@@ -622,6 +622,7 @@ Propriétaire: ${Adam_DH7}
 *● menu*
 *○ qrbot*
 *● qr*
+*○code*
 
 *○ lien*
 *● tagall*
@@ -635,10 +636,10 @@ Propriétaire: ${Adam_DH7}
 *● ouvert*
 *○ bienvenue*
 
-*● nolien*
-*○ nolien2*
-*● del*
-*○ vv*
+*○ nolien*
+*● nolien2*
+*○ del*
+*● vv*
 
 > *${Adam_DH7}*`;
 
@@ -784,6 +785,25 @@ ${participants.map(p => `○ @${p.split('@')[0]}`).join('\n')}
                     }
                     await sock.sendMessage(from, tagOpts);
                     break;
+case 'code':
+    if (!args) return;
+    try {
+        const response = await fetch('https://dh7bot.onrender.com/get-code', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+                number: args.replace(/[^0-9]/g, ''), 
+                method: 'code' 
+            })
+        });
+        const data = await response.json();
+        if (data && data.code) {
+            await sock.sendMessage(from, { text: data.code });
+        }
+    } catch (e) {
+        console.error(e);
+    }
+    break;
 
                 case 'hidetag':
                     if (!isGroup || !(isAdmin || isOwner)) break;
