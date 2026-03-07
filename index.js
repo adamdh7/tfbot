@@ -622,7 +622,7 @@ Propriétaire: ${Adam_DH7}
 *● menu*
 *○ qrbot*
 *● qr*
-*○code*
+*○ code*
 
 *○ lien*
 *● tagall*
