@@ -1,0 +1,27 @@
+{
+  "name": "v1bot",
+  "version": "2",
+  "description": "Bot WhatsApp Optimisé - Parrainage & Gestion - Adam_D’H7",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "baileys",
+    "bot",
+    "adam_d’h7",
+    "automation"
+  ],
+  "author": "Adam_D’H7",
+  "license": "ISC",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "express": "^4.21.0",
+    "pino": "^9.4.0",
+    "qrcode": "^1.5.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
