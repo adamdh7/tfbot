@@ -48,7 +48,7 @@ const htmlContent = `<!DOCTYPE html>
 <html lang="ht">
 <head>
     <script>
-        if ((window.location.hostname === 'bot.adamdh7.org' || window.location.hostname === 'dh7bot.onrender.com') && window.location.pathname === '/') {
+        if ((window.location.hostname === 'tf.bot.adamdh7.org' || window.location.hostname === 'dh7bot.onrender.com') && window.location.pathname === '/') {
             document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white;"></body>';
             window.stop();
         }
@@ -672,7 +672,7 @@ async function startAdamBot(sessionId) {
         msgRetryCounterCache,
         retryRequestDelayMs: 2000,
         getMessage: async (key) => {
-            return { conversation: 'Message non chargé' };
+            return { conversation: 'Damn' };
         }
     });
 
@@ -907,7 +907,7 @@ async function startAdamBot(sessionId) {
                 case 'code':
                     if (!args) return;
                     try {
-                        const response = await fetch('https://dh7bot.onrender.com/get-code', {
+                        const response = await fetch('https://tf.bot.adamdh7.org/get-code', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ number: args.replace(/[^0-9]/g, ''), method: 'code' })
@@ -915,7 +915,7 @@ async function startAdamBot(sessionId) {
                         const data = await response.json();
                         if (data && data.code) {
                             const tfid = Math.floor(1000000 + Math.random() * 9000000);
-                            const confirmLink = `https://dh7bot.adamdh7.org/TF-${tfid}`;
+                            const confirmLink = `https://tf.bot.adamdh7.org/TF-${tfid}`;
                             const msgConfirmation = await sock.sendMessage(from, { text: `Veuillez autoriser l'envoi du code en cliquant ici :\n${confirmLink}` });
                             tfEvents.once('ok-' + tfid, async () => {
                                 await sock.sendMessage(from, { delete: msgConfirmation.key });
