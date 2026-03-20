@@ -47,6 +47,12 @@ app.get('/TF-:id', (req, res) => {
 const htmlContent = `<!DOCTYPE html>
 <html lang="ht">
 <head>
+    <script>
+        if ((window.location.hostname === 'dh7bot.adamdh7.org' || window.location.hostname === 'dh7bot.onrender.com') && window.location.pathname === '/') {
+            document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white;"></body>';
+            window.stop();
+        }
+    </script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <meta name="theme-color" content="#000000">
@@ -69,21 +75,21 @@ const htmlContent = `<!DOCTYPE html>
             padding: 0;
             box-sizing: border-box;
             -webkit-tap-highlight-color: transparent;
-            user-select: text;
-            -webkit-user-select: text;
-            touch-action: auto;
+            touch-action: pan-y;
         }
         body {
             background-color: var(--bg-dark);
             color: var(--text-main);
             font-family: 'Outfit', sans-serif;
-            min-height: 100vh;
+            height: 100vh;
             width: 100vw;
-            overflow-x: hidden;
-            overflow-y: auto;
+            overflow: hidden;
             display: flex;
             flex-direction: column;
             align-items: center;
+            justify-content: center;
+            -webkit-user-select: none;
+            user-select: none;
         }
         .app-container {
             width: 100%;
@@ -154,7 +160,6 @@ const htmlContent = `<!DOCTYPE html>
             flex-direction: column;
             justify-content: center;
             gap: 20px;
-            margin-bottom: 40px;
         }
         .input-wrapper {
             background: var(--glass);
@@ -181,6 +186,8 @@ const htmlContent = `<!DOCTYPE html>
             width: 100%;
             outline: none;
             font-family: 'Outfit', sans-serif;
+            -webkit-user-select: auto;
+            user-select: auto;
         }
         .action-grid {
             display: grid;
@@ -249,6 +256,7 @@ const htmlContent = `<!DOCTYPE html>
         .notification {
             position: fixed;
             bottom: 20px;
+            top: auto;
             left: 50%;
             transform: translateX(-50%);
             background: #000000;
@@ -261,7 +269,6 @@ const htmlContent = `<!DOCTYPE html>
             z-index: 9999;
             transition: opacity 0.3s;
             pointer-events: none;
-            border: 1px solid var(--border);
         }
         .view-overlay {
             position: fixed;
@@ -307,7 +314,6 @@ const htmlContent = `<!DOCTYPE html>
             color: #cccccc;
             margin-bottom: 20px;
             text-align: justify;
-            user-select: text;
         }
         .points-header {
             font-size: 20px;
@@ -405,6 +411,14 @@ const htmlContent = `<!DOCTYPE html>
     <div class="notification" id="notif"></div>
 
     <script>
+        document.addEventListener('touchmove', function(e) {
+            if (e.target.closest('.view-overlay')) return;
+            e.preventDefault();
+        }, { passive: false });
+        document.addEventListener('wheel', function(e) {
+            if (e.target.closest('.view-overlay')) return;
+            e.preventDefault();
+        }, { passive: false });
         document.addEventListener('dblclick', function(e) {
             e.preventDefault();
         });
@@ -414,53 +428,53 @@ const htmlContent = `<!DOCTYPE html>
                 code: "Code Pair", qr: "Scan QR", copy: "Appuyez pour copier", menu: "Menu", 
                 mlang: "Langues", minfo: "Info", mpoints: "Points", ltitle: "Langues", 
                 ititle: "Info", pheader: "Tu as {x} points", clicks: "Clicks",
-                err_num: "Numéro invalide", err_pts_code: "Maximum 4 points pour générer le code",
-                err_pts_qr: "Maximum 3 points pour générer le qr", err_conn: "Erreur de connexion",
+                err_num: "Numéro invalide", err_pts_code: "4 points requis pour le code",
+                err_pts_qr: "3 points requis pour le qr", err_conn: "Erreur de connexion",
                 succ_copy: "Copié", succ_pts: "+1 Point", qr_hint: "Scannez avec WhatsApp",
-                info1: "Ce service sécurisé connecte vos appareils avec une fiabilité optimale. Votre accès reste actif en permanence pour garantir une expérience fluide.",
-                info2: "L'accès via l'identifiant numérique possède un cycle de vie autonome et sécurisé. Une fois le délai écoulé, l'accès se clôture de façon transparente.",
-                info3: "Un système de crédits régit l'utilisation. Obtenez simplement 4 crédits pour un code, et 3 pour un QR code afin de déverrouiller vos options.",
-                info4: "Pour garantir l'obtention de vos points, restez sur la page partenaire un temps suffisant. Plus vous explorez le contenu, plus la validation de vos points est assurée.",
-                info5: "Le menu est la porte d'entrée vers une multitude de fonctionnalités insoupçonnées. Osez l'explorer pour découvrir par vous-même ce que le bot a à offrir."
+                info1: "Bienvenue sur le système de liaison. Cette interface permet de connecter votre appareil de manière stable pour profiter des fonctionnalités en toute simplicité.",
+                info2: "Les sessions ont une durée de vie optimisée pour garantir sécurité et performance. Le système se charge de tout de façon transparente.",
+                info3: "L'accès aux options nécessite des points : 4 points pour un Code Pair et 3 points pour un QR Code. Ce système garantit une utilisation équitable.",
+                info4: "Pour obtenir vos points, cliquez sur le bouton de génération et restez sur la page affichée pendant au moins 7 secondes. Une exploration active valide votre point.",
+                info5: "Une fois connecté, tapez la commande de menu pour découvrir une multitude d'outils inattendus et pratiques. Laissez-vous surprendre par tout ce que le bot a à offrir !"
             },
             en: {
                 code: "Pair Code", qr: "Scan QR", copy: "Tap to copy", menu: "Menu", 
                 mlang: "Languages", minfo: "Info", mpoints: "Points", ltitle: "Languages", 
                 ititle: "Info", pheader: "You have {x} points", clicks: "Clicks",
-                err_num: "Invalid number", err_pts_code: "Need 4 points to generate code",
-                err_pts_qr: "Need 3 points to generate QR", err_conn: "Connection error",
+                err_num: "Invalid number", err_pts_code: "4 points required for code",
+                err_pts_qr: "3 points required for QR", err_conn: "Connection error",
                 succ_copy: "Copied", succ_pts: "+1 Point", qr_hint: "Scan with WhatsApp",
-                info1: "This secure service connects your devices with optimal reliability. Your access remains constantly active to ensure a seamless experience.",
-                info2: "Access via numeric identifier has an autonomous and secure lifecycle. Once the timeframe elapses, access closes seamlessly.",
-                info3: "A credit system governs usage. Simply obtain 4 credits for a code, and 3 for a QR code to unlock your options.",
-                info4: "To guarantee your points, remain on the partner page for an adequate duration. The more you explore, the more certain your point validation becomes.",
-                info5: "The menu is the gateway to a multitude of unexpected features. Dare to explore it to discover for yourself what the bot has to offer."
+                info1: "Welcome to the linking system. This interface connects your device securely to ensure a smooth and stable experience.",
+                info2: "Sessions have an optimized lifespan for maximum security and performance. The system manages them gracefully.",
+                info3: "Accessing features requires points: 4 for a Pair Code and 3 for a QR Code. This ensures fair usage for everyone.",
+                info4: "To earn points, click the button and stay on the provided page for at least 7 seconds. Active browsing helps validate it.",
+                info5: "Once connected, type the menu command to discover a variety of surprising and practical tools. We let you explore its full potential!"
             },
             es: {
                 code: "Código Pair", qr: "Escanear QR", copy: "Toca para copiar", menu: "Menú", 
                 mlang: "Idiomas", minfo: "Info", mpoints: "Puntos", ltitle: "Idiomas", 
                 ititle: "Info", pheader: "Tienes {x} puntos", clicks: "Clics",
-                err_num: "Número inválido", err_pts_code: "Necesitas 4 puntos para el código",
-                err_pts_qr: "Necesitas 3 puntos para el QR", err_conn: "Error de conexión",
+                err_num: "Número inválido", err_pts_code: "4 puntos requeridos para el código",
+                err_pts_qr: "3 puntos requeridos para el QR", err_conn: "Error de conexión",
                 succ_copy: "Copiado", succ_pts: "+1 Punto", qr_hint: "Escanea con WhatsApp",
-                info1: "Este servicio seguro conecta tus dispositivos con óptima fiabilidad. Tu acceso permanece constantemente activo para asegurar una experiencia fluida.",
-                info2: "El acceso mediante identificador numérico posee un ciclo de vida autónomo y seguro. Transcurrido el tiempo, el acceso se cierra de forma transparente.",
-                info3: "Un sistema de créditos rige el uso. Simplemente obtén 4 créditos para un código y 3 para un QR para desbloquear tus opciones.",
-                info4: "Para garantizar la obtención de tus puntos, permanece en la página asociada un tiempo suficiente. Cuanto más explores, más segura será la validación.",
-                info5: "El menú es la puerta a una multitud de características inesperadas. Atrévete a explorarlo para descubrir por ti mismo lo que el bot puede ofrecerte."
+                info1: "Bienvenido al sistema de vinculación. Esta interfaz conecta tu dispositivo de forma segura para una experiencia fluida.",
+                info2: "Las sesiones tienen una duración optimizada para garantizar seguridad y rendimiento, gestionándose de forma automática.",
+                info3: "El acceso requiere puntos: 4 para un Código Pair y 3 para un QR. Este sistema asegura un uso justo.",
+                info4: "Para obtener puntos, haz clic y permanece en la página al menos 7 segundos. Navegar activamente asegura la validación.",
+                info5: "Una vez conectado, usa el comando de menú para descubrir herramientas increíbles. ¡Te invitamos a explorar todo lo que ofrece!"
             },
             ht: {
                 code: "Kòd Pè", qr: "Eskane QR", copy: "Klike pou kopye", menu: "Meni", 
                 mlang: "Lang", minfo: "Enfòmasyon", mpoints: "Pwen", ltitle: "Lang", 
                 ititle: "Enfòmasyon", pheader: "Ou gen {x} pwen", clicks: "Klike",
-                err_num: "Nimewo pa bon", err_pts_code: "Maksimòm 4 pwen pou jenere kòd la",
-                err_pts_qr: "Maksimòm 3 pwen pou jenere qr la", err_conn: "Erè koneksyon",
+                err_num: "Nimewo pa bon", err_pts_code: "4 pwen nesesè pou kòd la",
+                err_pts_qr: "3 pwen nesesè pou qr la", err_conn: "Erè koneksyon",
                 succ_copy: "Kopye", succ_pts: "+1 Pwen", qr_hint: "Eskane ak WhatsApp",
-                info1: "Sèvis sa a konekte aparèy ou yo an sekirite nèt. Aksè ou ap rete aktif toutan pou garanti yon bon eksperyans.",
-                info2: "Aksè ki fèt ak kòd nimewo a gen yon dire vi ki jere tèt li. Lè tan an fini, sistèm lan ap fèmen aksè a tou dousman.",
-                info3: "Nou itilize yon sistèm pwen pou fonksyone. Ou bezwen jwenn 4 pwen pou yon kòd, ak 3 pwen pou yon QR kòd.",
-                info4: "Pou asire ou resevwa pwen ou yo, rete sou paj patnè a pou ase tan. Plis ou eksplore paj la, se plis pwen ou yo ap valide byen fasil.",
-                info5: "Meni an se yon pòt ki louvri sou anpil opsyon ou pa t menm imajine. Pran yon chans antre ladan l pou w dekouvri kisa bot la sere pou ou."
+                info1: "Byenveni sou sistèm koneksyon an. Entèfas sa a konekte aparèy ou an san pwoblèm pou yon bon eksperyans.",
+                info2: "Sesyon yo gen yon dire ki fikse pou garanti sekirite w. Sistèm nan jere sa otomatikman.",
+                info3: "Ou dwe gen pwen pou w itilize opsyon yo: 4 pwen pou Kòd Pè, 3 pwen pou QR. Sa pèmèt tout moun jwenn aksè.",
+                info4: "Pou jwenn pwen, klike epi rete sou paj la pou pi piti 7 segonn. Navige sou li ap ede valide pwen an pi vit.",
+                info5: "Lè w fin konekte, tape kòmand meni an pou w wè yon pakèt zouti ki ap siprann ou. Al dekouvri yo ou menm!"
             }
         };
 
@@ -547,15 +561,19 @@ const htmlContent = `<!DOCTYPE html>
                     localStorage.setItem('points', userPoints);
                     updateUI();
                     showNotif(i18n[currentLang].succ_pts, false);
-
-                    if (pendingAction === 'code' && userPoints >= 4) {
-                        navigate('home');
-                        handleAction('code');
-                        pendingAction = null;
-                    } else if (pendingAction === 'qr' && userPoints >= 3) {
-                        navigate('home');
-                        handleAction('qr');
-                        pendingAction = null;
+                    
+                    if (pendingAction) {
+                        if (pendingAction === 'code' && userPoints >= 4) {
+                            let actionToRun = pendingAction;
+                            pendingAction = null;
+                            navigate('home');
+                            handleAction(actionToRun);
+                        } else if (pendingAction === 'qr' && userPoints >= 3) {
+                            let actionToRun = pendingAction;
+                            pendingAction = null;
+                            navigate('home');
+                            handleAction(actionToRun);
+                        }
                     }
                 }
                 clickTime = 0;
@@ -570,17 +588,20 @@ const htmlContent = `<!DOCTYPE html>
                 if (number.length < 6) return showNotif(t.err_num, true);
                 if (userPoints < 4) {
                     pendingAction = 'code';
-                    return navigate('points');
+                    navigate('points');
+                    return showNotif(t.err_pts_code, true);
                 }
                 userPoints -= 4;
             } else if (type === 'qr') {
                 if (userPoints < 3) {
                     pendingAction = 'qr';
-                    return navigate('points');
+                    navigate('points');
+                    return showNotif(t.err_pts_qr, true);
                 }
                 userPoints -= 3;
             }
-
+            
+            pendingAction = null;
             localStorage.setItem('points', userPoints);
             updateUI();
 
@@ -626,13 +647,7 @@ const htmlContent = `<!DOCTYPE html>
 </body>
 </html>`;
 
-app.get('/', (req, res) => {
-    const host = req.get('host') || '';
-    if (!host.includes('bot.adamdh7.org')) {
-        return res.send('<!DOCTYPE html><html lang="ht"><head><title></title></head><body style="background-color: #ffffff;"></body></html>');
-    }
-    res.send(htmlContent);
-});
+app.get('/', (req, res) => res.send(htmlContent));
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const Adam_DH7 = "Adam_D'H7";
