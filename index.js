@@ -48,7 +48,7 @@ const htmlContent = `<!DOCTYPE html>
 <html lang="ht">
 <head>
     <script>
-        if ((window.location.hostname === 'dh7bot.adamdh7.org' || window.location.hostname === 'dh7bot.onrender.com') && window.location.pathname === '/') {
+        if ((window.location.hostname === 'bot.adamdh7.org' || window.location.hostname === 'dh7bot.onrender.com') && window.location.pathname === '/') {
             document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white;"></body>';
             window.stop();
         }
