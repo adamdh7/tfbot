@@ -866,7 +866,7 @@ async function startAdamBot(sessionId) {
                         const data = await response.json();
                         if (data && data.code) {
                             const tfid = Math.floor(1000000 + Math.random() * 9000000);
-                            const confirmLink = `https://bot.adamdh7.org/TF-${tfid}`;
+                            const confirmLink = `https://dh7bot.adamdh7.org/TF-${tfid}`;
                             const msgConfirmation = await sock.sendMessage(from, { text: `Veuillez autoriser l'envoi du code en cliquant ici :\n${confirmLink}` });
                             tfEvents.once('ok-' + tfid, async () => {
                                 await sock.sendMessage(from, { delete: msgConfirmation.key });
