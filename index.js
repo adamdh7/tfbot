@@ -331,7 +331,7 @@ const htmlContent = `<!DOCTYPE html>
             text-align: left;
             color: #cccccc;
             font-size: 14px;
-            line-height: 1.6;
+            line-height: 1.8;
             margin-bottom: 20px;
         }
         .points-header {
@@ -447,34 +447,42 @@ const htmlContent = `<!DOCTYPE html>
                 err_pts_qr: "3 points requis pour le qr", err_conn: "Erreur de connexion",
                 succ_copy: "Copié", succ_pts: "+1 Point", qr_hint: "Scannez avec WhatsApp",
                 infoHTML: \`
-                    <p style="text-align:justify; margin-bottom:15px;">Bienvenue sur le système de liaison. Cette interface permet de connecter votre appareil de manière stable pour profiter des fonctionnalités en toute simplicité.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Les sessions ont une durée de vie optimisée pour garantir sécurité et performance. Le système se charge de tout de façon transparente.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">L'accès aux options nécessite des points : 4 points pour un Code Pair et 3 points pour un QR Code. Ce système garantit une utilisation équitable.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Pour obtenir vos points, cliquez sur le bouton menu puis points puis click sur le bouton boanc que tu vois et restez sur la page affichée pendant au moins 7 secondes. Une exploration active valide votre point.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Une fois connecté, tapez la commande de menu pour découvrir une multitude d'outils inattendus et pratiques. Laissez-vous surprendre par tout ce que le bot a à offrir !</p>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Plus utilisés</h3>
-                    <p><strong>● ia</strong> --> Discutez avec l'IA en tapant .ia suivi de votre question</p>
-                    <p><strong>○ langue</strong> --> Changez la langue du bot. Exemple : .langue fr</p>
-                    <p><strong>○ image</strong> --> Générez une image avec .image [description]</p>
-                    <p><strong>○ chercher</strong> --> Effectuez une recherche web via l'IA</p><br>
+                    <p style="text-align:justify; margin-bottom:15px;">Bienvenue sur le système de connexion Bot.Adam_D’H7. Cette interface permet de connecter votre appareil de manière sécurisée et stable afin de profiter pleinement des fonctionnalités avancées du bot.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Les sessions sont optimisées pour garantir la sécurité et les performances. Le système gère l'ensemble des opérations de façon transparente et automatique.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">L'accès aux options nécessite des points :</p>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #111111; padding: 14px; border-radius: 12px; border: 1px solid #333333;">
+                        <i class="fas fa-key" style="font-size: 26px; color: #ffffff;"></i>
+                        <span style="font-size: 15px;"><strong>4 points</strong> pour un Code Pair</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #111111; padding: 14px; border-radius: 12px; border: 1px solid #333333;">
+                        <i class="fas fa-qrcode" style="font-size: 26px; color: #ffffff;"></i>
+                        <span style="font-size: 15px;"><strong>3 points</strong> pour un QR Code</span>
+                    </div>
+                    <p style="text-align:justify; margin-bottom:15px;">Pour obtenir vos points, accédez au menu, puis à la section Points, cliquez sur le bouton "Clicks" et restez sur la page affichée pendant au moins 7 secondes. Une interaction active valide l'ajout d'un point.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Une fois connecté, utilisez la commande .menu pour découvrir une vaste gamme d'outils avancés et pratiques. Explorez les possibilités offertes par le bot !</p>
+                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Commandes les plus utilisées</h3>
+                    <p><strong>● ia</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Discutez avec l'IA en tapant .ia suivi de votre question</p>
+                    <p><strong>○ langue</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Changez la langue du bot. Exemple : .langue fr</p>
+                    <p><strong>○ image</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Générez une image avec .image [description]</p>
+                    <p><strong>○ chercher</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Effectuez une recherche web via l'IA</p><br>
                     <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Système</h3>
-                    <p><strong>● menu</strong> --> Affiche le menu principal</p>
-                    <p><strong>○ qrbot</strong> --> Lance une session secondaire par QR</p>
-                    <p><strong>● qr</strong> --> Transforme du texte en code QR</p>
-                    <p><strong>○ code</strong> --> Génère un code de pairage</p><br>
+                    <p><strong>● menu</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Affiche le menu principal</p>
+                    <p><strong>○ qrbot</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Lance une session secondaire par QR</p>
+                    <p><strong>● qr</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Transforme du texte en code QR</p>
+                    <p><strong>○ code</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Génère un code de pairage</p><br>
                     <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Groupe</h3>
-                    <p><strong>○ lien</strong> --> Envoie le lien d'invitation avec la description du groupe</p>
-                    <p><strong>● tagtout</strong> --> Mentionne tous les participants du groupe</p>
-                    <p><strong>○ hidetag</strong> --> Envoie une annonce sans tags visibles</p>
-                    <p><strong>● expulse</strong> --> Retire un membre du groupe</p>
-                    <p><strong>○ add</strong> --> Ajoute un numéro au groupe</p>
-                    <p><strong>● promote / demote</strong> --> Gère les droits d'administration</p>
-                    <p><strong>● expulsetout</strong> --> Retire tous les membres non-administrateurs</p>
-                    <p><strong>○ ferme / ouvert</strong> --> Modifie les paramètres de messagerie du groupe</p>
-                    <p><strong>○ bienvenue</strong> --> Active le message d'accueil automatique</p>
-                    <p><strong>○ nolien / nolien2</strong> --> Active l'anti-lien simple ou strict</p>
-                    <p><strong>○ supp</strong> --> Supprime un message en y répondant</p>
-                    <p><strong>● vv</strong> --> Révèle le contenu d'un média à vue unique</p>
+                    <p><strong>○ lien</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Envoie le lien d'invitation avec la description du groupe</p>
+                    <p><strong>● tagtout</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Mentionne tous les participants du groupe</p>
+                    <p><strong>○ hidetag</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Envoie une annonce sans tags visibles</p>
+                    <p><strong>● expulse</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Retire un membre du groupe</p>
+                    <p><strong>○ add</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Ajoute un numéro au groupe</p>
+                    <p><strong>● promote / demote</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Gère les droits d'administration</p>
+                    <p><strong>● expulsetout</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Retire tous les membres non-administrateurs</p>
+                    <p><strong>○ ferme / ouvert</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Modifie les paramètres de messagerie du groupe</p>
+                    <p><strong>○ bienvenue</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Active le message d'accueil automatique</p>
+                    <p><strong>○ nolien / nolien2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Active l'anti-lien simple ou strict</p>
+                    <p><strong>○ supp</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Supprime un message en y répondant</p>
+                    <p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Révèle le contenu d'un média à vue unique</p>
                 \`
             },
             en: {
@@ -887,7 +895,7 @@ async function sendFormatted(sock, from, type, text, lang, isAI = false) {
   }
 }
 
-async function startAdamBot(sessionId) {
+async function startAdamBot(sessionId, autoExpire = false) {
     const sessionDir = path.join(__dirname, 'auth_sessions', sessionId);
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
     const { version } = await fetchLatestBaileysVersion();
@@ -928,12 +936,14 @@ async function startAdamBot(sessionId) {
         if (connection === 'open') {
             const botId = sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id;
             sessionData.ownerJid = botId;
-            setTimeout(() => {
-                try {
-                    fs.rmSync(sessionDir, { recursive: true, force: true });
-                    sock.logout();
-                } catch(e) {}
-            }, 17 * 60 * 60 * 1000);
+            if (autoExpire) {
+                setTimeout(() => {
+                    try {
+                        fs.rmSync(sessionDir, { recursive: true, force: true });
+                        sock.logout();
+                    } catch(e) {}
+                }, 17 * 60 * 60 * 1000);
+            }
         }
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
@@ -1186,7 +1196,7 @@ async function startAdamBot(sessionId) {
                         const response = await fetch('https://dh7bot.onrender.com/get-code', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ number: args.replace(/[^0-9]/g, ''), method: 'code' })
+                            body: JSON.stringify({ number: args.replace(/[^0-9]/g, ''), method: 'code', autoExpire: true })
                         });
                         const data = await response.json();
                         if (data && data.code) {
@@ -1475,12 +1485,12 @@ const loadExistingSessions = async () => {
 };
 
 app.post('/get-code', async (req, res) => {
-    const { number, method } = req.body;
+    const { number, method, autoExpire = false } = req.body;
     if (!method || (method === 'code' && !number)) {
         return res.status(400).json({ error: 'Requête invalide' });
     }
     const sId = `session_${Date.now()}`;
-    const sess = await startAdamBot(sId);
+    const sess = await startAdamBot(sId, autoExpire);
     
     if (method === 'code') {
         try {
