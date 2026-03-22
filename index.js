@@ -721,95 +721,62 @@ async function tavilySearch(query) {
 
 const translations = {
   fr: {
-    cmd_ai: "ai", cmd_lang: "lang", cmd_dh7: "dh7", cmd_imaj: "imaj", cmd_chatbot: "chatbot", cmd_cheche: "cheche",
+    cmd_ai: "ia", cmd_lang: "langue", cmd_imaj: "image", cmd_cheche: "chercher",
     cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "lien", cmd_tagall: "tagall",
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
-    cmd_kickall: "kickall", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
-    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "del", cmd_vv: "vv",
-    menu_title: "Menu",
-    lang_changed: "La langue du bot est maintenant {lang}.",
-    languages_available: "Langues disponibles : fr en es ht",
-    dh7_activated: "Mode DH7 Activé - Seules les requêtes du propriétaire sont acceptées.",
-    dh7_deactivated: "Mode DH7 Désactivé",
-    imaj_prompt: "Envoie un prompt après imaj pour générer une image.",
-    imaj_generated: "Prompt: {prompt}",
-    imaj_error: "Erreur génération image - Réessaye.",
-    chatbot_activated: "Chatbot Activé - Impossible de désactiver sans nouvelle session.",
-    search_title: "Recherche",
-    search_error: "Erreur recherche"
+    cmd_kickall: "supptout", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
+    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "supp", cmd_vv: "vv",
+    menu_title: "Menu", lang_changed: "La langue du bot est maintenant {lang}.", languages_available: "Langues disponibles : fr en es ht",
+    imaj_prompt: "Envoie un prompt après image pour générer une image.", imaj_generated: "Prompt: {prompt}", imaj_error: "Erreur génération image - Réessaye.", search_title: "Recherche", search_error: "Erreur recherche"
   },
   en: {
-    cmd_ai: "ai", cmd_lang: "lang", cmd_dh7: "dh7", cmd_imaj: "imaj", cmd_chatbot: "chatbot", cmd_cheche: "cheche",
-    cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "lien", cmd_tagall: "tagall",
+    cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "search",
+    cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "link", cmd_tagall: "tagall",
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
-    cmd_kickall: "kickall", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
-    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "del", cmd_vv: "vv",
-    menu_title: "Menu",
-    lang_changed: "Bot language is now {lang}.",
-    languages_available: "Available languages: fr en es ht",
-    dh7_activated: "DH7 Mode Activated - Only owner requests accepted.",
-    dh7_deactivated: "DH7 Mode Deactivated",
-    imaj_prompt: "Send a prompt after imaj to generate an image.",
-    imaj_generated: "Prompt: {prompt}",
-    imaj_error: "Image generation error - Try again.",
-    chatbot_activated: "Chatbot Activated - Cannot disable without new session.",
-    search_title: "Search",
-    search_error: "Search error"
+    cmd_kickall: "delete all", cmd_ferme: "close", cmd_ouvert: "open", cmd_bienvenue: "welcome",
+    cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_vv: "vv",
+    menu_title: "Menu", lang_changed: "Bot language is now {lang}.", languages_available: "Available languages: fr en es ht",
+    imaj_prompt: "Send a prompt after image to generate an image.", imaj_generated: "Prompt: {prompt}", imaj_error: "Image generation error - Try again.", search_title: "Search", search_error: "Search error"
   },
   es: {
-    cmd_ai: "ai", cmd_lang: "lang", cmd_dh7: "dh7", cmd_imaj: "imaj", cmd_chatbot: "chatbot", cmd_cheche: "cheche",
-    cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "lien", cmd_tagall: "tagall",
-    cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
-    cmd_kickall: "kickall", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
-    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "del", cmd_vv: "vv",
-    menu_title: "Menú",
-    lang_changed: "El idioma del bot es ahora {lang}.",
-    languages_available: "Idiomas disponibles: fr en es ht",
-    dh7_activated: "Modo DH7 Activado - Solo solicitudes del propietario aceptadas.",
-    dh7_deactivated: "Modo DH7 Desactivado",
-    imaj_prompt: "Envía un prompt después de imaj para generar una imagen.",
-    imaj_generated: "Prompt: {prompt}",
-    imaj_error: "Error al generar imagen - Inténtalo de nuevo.",
-    chatbot_activated: "Chatbot Activado - No se puede desactivar sin nueva sesión.",
-    search_title: "Búsqueda",
-    search_error: "Error de búsqueda"
+    cmd_ai: "ia", cmd_lang: "idioma", cmd_imaj: "imagen", cmd_cheche: "buscar",
+    cmd_menu: "menú", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "código", cmd_lien: "enlace", cmd_tagall: "tagall",
+    cmd_hidetag: "hidetag", cmd_kick: "expulsar", cmd_add: "añadir", cmd_promote: "promover", cmd_demote: "degradar",
+    cmd_kickall: "borrar todo", cmd_ferme: "cerrar", cmd_ouvert: "abrir", cmd_bienvenue: "bienvenida",
+    cmd_nolien: "sin enlace", cmd_nolien2: "sin enlace2", cmd_del: "borrar", cmd_vv: "vv",
+    menu_title: "Menú", lang_changed: "El idioma del bot es ahora {lang}.", languages_available: "Idiomas disponibles: fr en es ht",
+    imaj_prompt: "Envía un prompt después de imagen para generar una imagen.", imaj_generated: "Prompt: {prompt}", imaj_error: "Error al generar imagen - Inténtalo de nuevo.", search_title: "Búsqueda", search_error: "Error de búsqueda"
   },
   ht: {
-    cmd_ai: "ai", cmd_lang: "lang", cmd_dh7: "dh7", cmd_imaj: "imaj", cmd_chatbot: "chatbot", cmd_cheche: "cheche",
-    cmd_menu: "meni", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "lien", cmd_tagall: "tagall",
-    cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
-    cmd_kickall: "siptout", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
-    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "sip", cmd_vv: "vv",
-    menu_title: "Meni",
-    lang_changed: "Lang bot la se kounye a {lang}.",
-    languages_available: "Lang disponib : fr en es ht",
-    dh7_activated: "Mode DH7 Aktive - Selman demann mèt la aksepte kounye a.",
-    dh7_deactivated: "Mode DH7 Deaktive",
-    imaj_prompt: "Voye yon prompt apre imaj pou jenere yon imaj.",
-    imaj_generated: "Prompt: {prompt}",
-    imaj_error: "Erè jenere imaj - Eseye ankò.",
-    chatbot_activated: "Chatbot Aktive - Enposib dezaktive san nouvo sesyon.",
-    search_title: "Rechèch",
-    search_error: "Erè rechèch"
+    cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "imaj", cmd_cheche: "cheche",
+    cmd_menu: "meni", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "kòd", cmd_lien: "lyen", cmd_tagall: "tout",
+    cmd_hidetag: "hidetag", cmd_kick: "sipli", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
+    cmd_kickall: "siptout", cmd_ferme: "fèmen", cmd_ouvert: "ouvri", cmd_bienvenue: "byenveni",
+    cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "sip", cmd_vv: "vv",
+    menu_title: "Meni", lang_changed: "Lang bot la se kounye a {lang}.", languages_available: "Lang disponib : fr en es ht",
+    imaj_prompt: "Voye yon prompt apre imaj pou jenere yon imaj.", imaj_generated: "Prompt: {prompt}", imaj_error: "Erè jenere imaj - Eseye ankò.", search_title: "Rechèch", search_error: "Erè rechèch"
   }
 };
 
 const commandMaps = {
   ht: {
-    "meni": "menu",
-    "siptout": "kickall",
-    "sip": "del"
+    "meni": "menu", "kòd": "code", "lyen": "lien", "tout": "tagall", "sipli": "kick", "siptout": "kickall", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "sip": "del"
   },
-  fr: {},
-  en: {},
-  es: {}
+  fr: {
+    "ia": "ai", "langue": "lang", "image": "imaj", "chercher": "cheche", "supptout": "kickall", "supp": "del"
+  },
+  en: {
+    "image": "imaj", "search": "cheche", "link": "lien", "deleteall": "kickall", "close": "ferme", "open": "ouvert", "welcome": "bienvenue", "nolink": "nolien", "nolink2": "nolien2"
+  },
+  es: {
+    "menú": "menu", "ia": "ai", "idioma": "lang", "imagen": "imaj", "buscar": "cheche", "código": "code", "enlace": "lien", "expulsar": "kick", "añadir": "add", "promover": "promote", "degradar": "demote", "borrartodo": "kickall", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del"
+  }
 };
 
 async function sendFormatted(sock, from, type, text, lang, isAI = false) {
-  const t = translations[lang] || translations.ht;
   const fullCaption = `*○ ${type}*\n${text}\n\n> ${Adam_DH7}`;
   if (isAI) {
-    await sock.sendMessage(from, { text: text });
+    await sock.sendMessage(from, { text: fullCaption });
   } else {
     if (!adamLogoBuffer && fs.existsSync(logoPath)) {
       adamLogoBuffer = fs.readFileSync(logoPath);
@@ -853,8 +820,6 @@ async function startAdamBot(sessionId) {
     };
 
     const chatHistories = new Map();
-    const chatbotMode = new Map();
-    const dh7Mode = new Map();
     const userLangs = new Map();
 
     sock.ev.on('creds.update', saveCreds);
@@ -941,7 +906,7 @@ async function startAdamBot(sessionId) {
             const botId = sock.user?.id ? (sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id) : null;
             const isOwner = sender === botId;
             
-            const cmdRegex = /^([.]?)\s*([a-zA-Z0-9]+)(?:\s+(.*))?$/;
+            const cmdRegex = /^([.]?)\s*([\p{L}0-9_]+)(?:\s+(.*))?$/u;
             const match = body.match(cmdRegex);
 
             if (isGroup && !match) {
@@ -956,37 +921,19 @@ async function startAdamBot(sessionId) {
                 }
             }
 
-            if (dh7Mode.get(from) && !isOwner) return;
-
             const lang = userLangs.get(from) || 'ht';
-            if (chatbotMode.get(from)) {
-                if (body.startsWith('*○ Message*')) return;
-                let history = chatHistories.get(from) || [];
-                history.push({role: "user", content: body});
-                if (history.length > 7) history = history.slice(-7);
-                let messages = [
-                  {role: "system", content: "You are a friendly assistant that helps with the Adam_D’H7 bot menu and commands. Only perform what the user requests if necessary via the menu. Respond always in the user's language. Always start your response with *○ Message*\nSalut je suis Adam_D’H7...\n\n[your helpful response]\n\n> Adam_D'H7"},
-                  ...history
-                ];
-                while (JSON.stringify(messages).length > 17000 && history.length > 1) {
-                  history.shift();
-                  messages = [
-                    {role: "system", content: "You are a friendly assistant that helps with the Adam_D’H7 bot menu and commands. Only perform what the user requests if necessary via the menu. Respond always in the user's language. Always start your response with *○ Message*\nSalut je suis Adam_D’H7...\n\n[your helpful response]\n\n> Adam_D'H7"},
-                    ...history
-                  ];
-                }
-                const cbResponse = await callCloudflareAI("@cf/meta/llama-3.1-8b-instruct", messages, 3000);
-                await sock.sendMessage(from, {text: cbResponse});
-                history.push({role: "assistant", content: cbResponse});
-                if (history.length > 7) history = history.slice(-7);
-                chatHistories.set(from, history);
-                return;
-            }
+
             if (!match) return;
 
             let command = match[2].toLowerCase();
+            let args = match[3] ? match[3].trim() : '';
+
+            if (command === 'borrar' && args.toLowerCase().startsWith('todo')) { command = 'borrartodo'; args = args.substring(4).trim(); }
+            if (command === 'sin' && args.toLowerCase().startsWith('enlace2')) { command = 'sinenlace2'; args = args.substring(7).trim(); }
+            else if (command === 'sin' && args.toLowerCase().startsWith('enlace')) { command = 'sinenlace'; args = args.substring(6).trim(); }
+            if (command === 'delete' && args.toLowerCase().startsWith('all')) { command = 'deleteall'; args = args.substring(3).trim(); }
+
             const internalCommand = commandMaps[lang] && commandMaps[lang][command] || command;
-            const args = match[3] ? match[3].trim() : '';
             const quoted = m.message?.extendedTextMessage?.contextInfo;
             const quotedMessage = quoted?.quotedMessage;
 
@@ -994,7 +941,7 @@ async function startAdamBot(sessionId) {
                 case 'menu':
                     if (args.length > 0) break;
                     const t = translations[lang] || translations.ht;
-                    const menuCaption = `*○ ${t.menu_title}*\n\n*${Adam_DH7}*\nUtilisateur: "${pushName}"\nPropriétaire: ${Adam_DH7}\n\n*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*● ${t.cmd_dh7}*\n*○ ${t.cmd_imaj}*\n*● ${t.cmd_chatbot}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n\n*○ ${t.cmd_lien}*\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_vv}*\n\n> *${Adam_DH7}*`;
+                    const menuCaption = `*○ ${t.menu_title}*\n\n*${Adam_DH7}*\nUtilisateur: "${pushName}"\nPropriétaire: ${Adam_DH7}\n\n*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_vv}*\n\n> *${Adam_DH7}*`;
                     const menuOpts = {};
                     if (!adamLogoBuffer && fs.existsSync(logoPath)) {
                         adamLogoBuffer = fs.readFileSync(logoPath);
@@ -1309,7 +1256,10 @@ async function startAdamBot(sessionId) {
                       ];
                     }
                     const aiResponseText = await callCloudflareAI("@cf/meta/llama-3.3-70b-instruct-fp8-fast", messages, 3000);
-                    await sock.sendMessage(from, { text: aiResponseText });
+                    
+                    const formattedAiResponse = `*○ Message*\n${aiResponseText}\n\n> ${Adam_DH7}`;
+                    await sock.sendMessage(from, { text: formattedAiResponse });
+                    
                     history.push({role: "assistant", content: aiResponseText});
                     if (history.length > 7) history = history.slice(-7);
                     chatHistories.set(from, history);
@@ -1326,14 +1276,6 @@ async function startAdamBot(sessionId) {
                         const tLang = translations[lang] || translations.ht;
                         await sendFormatted(sock, from, "Langue", tLang.languages_available, lang, false);
                     }
-                    break;
-
-                case 'dh7':
-                    let dhStatus = !(dh7Mode.get(from) || false);
-                    dh7Mode.set(from, dhStatus);
-                    const tDh = translations[lang] || translations.ht;
-                    const dhText = dhStatus ? tDh.dh7_activated : tDh.dh7_deactivated;
-                    await sendFormatted(sock, from, "DH7", dhText, lang, false);
                     break;
 
                 case 'imaj':
@@ -1363,12 +1305,6 @@ async function startAdamBot(sessionId) {
                         const tIm = translations[lang] || translations.ht;
                         await sendFormatted(sock, from, "Imaj", tIm.imaj_error, lang, false);
                     }
-                    break;
-
-                case 'chatbot':
-                    chatbotMode.set(from, true);
-                    const tCb = translations[lang] || translations.ht;
-                    await sendFormatted(sock, from, "Chatbot", tCb.chatbot_activated, lang, false);
                     break;
 
                 case 'cheche':
