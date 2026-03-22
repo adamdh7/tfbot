@@ -447,7 +447,11 @@ const htmlContent = `<!DOCTYPE html>
                 err_pts_qr: "3 points requis pour le qr", err_conn: "Erreur de connexion",
                 succ_copy: "Copié", succ_pts: "+1 Point", qr_hint: "Scannez avec WhatsApp",
                 infoHTML: \`
-                    <p style="text-align:justify; margin-bottom:15px;">Voici une explication professionnelle et neutre de chaque commande du menu :</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Bienvenue sur le système de liaison. Cette interface permet de connecter votre appareil de manière stable pour profiter des fonctionnalités en toute simplicité.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Les sessions ont une durée de vie optimisée pour garantir sécurité et performance. Le système se charge de tout de façon transparente.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">L'accès aux options nécessite des points : 4 points pour un Code Pair et 3 points pour un QR Code. Ce système garantit une utilisation équitable.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Pour obtenir vos points, cliquez sur le bouton menu puis points puis click sur le bouton boanc que tu vois et restez sur la page affichée pendant au moins 7 secondes. Une exploration active valide votre point.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Une fois connecté, tapez la commande de menu pour découvrir une multitude d'outils inattendus et pratiques. Laissez-vous surprendre par tout ce que le bot a à offrir !</p>
                     <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Plus utilisés</h3>
                     <p><strong>● ia</strong> --> Discutez avec l'IA en tapant .ia suivi de votre question</p>
                     <p><strong>○ langue</strong> --> Changez la langue du bot. Exemple : .langue fr</p>
@@ -481,7 +485,11 @@ const htmlContent = `<!DOCTYPE html>
                 err_pts_qr: "3 points required for QR", err_conn: "Connection error",
                 succ_copy: "Copied", succ_pts: "+1 Point", qr_hint: "Scan with WhatsApp",
                 infoHTML: \`
-                    <p style="text-align:justify; margin-bottom:15px;">Here is a professional and neutral explanation of each menu command:</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Welcome to the connection system. This interface allows you to connect your device stably to enjoy the features with complete simplicity.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Sessions have an optimized lifespan to guarantee security and performance. The system takes care of everything transparently.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Access to options requires points: 4 points for a Pair Code and 3 points for a QR Code. This system guarantees fair use.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">To obtain your points, click on the menu button then points then click on the button you see and stay on the displayed page for at least 7 seconds. An active exploration validates your point.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Once connected, type the menu command to discover a multitude of unexpected and practical tools. Let yourself be surprised by everything the bot has to offer!</p>
                     <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Most Used</h3>
                     <p><strong>● ai</strong> --> Chat with the AI by typing .ai followed by your query</p>
                     <p><strong>○ lang</strong> --> Change the bot's language. Example: .lang en</p>
@@ -515,7 +523,11 @@ const htmlContent = `<!DOCTYPE html>
                 err_pts_qr: "3 puntos requeridos para el QR", err_conn: "Error de conexión",
                 succ_copy: "Copiado", succ_pts: "+1 Punto", qr_hint: "Escanea con WhatsApp",
                 infoHTML: \`
-                    <p style="text-align:justify; margin-bottom:15px;">Aquí tienes una explicación profesional y neutral de cada comando del menú:</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Bienvenido al sistema de conexión. Esta interfaz permite conectar tu dispositivo de manera estable para disfrutar de las funcionalidades con total simplicidad.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Las sesiones tienen una duración de vida optimizada para garantizar seguridad y rendimiento. El sistema se encarga de todo de forma transparente.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">El acceso a las opciones requiere puntos: 4 puntos para un Código Pair y 3 puntos para un Código QR. Este sistema garantiza un uso equitativo.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Para obtener tus puntos, haz clic en el botón menú luego puntos luego haz clic en el botón que ves y permanece en la página mostrada durante al menos 7 segundos. Una exploración activa valida tu punto.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Una vez conectado, escribe el comando de menú para descubrir una multitud de herramientas inesperadas y prácticas. ¡Déjate sorprender por todo lo que el bot tiene para ofrecer!</p>
                     <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Más Usados</h3>
                     <p><strong>● ia</strong> --> Habla con la IA escribiendo .ia seguido de tu pregunta</p>
                     <p><strong>○ idioma</strong> --> Cambia el idioma del bot. Ejemplo: .idioma es</p>
@@ -549,7 +561,11 @@ const htmlContent = `<!DOCTYPE html>
                 err_pts_qr: "3 pwen nesesè pou qr la", err_conn: "Erè koneksyon",
                 succ_copy: "Kopye", succ_pts: "+1 Pwen", qr_hint: "Eskane ak WhatsApp",
                 infoHTML: \`
-                    <p style="text-align:justify; margin-bottom:15px;">Men yon esplikasyon pwofesyonèl ak net sou chak kòmand ki nan meni an:</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Byenveni sou sistèm lyazon an. Entèfas sa a pèmèt ou konekte aparèy ou a yon fason ki estab pou w jwi fonksyonalite yo ak tout senplisite.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Sesyon yo gen yon dire lavi optimize pou garanti sekirite ak pèfòmans. Sistèm nan pran swen tout bagay yon fason transparan.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Aksè a opsyon yo mande pwen : 4 pwen pou yon Kòd Pè ak 3 pwen pou yon Kòd QR. Sistèm sa a garanti yon itilizasyon ekitab.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Pou jwenn pwen ou yo, klike sou bouton meni a, answit pwen, answit klike sou bouton boanc ou wè a epi rete sou paj ki afiche a pandan omwen 7 segonn. Yon eksplorasyon aktif valide pwen ou.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Yon fwa konekte, tape kòmand meni a pou dekouvri yon pakèt zouti inatandi ak pratik. Kite tèt ou sezi pa tout sa bot la gen pou ofri !</p>
                     <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Pi itilize</h3>
                     <p><strong>● ai</strong> --> Pale ak IA a lè w tape .ai epi kesyon ou a</p>
                     <p><strong>○ lang</strong> --> Chanje lang bot la. Egzanp : .lang ht</p>
