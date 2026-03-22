@@ -447,7 +447,7 @@ const htmlContent = `<!DOCTYPE html>
                 err_pts_qr: "3 points requis pour le qr", err_conn: "Erreur de connexion",
                 succ_copy: "Copié", succ_pts: "+1 Point", qr_hint: "Scannez avec WhatsApp",
                 infoHTML: \`
-                    <p style="text-align:justify; margin-bottom:15px;">Voici une explication professionnelle et neutre de chaque commande du menu :</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Bienvenue sur le système de liaison. Cette interface permet de connecter votre appareil de manière stable pour profiter des fonctionnalités en toute simplicité. \nLes sessions ont une durée de vie optimisée pour garantir sécurité et performance. Le système se charge de tout de façon transparente. \nL'accès aux options nécessite des points : 4 points pour un Code Pair et 3 points pour un QR Code. Ce système garantit une utilisation équitable. \nPour obtenir vos points, cliquez sur le bouton de génération et restez sur la page affichée pendant au moins 7 secondes. Une exploration active valide votre point. \nUne fois connecté, tapez la commande de menu pour découvrir une multitude d'outils inattendus et pratiques. Laissez-vous surprendre par tout ce que le bot a à offrir !</p>
                     <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Plus utilisés</h3>
                     <p><strong>● ia</strong> --> Parler avec l'IA en utilisant .ia texte</p>
                     <p><strong>○ langue</strong> --> Changer la langue d'interface. Exemple .langue fr</p>
