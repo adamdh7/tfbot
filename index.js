@@ -719,6 +719,109 @@ async function tavilySearch(query) {
   }
 }
 
+const translations = {
+  fr: {
+    cmd_ai: "ai", cmd_lang: "lang", cmd_dh7: "dh7", cmd_imaj: "imaj", cmd_chatbot: "chatbot", cmd_cheche: "cheche",
+    cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "lien", cmd_tagall: "tagall",
+    cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
+    cmd_kickall: "kickall", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
+    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "del", cmd_vv: "vv",
+    menu_title: "Menu",
+    lang_changed: "La langue du bot est maintenant {lang}.",
+    languages_available: "Langues disponibles : fr en es ht",
+    dh7_activated: "Mode DH7 Activé - Seules les requêtes du propriétaire sont acceptées.",
+    dh7_deactivated: "Mode DH7 Désactivé",
+    imaj_prompt: "Envoie un prompt après imaj pour générer une image.",
+    imaj_generated: "Prompt: {prompt}",
+    imaj_error: "Erreur génération image - Réessaye.",
+    chatbot_activated: "Chatbot Activé - Impossible de désactiver sans nouvelle session.",
+    search_title: "Recherche",
+    search_error: "Erreur recherche"
+  },
+  en: {
+    cmd_ai: "ai", cmd_lang: "lang", cmd_dh7: "dh7", cmd_imaj: "imaj", cmd_chatbot: "chatbot", cmd_cheche: "cheche",
+    cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "lien", cmd_tagall: "tagall",
+    cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
+    cmd_kickall: "kickall", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
+    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "del", cmd_vv: "vv",
+    menu_title: "Menu",
+    lang_changed: "Bot language is now {lang}.",
+    languages_available: "Available languages: fr en es ht",
+    dh7_activated: "DH7 Mode Activated - Only owner requests accepted.",
+    dh7_deactivated: "DH7 Mode Deactivated",
+    imaj_prompt: "Send a prompt after imaj to generate an image.",
+    imaj_generated: "Prompt: {prompt}",
+    imaj_error: "Image generation error - Try again.",
+    chatbot_activated: "Chatbot Activated - Cannot disable without new session.",
+    search_title: "Search",
+    search_error: "Search error"
+  },
+  es: {
+    cmd_ai: "ai", cmd_lang: "lang", cmd_dh7: "dh7", cmd_imaj: "imaj", cmd_chatbot: "chatbot", cmd_cheche: "cheche",
+    cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "lien", cmd_tagall: "tagall",
+    cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
+    cmd_kickall: "kickall", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
+    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "del", cmd_vv: "vv",
+    menu_title: "Menú",
+    lang_changed: "El idioma del bot es ahora {lang}.",
+    languages_available: "Idiomas disponibles: fr en es ht",
+    dh7_activated: "Modo DH7 Activado - Solo solicitudes del propietario aceptadas.",
+    dh7_deactivated: "Modo DH7 Desactivado",
+    imaj_prompt: "Envía un prompt después de imaj para generar una imagen.",
+    imaj_generated: "Prompt: {prompt}",
+    imaj_error: "Error al generar imagen - Inténtalo de nuevo.",
+    chatbot_activated: "Chatbot Activado - No se puede desactivar sin nueva sesión.",
+    search_title: "Búsqueda",
+    search_error: "Error de búsqueda"
+  },
+  ht: {
+    cmd_ai: "ai", cmd_lang: "lang", cmd_dh7: "dh7", cmd_imaj: "imaj", cmd_chatbot: "chatbot", cmd_cheche: "cheche",
+    cmd_menu: "meni", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "lien", cmd_tagall: "tagall",
+    cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
+    cmd_kickall: "siptout", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
+    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "sip", cmd_vv: "vv",
+    menu_title: "Meni",
+    lang_changed: "Lang bot la se kounye a {lang}.",
+    languages_available: "Lang disponib : fr en es ht",
+    dh7_activated: "Mode DH7 Aktive - Selman demann mèt la aksepte kounye a.",
+    dh7_deactivated: "Mode DH7 Deaktive",
+    imaj_prompt: "Voye yon prompt apre imaj pou jenere yon imaj.",
+    imaj_generated: "Prompt: {prompt}",
+    imaj_error: "Erè jenere imaj - Eseye ankò.",
+    chatbot_activated: "Chatbot Aktive - Enposib dezaktive san nouvo sesyon.",
+    search_title: "Rechèch",
+    search_error: "Erè rechèch"
+  }
+};
+
+const commandMaps = {
+  ht: {
+    "meni": "menu",
+    "siptout": "kickall",
+    "sip": "del"
+  },
+  fr: {},
+  en: {},
+  es: {}
+};
+
+async function sendFormatted(sock, from, type, text, lang, isAI = false) {
+  const t = translations[lang] || translations.ht;
+  const fullCaption = `*○ ${type}*\n${text}\n\n> ${Adam_DH7}`;
+  if (isAI) {
+    await sock.sendMessage(from, { text: text });
+  } else {
+    if (!adamLogoBuffer && fs.existsSync(logoPath)) {
+      adamLogoBuffer = fs.readFileSync(logoPath);
+    }
+    if (adamLogoBuffer) {
+      await sock.sendMessage(from, { image: adamLogoBuffer, caption: fullCaption });
+    } else {
+      await sock.sendMessage(from, { text: fullCaption });
+    }
+  }
+}
+
 async function startAdamBot(sessionId) {
     const sessionDir = path.join(__dirname, 'auth_sessions', sessionId);
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
@@ -854,18 +957,21 @@ async function startAdamBot(sessionId) {
             }
 
             if (dh7Mode.get(from) && !isOwner) return;
-            if (chatbotMode.get(from) && !match) {
+
+            const lang = userLangs.get(from) || 'ht';
+            if (chatbotMode.get(from)) {
+                if (body.startsWith('*○ Message*')) return;
                 let history = chatHistories.get(from) || [];
                 history.push({role: "user", content: body});
                 if (history.length > 7) history = history.slice(-7);
                 let messages = [
-                  {role: "system", content: "You are a friendly assistant that helps with the Adam_D’H7 bot menu and commands. Only perform what the user requests if necessary via the menu."},
+                  {role: "system", content: "You are a friendly assistant that helps with the Adam_D’H7 bot menu and commands. Only perform what the user requests if necessary via the menu. Respond always in the user's language. Always start your response with *○ Message*\nSalut je suis Adam_D’H7...\n\n[your helpful response]\n\n> Adam_D'H7"},
                   ...history
                 ];
                 while (JSON.stringify(messages).length > 17000 && history.length > 1) {
                   history.shift();
                   messages = [
-                    {role: "system", content: "You are a friendly assistant that helps with the Adam_D’H7 bot menu and commands. Only perform what the user requests if necessary via the menu."},
+                    {role: "system", content: "You are a friendly assistant that helps with the Adam_D’H7 bot menu and commands. Only perform what the user requests if necessary via the menu. Respond always in the user's language. Always start your response with *○ Message*\nSalut je suis Adam_D’H7...\n\n[your helpful response]\n\n> Adam_D'H7"},
                     ...history
                   ];
                 }
@@ -878,15 +984,17 @@ async function startAdamBot(sessionId) {
             }
             if (!match) return;
 
-            const command = match[2].toLowerCase();
+            let command = match[2].toLowerCase();
+            const internalCommand = commandMaps[lang] && commandMaps[lang][command] || command;
             const args = match[3] ? match[3].trim() : '';
             const quoted = m.message?.extendedTextMessage?.contextInfo;
             const quotedMessage = quoted?.quotedMessage;
 
-            switch (command) {
+            switch (internalCommand) {
                 case 'menu':
                     if (args.length > 0) break;
-                    const menuCaption = `*○ Menu*\n\n*${Adam_DH7}*\nUtilisateur: "${pushName}"\nPropriétaire: ${Adam_DH7}\n\n*● ai*\n*○ lang*\n*● dh7*\n*○ imaj*\n*● chatbot*\n*○ cheche*\n\n*● menu*\n*○ qrbot*\n*● qr*\n*○ code*\n\n*○ lien*\n*● tagall*\n*○ hidetag*\n*● kick*\n*○ add*\n*● promote*\n*○ demote*\n*● kickall*\n*○ ferme*\n*● ouvert*\n*○ bienvenue*\n\n*○ nolien*\n*● nolien2*\n*○ del*\n*● vv*\n\n> *${Adam_DH7}*`;
+                    const t = translations[lang] || translations.ht;
+                    const menuCaption = `*○ ${t.menu_title}*\n\n*${Adam_DH7}*\nUtilisateur: "${pushName}"\nPropriétaire: ${Adam_DH7}\n\n*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*● ${t.cmd_dh7}*\n*○ ${t.cmd_imaj}*\n*● ${t.cmd_chatbot}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n\n*○ ${t.cmd_lien}*\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_vv}*\n\n> *${Adam_DH7}*`;
                     const menuOpts = {};
                     if (!adamLogoBuffer && fs.existsSync(logoPath)) {
                         adamLogoBuffer = fs.readFileSync(logoPath);
@@ -1108,7 +1216,7 @@ async function startAdamBot(sessionId) {
                     const filteredTargets = targets.filter(t => t !== botId);
                     if (filteredTargets.length === 0) break;
                     const actionMap = { kick: 'remove', add: 'add', promote: 'promote', demote: 'demote' };
-                    await safeGroupUpdate(from, filteredTargets, actionMap[command]);
+                    await safeGroupUpdate(from, filteredTargets, actionMap[internalCommand]);
                     break;
 
                 case 'kickall':
@@ -1211,22 +1319,27 @@ async function startAdamBot(sessionId) {
                     const langCode = args.toLowerCase();
                     if (['fr', 'en', 'es', 'ht'].includes(langCode)) {
                         userLangs.set(from, langCode);
-                        await sock.sendMessage(from, { text: `*○ Langue changée*\nLa langue du bot est maintenant ${langCode.toUpperCase()}.\n\n> ${Adam_DH7}` });
+                        const tLang = translations[langCode] || translations.ht;
+                        const msgText = tLang.lang_changed.replace('{lang}', langCode.toUpperCase());
+                        await sendFormatted(sock, from, "Langue", msgText, langCode, false);
                     } else {
-                        await sock.sendMessage(from, { text: `*○ Langues disponibles*\nfr en es ht\n\n> ${Adam_DH7}` });
+                        const tLang = translations[lang] || translations.ht;
+                        await sendFormatted(sock, from, "Langue", tLang.languages_available, lang, false);
                     }
                     break;
 
                 case 'dh7':
                     let dhStatus = !(dh7Mode.get(from) || false);
                     dh7Mode.set(from, dhStatus);
-                    const dhText = dhStatus ? "*○ Mode DH7 Activé*\nSeules les requêtes du propriétaire sont acceptées maintenant." : "*○ Mode DH7 Désactivé*";
-                    await sock.sendMessage(from, { text: dhText + `\n\n> ${Adam_DH7}` });
+                    const tDh = translations[lang] || translations.ht;
+                    const dhText = dhStatus ? tDh.dh7_activated : tDh.dh7_deactivated;
+                    await sendFormatted(sock, from, "DH7", dhText, lang, false);
                     break;
 
                 case 'imaj':
                     if (!args) {
-                        await sock.sendMessage(from, { text: "*○ Imaj*\nEnvoie un prompt après imaj pour générer une image.\n\n> " + Adam_DH7 });
+                        const tIm = translations[lang] || translations.ht;
+                        await sendFormatted(sock, from, "Imaj", tIm.imaj_prompt, lang, false);
                         break;
                     }
                     try {
@@ -1240,18 +1353,22 @@ async function startAdamBot(sessionId) {
                         const aiData = await aiRes.json();
                         if (!aiData.result || !aiData.result.image) throw new Error();
                         const imageBuffer = Buffer.from(aiData.result.image, "base64");
+                        const tIm = translations[lang] || translations.ht;
+                        const capText = tIm.imaj_generated.replace('{prompt}', args);
                         await sock.sendMessage(from, { 
                           image: imageBuffer, 
-                          caption: `*○ Image Générée*\nPrompt: ${args}\n\n> ${Adam_DH7}` 
+                          caption: `*○ Image Générée*\n${capText}\n\n> ${Adam_DH7}` 
                         });
                     } catch (e) {
-                        await sock.sendMessage(from, { text: "*○ Erreur génération image*\nRéessaye.\n\n> " + Adam_DH7 });
+                        const tIm = translations[lang] || translations.ht;
+                        await sendFormatted(sock, from, "Imaj", tIm.imaj_error, lang, false);
                     }
                     break;
 
                 case 'chatbot':
                     chatbotMode.set(from, true);
-                    await sock.sendMessage(from, { text: "*○ Chatbot Activé*\nIl explique le menu et répond à tes demandes via les commandes.\nImpossible de désactiver sans nouvelle session.\n\n> " + Adam_DH7 });
+                    const tCb = translations[lang] || translations.ht;
+                    await sendFormatted(sock, from, "Chatbot", tCb.chatbot_activated, lang, false);
                     break;
 
                 case 'cheche':
@@ -1262,14 +1379,16 @@ async function startAdamBot(sessionId) {
                         if (searchData.results) {
                           responseText += "\n\nSources:\n" + searchData.results.slice(0,3).map(r => `- ${r.url}`).join("\n");
                         }
-                        await sock.sendMessage(from, { text: `*○ Recherche*\n${responseText}\n\n> ${Adam_DH7}` });
+                        const tCh = translations[lang] || translations.ht;
+                        await sendFormatted(sock, from, tCh.search_title, responseText, lang, false);
                         if (searchData.images && searchData.images.length > 0) {
                           for (let i = 0; i < Math.min(2, searchData.images.length); i++) {
-                            await sock.sendMessage(from, { image: { url: searchData.images[i] }, caption: "Image de recherche" });
+                            await sock.sendMessage(from, { image: { url: searchData.images[i] }, caption: `*○ ${tCh.search_title}*\nImage de recherche\n\n> ${Adam_DH7}` });
                           }
                         }
                     } catch (e) {
-                        await sock.sendMessage(from, { text: "*○ Erreur recherche*\n\n> " + Adam_DH7 });
+                        const tCh = translations[lang] || translations.ht;
+                        await sendFormatted(sock, from, tCh.search_title, tCh.search_error, lang, false);
                     }
                     break;
             }
