@@ -326,13 +326,12 @@ const htmlContent = `<!DOCTYPE html>
             background: #000000;
             cursor: pointer;
         }
-        .info-container {
-            width: 100%;
-            text-align: left;
-            color: #cccccc;
+        .info-text {
             font-size: 14px;
             line-height: 1.6;
+            color: #cccccc;
             margin-bottom: 20px;
+            text-align: justify;
         }
         .points-header {
             font-size: 20px;
@@ -415,7 +414,11 @@ const htmlContent = `<!DOCTYPE html>
 
     <div class="view-overlay" id="view-info">
         <h2 class="tr-info-title">Info</h2>
-        <div class="info-container" id="info-content"></div>
+        <div class="info-text tr-info-p1"></div>
+        <div class="info-text tr-info-p2"></div>
+        <div class="info-text tr-info-p3"></div>
+        <div class="info-text tr-info-p4"></div>
+        <div class="info-text tr-info-p5"></div>
     </div>
 
     <div class="view-overlay" id="view-points">
@@ -446,32 +449,11 @@ const htmlContent = `<!DOCTYPE html>
                 err_num: "Numéro invalide", err_pts_code: "4 points requis pour le code",
                 err_pts_qr: "3 points requis pour le qr", err_conn: "Erreur de connexion",
                 succ_copy: "Copié", succ_pts: "+1 Point", qr_hint: "Scannez avec WhatsApp",
-                infoHTML: \`
-                    <p style="text-align:justify; margin-bottom:15px;">Voici une explication professionnelle et neutre de chaque commande du menu :</p>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Plus utilisés</h3>
-                    <p><strong>● ia</strong> --> Parler avec l'IA en utilisant .ia texte</p>
-                    <p><strong>○ langue</strong> --> Changer la langue d'interface. Exemple .langue fr</p>
-                    <p><strong>○ image</strong> --> Génère une image avec .image [description]</p>
-                    <p><strong>○ chercher</strong> --> Effectue une recherche web via l'IA</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Système</h3>
-                    <p><strong>● menu</strong> --> Affiche le menu principal</p>
-                    <p><strong>○ qrbot</strong> --> Lance une session secondaire par QR</p>
-                    <p><strong>● qr</strong> --> Transforme du texte en code QR</p>
-                    <p><strong>○ code</strong> --> Génère un code de pairage</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Groupe</h3>
-                    <p><strong>○ lien</strong> --> Envoie le lien d'invitation avec la description</p>
-                    <p><strong>● tagtout</strong> --> Mentionne tous les participants</p>
-                    <p><strong>○ hidetag</strong> --> Envoie une annonce sans tag visible</p>
-                    <p><strong>● expulse</strong> --> Retire un membre du groupe</p>
-                    <p><strong>○ add</strong> --> Ajoute un numéro au groupe</p>
-                    <p><strong>● promote / demote</strong> --> Gère les droits d'administration</p>
-                    <p><strong>● expulsetout</strong> --> Retire tous les membres non-administrateurs</p>
-                    <p><strong>○ ferme / ouvert</strong> --> Modifie les paramètres de messagerie du groupe</p>
-                    <p><strong>○ bienvenue</strong> --> Active le message d'accueil automatique</p>
-                    <p><strong>○ nolien / nolien2</strong> --> Active l'anti-lien simple ou strict</p>
-                    <p><strong>○ supp</strong> --> Supprime un message en y répondant</p>
-                    <p><strong>● vv</strong> --> Révèle le contenu d'un média à vue unique</p>
-                \`
+                info1: "*○ Menu*\\n*Adam_D'H7*\\nUtilisateur: \\"Bot\\"\\nPropriétaire: Adam_D'H7\\n\\n*Utilitaires*\\n*● ia* --> Parler avec l'IA Adam_D'H7 beta en utilisant .ia suivi de votre texte.\\n*○ langue* --> Changer la langue du bot. Exemple : .langue fr.\\n*○ image* --> Générer une image. Utilisez .image + description du prompt.\\n*○ chercher* --> Rechercher sur le web. Utilisez .chercher + requête.",
+                info2: "*Menu et outils*\\n*● menu* --> Affiche ce menu complet.\\n*○ qrbot* --> Crée une nouvelle session QR pour connecter un autre appareil.\\n*● qr* --> Génère un QR code pour le texte fourni.\\n*○ code* --> Génère un code pair pour connexion.\\n*○ lien* --> Donne le lien d'invitation du groupe avec sa description exacte (sauts de ligne préservés).",
+                info3: "*Groupe*\\n*● taguer* --> Tag tous les membres du groupe.\\n*○ masquer* --> Masque les tags dans un message cité.",
+                info4: "*Modération*\\n*● expulser* --> Expulse un membre cité ou mentionné (ne s'applique jamais au bot lui-même).\\n*○ ajouter* --> Ajoute un membre au groupe.\\n*● promouvoir* --> Donne les droits admin à un membre.\\n*○ rétrograder* --> Retire les droits admin à un membre.\\n*● expulser_tous* --> Expulse tous les membres non-admin (ne touche jamais le bot).",
+                info5: "*Paramètres du groupe*\\n*○ fermer* --> Ferme le groupe (seuls les admins peuvent parler).\\n*● ouvrir* --> Ouvre le groupe.\\n*○ bienvenue* --> Active ou désactive le message automatique de bienvenue.\\n*○ sanslien* --> Active ou désactive la suppression automatique de liens (mode normal).\\n*● sanslien2* --> Active ou désactive la suppression automatique de liens (mode strict).\\n\\n*Autres*\\n*○ supprimer* --> Supprime le message cité (fonctionne dans toutes les langues).\\n*● vv* --> Affiche le contenu d'un message vu une fois.\\n\\n> *Adam_D'H7*"
             },
             en: {
                 code: "Pair Code", qr: "Scan QR", copy: "Tap to copy", menu: "Menu", 
@@ -480,32 +462,11 @@ const htmlContent = `<!DOCTYPE html>
                 err_num: "Invalid number", err_pts_code: "4 points required for code",
                 err_pts_qr: "3 points required for QR", err_conn: "Connection error",
                 succ_copy: "Copied", succ_pts: "+1 Point", qr_hint: "Scan with WhatsApp",
-                infoHTML: \`
-                    <p style="text-align:justify; margin-bottom:15px;">Here is a professional and neutral explanation of each menu command:</p>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Most Used</h3>
-                    <p><strong>● ai</strong> --> Chat with AI using .ai text</p>
-                    <p><strong>○ lang</strong> --> Change the bot's language. Example .lang en</p>
-                    <p><strong>○ image</strong> --> Generate an image using .image [prompt]</p>
-                    <p><strong>○ search</strong> --> Perform a web search via AI</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">System</h3>
-                    <p><strong>● menu</strong> --> Displays the main menu</p>
-                    <p><strong>○ qrbot</strong> --> Starts a secondary session via QR</p>
-                    <p><strong>● qr</strong> --> Transforms text into a QR code</p>
-                    <p><strong>○ code</strong> --> Generates a pairing code</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Group</h3>
-                    <p><strong>○ link</strong> --> Sends the invitation link with the description</p>
-                    <p><strong>● tagall</strong> --> Mentions all participants</p>
-                    <p><strong>○ hidetag</strong> --> Sends an announcement with hidden tags</p>
-                    <p><strong>● kick</strong> --> Removes a member from the group</p>
-                    <p><strong>○ add</strong> --> Adds a number to the group</p>
-                    <p><strong>● promote / demote</strong> --> Manages admin rights</p>
-                    <p><strong>● kickall</strong> --> Removes all non-admin members</p>
-                    <p><strong>○ close / open</strong> --> Toggles group messaging permissions</p>
-                    <p><strong>○ welcome</strong> --> Activates automatic welcome messages</p>
-                    <p><strong>○ nolink / nolink2</strong> --> Enables standard or strict anti-link</p>
-                    <p><strong>○ del</strong> --> Deletes a specific message by replying</p>
-                    <p><strong>● vv</strong> --> Reveals view-once media content</p>
-                \`
+                info1: "*○ Menu*\\n*Adam_D'H7*\\nUser: \\"Bot\\"\\nOwner: Adam_D'H7\\n\\n*Utilities*\\n*● ai* --> Talk with Adam_D'H7 AI beta using .ai followed by your text.\\n*○ lang* --> Change bot language. Example: .lang en.\\n*○ image* --> Generate an image. Use .image + prompt description.\\n*○ search* --> Search the web. Use .search + query.",
+                info2: "*Menu and tools*\\n*● menu* --> Displays this full menu.\\n*○ qrbot* --> Creates a new QR session to connect another device.\\n*● qr* --> Generates a QR code for the provided text.\\n*○ code* --> Generates a pairing code.\\n*○ link* --> Provides the group invite link with its exact description (line breaks preserved).",
+                info3: "*Group*\\n*● tagall* --> Tags all group members.\\n*○ hidetag* --> Hides tags in a quoted message.",
+                info4: "*Moderation*\\n*● kick* --> Kicks a quoted or mentioned member (never applies to the bot itself).\\n*○ add* --> Adds a member to the group.\\n*● promote* --> Gives admin rights to a member.\\n*○ demote* --> Removes admin rights from a member.\\n*● deleteall* --> Kicks all non-admin members (never touches the bot).",
+                info5: "*Group settings*\\n*○ close* --> Closes the group (only admins can speak).\\n*● open* --> Opens the group.\\n*○ welcome* --> Activates or deactivates the automatic welcome message.\\n*○ nolink* --> Activates or deactivates automatic link deletion (normal mode).\\n*● nolink2* --> Activates or deactivates automatic link deletion (strict mode).\\n\\n*Others*\\n*○ del* --> Deletes the quoted message (works in any language).\\n*● vv* --> Displays the content of a view-once message.\\n\\n> *Adam_D'H7*"
             },
             es: {
                 code: "Código Pair", qr: "Escanear QR", copy: "Toca para copiar", menu: "Menú", 
@@ -514,32 +475,11 @@ const htmlContent = `<!DOCTYPE html>
                 err_num: "Número inválido", err_pts_code: "4 puntos requeridos para el código",
                 err_pts_qr: "3 puntos requeridos para el QR", err_conn: "Error de conexión",
                 succ_copy: "Copiado", succ_pts: "+1 Punto", qr_hint: "Escanea con WhatsApp",
-                infoHTML: \`
-                    <p style="text-align:justify; margin-bottom:15px;">Aquí tienes una explicación profesional y neutral de cada comando del menú:</p>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Más Usados</h3>
-                    <p><strong>● ia</strong> --> Hablar con la IA usando .ia texto</p>
-                    <p><strong>○ idioma</strong> --> Cambiar el idioma de la interfaz. Ejemplo .idioma es</p>
-                    <p><strong>○ imagen</strong> --> Generar una imagen con .imagen [descripción]</p>
-                    <p><strong>○ buscar</strong> --> Realizar una búsqueda web mediante IA</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Sistema</h3>
-                    <p><strong>● menú</strong> --> Muestra el menú principal</p>
-                    <p><strong>○ qrbot</strong> --> Inicia una sesión secundaria mediante QR</p>
-                    <p><strong>● qr</strong> --> Transforma texto en un código QR</p>
-                    <p><strong>○ código</strong> --> Genera un código de emparejamiento</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Grupo</h3>
-                    <p><strong>○ enlace</strong> --> Envía el enlace de invitación con la descripción</p>
-                    <p><strong>● etiquetartodo</strong> --> Menciona a todos los participantes</p>
-                    <p><strong>○ hidetag</strong> --> Envía un anuncio sin etiquetas visibles</p>
-                    <p><strong>● expulsar</strong> --> Elimina a un miembro del grupo</p>
-                    <p><strong>○ añadir</strong> --> Agrega un número al grupo</p>
-                    <p><strong>● promover / degradar</strong> --> Administra derechos de administrador</p>
-                    <p><strong>● borrartodo</strong> --> Elimina a todos los miembros que no son administradores</p>
-                    <p><strong>○ cerrar / abrir</strong> --> Cambia los permisos de mensajes del grupo</p>
-                    <p><strong>○ bienvenida</strong> --> Activa el mensaje automático de bienvenida</p>
-                    <p><strong>○ sinenlace / sinenlace2</strong> --> Activa el modo anti-enlace básico o estricto</p>
-                    <p><strong>○ borrar</strong> --> Elimina un mensaje respondiendo a él</p>
-                    <p><strong>● vv</strong> --> Revela el contenido de archivos de visualización única</p>
-                \`
+                info1: "*○ Menú*\\n*Adam_D'H7*\\nUsuario: \\"Bot\\"\\nPropietario: Adam_D'H7\\n\\n*Utilitarios*\\n*● ia* --> Hablar con la IA Adam_D'H7 beta usando .ia seguido de tu texto.\\n*○ idioma* --> Cambiar el idioma del bot. Ejemplo: .idioma es.\\n*○ imagen* --> Generar una imagen. Usa .imagen + descripción del prompt.\\n*○ buscar* --> Buscar en la web. Usa .buscar + consulta.",
+                info2: "*Menú y herramientas*\\n*● menú* --> Muestra este menú completo.\\n*○ qrbot* --> Crea una nueva sesión QR para conectar otro dispositivo.\\n*● qr* --> Genera un código QR para el texto proporcionado.\\n*○ código* --> Genera un código de emparejamiento.\\n*○ enlace* --> Proporciona el enlace de invitación del grupo con su descripción exacta (saltos de línea preservados).",
+                info3: "*Grupo*\\n*● etiquetar* --> Etiqueta a todos los miembros del grupo.\\n*○ ocultar* --> Oculta las etiquetas en un mensaje citado.",
+                info4: "*Moderación*\\n*● expulsar* --> Expulsa a un miembro citado o mencionado (nunca se aplica al bot mismo).\\n*○ añadir* --> Añade un miembro al grupo.\\n*● promover* --> Da derechos de administrador a un miembro.\\n*○ degradar* --> Quita derechos de administrador a un miembro.\\n*● borrar_todo* --> Expulsa a todos los miembros no-admin (nunca toca al bot).",
+                info5: "*Configuración del grupo*\\n*○ cerrar* --> Cierra el grupo (solo admins pueden hablar).\\n*● abrir* --> Abre el grupo.\\n*○ bienvenida* --> Activa o desactiva el mensaje automático de bienvenida.\\n*○ sinenlace* --> Activa o desactiva la eliminación automática de enlaces (modo normal).\\n*● sinenlace2* --> Activa o desactiva la eliminación automática de enlaces (modo estricto).\\n\\n*Otros*\\n*○ borrar* --> Elimina el mensaje citado (funciona en cualquier idioma).\\n*● vv* --> Muestra el contenido de un mensaje visto una vez.\\n\\n> *Adam_D'H7*"
             },
             ht: {
                 code: "Kòd Pè", qr: "Eskane QR", copy: "Klike pou kopye", menu: "Meni", 
@@ -548,32 +488,11 @@ const htmlContent = `<!DOCTYPE html>
                 err_num: "Nimewo pa bon", err_pts_code: "4 pwen nesesè pou kòd la",
                 err_pts_qr: "3 pwen nesesè pou qr la", err_conn: "Erè koneksyon",
                 succ_copy: "Kopye", succ_pts: "+1 Pwen", qr_hint: "Eskane ak WhatsApp",
-                infoHTML: \`
-                    <p style="text-align:justify; margin-bottom:15px;">Men yon esplikasyon pwofesyonèl ak net sou chak kòmand ki nan meni an:</p>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Pi itilize</h3>
-                    <p><strong>● ai</strong> --> Pale ak entèlijans atifisyèl la ak .ai teks</p>
-                    <p><strong>○ lang</strong> --> Chanje lang bot la. Egzanp .lang ht</p>
-                    <p><strong>○ imaj</strong> --> Jenere yon imaj avèk .imaj [deskripsyon]</p>
-                    <p><strong>○ cheche</strong> --> Fè yon rechèch sou entènèt</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Sistèm</h3>
-                    <p><strong>● meni</strong> --> Afiche meni prensipal la</p>
-                    <p><strong>○ qrbot</strong> --> Lanse yon dezyèm sesyon avèk QR</p>
-                    <p><strong>● qr</strong> --> Transfòme yon tèks an kòd QR</p>
-                    <p><strong>○ kòd</strong> --> Jenere yon kòd pè</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Gwoup</h3>
-                    <p><strong>○ lyen</strong> --> Voye lyen envitasyon an ansanm ak deskripsyon an</p>
-                    <p><strong>● tout</strong> --> Mansyone tout moun nan gwoup la</p>
-                    <p><strong>○ hidetag</strong> --> Voye yon anons san tag parèt klè</p>
-                    <p><strong>● sipli</strong> --> Retire yon manm nan gwoup la</p>
-                    <p><strong>○ add</strong> --> Ajoute yon nimewo nan gwoup la</p>
-                    <p><strong>● promote / demote</strong> --> Jere dwa administrateur yo</p>
-                    <p><strong>● siptout</strong> --> Retire tout manm ki pa administrateur</p>
-                    <p><strong>○ fèmen / ouvri</strong> --> Chanje dwa pou voye mesaj nan gwoup la</p>
-                    <p><strong>○ byenveni</strong> --> Aktive mesaj akèy otomatik pou nouvo manm</p>
-                    <p><strong>○ nolyen / nolyen2</strong> --> Aktive sistèm anti-lyen senp oswa strik</p>
-                    <p><strong>○ sip</strong> --> Efase yon mesaj presi lè w reponn li</p>
-                    <p><strong>● vv</strong> --> Montre kontni medya ki te voye pou wè yon sèl fwa</p>
-                \`
+                info1: "*○ Meni*\\n*Adam_D'H7*\\nItilizatè: \\"Bot\\"\\nPwopriyetè: Adam_D'H7\\n\\n*Itilitè*\\n*● ai* --> Pale ak AI Adam_D'H7 beta lè w itilize .ai + tèks ou a.\\n*○ lang* --> Chanje lang bot la. Egzanp: .lang fr.\\n*○ imaj* --> Jenere yon imaj. Itilize .imaj + deskripsyon prompt la.\\n*○ cheche* --> Fè rechèch sou entènèt. Itilize .cheche + kesyon.",
+                info2: "*Meni ak zouti*\\n*● meni* --> Montre meni konplè sa a.\\n*○ qrbot* --> Kreye yon nouvo sesyon QR pou konekte yon lòt aparèy.\\n*● qr* --> Jenere yon kòd QR pou tèks la.\\n*○ kòd* --> Jenere kòd pè.\\n*○ lyen* --> Bay lyen envitasyon gwoup la ak deskripsyon egzak li (saut liy prezève).",
+                info3: "*Groupe*\\n*● tagtout* --> Tag tout manm gwoup la.\\n*○ hidetag* --> Maske tag yo nan yon mesaj site.",
+                info4: "*Modération*\\n*● sipli* --> Sipli yon manm site oswa mansyone (pa janm aplike sou bot la menm).\\n*○ add* --> Ajoute yon manm nan gwoup la.\\n*● promote* --> Bay dwa admin yon manm.\\n*○ demote* --> Retire dwa admin yon manm.\\n*● siptout* --> Sipli tout manm ki pa admin (pa janm touche bot la).",
+                info5: "*Paramèt gwoup*\\n*○ fèmen* --> Fèmen gwoup la (selman admin ka pale).\\n*● ouvri* --> Ouvri gwoup la.\\n*○ byenveni* --> Aktive oswa dezaktive mesaj byenveni otomatik.\\n*○ nolyen* --> Aktive oswa dezaktive sipresyon lyen otomatik (mòd nòmal).\\n*● nolyen2* --> Aktive oswa dezaktive sipresyon lyen otomatik (mòd strik).\\n\\n*Autres*\\n*○ sip* --> Siprime mesaj site a (travay nan tout lang).\\n*● vv* --> Wè kontni yon mesaj wè yon sèl fwa.\\n\\n> *Adam_D'H7*"
             }
         };
 
@@ -593,8 +512,7 @@ const htmlContent = `<!DOCTYPE html>
             qr: document.getElementById('qr-container'),
             code: document.getElementById('code-text'),
             hint: document.getElementById('hint-text'),
-            notif: document.getElementById('notif'),
-            infoContent: document.getElementById('info-content')
+            notif: document.getElementById('notif')
         };
 
         function updateUI() {
@@ -610,7 +528,11 @@ const htmlContent = `<!DOCTYPE html>
             document.querySelector('.tr-info-title').textContent = t.ititle;
             document.querySelector('.tr-points-header').textContent = t.pheader.replace('{x}', userPoints);
             document.querySelector('.tr-clicks').textContent = t.clicks;
-            ui.infoContent.innerHTML = t.infoHTML;
+            document.querySelector('.tr-info-p1').textContent = t.info1;
+            document.querySelector('.tr-info-p2').textContent = t.info2;
+            document.querySelector('.tr-info-p3').textContent = t.info3;
+            document.querySelector('.tr-info-p4').textContent = t.info4;
+            document.querySelector('.tr-info-p5').textContent = t.info5;
         }
 
         function setLang(l) {
@@ -800,10 +722,10 @@ async function tavilySearch(query) {
 const translations = {
   fr: {
     cmd_ai: "ia", cmd_lang: "langue", cmd_imaj: "image", cmd_cheche: "chercher",
-    cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "lien", cmd_tagall: "tagtout",
-    cmd_hidetag: "hidetag", cmd_kick: "expulse", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
-    cmd_kickall: "expulsetout", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
-    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "supp", cmd_vv: "vv",
+    cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "lien", cmd_tagall: "taguer",
+    cmd_hidetag: "masquer", cmd_kick: "expulser", cmd_add: "ajouter", cmd_promote: "promouvoir", cmd_demote: "rétrograder",
+    cmd_kickall: "expulser_tous", cmd_ferme: "fermer", cmd_ouvert: "ouvrir", cmd_bienvenue: "bienvenue",
+    cmd_nolien: "sanslien", cmd_nolien2: "sanslien2", cmd_del: "supprimer", cmd_vv: "vv",
     menu_title: "Menu", lang_changed: "La langue du bot est maintenant {lang}.", languages_available: "Langues disponibles : fr en es ht",
     imaj_prompt: "Envoie un prompt après image pour générer une image.", imaj_generated: "Prompt: {prompt}", imaj_error: "Erreur génération image - Réessaye.", search_title: "Recherche", search_error: "Erreur recherche"
   },
@@ -811,23 +733,23 @@ const translations = {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "search",
     cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "link", cmd_tagall: "tagall",
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
-    cmd_kickall: "kickall", cmd_ferme: "close", cmd_ouvert: "open", cmd_bienvenue: "welcome",
+    cmd_kickall: "delete all", cmd_ferme: "close", cmd_ouvert: "open", cmd_bienvenue: "welcome",
     cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_vv: "vv",
     menu_title: "Menu", lang_changed: "Bot language is now {lang}.", languages_available: "Available languages: fr en es ht",
     imaj_prompt: "Send a prompt after image to generate an image.", imaj_generated: "Prompt: {prompt}", imaj_error: "Image generation error - Try again.", search_title: "Search", search_error: "Search error"
   },
   es: {
     cmd_ai: "ia", cmd_lang: "idioma", cmd_imaj: "imagen", cmd_cheche: "buscar",
-    cmd_menu: "menú", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "código", cmd_lien: "enlace", cmd_tagall: "etiquetartodo",
-    cmd_hidetag: "hidetag", cmd_kick: "expulsar", cmd_add: "añadir", cmd_promote: "promover", cmd_demote: "degradar",
-    cmd_kickall: "borrartodo", cmd_ferme: "cerrar", cmd_ouvert: "abrir", cmd_bienvenue: "bienvenida",
+    cmd_menu: "menú", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "código", cmd_lien: "enlace", cmd_tagall: "etiquetar",
+    cmd_hidetag: "ocultar", cmd_kick: "expulsar", cmd_add: "añadir", cmd_promote: "promover", cmd_demote: "degradar",
+    cmd_kickall: "borrar_todo", cmd_ferme: "cerrar", cmd_ouvert: "abrir", cmd_bienvenue: "bienvenida",
     cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "borrar", cmd_vv: "vv",
     menu_title: "Menú", lang_changed: "El idioma del bot es ahora {lang}.", languages_available: "Idiomas disponibles: fr en es ht",
     imaj_prompt: "Envía un prompt después de imagen para generar una imagen.", imaj_generated: "Prompt: {prompt}", imaj_error: "Error al generar imagen - Inténtalo de nuevo.", search_title: "Búsqueda", search_error: "Error de búsqueda"
   },
   ht: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "imaj", cmd_cheche: "cheche",
-    cmd_menu: "meni", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "kòd", cmd_lien: "lyen", cmd_tagall: "tout",
+    cmd_menu: "meni", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "kòd", cmd_lien: "lyen", cmd_tagall: "tagtout",
     cmd_hidetag: "hidetag", cmd_kick: "sipli", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "siptout", cmd_ferme: "fèmen", cmd_ouvert: "ouvri", cmd_bienvenue: "byenveni",
     cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "sip", cmd_vv: "vv",
@@ -837,17 +759,17 @@ const translations = {
 };
 
 const commandMaps = {
+  ht: {
+    "meni": "menu", "kòd": "code", "lyen": "lien", "tagtout": "tagall", "sipli": "kick", "siptout": "kickall", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "sip": "del", "hidetag": "hidetag", "add": "add", "promote": "promote", "demote": "demote", "qrbot": "qrbot", "qr": "qr", "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "vv": "vv"
+  },
   fr: {
-    "ia": "ai", "langue": "lang", "image": "imaj", "chercher": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "lien": "lien", "tagtout": "tagall", "hidetag": "hidetag", "expulse": "kick", "add": "add", "promote": "promote", "demote": "demote", "expulsetout": "kickall", "ferme": "ferme", "ouvert": "ouvert", "bienvenue": "bienvenue", "nolien": "nolien", "nolien2": "nolien2", "supp": "del", "vv": "vv"
+    "ia": "ai", "langue": "lang", "image": "imaj", "chercher": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "lien": "lien", "taguer": "tagall", "masquer": "hidetag", "expulser": "kick", "ajouter": "add", "promouvoir": "promote", "rétrograder": "demote", "expulser_tous": "kickall", "fermer": "ferme", "ouvrir": "ouvert", "bienvenue": "bienvenue", "sanslien": "nolien", "sanslien2": "nolien2", "supprimer": "del", "vv": "vv"
   },
   en: {
-    "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "close": "ferme", "open": "ouvert", "welcome": "bienvenue", "nolink": "nolien", "nolink2": "nolien2", "del": "del", "vv": "vv"
+    "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "deleteall": "kickall", "close": "ferme", "open": "ouvert", "welcome": "bienvenue", "nolink": "nolien", "nolink2": "nolien2", "del": "del", "vv": "vv"
   },
   es: {
-    "ia": "ai", "idioma": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promover": "promote", "degradar": "demote", "borrartodo": "kickall", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del", "vv": "vv"
-  },
-  ht: {
-    "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "sip": "del", "vv": "vv"
+    "ia": "ai", "idioma": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetar": "tagall", "ocultar": "hidetag", "expulsar": "kick", "añadir": "add", "promover": "promote", "degradar": "demote", "borrar_todo": "kickall", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del", "vv": "vv"
   }
 };
 
@@ -1006,9 +928,12 @@ async function startAdamBot(sessionId) {
             let command = match[2].toLowerCase();
             let args = match[3] ? match[3].trim() : '';
 
-            const internalCommand = commandMaps[lang] && commandMaps[lang][command] ? commandMaps[lang][command] : null;
-            if (!internalCommand) return;
-            
+            if (command === 'borrar' && args.toLowerCase().startsWith('todo')) { command = 'borrartodo'; args = args.substring(4).trim(); }
+            if (command === 'sin' && args.toLowerCase().startsWith('enlace2')) { command = 'sinenlace2'; args = args.substring(7).trim(); }
+            else if (command === 'sin' && args.toLowerCase().startsWith('enlace')) { command = 'sinenlace'; args = args.substring(6).trim(); }
+            if (command === 'delete' && args.toLowerCase().startsWith('all')) { command = 'deleteall'; args = args.substring(3).trim(); }
+
+            const internalCommand = commandMaps[lang] && commandMaps[lang][command] || command;
             const quoted = m.message?.extendedTextMessage?.contextInfo;
             const quotedMessage = quoted?.quotedMessage;
 
@@ -1088,12 +1013,12 @@ async function startAdamBot(sessionId) {
 
                 case 'lien':
                     if (!isGroup) break;
-                    const tLien = translations[lang] || translations.ht;
                     const c = await sock.groupInviteCode(from);
                     const link = `https://chat.whatsapp.com/${c}`;
-                    const groupDesc = metadata.desc ? metadata.desc.toString() : "";
-                    const lienCapTitle = tLien.cmd_lien.charAt(0).toUpperCase() + tLien.cmd_lien.slice(1);
-                    const lienCaption = `*○ ${lienCapTitle}*\n\n*${Adam_DH7}*\nUtilisateur: "${pushName}"\nPropriétaire: ${Adam_DH7}\n\n*${link}*\n\n${groupDesc}\n\n> ${Adam_DH7}`;
+                    const gmeta = await sock.groupMetadata(from);
+                    const desc = gmeta.desc ? `\n\n${gmeta.desc}` : '\n\nAucune description disponible.';
+                    const t = translations[lang] || translations.ht;
+                    const lienCaption = `*○ ${t.cmd_lien}*\n\n*${Adam_DH7}*\nUtilisateur: "${pushName}"\nPropriétaire: ${Adam_DH7}\n\n*${link}*${desc}\n\n> ${Adam_DH7}`;
                     const lienOpts = { caption: lienCaption };
                     try {
                         const ppUrl = await sock.profilePictureUrl(from, 'image');
@@ -1115,10 +1040,8 @@ async function startAdamBot(sessionId) {
 
                 case 'tagall':
                     if (!isGroup || !isAdmin) break;
-                    const tTag = translations[lang] || translations.ht;
-                    const tagTitle = tTag.cmd_tagall.charAt(0).toUpperCase() + tTag.cmd_tagall.slice(1);
                     const participants = metadata.participants.map(p => p.id);
-                    const tagCaption = `*○ ${tagTitle}*\n\n*${Adam_DH7}*\nUtilisateur: ${pushName}\n\n${participants.map(p => `○ @${p.split('@')[0]}`).join('\n')}\n\n> *${Adam_DH7}*`;
+                    const tagCaption = `*○ Tagall*\n\n*${Adam_DH7}*\nUtilisateur: ${pushName}\n\n${participants.map(p => `○ @${p.split('@')[0]}`).join('\n')}\n\n> *${Adam_DH7}*`;
                     const tagOpts = { mentions: participants };
                     if (!adamLogoBuffer && fs.existsSync(logoPath)) {
                         adamLogoBuffer = fs.readFileSync(logoPath);
