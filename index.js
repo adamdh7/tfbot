@@ -868,7 +868,7 @@ const commandMaps = {
     "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "close": "ferme", "open": "ouvert", "welcome": "bienvenue", "nolink": "nolien", "nolink2": "nolien2", "del": "del", "vv": "vv"
   },
   es: {
-    "ia": "ai", "idioma": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promover": "promote", "degradar": "demote", "borrartodo": "kickall", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del", "vv": "vv"
+    "ia": "ai", "idioma": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del", "vv": "vv"
   },
   ht: {
     "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "sip": "del", "vv": "vv"
@@ -913,7 +913,7 @@ async function startAdamBot(sessionId, autoExpire = false) {
         msgRetryCounterCache,
         retryRequestDelayMs: 2000,
         getMessage: async (key) => {
-            return { conversation: 'Message non chargé' };
+            return undefined;
         }
     });
 
@@ -1006,18 +1006,25 @@ async function startAdamBot(sessionId, autoExpire = false) {
             const from = m.key.remoteJid;
             const pushName = m.pushName || 'Inconnu';
             const sender = m.key.participant || m.key.remoteJid;
-            const body = (m.message.conversation || m.message.extendedTextMessage?.text || m.message.imageMessage?.caption || m.message.videoMessage?.caption || '').trim();
+            const bodyRaw = m.message.conversation || m.message.extendedTextMessage?.text || m.message.imageMessage?.caption || m.message.videoMessage?.caption || '';
+            const body = bodyRaw.trim();
+
+            if (!body || body.includes('Message non chargé')) return;
+
+            const messageType = Object.keys(m.message || {})[0];
+            if (['protocolMessage', 'senderKeyDistributionMessage', 'appStateSyncKeyRequest', 'appStateSyncKeyShare', 'deviceSentMessage', 'reactionMessage'].includes(messageType)) return;
+
             const isGroup = from.endsWith('@g.us');
             let metadata = isGroup ? await sock.groupMetadata(from) : null;
             const botId = sock.user?.id ? (sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id) : null;
             const isOwner = sender === botId;
-            const isAdmin = isGroup ? metadata?.participants.some(p => p.id === sender && p.admin) || (sender === botId) : false;
+            const isAdmin = isGroup ? metadata?.participants.some(p => p.id === sender && p.admin) || isOwner : false;
             
             const cmdRegex = /^([.]?)\s*([\p{L}0-9_]+)(?:\s+(.*))?$/u;
             const match = body.match(cmdRegex);
 
             if (isGroup && !match) {
-                const textContent = m.message?.conversation || m.message?.extendedTextMessage?.text || m.message?.imageMessage?.caption || m.message?.videoMessage?.caption || m.message?.documentMessage?.caption || '';
+                const textContent = bodyRaw;
                 const mode = sessionData.noLienMode[from] || 'off';
                 if (mode !== 'off' && textContent && /https?:\/\/|www\./i.test(textContent)) {
                     const senderIsAdmin = metadata.participants.find(p => p.id === sender)?.admin != null;
