@@ -446,16 +446,6 @@ const htmlContent = `<!DOCTYPE html>
                 err_num: "Numéro invalide", err_pts_code: "4 points requis pour le code",
                 err_pts_qr: "3 points requis pour le qr", err_conn: "Erreur de connexion",
                 succ_copy: "Copié", succ_pts: "+1 Point", qr_hint: "Scannez avec WhatsApp",
-                authorize_code: "Veuillez autoriser l'envoi du code en cliquant ici :",
-                new_session: "Nouvelle Session Créée",
-                scan_qr_text: "Scannez ce code pour connecter la nouvelle session.",
-                session_connected_title: "Session Connectée",
-                session_connected_desc: "La nouvelle session est active.\nID: ",
-                image_generated_title: "Image Générée",
-                message_title: "Message",
-                lang_command_title: "Langue",
-                welcome: "Bienvenue",
-                welcome_in: "Bienvenue dans",
                 infoHTML: \`
                     <p style="text-align:justify; margin-bottom:15px;">Bienvenue sur le système de connexion Bot.Adam_D’H7. Cette interface permet de connecter votre appareil de manière sécurisée et stable afin de profiter pleinement des fonctionnalités avancées du bot.</p>
                     <p style="text-align:justify; margin-bottom:15px;">Les sessions sont optimisées pour garantir la sécurité et les performances. Le système gère l'ensemble des opérations de façon transparente et automatique.</p>
@@ -972,7 +962,7 @@ const commandMaps = {
     "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "close": "ferme", "open": "ouvert", "welcome": "bienvenue", "nolink": "nolien", "nolink2": "nolien2", "del": "del", "vv": "vv"
   },
   es: {
-    "ia": "ai", "idioma": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del", "vv": "vv"
+    "ia": "ai", "idioma": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promover": "promote", "degradar": "demote", "borrartodo": "kickall", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del", "vv": "vv"
   },
   ht: {
     "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "sip": "del", "vv": "vv"
@@ -1017,7 +1007,7 @@ async function startAdamBot(sessionId, autoExpire = false) {
         msgRetryCounterCache,
         retryRequestDelayMs: 2000,
         getMessage: async (key) => {
-            return {};
+            return { conversation: 'Message non chargé' };
         }
     });
 
@@ -1135,15 +1125,17 @@ async function startAdamBot(sessionId, autoExpire = false) {
                 }
             }
 
+            const lang = userLangs.get(from) || 'ht';
+
             if (!match) return;
 
             let command = match[2].toLowerCase();
             let args = match[3] ? match[3].trim() : '';
 
             let internalCommand = null;
-            let commandLang = userLangs.get(from) || 'ht';
+            let commandLang = lang;
             const normCmd = normalizeText(command);
-            const currentMap = commandMaps[commandLang];
+            const currentMap = commandMaps[lang];
             if (currentMap) {
                 for (const [alias, intern] of Object.entries(currentMap)) {
                     if (normalizeText(alias) === normCmd) {
@@ -1154,7 +1146,7 @@ async function startAdamBot(sessionId, autoExpire = false) {
             }
             if (!internalCommand) {
                 for (const l of Object.keys(commandMaps)) {
-                    if (l === commandLang) continue;
+                    if (l === lang) continue;
                     const mapL = commandMaps[l];
                     for (const [alias, intern] of Object.entries(mapL)) {
                         if (normalizeText(alias) === normCmd) {
@@ -1167,7 +1159,6 @@ async function startAdamBot(sessionId, autoExpire = false) {
                 }
             }
             if (!internalCommand) return;
-
             if (internalCommand === 'menu') {
                 userLangs.set(from, commandLang);
             }
@@ -1178,7 +1169,7 @@ async function startAdamBot(sessionId, autoExpire = false) {
             switch (internalCommand) {
                 case 'menu':
                     if (args.length > 0) break;
-                    const t = translations[commandLang] || translations[commandLang] || translations.ht;
+                    const t = translations[commandLang] || translations[lang] || translations.ht;
                     const menuCaption = `*○ ${t.menu_title}*\n\n*${Adam_DH7}*\nUtilisateur: "${pushName}"\nPropriétaire: ${Adam_DH7}\n\n*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_vv}*\n\n> *${Adam_DH7}*`;
                     const menuOpts = {};
                     if (!adamLogoBuffer && fs.existsSync(logoPath)) {
@@ -1213,7 +1204,7 @@ async function startAdamBot(sessionId, autoExpire = false) {
 
                     tempSock.ev.on('creds.update', tempSaveCreds);
                     let qrSent = false;
-                    const chatLang = commandLang;
+                    const chatLang = lang;
 
                     tempSock.ev.on('connection.update', async (update) => {
                         const { qr, connection } = update;
@@ -1254,7 +1245,7 @@ async function startAdamBot(sessionId, autoExpire = false) {
 
                 case 'lien':
                     if (!isGroup) break;
-                    const tLien = translations[commandLang] || translations.ht;
+                    const tLien = translations[lang] || translations.ht;
                     const c = await sock.groupInviteCode(from);
                     const link = `https://chat.whatsapp.com/${c}`;
                     const groupDesc = metadata.desc ? metadata.desc.toString() : "";
@@ -1281,7 +1272,7 @@ async function startAdamBot(sessionId, autoExpire = false) {
 
                 case 'tagall':
                     if (!isGroup || !isAdmin) break;
-                    const tTag = translations[commandLang] || translations.ht;
+                    const tTag = translations[lang] || translations.ht;
                     const tagTitle = tTag.cmd_tagall.charAt(0).toUpperCase() + tTag.cmd_tagall.slice(1);
                     const participants = metadata.participants.map(p => p.id);
                     const tagCaption = `*○ ${tagTitle}*\n\n*${Adam_DH7}*\nUtilisateur: ${pushName}\n\n${participants.map(p => `○ @${p.split('@')[0]}`).join('\n')}\n\n> *${Adam_DH7}*`;
@@ -1310,7 +1301,7 @@ async function startAdamBot(sessionId, autoExpire = false) {
                         if (data && data.code) {
                             const tfid = Math.floor(1000000 + Math.random() * 9000000);
                             const confirmLink = `https://dh7bot.adamdh7.org/TF-${tfid}`;
-                            const tCode = translations[commandLang] || translations.ht;
+                            const tCode = translations[lang] || translations.ht;
                             const msgConfirmation = await sock.sendMessage(from, { text: tCode.authorize_code + `\n${confirmLink}` });
                             tfEvents.once('ok-' + tfid, async () => {
                                 await sock.sendMessage(from, { delete: msgConfirmation.key });
@@ -1496,7 +1487,7 @@ async function startAdamBot(sessionId, autoExpire = false) {
                       ];
                     }
                     const aiResponseText = await callCloudflareAI("@cf/meta/llama-3.3-70b-instruct-fp8-fast", messages, 3000);
-                    const tAi = translations[commandLang] || translations.ht;
+                    const tAi = translations[lang] || translations.ht;
                     const formattedAiResponse = `*○ ${tAi.message_title}*\n${aiResponseText}\n\n> ${Adam_DH7}`;
                     await sock.sendMessage(from, { text: formattedAiResponse });
                     
@@ -1507,21 +1498,21 @@ async function startAdamBot(sessionId, autoExpire = false) {
 
                 case 'lang':
                     const langCode = args.toLowerCase();
-                    const tLangBase = translations[commandLang] || translations.ht;
+                    const tLangBase = translations[lang] || translations.ht;
                     if (['fr', 'en', 'es', 'ht'].includes(langCode)) {
                         userLangs.set(from, langCode);
                         const tLang = translations[langCode] || translations.ht;
                         const msgText = tLang.lang_changed.replace('{lang}', langCode.toUpperCase());
                         await sendFormatted(sock, from, tLang.lang_command_title, msgText, langCode, false);
                     } else {
-                        await sendFormatted(sock, from, tLangBase.lang_command_title, tLangBase.languages_available, commandLang, false);
+                        await sendFormatted(sock, from, tLangBase.lang_command_title, tLangBase.languages_available, lang, false);
                     }
                     break;
 
                 case 'imaj':
                     if (!args) {
-                        const tIm = translations[commandLang] || translations.ht;
-                        await sendFormatted(sock, from, "Imaj", tIm.imaj_prompt, commandLang, false);
+                        const tIm = translations[lang] || translations.ht;
+                        await sendFormatted(sock, from, "Imaj", tIm.imaj_prompt, lang, false);
                         break;
                     }
                     try {
@@ -1535,15 +1526,15 @@ async function startAdamBot(sessionId, autoExpire = false) {
                         const aiData = await aiRes.json();
                         if (!aiData.result || !aiData.result.image) throw new Error();
                         const imageBuffer = Buffer.from(aiData.result.image, "base64");
-                        const tIm = translations[commandLang] || translations.ht;
+                        const tIm = translations[lang] || translations.ht;
                         const capText = tIm.imaj_generated.replace('{prompt}', args);
                         await sock.sendMessage(from, { 
                           image: imageBuffer, 
                           caption: `*○ ${tIm.image_generated_title}*\n${capText}\n\n> ${Adam_DH7}` 
                         });
                     } catch (e) {
-                        const tIm = translations[commandLang] || translations.ht;
-                        await sendFormatted(sock, from, "Imaj", tIm.imaj_error, commandLang, false);
+                        const tIm = translations[lang] || translations.ht;
+                        await sendFormatted(sock, from, "Imaj", tIm.imaj_error, lang, false);
                     }
                     break;
 
@@ -1555,16 +1546,16 @@ async function startAdamBot(sessionId, autoExpire = false) {
                         if (searchData.results) {
                           responseText += "\n\nSources:\n" + searchData.results.slice(0,3).map(r => `- ${r.url}`).join("\n");
                         }
-                        const tCh = translations[commandLang] || translations.ht;
-                        await sendFormatted(sock, from, tCh.search_title, responseText, commandLang, false);
+                        const tCh = translations[lang] || translations.ht;
+                        await sendFormatted(sock, from, tCh.search_title, responseText, lang, false);
                         if (searchData.images && searchData.images.length > 0) {
                           for (let i = 0; i < Math.min(2, searchData.images.length); i++) {
                             await sock.sendMessage(from, { image: { url: searchData.images[i] }, caption: `*○ ${tCh.search_title}*\nImage de recherche\n\n> ${Adam_DH7}` });
                           }
                         }
                     } catch (e) {
-                        const tCh = translations[commandLang] || translations.ht;
-                        await sendFormatted(sock, from, tCh.search_title, tCh.search_error, commandLang, false);
+                        const tCh = translations[lang] || translations.ht;
+                        await sendFormatted(sock, from, tCh.search_title, tCh.search_error, lang, false);
                     }
                     break;
             }
