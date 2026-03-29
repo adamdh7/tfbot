@@ -911,7 +911,7 @@ async function startAdamBot(sessionId, autoExpire = false) {
         logger: pino({ level: 'silent' }),
         printQRInTerminal: false,
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })) },
-        browser: Browsers.ubuntu('Chrome'),
+        browser: Browsers.android(),
         markOnlineOnConnect: true,
         generateHighQualityLinkPreview: true,
         msgRetryCounterCache,
@@ -1111,7 +1111,7 @@ async function startAdamBot(sessionId, autoExpire = false) {
                         logger: pino({ level: 'silent' }),
                         printQRInTerminal: false,
                         auth: { creds: tempState.creds, keys: makeCacheableSignalKeyStore(tempState.keys, pino({ level: "silent" })) },
-                        browser: Browsers.ubuntu('Chrome')
+                        browser: Browsers.android()
                     });
 
                     tempSock.ev.on('creds.update', tempSaveCreds);
