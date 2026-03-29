@@ -38,7 +38,7 @@ app.get('/sw.js', (req, res) => {
     res.sendFile(path.join(__dirname, 'sw.js'));
 });
 app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s me Adam_DH7"));
-
+app.get('/ok', (req, res) => res.send('ok'));
 app.get('/TF-:id', (req, res) => {
     tfEvents.emit('ok-' + req.params.id);
     res.redirect('https://www.profitablecpmratenetwork.com/ak0xgm6xu?key=96856a216ee758b70d6c8303e964e86b');
