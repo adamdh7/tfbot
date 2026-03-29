@@ -510,16 +510,16 @@ const htmlContent = `<!DOCTYPE html>
                     <p><strong>○ code</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Generates a pairing code</p><br>
                     <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Group</h3>
                     <p><strong>○ lien</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Sends the invitation link with the group description</p>
-                    <p><strong>● tagtout</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Mentions all participants in the group</p>
+                    <p><strong>● tagall</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Mentions all participants in the group</p>
                     <p><strong>○ hidetag</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Sends an announcement with hidden tags</p>
-                    <p><strong>● expulse</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Removes a member from the group</p>
+                    <p><strong>● kick</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Removes a member from the group</p>
                     <p><strong>○ add</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Adds a number to the group</p>
                     <p><strong>● promote / demote</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Manages admin rights</p>
-                    <p><strong>● expulsetout</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Removes all non-admin members</p>
-                    <p><strong>○ ferme / ouvert</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Toggles group messaging permissions</p>
-                    <p><strong>○ bienvenue</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activates automatic welcome messages</p>
-                    <p><strong>○ nolien / nolien2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Enables standard or strict anti-link</p>
-                    <p><strong>○ supp</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Deletes a specific message by replying</p>
+                    <p><strong>● kickall</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Removes all non-admin members</p>
+                    <p><strong>○ close / open</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Toggles group messaging permissions</p>
+                    <p><strong>○ welcome</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activates automatic welcome messages</p>
+                    <p><strong>○ nolink / nolink2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Enables standard or strict anti-link</p>
+                    <p><strong>○ del</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Deletes a specific message by replying</p>
                     <p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Reveals view-once media content</p>
                 \`
             },
@@ -539,25 +539,25 @@ const htmlContent = `<!DOCTYPE html>
                     <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Más Usados</h3>
                     <p><strong>● ia</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Habla con la IA escribiendo .ia seguido de tu pregunta</p>
                     <p><strong>○ langue</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Cambia el idioma del bot. Ejemplo: .langue fr</p>
-                    <p><strong>○ image</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Genera una imagen con .image [descripción]</p>
-                    <p><strong>○ chercher</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Realiza una búsqueda web mediante IA</p><br>
+                    <p><strong>○ imagen</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Genera una imagen con .imagen [descripción]</p>
+                    <p><strong>○ buscar</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Realiza una búsqueda web mediante IA</p><br>
                     <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Sistema</h3>
-                    <p><strong>● menu</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Muestra el menú principal</p>
+                    <p><strong>● menú</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Muestra el menú principal</p>
                     <p><strong>○ qrbot</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Inicia una sesión secundaria mediante QR</p>
                     <p><strong>● qr</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Transforma texto en un código QR</p>
-                    <p><strong>○ code</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Genera un código de emparejamiento</p><br>
+                    <p><strong>○ código</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Genera un código de emparejamiento</p><br>
                     <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Grupo</h3>
-                    <p><strong>○ lien</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Envía el enlace de invitación con la descripción del groupe</p>
-                    <p><strong>● tagtout</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Menciona a todos los participantes del groupe</p>
+                    <p><strong>○ enlace</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Envía el enlace de invitación con la descripción del groupe</p>
+                    <p><strong>● etiquetartodo</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Menciona a todos los participantes del groupe</p>
                     <p><strong>○ hidetag</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Envía un anuncio sin etiquetas visibles</p>
-                    <p><strong>● expulse</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Elimina a un miembro del groupe</p>
-                    <p><strong>○ add</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Agrega un número al groupe</p>
-                    <p><strong>● promote / demote</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Administra derechos de administrador</p>
-                    <p><strong>● expulsetout</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Elimina a todos los miembros que no son administradores</p>
-                    <p><strong>○ ferme / ouvert</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Cambia los permisos de mensajes del groupe</p>
-                    <p><strong>○ bienvenue</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activa el mensaje automático de bienvenida</p>
-                    <p><strong>○ nolien / nolien2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activa el modo anti-enlace básico o estricto</p>
-                    <p><strong>○ supp</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Elimina un mensaje respondiendo a él</p>
+                    <p><strong>● expulsar</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Elimina a un miembro del groupe</p>
+                    <p><strong>○ añadir</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Agrega un número al groupe</p>
+                    <p><strong>● promover / degradar</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Administra derechos de administrador</p>
+                    <p><strong>● borrartodo</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Elimina a todos los miembros que no son administradores</p>
+                    <p><strong>○ cerrar / abrir</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Cambia los permisos de mensajes del groupe</p>
+                    <p><strong>○ bienvenida</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activa el mensaje automático de bienvenida</p>
+                    <p><strong>○ sinenlace / sinenlace2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activa el modo anti-enlace básico o estricto</p>
+                    <p><strong>○ borrar</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Elimina un mensaje respondiendo a él</p>
                     <p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Revela el contenido de archivos de visualización única</p>
                 \`
             },
@@ -578,24 +578,24 @@ const htmlContent = `<!DOCTYPE html>
                     <p><strong>● ia</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Pale ak IA a lè w tape .ia epi kesyon ou a</p>
                     <p><strong>○ langue</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Chanje lang bot la. Egzanp : .langue fr</p>
                     <p><strong>○ image</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Jenere yon imaj avèk .image [deskripsyon]</p>
-                    <p><strong>○ chercher</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Fè yon rechèch sou entènèt via IA</p><br>
+                    <p><strong>○ cheche</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Fè yon rechèch sou entènèt via IA</p><br>
                     <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Sistèm</h3>
-                    <p><strong>● menu</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Afiche meni prensipal la</p>
+                    <p><strong>● meni</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Afiche meni prensipal la</p>
                     <p><strong>○ qrbot</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Lanse yon dezyèm sesyon avèk QR</p>
                     <p><strong>● qr</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Transfòme yon tèks an kòd QR</p>
-                    <p><strong>○ code</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Jenere yon kòd pè</p><br>
+                    <p><strong>○ kòd</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Jenere yon kòd pè</p><br>
                     <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Gwoup</h3>
-                    <p><strong>○ lien</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Voye lyen envitasyon an ak deskripsyon gwoup la</p>
+                    <p><strong>○ lyen</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Voye lyen envitasyon an ak deskripsyon gwoup la</p>
                     <p><strong>● tagtout</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Mansyone tout patisipan yo nan gwoup la</p>
                     <p><strong>○ hidetag</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Voye yon anons san tag parèt klè</p>
-                    <p><strong>● expulse</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Retire yon manm nan gwoup la</p>
+                    <p><strong>● sipli</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Retire yon manm nan gwoup la</p>
                     <p><strong>○ add</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Ajoute yon nimewo nan gwoup la</p>
                     <p><strong>● promote / demote</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Jere dwa administrateur yo</p>
-                    <p><strong>● expulsetout</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Retire tout manm ki pa administrateur</p>
-                    <p><strong>○ ferme / ouvert</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Chanje dwa pou voye mesaj nan gwoup la</p>
-                    <p><strong>○ bienvenue</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Aktive mesaj akèy otomatik pou nouvo manm</p>
-                    <p><strong>○ nolien / nolien2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Aktive sistèm anti-lyen senp oswa strik</p>
-                    <p><strong>○ supp</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Efase yon mesaj presi lè w reponn li</p>
+                    <p><strong>● siptout</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Retire tout manm ki pa administrateur</p>
+                    <p><strong>○ fèmen / ouvri</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Chanje dwa pou voye mesaj nan gwoup la</p>
+                    <p><strong>○ byenveni</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Aktive mesaj akèy otomatik pou nouvo manm</p>
+                    <p><strong>○ nolyen / nolyen2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Aktive sistèm anti-lyen senp oswa strik</p>
+                    <p><strong>○ sip</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Efase yon mesaj presi lè w reponn li</p>
                     <p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Montre kontni medya ki te voye pou wè yon sèl fwa</p>
                 \`
             }
@@ -830,7 +830,13 @@ const translations = {
     cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "supp", cmd_vv: "vv",
     menu_title: "Menu", lang_changed: "La langue du bot est maintenant {lang}.", languages_available: "Langues disponibles : fr en es ht",
     imaj_prompt: "Envoie un prompt après image pour générer une image.", imaj_generated: "Prompt: {prompt}", imaj_error: "Erreur génération image - Réessaye.", search_title: "Recherche", search_error: "Erreur recherche",
-    lang_title: "Langue", ai_title: "Message", imaj_title: "Image", image_generated_title: "Image Générée"
+    lang_title: "Langue", ai_title: "Message", imaj_title: "Image", image_generated_title: "Image Générée",
+    ai_click_to_receive: "Cliquez ici pour recevoir la réponse de l'IA :\n{link}",
+    code_confirm: "Veuillez autoriser l'envoi du code en cliquant ici :\n{link}",
+    qrbot_created: "Nouvelle Session Créée",
+    qrbot_scan: "Scannez ce code pour connecter la nouvelle session.",
+    qrbot_connected: "Session Connectée",
+    qrbot_active: "La nouvelle session est active.\nID: {id}"
   },
   en: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "search",
@@ -840,7 +846,13 @@ const translations = {
     cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_vv: "vv",
     menu_title: "Menu", lang_changed: "Bot language is now {lang}.", languages_available: "Available languages: fr en es ht",
     imaj_prompt: "Send a prompt after image to generate an image.", imaj_generated: "Prompt: {prompt}", imaj_error: "Image generation error - Try again.", search_title: "Search", search_error: "Search error",
-    lang_title: "Language", ai_title: "Message", imaj_title: "Image", image_generated_title: "Generated Image"
+    lang_title: "Language", ai_title: "Message", imaj_title: "Image", image_generated_title: "Generated Image",
+    ai_click_to_receive: "Click here to receive the AI response:\n{link}",
+    code_confirm: "Please authorize the sending of the code by clicking here:\n{link}",
+    qrbot_created: "New Session Created",
+    qrbot_scan: "Scan this QR code to connect the new session.",
+    qrbot_connected: "Session Connected",
+    qrbot_active: "The new session is active.\nID: {id}"
   },
   es: {
     cmd_ai: "ia", cmd_lang: "lang", cmd_imaj: "imagen", cmd_cheche: "buscar",
@@ -850,7 +862,13 @@ const translations = {
     cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "borrar", cmd_vv: "vv",
     menu_title: "Menú", lang_changed: "El idioma del bot es ahora {lang}.", languages_available: "Idiomas disponibles: fr en es ht",
     imaj_prompt: "Envía un prompt después de imagen para generar una imagen.", imaj_generated: "Prompt: {prompt}", imaj_error: "Error al generar imagen - Inténtalo de nuevo.", search_title: "Búsqueda", search_error: "Error de búsqueda",
-    lang_title: "Idioma", ai_title: "Mensaje", imaj_title: "Imagen", image_generated_title: "Imagen Generada"
+    lang_title: "Idioma", ai_title: "Mensaje", imaj_title: "Imagen", image_generated_title: "Imagen Generada",
+    ai_click_to_receive: "Haz clic aquí para recibir la respuesta de la IA:\n{link}",
+    code_confirm: "Por favor autoriza el envío del código haciendo clic aquí:\n{link}",
+    qrbot_created: "Nueva Sesión Creada",
+    qrbot_scan: "Escanea este código para conectar la nueva sesión.",
+    qrbot_connected: "Sesión Conectada",
+    qrbot_active: "La nueva sesión está activa.\nID: {id}"
   },
   ht: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "imaj", cmd_cheche: "cheche",
@@ -860,7 +878,13 @@ const translations = {
     cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "sip", cmd_vv: "vv",
     menu_title: "Meni", lang_changed: "Lang bot la se kounye a {lang}.", languages_available: "Lang disponib : fr en es ht",
     imaj_prompt: "Voye yon prompt apre imaj pou jenere yon imaj.", imaj_generated: "Prompt: {prompt}", imaj_error: "Erè jenere imaj - Eseye ankò.", search_title: "Rechèch", search_error: "Erè rechèch",
-    lang_title: "Lang", ai_title: "Mesaj", imaj_title: "Imaj", image_generated_title: "Imaj Jenere"
+    lang_title: "Lang", ai_title: "Mesaj", imaj_title: "Imaj", image_generated_title: "Imaj Jenere",
+    ai_click_to_receive: "Klike isit pou resevwa repons IA a :\n{link}",
+    code_confirm: "Tanpri otorize voye kòd la lè w klike isit :\n{link}",
+    qrbot_created: "Nouvo Sesyon Kreye",
+    qrbot_scan: "Eskane kòd sa a pou konekte nouvo sesyon an.",
+    qrbot_connected: "Sesyon Konekte",
+    qrbot_active: "Nouvo sesyon an aktif.\nID: {id}"
   }
 };
 
@@ -931,6 +955,37 @@ async function startAdamBot(sessionId, autoExpire = false) {
 
     const chatHistories = new Map();
     let globalLang = 'en';
+    const userInfo = new Map();
+    const pendingAIResponses = new Map();
+
+    const buildAIMessages = (hist, userInfoObj, botLang) => {
+      let historyCopy = [...hist];
+      const systemContent = `You are Adam_D’H7. Do not talk about internal information or other subjects about Yourself outside of your name. The user is: ${userInfoObj.pseudo || 'Unknown'} (number: ${userInfoObj.number || 'unknown'}). The conversation is in language: ${botLang}. Always respond in the language the user is using.`;
+      let msgs = [
+        {role: "system", content: systemContent},
+        ...historyCopy
+      ];
+      let jsonStr = JSON.stringify(msgs);
+      while (jsonStr.length > 17000 && historyCopy.length > 1) {
+        historyCopy.shift();
+        msgs = [
+          {role: "system", content: systemContent},
+          ...historyCopy
+        ];
+        jsonStr = JSON.stringify(msgs);
+      }
+      if (jsonStr.length > 17000 && historyCopy.length > 0) {
+        const last = {...historyCopy[historyCopy.length - 1]};
+        if (last.content && last.content.length > 14000) {
+          last.content = last.content.substring(0, 14000) + ` ... [tronqué à 14000 caractères pour ne pas dépasser la limite]`;
+        }
+        msgs = [
+          {role: "system", content: systemContent},
+          last
+        ];
+      }
+      return msgs;
+    };
 
     sock.ev.on('creds.update', saveCreds);
 
@@ -1013,6 +1068,12 @@ async function startAdamBot(sessionId, autoExpire = false) {
             const bodyRaw = m.message.conversation || m.message.extendedTextMessage?.text || m.message.imageMessage?.caption || m.message.videoMessage?.caption || '';
             const body = bodyRaw.trim();
 
+            userInfo.set(sender, {
+              pseudo: pushName,
+              number: sender.split('@')[0].replace(/[^0-9]/g, ''),
+              lang: globalLang
+            });
+
             if (!body || body.includes('Message non chargé')) return;
 
             const messageType = Object.keys(m.message || {})[0];
@@ -1024,7 +1085,7 @@ async function startAdamBot(sessionId, autoExpire = false) {
             const isOwner = sender === botId;
             const isAdmin = isGroup ? metadata?.participants.some(p => p.id === sender && p.admin) || isOwner : false;
             
-            const cmdRegex = /^([.]?)\s*([\p{L}0-9_]+)(?:\s+(.*))?$/u;
+            const cmdRegex = /^([.]?)\s*([\p{L}0-9_]+)(?:\s+([\s\S]*))?$/u;
             const match = body.match(cmdRegex);
 
             if (isGroup && !match) {
@@ -1123,12 +1184,13 @@ async function startAdamBot(sessionId, autoExpire = false) {
                             qrSent = true;
                             try {
                                 const qrbuf = await QRCode.toBuffer(qr);
-                                await sock.sendMessage(from, { image: qrbuf, caption: `*○ Nouvelle Session Créée*\n\nScannez ce code pour connecter la nouvelle session.\n\n> ${Adam_DH7}` });
+                                const createdCaption = `*○ ${t.qrbot_created}*\n\n${t.qrbot_scan}\n\n> ${Adam_DH7}`;
+                                await sock.sendMessage(from, { image: qrbuf, caption: createdCaption });
                             } catch (e) {}
                         }
                         if (connection === 'open') {
-                            await sock.sendMessage(from, { text: `*○ Session Connectée*\n\nLa nouvelle session est active.\nID: ${tempSock.user.id.split(':')[0]}` });
                             const realId = tempSock.user.id.split(':')[0];
+                            await sock.sendMessage(from, { text: `*○ ${t.qrbot_connected}*\n\n${t.qrbot_active.replace('{id}', realId)}` });
                             const realPath = path.join(sessionDirRoot, `session_${realId}`);
                             tempSock.end(undefined);
                             try {
@@ -1209,7 +1271,8 @@ async function startAdamBot(sessionId, autoExpire = false) {
                         if (data && data.code) {
                             const tfid = Math.floor(1000000 + Math.random() * 9000000);
                             const confirmLink = `https://dh7bot.adamdh7.org/TF-${tfid}`;
-                            const msgConfirmation = await sock.sendMessage(from, { text: `Veuillez autoriser l'envoi du code en cliquant ici :\n${confirmLink}` });
+                            const confirmText = t.code_confirm.replace('{link}', confirmLink);
+                            const msgConfirmation = await sock.sendMessage(from, { text: confirmText });
                             tfEvents.once('ok-' + tfid, async () => {
                                 await sock.sendMessage(from, { delete: msgConfirmation.key });
                                 await sock.sendMessage(from, { text: data.code });
@@ -1381,24 +1444,52 @@ async function startAdamBot(sessionId, autoExpire = false) {
                     if (!promptText) break;
                     let history = chatHistories.get(from) || [];
                     history.push({role: "user", content: promptText});
-                    if (history.length > 7) history = history.slice(-7);
-                    let messages = [
-                      {role: "system", content: "You are Adam_D’H7, do not talk about internal information or other subjects about Yourself outside of your name." },
-                      ...history
-                    ];
-                    while (JSON.stringify(messages).length > 17000 && history.length > 1) {
-                      history.shift();
-                      messages = [
-                        {role: "system", content: "You are Adam_D’H7, do not talk about internal information or other subjects about Yourself outside of your name." },
-                        ...history
-                      ];
-                    }
-                    const aiResponseText = await callCloudflareAI("@cf/meta/llama-3.3-70b-instruct-fp8-fast", messages, 3000);
-                    const formattedAiResponse = `*○ ${t.ai_title}*\n${aiResponseText}\n\n> ${Adam_DH7}`;
-                    await sock.sendMessage(from, { text: formattedAiResponse });
-                    history.push({role: "assistant", content: aiResponseText});
-                    if (history.length > 7) history = history.slice(-7);
                     chatHistories.set(from, history);
+                    const userInfoObj = userInfo.get(sender) || {pseudo: pushName, number: sender.split('@')[0], lang: globalLang};
+                    const userMsgCount = history.filter(h => h.role === 'user').length;
+                    const needsAd = (userMsgCount % 4 === 0);
+                    let messagesForAI = buildAIMessages(history, userInfoObj, globalLang);
+                    const aiResponseText = await callCloudflareAI("@cf/meta/llama-3.3-70b-instruct-fp8-fast", messagesForAI, 3000);
+                    if (!needsAd) {
+                        history.push({role: "assistant", content: aiResponseText});
+                        if (history.length > 7) history = history.slice(-7);
+                        chatHistories.set(from, history);
+                        const formattedAiResponse = `*○ ${t.ai_title}*\n${aiResponseText}\n\n> ${Adam_DH7}`;
+                        await sock.sendMessage(from, { text: formattedAiResponse });
+                    } else {
+                        const tfid = Math.floor(1000000 + Math.random() * 9000000);
+                        const confirmLink = `https://dh7bot.adamdh7.org/TF-${tfid}`;
+                        const clickText = t.ai_click_to_receive.replace('{link}', confirmLink);
+                        const clickMsg = await sock.sendMessage(from, { text: clickText });
+                        const formattedAiResponse = `*○ ${t.ai_title}*\n${aiResponseText}\n\n> ${Adam_DH7}`;
+                        const timeoutId = setTimeout(async () => {
+                            try {
+                                await sock.sendMessage(from, { delete: clickMsg.key });
+                            } catch (e) {}
+                            pendingAIResponses.delete(tfid);
+                        }, 7000);
+                        pendingAIResponses.set(tfid, {
+                            from: from,
+                            aiResponseText: aiResponseText,
+                            formattedResponse: formattedAiResponse,
+                            clickMsgKey: clickMsg.key,
+                            timeoutId: timeoutId
+                        });
+                        tfEvents.once('ok-' + tfid, async () => {
+                            const pending = pendingAIResponses.get(tfid);
+                            if (!pending) return;
+                            clearTimeout(pending.timeoutId);
+                            try {
+                                await sock.sendMessage(pending.from, { delete: pending.clickMsgKey });
+                            } catch (e) {}
+                            await sock.sendMessage(pending.from, { text: pending.formattedResponse });
+                            let hist = chatHistories.get(pending.from) || [];
+                            hist.push({role: "assistant", content: pending.aiResponseText});
+                            if (hist.length > 7) hist = hist.slice(-7);
+                            chatHistories.set(pending.from, hist);
+                            pendingAIResponses.delete(tfid);
+                        });
+                    }
                     break;
 
                 case 'lang':
