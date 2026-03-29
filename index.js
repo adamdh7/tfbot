@@ -24,6 +24,11 @@ if (!fs.existsSync(sessionDirRoot)) {
 }
 
 const msgRetryCounterCache = new Map();
+const retryCache = {
+    get: (key) => msgRetryCounterCache.get(key),
+    set: (key, value) => msgRetryCounterCache.set(key, value),
+    del: (key) => msgRetryCounterCache.delete(key)
+};
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -938,7 +943,7 @@ async function startAdamBot(sessionId, autoExpire = false) {
         browser: Browsers.macOS('Safari'),
         markOnlineOnConnect: true,
         generateHighQualityLinkPreview: true,
-        msgRetryCounterCache,
+        msgRetryCounterCache: retryCache,
         retryRequestDelayMs: 2000,
         getMessage: async (key) => {
             return undefined;
@@ -1172,7 +1177,8 @@ async function startAdamBot(sessionId, autoExpire = false) {
                         logger: pino({ level: 'silent' }),
                         printQRInTerminal: false,
                         auth: { creds: tempState.creds, keys: makeCacheableSignalKeyStore(tempState.keys, pino({ level: "silent" })) },
-                        browser: Browsers.macOS('Safari')
+                        browser: Browsers.macOS('Safari'),
+                        msgRetryCounterCache: retryCache
                     });
 
                     tempSock.ev.on('creds.update', tempSaveCreds);
