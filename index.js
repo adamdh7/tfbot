@@ -1,8 +1,4 @@
-IMPORTANT : aucun note(//,*/), aucun syntax error, respecte mon REQUETE, full CODE ORIGINAL avec les mise a jour insere, explication des mise a jour.
-
-REQUETE : corriger les svg qui s’affichent uniquement en fr moi je les veux dans les 4 langues je parle du parti info, quand c’est en franacais sa s’affiche mais dans les autre langue sa ne s’affiche pas(***Je parle des svg code pair et scan qr***)
-
-CODE ORIGINAL : const express = require('express');
+const express = require('express');
 const app = express();
 const pino = require('pino');
 const QRCode = require('qrcode');
