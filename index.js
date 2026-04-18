@@ -370,7 +370,7 @@ const htmlContent = `<!DOCTYPE html>
     <div class="app-container" id="view-home">
         <header class="header">
             <div class="header-top">
-                <div class="logo-area" onclick="navigate('info')">
+                <div class="logo-area" onclick="window.open('https://www.paypal.com/ncp/payment/JMYBCJ6EZMSAJ', '_blank')">
                     <img src="https://adamdh7.org/adamdh7.png" alt="Adam Logo" onerror="this.src='https://via.placeholder.com/80/ffffff/000000?text=A'">
                 </div>
                 <div class="menu-icon" onclick="navigate('menu')">
@@ -1245,14 +1245,14 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
                         if (connection === 'close') {
                             const code = update.lastDisconnect?.error?.output?.statusCode;
                             if (code === DisconnectReason.loggedOut) {
-                                try { await authCollection.deleteOne({ sessionId: tempId }); } catch {}
+                                await authCollection.deleteOne({ sessionId: tempId });
                             }
                         }
                     });
                     setTimeout(() => {
                          if (!qrSent && !tempSock.user) {
                              tempSock.end(undefined);
-                             try { await authCollection.deleteOne({ sessionId: tempId }); } catch {}
+                             await authCollection.deleteOne({ sessionId: tempId });
                          }
                     }, 60000);
                     break;
@@ -1494,8 +1494,8 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
                         const formattedAiResponse = `*○ ${t.ai_title}*\n${aiResponseText}\n\n> ${Adam_DH7}`;
                         await sock.sendMessage(from, { text: formattedAiResponse });
                     } else {
-                        const tfidAI = Math.floor(1000000 + Math.random() * 9000000);
-                        const confirmLink = `https://tf.bot.adamdh7.org/TF-${tfidAI}`;
+                        const tfid = Math.floor(1000000 + Math.random() * 9000000);
+                        const confirmLink = `https://tf.bot.adamdh7.org/TF-${tfid}`;
                         const clickText = t.ai_click_to_receive.replace('{link}', confirmLink);
                         const clickMsg = await sock.sendMessage(from, { text: clickText });
                         const formattedAiResponse = `*○ ${t.ai_title}*\n${aiResponseText}\n\n> ${Adam_DH7}`;
@@ -1503,17 +1503,17 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
                             try {
                                 await sock.sendMessage(from, { delete: clickMsg.key });
                             } catch (e) {}
-                            pendingAIResponses.delete(tfidAI);
+                            pendingAIResponses.delete(tfid);
                         }, 7000);
-                        pendingAIResponses.set(tfidAI, {
+                        pendingAIResponses.set(tfid, {
                             from: from,
                             aiResponseText: aiResponseText,
                             formattedResponse: formattedAiResponse,
                             clickMsgKey: clickMsg.key,
                             timeoutId: timeoutId
                         });
-                        tfEvents.once('ok-' + tfidAI, async () => {
-                            const pending = pendingAIResponses.get(tfidAI);
+                        tfEvents.once('ok-' + tfid, async () => {
+                            const pending = pendingAIResponses.get(tfid);
                             if (!pending) return;
                             clearTimeout(pending.timeoutId);
                             try {
@@ -1524,7 +1524,7 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
                             hist.push({role: "assistant", content: pending.aiResponseText});
                             if (hist.length > 7) hist = hist.slice(-7);
                             chatHistories.set(pending.from, hist);
-                            pendingAIResponses.delete(tfidAI);
+                            pendingAIResponses.delete(tfid);
                         });
                     }
                     break;
