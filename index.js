@@ -2,12 +2,11 @@ const express = require('express');
 const app = express();
 const pino = require('pino');
 const QRCode = require('qrcode');
-const fs = require('fs');
 const path = require('path');
+const fs = require('fs'); 
 const EventEmitter = require('events');
 const {
     default: makeWASocket,
-    useMultiFileAuthState,
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
     DisconnectReason,
@@ -51,16 +50,15 @@ app.get('/sw.js', (req, res) => {
     res.sendFile(path.join(__dirname, 'sw.js'));
 });
 app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s me Adam_DH7"));
+
 app.get('/ok', (req, res) => {
-  res.send(`<!DOCTYPE html>
+    res.send(`<!DOCTYPE html>
 <html>
-<head>
-<title></title>
-</head>
-<body style="background-color: white;margin:0;padding:0;height:100vh;display:flex;align-items:center;justify-content:center;font-family:Arial,sans-serif;">
+<head><title></title></head>
+<body style="background-color:white;margin:0;padding:0;height:100vh;display:flex;align-items:center;justify-content:center;font-family:Arial,sans-serif;">
   <div style="text-align:center;color:#000;">
-    <h1>UI Blanche Activée</h1>
-    <p>Points sauvegardés à l'infini dans le HTML.</p>
+    <h1>ok true</h1>
+    <p>Points sauvegardés à l'infini</p>
     <script>
       localStorage.setItem('points', '9999999999');
       if (window.opener) {
@@ -71,16 +69,18 @@ app.get('/ok', (req, res) => {
 </body>
 </html>`);
 });
+
 app.get('/TF-:id', (req, res) => {
     tfEvents.emit('ok-' + req.params.id);
     res.redirect('https://www.profitablecpmratenetwork.com/ak0xgm6xu?key=96856a216ee758b70d6c8303e964e86b');
 });
+
 app.get('/adamdh7/all', async (req, res) => {
   try {
     const sessionsList = await db.collection('sessions').find({ status: 'active' }).sort({ connectionTime: -1 }).toArray();
-    let htmlList = `<html lang="fr"><head><meta charset="UTF-8"><title>Sessions Actives - Adam_DH7</title><style>:root{--bg:#000;--text:#fff}body{background:var(--bg);color:var(--text);font-family:Outfit,sans-serif;padding:20px} .card{background:#111;border:1px solid #333;border-radius:16px;padding:20px;margin-bottom:15px}</style></head><body><h1 style="text-align:center">Toutes les sessions</h1>`;
+    let htmlList = `<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>Sessions - Adam_DH7</title><style>body{background:#000;color:#fff;font-family:Outfit,sans-serif;padding:20px;margin:0}h1{color:#fff;text-align:center}.card{background:#111;border:1px solid #333;border-radius:16px;padding:20px;margin:15px 0;color:#ccc}strong{color:#fff}</style></head><body><h1>Toutes les sessions actives</h1>`;
     if (sessionsList.length === 0) {
-      htmlList += `<p style="text-align:center;color:#888">Aucune session active pour le moment.</p>`;
+      htmlList += `<p style="text-align:center;color:#888">Aucune session active</p>`;
     } else {
       for (const s of sessionsList) {
         const tf = s.tfid || 'N/A';
@@ -98,8 +98,29 @@ app.get('/adamdh7/all', async (req, res) => {
     htmlList += `</body></html>`;
     res.send(htmlList);
   } catch (e) {
-    res.send('<html><body><h1>Erreur de chargement des sessions</h1></body></html>');
+    res.send(`<!DOCTYPE html><html><body style="background:#000;color:#fff;text-align:center;padding:50px;"><h1>Erreur</h1></body></html>`);
   }
+});
+
+const whitePage = `<!DOCTYPE html><html><head><title></title></head><body style="background-color: white;margin:0;padding:0;height:100vh;"></body></html>`;
+
+const allowedHosts = ['bot.adamdh7.org', 'adamdh7.org'];
+
+app.get('/', (req, res) => {
+  const referrer = req.headers.referer || '';
+  if (referrer) {
+    try {
+      const refHost = new URL(referrer).hostname;
+      if (!allowedHosts.includes(refHost)) {
+        return res.send(whitePage);
+      }
+    } catch (e) {
+      return res.send(whitePage);
+    }
+  } else {
+    return res.send(whitePage);
+  }
+  res.send(htmlContent);
 });
 
 const htmlContent = `<!DOCTYPE html>
@@ -614,7 +635,7 @@ const htmlContent = `<!DOCTYPE html>
                     <p><strong>● borrartodo</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Elimina a todos los miembros que no son administradores</p>
                     <p><strong>○ cerrar / abrir</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Cambia los permisos de mensajes del groupe</p>
                     <p><strong>○ bienvenida</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activa el mensaje automático de bienvenida</p>
-                    <p><strong>○ sinenlace / sinenlace2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activa el modo anti-enlace básico o estricto</p>
+                    <p><strong>○ sinenlace / sinenlace2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activa el modo anti-enlace básico ou estricto</p>
                     <p><strong>○ borrar</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Elimina un mensaje respondiendo a él</p>
                     <p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Revela el contenido de archivos de visualización única</p>
                 \`
@@ -824,8 +845,6 @@ const htmlContent = `<!DOCTYPE html>
     </script>
 </body>
 </html>`;
-
-app.get('/', (req, res) => res.send(htmlContent));
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const Adam_DH7 = "Adam_D'H7";
