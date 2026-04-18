@@ -11,7 +11,8 @@ const {
     makeCacheableSignalKeyStore,
     DisconnectReason,
     Browsers,
-    downloadContentFromMessage
+    downloadContentFromMessage,
+    initAuthCreds
 } = require('@whiskeysockets/baileys');
 const { MongoClient } = require('mongodb');
 
@@ -990,6 +991,8 @@ async function useMongoAuthState(sessionId) {
   if (doc) {
     creds = doc.creds || null;
     keys = doc.keys || {};
+  } else {
+    creds = initAuthCreds();
   }
   const saveCreds = async () => {
     await collection.updateOne({ _id: sessionId }, { $set: { creds, keys } }, { upsert: true });
