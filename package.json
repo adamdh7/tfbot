@@ -1,6 +1,6 @@
 {
   "name": "dh7bot",
-  "version": "2",
+  "version": "7",
   "description": "Bot WhatsApp Optimisé - Parrainage & Gestion - Adam_D’H7",
   "main": "index.js",
   "scripts": {
@@ -19,6 +19,7 @@
     "@whiskeysockets/baileys": "^6.7.9",
     "express": "^4.21.0",
     "pino": "^9.4.0",
+    "mongodb": "^6.5.0",
     "qrcode": "^1.5.4"
   },
   "engines": {
