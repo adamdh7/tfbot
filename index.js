@@ -1700,8 +1700,8 @@ app.post('/get-code', async (req, res) => {
     if (method === 'code') {
         try {
             let attempts = 0;
-            while (attempts < 20 && !sess.sock.authState?.creds?.me?.id) {
-                 await sleep(500);
+            while (attempts < 30 && (!sess.sock.authState || !sess.sock.authState.creds || !sess.sock.authState.creds.me || !sess.sock.authState.creds.me.id)) {
+                 await sleep(300);
                  attempts++;
             }
             await sleep(2000);
