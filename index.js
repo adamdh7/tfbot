@@ -497,120 +497,9 @@ const htmlContent = `<!DOCTYPE html>
                     <p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Révèle le contenu d'un média à vue unique</p>
                 \`
             },
-            en: {
-                code: "Pair Code", qr: "Scan QR", copy: "Tap to copy", menu: "Menu", 
-                mlang: "Languages", minfo: "Info", mpoints: "Points", ltitle: "Languages", 
-                ititle: "Info", pheader: "You have {x} points", clicks: "Clicks",
-                err_num: "Invalid number", err_pts_code: "4 points required for code",
-                err_pts_qr: "3 points required for QR", err_conn: "Connection error",
-                succ_copy: "Copied", succ_pts: "+1 Point", qr_hint: "Scan with WhatsApp",
-                infoHTML: \`
-                    <p style="text-align:justify; margin-bottom:15px;">Welcome to the connection system Bot.Adam_D’H7. This interface allows you to connect your device stably to enjoy the features with complete simplicity.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Sessions have an optimized lifespan to guarantee security and performance. The system takes care of everything transparently.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Access to options requires points: 4 points for a Pair Code and 3 points for a QR Code. This system guarantees fair use.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">To obtain your points, click on the menu button then points then click on the button you see and stay on the displayed page for at least 7 seconds. An active exploration validates your point.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Once connected, type the menu command to discover a multitude of unexpected and practical tools. Let yourself be surprised by everything the bot has to offer!</p>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Most Used</h3>
-                    <p><strong>● ia</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Chat with the AI by typing .ia followed by your query</p>
-                    <p><strong>○ langue</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Change the bot's language. Example: .langue fr</p>
-                    <p><strong>○ image</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Generate an image with .image [description]</p>
-                    <p><strong>○ chercher</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Perform a web search via AI</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">System</h3>
-                    <p><strong>● menu</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Displays the main menu</p>
-                    <p><strong>○ qrbot</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Starts a secondary session via QR</p>
-                    <p><strong>● qr</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Transforms text into a QR code</p>
-                    <p><strong>○ code</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Generates a pairing code</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Group</h3>
-                    <p><strong>○ lien</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Sends the invitation link with the group description</p>
-                    <p><strong>● tagall</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Mentions all participants in the group</p>
-                    <p><strong>○ hidetag</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Sends an announcement with hidden tags</p>
-                    <p><strong>● kick</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Removes a member from the group</p>
-                    <p><strong>○ add</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Adds a number to the group</p>
-                    <p><strong>● promote / demote</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Manages admin rights</p>
-                    <p><strong>● kickall</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Removes all non-admin members</p>
-                    <p><strong>○ close / open</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Toggles group messaging permissions</p>
-                    <p><strong>○ welcome</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activates automatic welcome messages</p>
-                    <p><strong>○ nolink / nolink2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Enables standard or strict anti-link</p>
-                    <p><strong>○ del</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Deletes a specific message by replying</p>
-                    <p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Reveals view-once media content</p>
-                \`
-            },
-            es: {
-                code: "Código Pair", qr: "Escanear QR", copy: "Toca para copiar", menu: "Menú", 
-                mlang: "Idiomas", minfo: "Info", mpoints: "Puntos", ltitle: "Idiomas", 
-                ititle: "Info", pheader: "Tienes {x} puntos", clicks: "Clics",
-                err_num: "Número inválido", err_pts_code: "4 puntos requeridos para el código",
-                err_pts_qr: "3 puntos requeridos para el QR", err_conn: "Error de conexión",
-                succ_copy: "Copiado", succ_pts: "+1 Punto", qr_hint: "Escanea con WhatsApp",
-                infoHTML: \`
-                    <p style="text-align:justify; margin-bottom:15px;">Bienvenido al sistema de conexión Bot.Adam_D’H7. Esta interfaz permite conectar tu dispositivo de manera estable para disfrutar de las funcionalidades con total simplicidad.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Las sesiones tienen una duración de vida optimizada para garantizar seguridad y rendimiento. El sistema se encarga de todo de forma transparente.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">El acceso a las opciones requiere puntos: 4 puntos para un Código Pair y 3 puntos para un Código QR. Este sistema garantiza un uso equitativo.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Para obtener tus puntos, haz clic en el botón menú luego puntos luego haz clic en el botón que ves y permanece en la página mostrada durante al menos 7 segundos. Una exploración activa valida tu punto.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Una vez conectado, escribe el comando de menú para descubrir una multitud de herramientas inesperadas y prácticas. ¡Déjate sorprender por todo lo que el bot tiene para ofrecer!</p>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Más Usados</h3>
-                    <p><strong>● ia</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Habla con la IA escribiendo .ia seguido de tu pregunta</p>
-                    <p><strong>○ langue</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Cambia el idioma del bot. Ejemplo: .langue fr</p>
-                    <p><strong>○ imagen</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Genera una imagen con .imagen [descripción]</p>
-                    <p><strong>○ buscar</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Realiza una búsqueda web mediante IA</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Sistema</h3>
-                    <p><strong>● menú</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Muestra el menú principal</p>
-                    <p><strong>○ qrbot</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Inicia una sesión secundaria mediante QR</p>
-                    <p><strong>● qr</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Transforma texto en un código QR</p>
-                    <p><strong>○ código</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Genera un código de emparejamiento</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Grupo</h3>
-                    <p><strong>○ enlace</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Envía el enlace de invitación con la descripción del groupe</p>
-                    <p><strong>● etiquetartodo</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Menciona a todos los participantes del groupe</p>
-                    <p><strong>○ hidetag</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Envía un anuncio sin etiquetas visibles</p>
-                    <p><strong>● expulsar</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Elimina a un miembro del groupe</p>
-                    <p><strong>○ añadir</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Agrega un número al groupe</p>
-                    <p><strong>● promover / degradar</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Administra derechos de administrador</p>
-                    <p><strong>● borrartodo</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Elimina a todos los miembros que no son administradores</p>
-                    <p><strong>○ cerrar / abrir</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Cambia los permisos de mensajes del groupe</p>
-                    <p><strong>○ bienvenida</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activa el mensaje automático de bienvenida</p>
-                    <p><strong>○ sinenlace / sinenlace2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activa el modo anti-enlace básico o estricto</p>
-                    <p><strong>○ borrar</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Elimina un mensaje respondiendo a él</p>
-                    <p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Revela el contenido de archivos de visualización única</p>
-                \`
-            },
-            ht: {
-                code: "Kòd Pè", qr: "Eskane QR", copy: "Klike pou kopye", menu: "Meni", 
-                mlang: "Lang", minfo: "Enfòmasyon", mpoints: "Pwen", ltitle: "Lang", 
-                ititle: "Enfòmasyon", pheader: "Ou gen {x} pwen", clicks: "Klike",
-                err_num: "Nimewo pa bon", err_pts_code: "4 pwen nesesè pou kòd la",
-                err_pts_qr: "3 pwen nesesè pou qr la", err_conn: "Erè koneksyon",
-                succ_copy: "Kopye", succ_pts: "+1 Pwen", qr_hint: "Eskane ak WhatsApp",
-                infoHTML: \`
-                    <p style="text-align:justify; margin-bottom:15px;">Byenveni sou sistèm lyazon an Bot.Adam_D’H7. Entèfas sa a pèmèt ou konekte aparèy ou a yon fason ki estab pou w jwi fonksyonalite yo ak tout senplisite.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Sesyon yo gen yon dire lavi optimize pou garanti sekirite ak pèfòmans. Sistèm nan pran swen tout bagay yon fason transparan.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Aksè a opsyon yo mande pwen : 4 pwen pou yon Kòd Pè ak 3 pwen pou yon Kòd QR. Sistèm sa a garanti yon itilizasyon ekitab.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Pou jwenn pwen ou yo, klike sou bouton meni a, answit pwen, answit klike sou bouton boanc ou wè a epi rete sou paj ki afiche a pandan omwen 7 segonn. Yon eksplorasyon aktif valide pwen ou.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Yon fwa konekte, tape kòmand meni a pou dekouvri yon pakèt zouti inatandi ak pratik. Kite tèt ou sezi pa tout sa bot la gen pou ofri !</p>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Pi itilize</h3>
-                    <p><strong>● ia</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Pale ak IA a lè w tape .ia epi kesyon ou a</p>
-                    <p><strong>○ langue</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Chanje lang bot la. Egzanp : .langue fr</p>
-                    <p><strong>○ image</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Jenere yon imaj avèk .image [deskripsyon]</p>
-                    <p><strong>○ cheche</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Fè yon rechèch sou entènèt via IA</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Sistèm</h3>
-                    <p><strong>● meni</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Afiche meni prensipal la</p>
-                    <p><strong>○ qrbot</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Lanse yon dezyèm sesyon avèk QR</p>
-                    <p><strong>● qr</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Transfòme yon tèks an kòd QR</p>
-                    <p><strong>○ kòd</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Jenere yon kòd pè</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Gwoup</h3>
-                    <p><strong>○ lyen</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Voye lyen envitasyon an ak deskripsyon gwoup la</p>
-                    <p><strong>● tagtout</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Mansyone tout patisipan yo nan gwoup la</p>
-                    <p><strong>○ hidetag</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Voye yon anons san tag parèt klè</p>
-                    <p><strong>● sipli</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Retire yon manm nan gwoup la</p>
-                    <p><strong>○ add</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Ajoute yon nimewo nan gwoup la</p>
-                    <p><strong>● promote / demote</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Jere dwa administrateur yo</p>
-                    <p><strong>● siptout</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Retire tout manm ki pa administrateur</p>
-                    <p><strong>○ fèmen / ouvri</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Chanje dwa pou voye mesaj nan gwoup la</p>
-                    <p><strong>○ byenveni</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Aktive mesaj akèy otomatik pou nouvo manm</p>
-                    <p><strong>○ nolyen / nolyen2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Aktive sistèm anti-lyen senp oswa strik</p>
-                    <p><strong>○ sip</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Efase yon mesaj presi lè w reponn li</p>
-                    <p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Montre kontni medya ki te voye pou wè yon sèl fwa</p>
-                \`
-            }
+            en: {code: "Pair Code", qr: "Scan QR", copy: "Tap to copy", menu: "Menu", mlang: "Languages", minfo: "Info", mpoints: "Points", ltitle: "Languages", ititle: "Info", pheader: "You have {x} points", clicks: "Clicks", err_num: "Invalid number", err_pts_code: "4 points required for code", err_pts_qr: "3 points required for QR", err_conn: "Connection error", succ_copy: "Copied", succ_pts: "+1 Point", qr_hint: "Scan with WhatsApp", infoHTML: `<p style="text-align:justify; margin-bottom:15px;">Welcome to the connection system Bot.Adam_D’H7. This interface allows you to connect your device stably to enjoy the features with complete simplicity.</p><p style="text-align:justify; margin-bottom:15px;">Sessions have an optimized lifespan to guarantee security and performance. The system takes care of everything transparently.</p><p style="text-align:justify; margin-bottom:15px;">Access to options requires points: 4 points for a Pair Code and 3 points for a QR Code. This system guarantees fair use.</p><p style="text-align:justify; margin-bottom:15px;">To obtain your points, click on the menu button then points then click on the button you see and stay on the displayed page for at least 7 seconds. An active exploration validates your point.</p><p style="text-align:justify; margin-bottom:15px;">Once connected, type the menu command to discover a multitude of unexpected and practical tools. Let yourself be surprised by everything the bot has to offer!</p><h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Most Used</h3><p><strong>● ia</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Chat with the AI by typing .ia followed by your query</p><p><strong>○ langue</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Change the bot's language. Example: .langue fr</p><p><strong>○ image</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Generate an image with .image [description]</p><p><strong>○ chercher</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Perform a web search via AI</p><br><h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">System</h3><p><strong>● menu</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Displays the main menu</p><p><strong>○ qrbot</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Starts a secondary session via QR</p><p><strong>● qr</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Transforms text into a QR code</p><p><strong>○ code</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Generates a pairing code</p><br><h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Group</h3><p><strong>○ lien</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Sends the invitation link with the group description</p><p><strong>● tagall</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Mentions all participants in the group</p><p><strong>○ hidetag</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Sends an announcement with hidden tags</p><p><strong>● kick</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Removes a member from the group</p><p><strong>○ add</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Adds a number to the group</p><p><strong>● promote / demote</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Manages admin rights</p><p><strong>● kickall</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Removes all non-admin members</p><p><strong>○ close / open</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Toggles group messaging permissions</p><p><strong>○ welcome</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activates automatic welcome messages</p><p><strong>○ nolink / nolink2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Enables standard or strict anti-link</p><p><strong>○ del</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Deletes a specific message by replying</p><p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Reveals view-once media content</p>`},
+            es: {code: "Código Pair", qr: "Escanear QR", copy: "Toca para copiar", menu: "Menú", mlang: "Idiomas", minfo: "Info", mpoints: "Puntos", ltitle: "Idiomas", ititle: "Info", pheader: "Tienes {x} puntos", clicks: "Clics", err_num: "Número inválido", err_pts_code: "4 puntos requeridos para el código", err_pts_qr: "3 puntos requeridos para el QR", err_conn: "Error de conexión", succ_copy: "Copiado", succ_pts: "+1 Punto", qr_hint: "Escanea con WhatsApp", infoHTML: `<p style="text-align:justify; margin-bottom:15px;">Bienvenido al sistema de conexión Bot.Adam_D’H7. Esta interfaz permite conectar tu dispositivo de manera estable para disfrutar de las funcionalidades con total simplicidad.</p><p style="text-align:justify; margin-bottom:15px;">Las sesiones tienen una duración de vida optimizada para garantizar seguridad y rendimiento. El sistema se encarga de todo de forma transparente.</p><p style="text-align:justify; margin-bottom:15px;">El acceso a las opciones requiere puntos: 4 puntos para un Código Pair y 3 puntos para un Código QR. Este sistema garantiza un uso equitativo.</p><p style="text-align:justify; margin-bottom:15px;">Para obtener tus puntos, haz clic en el botón menú luego puntos luego haz clic en el botón que ves y permanece en la página mostrada durante al menos 7 segundos. Una exploración activa valida tu punto.</p><p style="text-align:justify; margin-bottom:15px;">Una vez conectado, escribe el comando de menú para descubrir una multitud de herramientas inesperadas y prácticas. ¡Déjate sorprender por todo lo que el bot tiene para ofrecer!</p><h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Más Usados</h3><p><strong>● ia</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Habla con la IA escribiendo .ia seguido de tu pregunta</p><p><strong>○ langue</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Cambia el idioma del bot. Ejemplo: .langue fr</p><p><strong>○ imagen</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Genera una imagen con .imagen [descripción]</p><p><strong>○ buscar</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Realiza una búsqueda web mediante IA</p><br><h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Sistema</h3><p><strong>● menú</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Muestra el menú principal</p><p><strong>○ qrbot</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Inicia una sesión secundaria mediante QR</p><p><strong>● qr</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Transforma texto en un código QR</p><p><strong>○ código</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Genera un código de emparejamiento</p><br><h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Grupo</h3><p><strong>○ enlace</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Envía el enlace de invitación con la descripción del groupe</p><p><strong>● etiquetartodo</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Menciona a todos los participantes del groupe</p><p><strong>○ hidetag</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Envía un anuncio sin etiquetas visibles</p><p><strong>● expulsar</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Elimina a un miembro del groupe</p><p><strong>○ añadir</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Agrega un número al groupe</p><p><strong>● promover / degradar</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Administra derechos de administrador</p><p><strong>● borrartodo</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Elimina a todos los miembros que no son administradores</p><p><strong>○ cerrar / abrir</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Cambia los permisos de mensajes del groupe</p><p><strong>○ bienvenida</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activa el mensaje automático de bienvenida</p><p><strong>○ sinenlace / sinenlace2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activa el modo anti-enlace básico o estricto</p><p><strong>○ borrar</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Elimina un mensaje respondiendo a él</p><p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Revela el contenido de archivos de visualización única</p>`},
+            ht: {code: "Kòd Pè", qr: "Eskane QR", copy: "Klike pou kopye", menu: "Meni", mlang: "Lang", minfo: "Enfòmasyon", mpoints: "Pwen", ltitle: "Lang", ititle: "Enfòmasyon", pheader: "Ou gen {x} pwen", clicks: "Klike", err_num: "Nimewo pa bon", err_pts_code: "4 pwen nesesè pou kòd la", err_pts_qr: "3 pwen nesesè pou qr la", err_conn: "Erè koneksyon", succ_copy: "Kopye", succ_pts: "+1 Pwen", qr_hint: "Eskane ak WhatsApp", infoHTML: `<p style="text-align:justify; margin-bottom:15px;">Byenveni sou sistèm lyazon an Bot.Adam_D’H7. Entèfas sa a pèmèt ou konekte aparèy ou a yon fason ki estab pou w jwi fonksyonalite yo ak tout senplisite.</p><p style="text-align:justify; margin-bottom:15px;">Sesyon yo gen yon dire lavi optimize pou garanti sekirite ak pèfòmans. Sistèm nan pran swen tout bagay yon fason transparan.</p><p style="text-align:justify; margin-bottom:15px;">Aksè a opsyon yo mande pwen : 4 pwen pou yon Kòd Pè ak 3 pwen pou yon Kòd QR. Sistèm sa a garanti yon itilizasyon ekitab.</p><p style="text-align:justify; margin-bottom:15px;">Pou jwenn pwen ou yo, klike sou bouton meni a, answit pwen, answit klike sou bouton boanc ou wè a epi rete sou paj ki afiche a pandan omwen 7 segonn. Yon eksplorasyon aktif valide pwen ou.</p><p style="text-align:justify; margin-bottom:15px;">Yon fwa konekte, tape kòmand meni a pou dekouvri yon pakèt zouti inatandi ak pratik. Kite tèt ou sezi pa tout sa bot la gen pou ofri !</p><h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Pi itilize</h3><p><strong>● ia</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Pale ak IA a lè w tape .ia epi kesyon ou a</p><p><strong>○ langue</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Chanje lang bot la. Egzanp : .langue fr</p><p><strong>○ image</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Jenere yon imaj avèk .image [deskripsyon]</p><p><strong>○ cheche</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Fè yon rechèch sou entènèt via IA</p><br><h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Sistèm</h3><p><strong>● meni</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Afiche meni prensipal la</p><p><strong>○ qrbot</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Lanse yon dezyèm sesyon avèk QR</p><p><strong>● qr</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Transfòme yon tèks an kòd QR</p><p><strong>○ kòd</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Jenere yon kòd pè</p><br><h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Gwoup</h3><p><strong>○ lyen</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Voye lyen envitasyon an ak deskripsyon gwoup la</p><p><strong>● tagtout</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Mansyone tout patisipan yo nan gwoup la</p><p><strong>○ hidetag</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Voye yon anons san tag parèt klè</p><p><strong>● sipli</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Retire yon manm nan gwoup la</p><p><strong>○ add</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Ajoute yon nimewo nan gwoup la</p><p><strong>● promote / demote</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Jere dwa administrateur yo</p><p><strong>● siptout</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Retire tout manm ki pa administrateur</p><p><strong>○ fèmen / ouvri</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Chanje dwa pou voye mesaj nan gwoup la</p><p><strong>○ byenveni</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Aktive mesaj akèy otomatik pou nouvo manm</p><p><strong>○ nolyen / nolyen2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Aktive sistèm anti-lyen senp oswa strik</p><p><strong>○ sip</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Efase yon mesaj presi lè w reponn li</p><p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Montre kontni medya ki te voye pou wè yon sèl fwa</p>`}
         };
 
         let currentLang = localStorage.getItem('lang');
@@ -693,7 +582,6 @@ const htmlContent = `<!DOCTYPE html>
                     localStorage.setItem('points', userPoints);
                     updateUI();
                     showNotif(i18n[currentLang].succ_pts, false);
-                    
                     if (pendingAction) {
                         if (pendingAction === 'code' && userPoints >= 4) {
                             let actionToRun = pendingAction;
@@ -715,7 +603,6 @@ const htmlContent = `<!DOCTYPE html>
         async function handleAction(type) {
             const t = i18n[currentLang];
             const number = ui.phone.value.replace(/[^0-9]/g, '');
-            
             if (type === 'code') {
                 if (number.length < 6) return showNotif(t.err_num, true);
                 if (userPoints < 4) {
@@ -732,26 +619,21 @@ const htmlContent = `<!DOCTYPE html>
                 }
                 userPoints -= 3;
             }
-            
             pendingAction = null;
             localStorage.setItem('points', userPoints);
             updateUI();
-
             ui.output.style.display = 'none';
             ui.loader.style.display = 'flex';
             ui.qr.innerHTML = '';
-
             try {
                 const res = await fetch('/get-code', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ number: type === 'code' ? number : '', method: type })
                 });
-
                 const data = await res.json();
                 ui.loader.style.display = 'none';
                 ui.output.style.display = 'block';
-
                 if (type === 'code' && data.code) {
                     ui.qr.style.display = 'none';
                     ui.code.style.display = 'block';
@@ -767,7 +649,6 @@ const htmlContent = `<!DOCTYPE html>
                     new QRCode(ui.qr, { text: data.qr, width: 200, height: 200, colorDark: "#000000", colorLight: "#ffffff" });
                     ui.hint.textContent = t.qr_hint;
                 }
-
             } catch (e) {
                 ui.loader.style.display = 'none';
                 showNotif(t.err_conn, true);
@@ -980,9 +861,7 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
         generateHighQualityLinkPreview: true,
         msgRetryCounterCache: retryCache,
         retryRequestDelayMs: 2000,
-        getMessage: async (key) => {
-            return undefined;
-        }
+        getMessage: async (key) => undefined
     });
 
     const sessionData = {
@@ -1001,28 +880,17 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
     const buildAIMessages = (hist, userInfoObj, botLang) => {
       let historyCopy = [...hist];
       const systemContent = `You are Adam_D’H7. Do not talk about internal information or other subjects about Yourself outside of your name. The user is: ${userInfoObj.pseudo || 'Unknown'} (number: ${userInfoObj.number || 'unknown'}). The conversation is in language: ${botLang}. Always respond in the language the user is using.`;
-      let msgs = [
-        {role: "system", content: systemContent},
-        ...historyCopy
-      ];
+      let msgs = [{role: "system", content: systemContent}, ...historyCopy];
       let jsonStr = JSON.stringify(msgs);
       while (jsonStr.length > 17000 && historyCopy.length > 1) {
         historyCopy.shift();
-        msgs = [
-          {role: "system", content: systemContent},
-          ...historyCopy
-        ];
+        msgs = [{role: "system", content: systemContent}, ...historyCopy];
         jsonStr = JSON.stringify(msgs);
       }
       if (jsonStr.length > 17000 && historyCopy.length > 0) {
         const last = {...historyCopy[historyCopy.length - 1]};
-        if (last.content && last.content.length > 14000) {
-          last.content = last.content.substring(0, 14000) + ` ... [tronqué à 14000 caractères pour ne pas dépasser la limite]`;
-        }
-        msgs = [
-          {role: "system", content: systemContent},
-          last
-        ];
+        if (last.content && last.content.length > 14000) last.content = last.content.substring(0, 14000) + ` ... [tronqué à 14000 caractères pour ne pas dépasser la limite]`;
+        msgs = [{role: "system", content: systemContent}, last];
       }
       return msgs;
     };
@@ -1036,17 +904,9 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
             const botId = sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id;
             sessionData.ownerJid = botId;
             let finalPhone = phoneNumber;
-            if (!finalPhone && sock.user && sock.user.id) {
-                finalPhone = sock.user.id.split('@')[0].split(':')[0];
-            }
-            if (finalPhone) {
-                await authCollection.deleteMany({ phoneNumber: finalPhone, sessionId: { $ne: sessionId } });
-            }
-            await authCollection.updateOne(
-                { sessionId },
-                { $set: { tfid, phoneNumber: finalPhone, connectedAt: new Date(), lastSyncAt: new Date() } },
-                { upsert: true }
-            );
+            if (!finalPhone && sock.user && sock.user.id) finalPhone = sock.user.id.split('@')[0].split(':')[0];
+            if (finalPhone) await authCollection.deleteMany({ phoneNumber: finalPhone, sessionId: { $ne: sessionId } });
+            await authCollection.updateOne({ sessionId }, { $set: { tfid, phoneNumber: finalPhone, connectedAt: new Date(), lastSyncAt: new Date() } }, { upsert: true });
             if (autoExpire) {
                 setTimeout(async () => {
                     try {
@@ -1061,9 +921,7 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
             if (statusCode !== DisconnectReason.loggedOut) {
                 setTimeout(() => startAdamBot(sessionId, autoExpire, phoneNumber), 5000);
             } else {
-                try {
-                    await authCollection.deleteOne({ sessionId });
-                } catch (e) {}
+                try { await authCollection.deleteOne({ sessionId }); } catch (e) {}
             }
         }
     });
@@ -1073,9 +931,7 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
             const cleanParticipants = participants.map(p => p.includes('@') ? p : `${p.replace(/[^0-9]/g, '')}@s.whatsapp.net`);
             await sock.groupParticipantsUpdate(jid, cleanParticipants, action);
             return true;
-        } catch (e) {
-            return false;
-        }
+        } catch (e) { return false; }
     };
 
     const resolveTargets = async (arg, m) => {
@@ -1108,8 +964,8 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
             }
             processedIds.add(m.key.id);
             if (processedIds.size > 2000) {
-                 const iterator = processedIds.values();
-                 processedIds.delete(iterator.next().value);
+                const iterator = processedIds.values();
+                processedIds.delete(iterator.next().value);
             }
 
             const from = m.key.remoteJid;
@@ -1118,11 +974,7 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
             const bodyRaw = m.message.conversation || m.message.extendedTextMessage?.text || m.message.imageMessage?.caption || m.message.videoMessage?.caption || '';
             const body = bodyRaw.trim();
 
-            userInfo.set(sender, {
-              pseudo: pushName,
-              number: sender.split('@')[0].replace(/[^0-9]/g, ''),
-              lang: globalLang
-            });
+            userInfo.set(sender, { pseudo: pushName, number: sender.split('@')[0].replace(/[^0-9]/g, ''), lang: globalLang });
 
             if (!body || body.includes('Message non chargé')) return;
 
@@ -1156,17 +1008,13 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
             let args = match[2] ? match[2].trim() : '';
 
             let internalCommand = null;
-            if (command === 'lang') {
-                internalCommand = 'lang';
-            } else {
+            if (command === 'lang') internalCommand = 'lang';
+            else {
                 const normCmd = normalizeText(command);
                 const currentMap = commandMaps[globalLang];
                 if (currentMap) {
                     for (const [alias, intern] of Object.entries(currentMap)) {
-                        if (normalizeText(alias) === normCmd) {
-                            internalCommand = intern;
-                            break;
-                        }
+                        if (normalizeText(alias) === normCmd) { internalCommand = intern; break; }
                     }
                 }
                 if (!internalCommand) {
@@ -1174,10 +1022,7 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
                         if (l === globalLang) continue;
                         const mapL = commandMaps[l];
                         for (const [alias, intern] of Object.entries(mapL)) {
-                            if (normalizeText(alias) === normCmd) {
-                                internalCommand = intern;
-                                break;
-                            }
+                            if (normalizeText(alias) === normCmd) { internalCommand = intern; break; }
                         }
                         if (internalCommand) break;
                     }
@@ -1195,12 +1040,7 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
                     if (args.length > 0) break;
                     const menuCaption = `*○ ${t.menu_title}*\n\n*${Adam_DH7}*\nUtilisateur: "${pushName}"\nPropriétaire: ${Adam_DH7}\n\n*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_vv}*\n\n> *${Adam_DH7}*`;
                     const menuOpts = {};
-                    if (adamLogoBuffer) {
-                        menuOpts.image = adamLogoBuffer;
-                        menuOpts.caption = menuCaption;
-                    } else {
-                        menuOpts.text = menuCaption;
-                    }
+                    if (adamLogoBuffer) { menuOpts.image = adamLogoBuffer; menuOpts.caption = menuCaption; } else menuOpts.text = menuCaption;
                     await sock.sendMessage(from, menuOpts);
                     break;
 
@@ -1221,10 +1061,8 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
                         browser: Browsers.macOS('Safari'),
                         msgRetryCounterCache: retryCache
                     });
-
                     tempSock.ev.on('creds.update', tempSaveCreds);
                     let qrSent = false;
-
                     tempSock.ev.on('connection.update', async (update) => {
                         const { qr, connection } = update;
                         if (qr && !qrSent) {
@@ -1250,10 +1088,10 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
                         }
                     });
                     setTimeout(() => {
-                         if (!qrSent && !tempSock.user) {
-                             tempSock.end(undefined);
-                             await authCollection.deleteOne({ sessionId: tempId });
-                         }
+                        if (!qrSent && !tempSock.user) {
+                            tempSock.end(undefined);
+                            authCollection.deleteOne({ sessionId: tempId });
+                        }
                     }, 60000);
                     break;
 
@@ -1272,11 +1110,8 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
                         const ppBuffer = Buffer.from(await response.arrayBuffer());
                         lienOpts.image = ppBuffer;
                     } catch {
-                        if (adamLogoBuffer) {
-                            lienOpts.image = adamLogoBuffer;
-                        } else {
-                            lienOpts.text = lienCaption;
-                        }
+                        if (adamLogoBuffer) lienOpts.image = adamLogoBuffer;
+                        else lienOpts.text = lienCaption;
                     }
                     await sock.sendMessage(from, lienOpts);
                     break;
@@ -1287,12 +1122,7 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
                     const participants = metadata.participants.map(p => p.id);
                     const tagCaption = `*○ ${tagTitle}*\n\n*${Adam_DH7}*\nUtilisateur: ${pushName}\n\n${participants.map((p, i) => (i % 2 === 0 ? '●' : '○') + ' @' + p.split('@')[0]).join('\n')}\n\n> *${Adam_DH7}*`;
                     const tagOpts = { mentions: participants };
-                    if (adamLogoBuffer) {
-                        tagOpts.image = adamLogoBuffer;
-                        tagOpts.caption = tagCaption;
-                    } else {
-                        tagOpts.text = tagCaption;
-                    }
+                    if (adamLogoBuffer) { tagOpts.image = adamLogoBuffer; tagOpts.caption = tagCaption; } else tagOpts.text = tagCaption;
                     await sock.sendMessage(from, tagOpts);
                     break;
 
@@ -1344,9 +1174,7 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
                     let sourceMessage = unwrap(sourceWrapper);
                     if (sourceWrapper) {
                         const keys0 = Object.keys(sourceWrapper || {});
-                        if (keys0.some(k => k.toLowerCase().includes('viewonce'))) {
-                            viewOnceOpts = { viewOnce: true };
-                        }
+                        if (keys0.some(k => k.toLowerCase().includes('viewonce'))) viewOnceOpts = { viewOnce: true };
                     }
                     let hasMedia = false;
                     if (sourceMessage) {
@@ -1384,17 +1212,11 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
                         }
                     }
                     if (args) {
-                        if (hasMedia) {
-                            msgOpts.caption = args;
-                        } else {
-                            msgOpts.text = args;
-                        }
+                        if (hasMedia) msgOpts.caption = args;
+                        else msgOpts.text = args;
                     }
-                    if (Object.keys(msgOpts).length === 1) {
-                        msgOpts.text = '‎';
-                    } else if (hasMedia && !msgOpts.caption) {
-                        msgOpts.caption = '‎';
-                    }
+                    if (Object.keys(msgOpts).length === 1) msgOpts.text = '‎';
+                    else if (hasMedia && !msgOpts.caption) msgOpts.caption = '‎';
                     await sock.sendMessage(from, { ...msgOpts, ...viewOnceOpts });
                     break;
 
@@ -1494,37 +1316,27 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
                         const formattedAiResponse = `*○ ${t.ai_title}*\n${aiResponseText}\n\n> ${Adam_DH7}`;
                         await sock.sendMessage(from, { text: formattedAiResponse });
                     } else {
-                        const tfid = Math.floor(1000000 + Math.random() * 9000000);
-                        const confirmLink = `https://tf.bot.adamdh7.org/TF-${tfid}`;
+                        const tfidAI = Math.floor(1000000 + Math.random() * 9000000);
+                        const confirmLink = `https://tf.bot.adamdh7.org/TF-${tfidAI}`;
                         const clickText = t.ai_click_to_receive.replace('{link}', confirmLink);
                         const clickMsg = await sock.sendMessage(from, { text: clickText });
                         const formattedAiResponse = `*○ ${t.ai_title}*\n${aiResponseText}\n\n> ${Adam_DH7}`;
                         const timeoutId = setTimeout(async () => {
-                            try {
-                                await sock.sendMessage(from, { delete: clickMsg.key });
-                            } catch (e) {}
-                            pendingAIResponses.delete(tfid);
+                            try { await sock.sendMessage(from, { delete: clickMsg.key }); } catch (e) {}
+                            pendingAIResponses.delete(tfidAI);
                         }, 7000);
-                        pendingAIResponses.set(tfid, {
-                            from: from,
-                            aiResponseText: aiResponseText,
-                            formattedResponse: formattedAiResponse,
-                            clickMsgKey: clickMsg.key,
-                            timeoutId: timeoutId
-                        });
-                        tfEvents.once('ok-' + tfid, async () => {
-                            const pending = pendingAIResponses.get(tfid);
+                        pendingAIResponses.set(tfidAI, { from: from, aiResponseText: aiResponseText, formattedResponse: formattedAiResponse, clickMsgKey: clickMsg.key, timeoutId: timeoutId });
+                        tfEvents.once('ok-' + tfidAI, async () => {
+                            const pending = pendingAIResponses.get(tfidAI);
                             if (!pending) return;
                             clearTimeout(pending.timeoutId);
-                            try {
-                                await sock.sendMessage(pending.from, { delete: pending.clickMsgKey });
-                            } catch (e) {}
+                            try { await sock.sendMessage(pending.from, { delete: pending.clickMsgKey }); } catch (e) {}
                             await sock.sendMessage(pending.from, { text: pending.formattedResponse });
                             let hist = chatHistories.get(pending.from) || [];
                             hist.push({role: "assistant", content: pending.aiResponseText});
                             if (hist.length > 7) hist = hist.slice(-7);
                             chatHistories.set(pending.from, hist);
-                            pendingAIResponses.delete(tfid);
+                            pendingAIResponses.delete(tfidAI);
                         });
                     }
                     break;
@@ -1557,10 +1369,7 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
                         if (!aiData.result || !aiData.result.image) throw new Error();
                         const imageBuffer = Buffer.from(aiData.result.image, "base64");
                         const capText = t.imaj_generated.replace('{prompt}', args);
-                        await sock.sendMessage(from, { 
-                          image: imageBuffer, 
-                          caption: `*○ ${t.image_generated_title}*\n${capText}\n\n> ${Adam_DH7}` 
-                        });
+                        await sock.sendMessage(from, { image: imageBuffer, caption: `*○ ${t.image_generated_title}*\n${capText}\n\n> ${Adam_DH7}` });
                     } catch (e) {
                         await sendFormatted(sock, from, t.imaj_title, t.imaj_error, globalLang, false);
                     }
@@ -1571,9 +1380,7 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
                     try {
                         const searchData = await tavilySearch(args);
                         let responseText = searchData.answer || "Pas de résultat trouvé.";
-                        if (searchData.results) {
-                          responseText += "\n\nSources:\n" + searchData.results.slice(0,3).map(r => `- ${r.url}`).join("\n");
-                        }
+                        if (searchData.results) responseText += "\n\nSources:\n" + searchData.results.slice(0,3).map(r => `- ${r.url}`).join("\n");
                         await sendFormatted(sock, from, t.search_title, responseText, globalLang, false);
                         if (searchData.images && searchData.images.length > 0) {
                           for (let i = 0; i < Math.min(2, searchData.images.length); i++) {
@@ -1591,9 +1398,7 @@ async function startAdamBot(sessionId, autoExpire = false, phoneNumber = null) {
                     if (adamLogoBuffer) {
                         sitesOpts.image = adamLogoBuffer;
                         sitesOpts.caption = sitesCaption;
-                    } else {
-                        sitesOpts.text = sitesCaption;
-                    }
+                    } else sitesOpts.text = sitesCaption;
                     await sock.sendMessage(from, sitesOpts);
                     break;
             }
@@ -1630,9 +1435,7 @@ app.post('/get-code', async (req, res) => {
     }
     const sId = `session_${Date.now()}`;
     let phone = null;
-    if (method === 'code' && number) {
-        phone = number.replace(/[^0-9]/g, '');
-    }
+    if (method === 'code' && number) phone = number.replace(/[^0-9]/g, '');
     const sess = await startAdamBot(sId, autoExpire, phone);
     
     if (method === 'code') {
@@ -1643,7 +1446,6 @@ app.post('/get-code', async (req, res) => {
                  attempts++;
             }
             await sleep(2000);
-            
             const cleanNumber = number.replace(/[^0-9]/g, '');
             const code = await sess.sock.requestPairingCode(cleanNumber);
             res.json({ code: code.match(/.{1,4}/g).join('-') });
