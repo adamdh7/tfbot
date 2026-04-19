@@ -991,6 +991,9 @@ async function useMongoAuthState(sessionId) {
   if (doc) {
     creds = doc.creds || null;
     keys = doc.keys || {};
+    if (creds && creds.me && creds.me.id && !creds.registered) {
+      creds.registered = true;
+    }
   } else {
     creds = initAuthCreds();
   }
@@ -1111,7 +1114,7 @@ async function startAdamBot(sessionId, autoExpire = false) {
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             if (statusCode !== DisconnectReason.loggedOut) {
-                setTimeout(() => startAdamBot(sessionId), 5000);
+                setTimeout(() => startAdamBot(sessionId), 8000);
             } else {
                 await db.collection('sessions').updateOne({ tfid: sessionId }, { $set: { status: 'deleted' } });
                 activeSocks.delete(sessionId);
@@ -1314,6 +1317,8 @@ async function startAdamBot(sessionId, autoExpire = false) {
                             if (code === DisconnectReason.loggedOut) {
                                 await db.collection('sessions').updateOne({ tfid: tempId }, { $set: { status: 'deleted' } });
                                 activeSocks.delete(tempId);
+                            } else {
+                                setTimeout(() => startAdamBot(tempId), 8000);
                             }
                         }
                     });
