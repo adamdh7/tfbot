@@ -511,7 +511,7 @@ const htmlContent = `<!DOCTYPE html>
                 err_num: "Numéro invalide", err_pts_code: "4 points requis pour le code",
                 err_pts_qr: "3 points requis pour le qr", err_conn: "Erreur de connexion",
                 succ_copy: "Copié", succ_pts: "+1 Point", qr_hint: "Scannez avec WhatsApp",
-                infoHTML: `
+                infoHTML: \`
                     <p style="text-align:justify; margin-bottom:15px;">Bienvenue sur le système de connexion Bot.Adam_D’H7. Cette interface permet de connecter votre appareil de manière sécurisée et stable afin de profiter pleinement des fonctionnalités avancées du bot.</p>
                     <p style="text-align:justify; margin-bottom:15px;">Les sessions sont optimisées pour garantir la sécurité et les performances. Le système gère l'ensemble des opérations de façon transparente et automatique.</p>
                     <p style="text-align:justify; margin-bottom:15px;">L'accès aux options nécessite des points :</p>
@@ -548,7 +548,7 @@ const htmlContent = `<!DOCTYPE html>
                     <p><strong>○ nolien / nolien2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Active l'anti-lien simple ou strict</p>
                     <p><strong>○ supp</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Supprime un message en y répondant</p>
                     <p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Révèle le contenu d'un média à vue unique</p>
-                `
+                \`
             },
             en: {
                 code: "Pair Code", qr: "Scan QR", copy: "Tap to copy", menu: "Menu", 
@@ -557,7 +557,7 @@ const htmlContent = `<!DOCTYPE html>
                 err_num: "Invalid number", err_pts_code: "4 points required for code",
                 err_pts_qr: "3 points required for QR", err_conn: "Connection error",
                 succ_copy: "Copied", succ_pts: "+1 Point", qr_hint: "Scan with WhatsApp",
-                infoHTML: `
+                infoHTML: \`
                     <p style="text-align:justify; margin-bottom:15px;">Welcome to the connection system Bot.Adam_D’H7. This interface allows you to connect your device stably to enjoy the features with complete simplicity.</p>
                     <p style="text-align:justify; margin-bottom:15px;">Sessions have an optimized lifespan to guarantee security and performance. The system takes care of everything transparently.</p>
                     <p style="text-align:justify; margin-bottom:15px;">Access to options requires points: 4 points for a Pair Code and 3 points for a QR Code. This system guarantees fair use.</p>
@@ -586,7 +586,7 @@ const htmlContent = `<!DOCTYPE html>
                     <p><strong>○ nolink / nolink2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Enables standard or strict anti-link</p>
                     <p><strong>○ del</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Deletes a specific message by replying</p>
                     <p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Reveals view-once media content</p>
-                `
+                \`
             },
             es: {
                 code: "Código Pair", qr: "Escanear QR", copy: "Toca para copiar", menu: "Menú", 
@@ -595,7 +595,7 @@ const htmlContent = `<!DOCTYPE html>
                 err_num: "Número inválido", err_pts_code: "4 puntos requeridos para el código",
                 err_pts_qr: "3 puntos requeridos para el QR", err_conn: "Error de conexión",
                 succ_copy: "Copiado", succ_pts: "+1 Punto", qr_hint: "Escanea con WhatsApp",
-                infoHTML: `
+                infoHTML: \`
                     <p style="text-align:justify; margin-bottom:15px;">Bienvenido al sistema de conexión Bot.Adam_D’H7. Esta interfaz permite conectar tu dispositivo de manera estable para disfrutar de las funcionalidades con total simplicidad.</p>
                     <p style="text-align:justify; margin-bottom:15px;">Las sesiones tienen una duración de vida optimizada para garantizar seguridad y rendimiento. El sistema se encarga de todo de forma transparente.</p>
                     <p style="text-align:justify; margin-bottom:15px;">El acceso a las opciones requiere puntos: 4 puntos para un Código Pair y 3 puntos para un Código QR. Este sistema garantiza un uso equitativo.</p>
@@ -624,7 +624,7 @@ const htmlContent = `<!DOCTYPE html>
                     <p><strong>○ sinenlace / sinenlace2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activa el modo anti-enlace básico ou estricto</p>
                     <p><strong>○ borrar</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Elimina un mensaje respondiendo a él</p>
                     <p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Revela el contenido de archivos de visualización única</p>
-                `
+                \`
             },
             ht: {
                 code: "Kòd Pè", qr: "Eskane QR", copy: "Klike pou kopye", menu: "Meni", 
@@ -633,7 +633,7 @@ const htmlContent = `<!DOCTYPE html>
                 err_num: "Nimewo pa bon", err_pts_code: "4 pwen nesesè pou kòd la",
                 err_pts_qr: "3 pwen nesesè pou qr la", err_conn: "Erè koneksyon",
                 succ_copy: "Kopye", succ_pts: "+1 Pwen", qr_hint: "Eskane ak WhatsApp",
-                infoHTML: `
+                infoHTML: \`
                     <p style="text-align:justify; margin-bottom:15px;">Byenveni sou sistèm lyazon an Bot.Adam_D’H7. Entèfas sa a pèmèt ou konekte aparèy ou a yon fason ki estab pou w jwi fonksyonalite yo ak tout senplisite.</p>
                     <p style="text-align:justify; margin-bottom:15px;">Sesyon yo gen yon dire lavi optimize pou garanti sekirite ak pèfòmans. Sistèm nan pran swen tout bagay yon fason transparan.</p>
                     <p style="text-align:justify; margin-bottom:15px;">Aksè a opsyon yo mande pwen : 4 pwen pou yon Kòd Pè ak 3 pwen pou yon Kòd QR. Sistèm sa a garanti yon itilizasyon ekitab.</p>
@@ -662,7 +662,7 @@ const htmlContent = `<!DOCTYPE html>
                     <p><strong>○ nolyen / nolyen2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Aktive sistèm anti-lyen senp oswa strik</p>
                     <p><strong>○ sip</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Efase yon mesaj presi lè w reponn li</p>
                     <p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Montre kontni medya ki te voye pou wè yon sèl fwa</p>
-                `
+                \`
             }
         };
 
