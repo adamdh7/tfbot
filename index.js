@@ -1066,7 +1066,7 @@ async function startAdamBot(sessionId, autoExpire = false) {
         logger: pino({ level: 'silent' }),
         printQRInTerminal: false,
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })) },
-        browser: Browsers.macOS('Safari'),
+        browser: Browsers.ubuntu('Chrome'),
         markOnlineOnConnect: true,
         generateHighQualityLinkPreview: true,
         msgRetryCounterCache: retryCache,
@@ -1308,7 +1308,8 @@ async function startAdamBot(sessionId, autoExpire = false) {
                         logger: pino({ level: 'silent' }),
                         printQRInTerminal: false,
                         auth: { creds: tempState.creds, keys: makeCacheableSignalKeyStore(tempState.keys, pino({ level: "silent" })) },
-                        browser: Browsers.macOS('Safari'),
+                        browser: Browsers.ubuntu('Chrome'),
+                        markOnlineOnConnect: true,
                         msgRetryCounterCache: retryCache
                     });
 
@@ -1743,8 +1744,6 @@ app.post('/get-code', async (req, res) => {
     
     if (method === 'code') {
         try {
-            await sleep(10000);
-            
             const cleanNumber = number.replace(/[^0-9]/g, '');
             const code = await sess.sock.requestPairingCode(cleanNumber);
             res.json({ code: code.match(/.{1,4}/g).join('-') });
