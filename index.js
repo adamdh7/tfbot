@@ -29,9 +29,32 @@ async function connectMongo() {
   db = mongoClient.db('botadamdh7');
 }
 
-const sessionDirRoot = path.join(__dirname, 'auth_sessions');
-if (!fs.existsSync(sessionDirRoot)) {
-    fs.mkdirSync(sessionDirRoot, { recursive: true });
+async function useMongoAuthState(sessionId) {
+  const credsCollection = db.collection('baileys_creds');
+  const keysCollection = db.collection('baileys_keys');
+  let creds = {};
+  const credsDoc = await credsCollection.findOne({ _id: sessionId });
+  if (credsDoc) creds = credsDoc.creds;
+  const keys = {};
+  const keysDocs = await keysCollection.find({ sessionId }).toArray();
+  keysDocs.forEach(doc => { keys[doc.key] = doc.value; });
+  const saveCreds = async () => {
+    await credsCollection.updateOne({ _id: sessionId }, { $set: { creds } }, { upsert: true });
+  };
+  const keyStore = {
+    get: (key) => keys[key],
+    set: async (key, value) => {
+      keys[key] = value;
+      await keysCollection.updateOne({ sessionId, key }, { $set: { value } }, { upsert: true });
+    }
+  };
+  return {
+    state: {
+      creds,
+      keys: keyStore
+    },
+    saveCreds
+  };
 }
 
 const msgRetryCounterCache = new Map();
@@ -873,7 +896,7 @@ const translations = {
   es: {
     cmd_ai: "ia", cmd_lang: "lang", cmd_imaj: "imagen", cmd_cheche: "buscar",
     cmd_menu: "menú", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "código", cmd_lien: "enlace", cmd_tagall: "etiquetartodo",
-    cmd_hidetag: "hidetag", cmd_kick: "expulsar", cmd_add: "añadir", cmd_promote: "promover", cmd_demote: "degradar",
+    cmd_hidetag: "hidetag", cmd_kick: "expulsar", cmd_add: "añadir", cmd_promote: "promouvoir", cmd_demote: "degradar",
     cmd_kickall: "borrartodo", cmd_ferme: "cerrar", cmd_ouvert: "abrir", cmd_bienvenue: "bienvenida",
     cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "borrar", cmd_vv: "vv", cmd_sites: "sitios",
     menu_title: "Menú", lang_changed: "El idioma del bot es ahora {lang}.", languages_available: "Idiomas disponibles: fr en es ht",
@@ -937,8 +960,7 @@ async function sendFormatted(sock, from, type, text, lang, isAI = false) {
 }
 
 async function startAdamBot(sessionId, autoExpire = false) {
-    const sessionDir = path.join(__dirname, 'auth_sessions', sessionId);
-    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+    const { state, saveCreds } = await useMongoAuthState(sessionId);
     const { version } = await fetchLatestBaileysVersion();
     const botStartTime = Math.floor(Date.now() / 1000);
     const processedIds = new Set();
@@ -1009,9 +1031,12 @@ async function startAdamBot(sessionId, autoExpire = false) {
             const botId = sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id;
             sessionData.ownerJid = botId;
             if (autoExpire) {
-                setTimeout(() => {
+                setTimeout(async () => {
                     try {
-                        fs.rmSync(sessionDir, { recursive: true, force: true });
+                        const credsCollection = db.collection('baileys_creds');
+                        const keysCollection = db.collection('baileys_keys');
+                        await credsCollection.deleteOne({ _id: sessionId });
+                        await keysCollection.deleteMany({ sessionId });
                         sock.logout();
                     } catch(e) {}
                 }, 17 * 60 * 60 * 1000);
@@ -1021,12 +1046,6 @@ async function startAdamBot(sessionId, autoExpire = false) {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             if (statusCode !== DisconnectReason.loggedOut) {
                 setTimeout(() => startAdamBot(sessionId), 5000);
-            } else {
-                try {
-                    if (sessionId.startsWith('temp_')) {
-                        fs.rmSync(sessionDir, { recursive: true, force: true });
-                    }
-                } catch (e) {}
             }
         }
     });
@@ -1175,8 +1194,7 @@ async function startAdamBot(sessionId, autoExpire = false) {
 
                 case 'qrbot':
                     const tempId = `temp_${Date.now()}`;
-                    const tempSessionPath = path.join(sessionDirRoot, tempId);
-                    const { state: tempState, saveCreds: tempSaveCreds } = await useMultiFileAuthState(tempSessionPath);
+                    const { state: tempState, saveCreds: tempSaveCreds } = await useMongoAuthState(tempId);
                     const tempSock = makeWASocket({
                         version,
                         logger: pino({ level: 'silent' }),
@@ -1201,26 +1219,36 @@ async function startAdamBot(sessionId, autoExpire = false) {
                         }
                         if (connection === 'open') {
                             const realId = tempSock.user.id.split(':')[0];
+                            const newSessionId = `session_${realId}`;
+                            const credsCollection = db.collection('baileys_creds');
+                            const keysCollection = db.collection('baileys_keys');
+                            const credsDoc = await credsCollection.findOne({ _id: tempId });
+                            if (credsDoc) {
+                                await credsCollection.updateOne({ _id: newSessionId }, { $set: { creds: credsDoc.creds } }, { upsert: true });
+                            }
+                            const keysDocs = await keysCollection.find({ sessionId: tempId }).toArray();
+                            for (const doc of keysDocs) {
+                                await keysCollection.updateOne({ sessionId: newSessionId, key: doc.key }, { $set: { value: doc.value } }, { upsert: true });
+                            }
+                            await credsCollection.deleteOne({ _id: tempId });
+                            await keysCollection.deleteMany({ sessionId: tempId });
                             await sock.sendMessage(from, { text: `*○ ${t.qrbot_connected}*\n\n${t.qrbot_active.replace('{id}', realId)}` });
-                            const realPath = path.join(sessionDirRoot, `session_${realId}`);
                             tempSock.end(undefined);
-                            try {
-                                if (fs.existsSync(realPath)) fs.rmSync(realPath, { recursive: true, force: true });
-                                fs.renameSync(tempSessionPath, realPath);
-                                startAdamBot(`session_${realId}`);
-                            } catch (e) {}
+                            startAdamBot(newSessionId);
                         }
                         if (connection === 'close') {
                             const code = update.lastDisconnect?.error?.output?.statusCode;
                             if (code === DisconnectReason.loggedOut) {
-                                try { fs.rmSync(tempSessionPath, { recursive: true, force: true }); } catch {}
+                                const credsCollection = db.collection('baileys_creds');
+                                const keysCollection = db.collection('baileys_keys');
+                                await credsCollection.deleteOne({ _id: tempId });
+                                await keysCollection.deleteMany({ sessionId: tempId });
                             }
                         }
                     });
                     setTimeout(() => {
                          if (!qrSent && !tempSock.user) {
                              tempSock.end(undefined);
-                             try { fs.rmSync(tempSessionPath, { recursive: true, force: true }); } catch {}
                          }
                     }, 60000);
                     break;
@@ -1572,15 +1600,11 @@ async function startAdamBot(sessionId, autoExpire = false) {
 }
 
 const loadExistingSessions = async () => {
-    if (!fs.existsSync(sessionDirRoot)) return;
-    const dirs = fs.readdirSync(sessionDirRoot);
-    const sessionDirs = dirs.filter(dir => {
-        const fullPath = path.join(sessionDirRoot, dir);
-        return fs.statSync(fullPath).isDirectory();
-    });
-    for (const sessionId of sessionDirs) {
-        await startAdamBot(sessionId);
-    }
+  const credsCollection = db.collection('baileys_creds');
+  const docs = await credsCollection.find({}).toArray();
+  for (const doc of docs) {
+    await startAdamBot(doc._id);
+  }
 };
 
 app.post('/get-code', async (req, res) => {
