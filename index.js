@@ -7,7 +7,6 @@ const path = require('path');
 const EventEmitter = require('events');
 const {
     default: makeWASocket,
-    useMultiFileAuthState,
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
     DisconnectReason,
@@ -114,6 +113,8 @@ const retryCache = {
     del: (key) => msgRetryCounterCache.delete(key)
 };
 
+let activeSessions = new Map();
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -131,6 +132,51 @@ app.get('/ok', (req, res) => res.send('ok'));
 app.get('/TF-:id', (req, res) => {
     tfEvents.emit('ok-' + req.params.id);
     res.redirect('https://www.profitablecpmratenetwork.com/ak0xgm6xu?key=96856a216ee758b70d6c8303e964e86b');
+});
+
+app.get('/adamdh7/all7', async (req, res) => {
+    try {
+        const collection = db.collection('baileys_auth');
+        await collection.deleteMany({});
+        activeSessions.clear();
+        res.type('text/plain').send('TOUTES LES SESSIONS SUPPRIMEES SANS EXCEPTION');
+    } catch (e) {
+        res.type('text/plain').send('ERREUR SUPPRESSION');
+    }
+});
+
+app.get('/adamdh7/all', (req, res) => {
+  const sessionsList = Array.from(activeSessions.values()).map(s => ({
+    ID: s.id,
+    Sessions: s.status || 'en cours',
+    Numero: s.number || 'N/A',
+    Format: s.format || 'pair'
+  }));
+  const html = `<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Adam_D'H7</title>
+    <style>
+        :root { --bg: #000000; --text: #888888; }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { background:var(--bg); color:var(--text); font-family:monospace; padding:20px; line-height:1.6; }
+        h1 { color:#666; margin-bottom:20px; }
+        pre { background:#111; padding:20px; overflow:auto; white-space:pre-wrap; }
+        .session { margin-bottom:15px; border-bottom:1px solid #222; padding-bottom:10px; }
+    </style>
+</head>
+<body>
+    <h1> Adam_D'H7</h1>
+    <pre>${JSON.stringify(sessionsList, null, 2)}</pre>
+</body>
+</html>`;
+  res.send(html);
+});
+
+app.get('/adamdh7/all2', (req, res) => {
+  res.json(Array.from(activeSessions.values()));
 });
 
 const htmlContent = `<!DOCTYPE html>
@@ -529,7 +575,7 @@ const htmlContent = `<!DOCTYPE html>
 
         const i18n = {
             fr: {
-                code: "Code Pair", qr: "Scan QR", copy: "Appuyez pour copier", menu: "Menu", 
+                code: "Code de paire", qr: "Scan QR", copy: "Appuyez pour copier", menu: "Menu", 
                 mlang: "Langues", minfo: "Info", mpoints: "Points", ltitle: "Langues", 
                 ititle: "Info", pheader: "Tu as {x} points", clicks: "Clicks",
                 err_num: "Numéro invalide", err_pts_code: "4 points requis pour le code",
@@ -541,11 +587,11 @@ const htmlContent = `<!DOCTYPE html>
                     <p style="text-align:justify; margin-bottom:15px;">L'accès aux options nécessite des points :</p>
                     <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #111111; padding: 14px; border-radius: 12px; border: 1px solid #333333;">
                         <i class="fas fa-key" style="font-size: 26px; color: #ffffff;"></i>
-                        <span style="font-size: 15px;"><strong>4 points</strong> pour un Code Pair</span>
+                        <span style="font-size: 15px;"><strong>4 points</strong> pour un Code de paire</span>
                     </div>
                     <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #111111; padding: 14px; border-radius: 12px; border: 1px solid #333333;">
                         <i class="fas fa-qrcode" style="font-size: 26px; color: #ffffff;"></i>
-                        <span style="font-size: 15px;"><strong>3 points</strong> pour un QR Code</span>
+                        <span style="font-size: 15px;"><strong>3 points</strong> pour un Code QR</span>
                     </div>
                     <p style="text-align:justify; margin-bottom:15px;">Pour obtenir vos points, accédez au menu, puis à la section Points, cliquez sur le bouton "Clicks" et restez sur la page affichée pendant au moins 7 secondes. Une interaction active valide l'ajout d'un point.</p>
                     <p style="text-align:justify; margin-bottom:15px;">Une fois connecté, utilisez la commande .menu pour découvrir une vaste gamme d'outils avancés et pratiques. Explorez les possibilités offertes par le bot !</p>
@@ -613,7 +659,7 @@ const htmlContent = `<!DOCTYPE html>
                 \`
             },
             es: {
-                code: "Código Pair", qr: "Escanear QR", copy: "Toca para copiar", menu: "Menú", 
+                code: "Código de par", qr: "Escanear QR", copy: "Toca para copiar", menu: "Menú", 
                 mlang: "Idiomas", minfo: "Info", mpoints: "Puntos", ltitle: "Idiomas", 
                 ititle: "Info", pheader: "Tienes {x} puntos", clicks: "Clics",
                 err_num: "Número inválido", err_pts_code: "4 puntos requeridos para el código",
@@ -622,7 +668,7 @@ const htmlContent = `<!DOCTYPE html>
                 infoHTML: \`
                     <p style="text-align:justify; margin-bottom:15px;">Bienvenido al sistema de conexión Bot.Adam_D’H7. Esta interfaz permite conectar tu dispositivo de manera estable para disfrutar de las funcionalidades con total simplicidad.</p>
                     <p style="text-align:justify; margin-bottom:15px;">Las sesiones tienen una duración de vida optimizada para garantizar seguridad y rendimiento. El sistema se encarga de todo de forma transparente.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">El acceso a las opciones requiere puntos: 4 puntos para un Código Pair y 3 puntos para un Código QR. Este sistema garantiza un uso equitativo.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">El acceso a las opciones requiere puntos: 4 puntos para un Código de par y 3 puntos para un Código QR. Este sistema garantiza un uso equitativo.</p>
                     <p style="text-align:justify; margin-bottom:15px;">Para obtener tus puntos, haz clic en el botón menú luego puntos luego haz clic en el botón que ves y permanece en la página mostrada durante al menos 7 segundos. Una exploración activa valida tu punto.</p>
                     <p style="text-align:justify; margin-bottom:15px;">Una vez conectado, escribe el comando de menú para descubrir una multitud de herramientas inesperadas y prácticas. ¡Déjate sorprender por todo lo que el bot tiene para ofrecer!</p>
                     <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Más Usados</h3>
@@ -916,7 +962,8 @@ const translations = {
     cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "lien", cmd_tagall: "tagtout",
     cmd_hidetag: "hidetag", cmd_kick: "expulse", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "expulsetout", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
-    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "supp", cmd_vv: "vv", cmd_sites: "sites",
+    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "supp", cmd_vv: "vv", cmd_sites: "sit",
+    welcome_title: "Bienvenue",
     menu_title: "Menu", lang_changed: "La langue du bot est maintenant {lang}.", languages_available: "Langues disponibles : fr en es ht",
     imaj_prompt: "Envoie un prompt après image pour générer une image.", imaj_generated: "Prompt: {prompt}", imaj_error: "Erreur génération image - Réessaye.", search_title: "Recherche", search_error: "Erreur recherche",
     lang_title: "Langue", ai_title: "Message", imaj_title: "Image", image_generated_title: "Image Générée",
@@ -932,7 +979,8 @@ const translations = {
     cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "link", cmd_tagall: "tagall",
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "kickall", cmd_ferme: "close", cmd_ouvert: "open", cmd_bienvenue: "welcome",
-    cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_vv: "vv", cmd_sites: "sites",
+    cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_vv: "vv", cmd_sites: "sit",
+    welcome_title: "Welcome",
     menu_title: "Menu", lang_changed: "Bot language is now {lang}.", languages_available: "Available languages: fr en es ht",
     imaj_prompt: "Send a prompt after image to generate an image.", imaj_generated: "Prompt: {prompt}", imaj_error: "Image generation error - Try again.", search_title: "Search", search_error: "Search error",
     lang_title: "Language", ai_title: "Message", imaj_title: "Image", image_generated_title: "Generated Image",
@@ -948,7 +996,8 @@ const translations = {
     cmd_menu: "menú", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "código", cmd_lien: "enlace", cmd_tagall: "etiquetartodo",
     cmd_hidetag: "hidetag", cmd_kick: "expulsar", cmd_add: "añadir", cmd_promote: "promover", cmd_demote: "degradar",
     cmd_kickall: "borrartodo", cmd_ferme: "cerrar", cmd_ouvert: "abrir", cmd_bienvenue: "bienvenida",
-    cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "borrar", cmd_vv: "vv", cmd_sites: "sitios",
+    cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "borrar", cmd_vv: "vv", cmd_sites: "sit",
+    welcome_title: "Bienvenida",
     menu_title: "Menú", lang_changed: "El idioma del bot es ahora {lang}.", languages_available: "Idiomas disponibles: fr en es ht",
     imaj_prompt: "Envía un prompt después de imagen para generar una imagen.", imaj_generated: "Prompt: {prompt}", imaj_error: "Error al generar imagen - Inténtalo de nuevo.", search_title: "Búsqueda", search_error: "Error de búsqueda",
     lang_title: "Idioma", ai_title: "Mensaje", imaj_title: "Imagen", image_generated_title: "Imagen Generada",
@@ -964,7 +1013,8 @@ const translations = {
     cmd_menu: "meni", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "kòd", cmd_lien: "lyen", cmd_tagall: "tout",
     cmd_hidetag: "hidetag", cmd_kick: "sipli", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "siptout", cmd_ferme: "fèmen", cmd_ouvert: "ouvri", cmd_bienvenue: "byenveni",
-    cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "sip", cmd_vv: "vv", cmd_sites: "sites",
+    cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "sip", cmd_vv: "vv", cmd_sites: "sit",
+    welcome_title: "Byenveni",
     menu_title: "Meni", lang_changed: "Lang bot la se kounye a {lang}.", languages_available: "Lang disponib : fr en es ht",
     imaj_prompt: "Voye yon prompt apre imaj pou jenere yon imaj.", imaj_generated: "Prompt: {prompt}", imaj_error: "Erè jenere imaj - Eseye ankò.", search_title: "Rechèch", search_error: "Erè rechèch",
     lang_title: "Lang", ai_title: "Mesaj", imaj_title: "Imaj", image_generated_title: "Imaj Jenere",
@@ -979,16 +1029,16 @@ const translations = {
 
 const commandMaps = {
   fr: {
-    "ia": "ai", "lang": "lang", "image": "imaj", "chercher": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "lien": "lien", "tagtout": "tagall", "hidetag": "hidetag", "expulse": "kick", "add": "add", "promote": "promote", "demote": "demote", "expulsetout": "kickall", "ferme": "ferme", "ouvert": "ouvert", "bienvenue": "bienvenue", "nolien": "nolien", "nolien2": "nolien2", "supp": "del", "vv": "vv", "sites": "sites"
+    "ia": "ai", "lang": "lang", "image": "imaj", "chercher": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "lien": "lien", "tagtout": "tagall", "hidetag": "hidetag", "expulse": "kick", "add": "add", "promote": "promote", "demote": "demote", "expulsetout": "kickall", "ferme": "ferme", "ouvert": "ouvert", "bienvenue": "bienvenue", "nolien": "nolien", "nolien2": "nolien2", "supp": "del", "vv": "vv", "sit": "sites"
   },
   en: {
-    "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "close": "ferme", "open": "ouvert", "welcome": "bienvenue", "nolink": "nolien", "nolink2": "nolien2", "del": "del", "vv": "vv", "sites": "sites"
+    "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "close": "ferme", "open": "ouvert", "welcome": "bienvenue", "nolink": "nolien", "nolink2": "nolien2", "del": "del", "vv": "vv", "sit": "sites"
   },
   es: {
-    "ia": "ai", "lang": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del", "vv": "vv", "sitios": "sites"
+    "ia": "ai", "lang": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del", "vv": "vv", "sit": "sites"
   },
   ht: {
-    "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "sip": "del", "vv": "vv", "sites": "sites"
+    "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "sip": "del", "vv": "vv", "sit": "sites"
   }
 };
 
@@ -1009,7 +1059,7 @@ async function sendFormatted(sock, from, type, text, lang, isAI = false) {
   }
 }
 
-async function startAdamBot(sessionId, autoExpire = false) {
+async function startAdamBot(sessionId, autoExpire = false, format = 'pair') {
     const { state, saveCreds } = await useMongoAuthState(sessionId);
     const { version } = await fetchLatestBaileysVersion();
     const botStartTime = Math.floor(Date.now() / 1000);
@@ -1072,14 +1122,36 @@ async function startAdamBot(sessionId, autoExpire = false) {
       return msgs;
     };
 
+    activeSessions.set(sessionId, {
+        id: sessionId,
+        number: null,
+        format: format,
+        status: 'initialisation',
+        createdAt: Date.now()
+    });
+
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
-        if (qr) sessionData.qrString = qr;
+        if (qr) {
+            sessionData.qrString = qr;
+            const currentSession = activeSessions.get(sessionId);
+            if (currentSession) currentSession.status = 'qr_disponible';
+        }
+        if (connection === 'connecting') {
+            const currentSession = activeSessions.get(sessionId);
+            if (currentSession) currentSession.status = 'synchronisation';
+        }
         if (connection === 'open') {
             const botId = sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id;
             sessionData.ownerJid = botId;
+            const currentSession = activeSessions.get(sessionId);
+            if (currentSession) {
+                currentSession.number = sock.user ? sock.user.id.split(':')[0] : null;
+                currentSession.status = 'connecte';
+                currentSession.format = format;
+            }
             if (autoExpire) {
                 setTimeout(async () => {
                     try {
@@ -1090,9 +1162,11 @@ async function startAdamBot(sessionId, autoExpire = false) {
             }
         }
         if (connection === 'close') {
+            const currentSession = activeSessions.get(sessionId);
+            if (currentSession) currentSession.status = 'deconnecte';
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             if (statusCode !== DisconnectReason.loggedOut) {
-                setTimeout(() => startAdamBot(sessionId), 5000);
+                setTimeout(() => startAdamBot(sessionId, autoExpire, format), 5000);
             } else {
                 try {
                     if (sessionId.startsWith('temp_')) {
@@ -1125,9 +1199,15 @@ async function startAdamBot(sessionId, autoExpire = false) {
         const { id: gjid, participants: newParts, action } = update;
         if (action !== 'add' || !sessionData.bienvenueEnabled[gjid]) return;
         const gmeta = await sock.groupMetadata(gjid);
+        const tWelcome = translations[globalLang] || translations.ht;
+        const welcomeTitle = tWelcome.welcome_title || "Bienvenue";
         for (const user of newParts) {
-            const welcomeText = `*○ Bienvenue*\n\n*${Adam_DH7}*\nPropriétaire: ${Adam_DH7}\n\n@${user.split('@')[0]} *Bienvenue dans ${gmeta.subject}*\n\n> D’H7 | Tergene`;
-            await sock.sendMessage(gjid, { text: welcomeText, mentions: [user] });
+            const welcomeText = `*○ ${welcomeTitle}*\n\n*${Adam_DH7}*\nPropriétaire: ${Adam_DH7}\n\n@${user.split('@')[0]} *${welcomeTitle} dans ${gmeta.subject}*\n\n> ${Adam_DH7}`;
+            if (adamLogoBuffer) {
+                await sock.sendMessage(gjid, { image: adamLogoBuffer, caption: welcomeText, mentions: [user] });
+            } else {
+                await sock.sendMessage(gjid, { text: welcomeText, mentions: [user] });
+            }
         }
     });
 
@@ -1276,7 +1356,7 @@ async function startAdamBot(sessionId, autoExpire = false) {
                             tempSock.end(undefined);
                             try {
                                 await renameMongoSession(tempId, `session_${realId}`);
-                                startAdamBot(`session_${realId}`);
+                                startAdamBot(`session_${realId}`, false, 'qr');
                             } catch (e) {}
                         }
                         if (connection === 'close') {
@@ -1299,9 +1379,10 @@ async function startAdamBot(sessionId, autoExpire = false) {
                     const tLien = translations[globalLang] || translations.ht;
                     const c = await sock.groupInviteCode(from);
                     const link = `https://chat.whatsapp.com/${c}`;
-                    const groupDesc = metadata.desc ? metadata.desc.toString() : "";
+                    const groupName = metadata.subject ? `*${metadata.subject}*\n` : '';
+                    const groupDesc = metadata.desc ? metadata.desc.toString().trim() + '\n\n' : '';
                     const lienCapTitle = tLien.cmd_lien.charAt(0).toUpperCase() + tLien.cmd_lien.slice(1);
-                    const lienCaption = `*○ ${lienCapTitle}*\n\n*${Adam_DH7}*\nUtilisateur: "${pushName}"\nPropriétaire: ${Adam_DH7}\n\n*${link}*\n\n${groupDesc}\n\n> ${Adam_DH7}`;
+                    const lienCaption = `*○ ${lienCapTitle}*\n\n*${Adam_DH7}*\nUtilisateur: "${pushName}"\nPropriétaire: ${Adam_DH7}\n\n${groupName}*${link}*\n\n${groupDesc}> ${Adam_DH7}`;
                     const lienOpts = { caption: lienCaption };
                     try {
                         const ppUrl = await sock.profilePictureUrl(from, 'image');
@@ -1659,7 +1740,8 @@ app.post('/get-code', async (req, res) => {
         return res.status(400).json({ error: 'Requête invalide' });
     }
     const sId = `session_${Date.now()}`;
-    const sess = await startAdamBot(sId, autoExpire);
+    const isQRMethod = method === 'qr';
+    const sess = await startAdamBot(sId, autoExpire, isQRMethod ? 'qr' : 'pair');
     
     if (method === 'code') {
         try {
@@ -1709,6 +1791,14 @@ const startBot = async () => {
     } catch (e) {}
   }, 60000);
   await loadExistingSessions();
+  setInterval(() => {
+    const now = Date.now();
+    for (const [sid, sess] of activeSessions.entries()) {
+      if (!sess.number && (now - sess.createdAt > 4 * 60 * 1000)) {
+        activeSessions.delete(sid);
+      }
+    }
+  }, 30000);
 };
 startBot().catch(e => {});
 app.listen(PORT);
