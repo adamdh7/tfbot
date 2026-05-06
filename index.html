@@ -1,52 +1,742 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="ht">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Bot.Adam_D'H7</title>
-    <meta name="description" content="Bot.Adam_D'H7, D'H7 | Tergene est un service web qui permet aux utilisateurs de déployer facilement des bots.">
-    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
-    <meta name="theme-color" content="#000000">
-    <link rel="canonical" href="https://bot.adamdh7.org/">
-    <meta property="og:type" content="website">
-    <meta property="og:url" content="https://bot.adamdh7.org/">
-    <meta property="og:title" content="Bot">
-    <meta property="og:description" content="Bot.Adam_D'H7, D'H7 | Tergene est un service web qui permet aux utilisateurs de déployer facilement des bots.">
-    <meta property="og:image" content="https://adamdh7.org/adamdh7.png">
-    <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:url" content="https://bot.adamdh7.org/">
-    <meta name="twitter:title" content="Bot.Adam_D'H7">
-    <meta name="twitter:description" content="Bot.Adam_D'H7, D'H7 | Tergene est un service web qui permet aux utilisateurs de déployer facilement des bots.">
-    <meta name="twitter:image" content="https://adamdh7.org/adamdh7.png">
-    <link rel="icon" href="https://adamdh7.org/adamdh7.png" type="image/png">
-    <link rel="apple-touch-icon" href="https://adamdh7.org/adamdh7.png">
-    <link rel="manifest" href="/manifest.json">
-    <style>
-        html, body {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: #000000;
-        }
-        iframe {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            border: none;
-            display: block;
-        }
-    </style>
     <script>
-        if (window.location.pathname !== "/") {
-            window.history.replaceState(null, "", "/");
+        try {
+            let isTF = window.location.pathname.indexOf('/TF-') === 0;
+            if (!isTF) {
+                let inIframe = window.self !== window.top;
+                if (!inIframe) {
+                    document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white;"></body>';
+                    window.stop();
+                } else {
+                    let refHost = '';
+                    if (document.referrer) {
+                        refHost = new URL(document.referrer).hostname;
+                    }
+                    if (refHost !== 'bot.adamdh7.org' && refHost !== 'adamdh7.org') {
+                        document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white;"></body>';
+                        window.stop();
+                    }
+                }
+            }
+        } catch (e) {
+            document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white;"></body>';
+            window.stop();
         }
     </script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#000000">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Bot.Adam_D’H7</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <style>
+        :root {
+            --bg-dark: #000000;
+            --text-main: #ffffff;
+            --text-muted: #888888;
+            --border: #333333;
+            --glass: #111111;
+        }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+            touch-action: pan-y;
+        }
+        body {
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            font-family: 'Outfit', sans-serif;
+            height: 100vh;
+            width: 100vw;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        .app-container {
+            width: 100%;
+            height: 100%;
+            max-width: 500px;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            padding: env(safe-area-inset-top) 24px env(safe-area-inset-bottom) 24px;
+        }
+        .header {
+            text-align: center;
+            margin-top: 4vh;
+            margin-bottom: 2vh;
+            position: relative;
+        }
+        .header-top {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+            margin-bottom: 16px;
+        }
+        .logo-area {
+            width: 80px;
+            height: 80px;
+            border-radius: 20px;
+            overflow: hidden;
+            border: 1px solid var(--border);
+            cursor: pointer;
+        }
+        .logo-area img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .menu-icon {
+            position: absolute;
+            right: 20px;
+            cursor: pointer;
+        }
+        .menu-icon svg {
+            width: 30px;
+            height: 30px;
+            fill: #ffffff;
+        }
+        h1 {
+            font-size: 28px;
+            font-weight: 700;
+            color: #ffffff;
+        }
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--glass);
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            color: #ffffff;
+            border: 1px solid var(--border);
+            margin-top: 10px;
+            cursor: pointer;
+        }
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            gap: 20px;
+        }
+        .input-wrapper {
+            background: var(--glass);
+            border-radius: 16px;
+            padding: 2px;
+            border: 1px solid var(--border);
+        }
+        .input-inner {
+            background: #000000;
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            padding: 16px;
+        }
+        .input-inner i {
+            color: var(--text-muted);
+            margin-right: 12px;
+        }
+        input {
+            background: transparent;
+            border: none;
+            color: #ffffff;
+            font-size: 18px;
+            width: 100%;
+            outline: none;
+            font-family: 'Outfit', sans-serif;
+            -webkit-user-select: auto;
+            user-select: auto;
+        }
+        .action-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-top: 10px;
+        }
+        .btn {
+            border: 1px solid var(--border);
+            padding: 18px;
+            border-radius: 16px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            font-family: 'Outfit', sans-serif;
+            background: #ffffff;
+            color: #000000;
+        }
+        .btn-secondary {
+            background: #000000;
+            color: #ffffff;
+        }
+        .output-area {
+            background: #000000;
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 20px;
+            margin-top: 20px;
+            text-align: center;
+            display: none;
+        }
+        .code-box {
+            font-family: 'Courier New', monospace;
+            font-size: 32px;
+            color: #ffffff;
+            letter-spacing: 4px;
+            margin: 15px 0;
+            font-weight: bold;
+            word-break: break-all;
+        }
+        .loader-container {
+            display: none;
+            justify-content: center;
+            padding: 20px;
+        }
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid #333;
+            border-radius: 50%;
+            border-top-color: #ffffff;
+            animation: spin 0.8s linear infinite;
+        }
+        #qr-container {
+            background: #ffffff;
+            padding: 15px;
+            border-radius: 12px;
+            display: inline-block;
+            margin-top: 15px;
+        }
+        .notification {
+            position: fixed;
+            bottom: 20px;
+            top: auto;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #000000;
+            color: #ffffff;
+            padding: 12px 24px;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 600;
+            opacity: 0;
+            z-index: 9999;
+            transition: opacity 0.3s;
+            pointer-events: none;
+        }
+        .view-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: #000000;
+            z-index: 1000;
+            display: none;
+            flex-direction: column;
+            padding: 40px 24px;
+            overflow-y: auto;
+        }
+        .view-overlay h2 {
+            margin-bottom: 30px;
+            text-align: center;
+            font-size: 24px;
+        }
+        .menu-item {
+            padding: 20px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            margin-bottom: 15px;
+            text-align: center;
+            font-size: 18px;
+            font-weight: 600;
+            cursor: pointer;
+            background: #111111;
+        }
+        .lang-btn {
+            padding: 15px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            margin-bottom: 10px;
+            text-align: center;
+            background: #000000;
+            cursor: pointer;
+        }
+        .info-container {
+            width: 100%;
+            text-align: left;
+            color: #cccccc;
+            font-size: 14px;
+            line-height: 1.8;
+            margin-bottom: 20px;
+        }
+        .points-header {
+            font-size: 20px;
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        .btn-clicks {
+            background: #ffffff;
+            color: #000000;
+            padding: 20px;
+            border-radius: 12px;
+            text-align: center;
+            font-weight: bold;
+            font-size: 18px;
+            cursor: pointer;
+            border: none;
+            width: 100%;
+        }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+    </style>
 </head>
 <body>
-    <iframe src="https://tf.bot.adamdh7.org/" allow="fullscreen; autoplay; clipboard-write; encrypted-media; picture-in-picture"></iframe>
+    <div class="app-container" id="view-home">
+        <header class="header">
+            <div class="header-top">
+                <div class="logo-area" onclick="navigate('info')">
+                    <img src="https://adamdh7.org/adamdh7.png" alt="Adam Logo" onerror="this.src='https://via.placeholder.com/80/ffffff/000000?text=A'">
+                </div>
+                <div class="menu-icon" onclick="navigate('menu')">
+                    <svg viewBox="0 0 24 24"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
+                </div>
+            </div>
+
+            <div class="status-badge" onclick="navigate('info')">
+                <span>It's me Adam_D'H7</span>
+            </div>
+        </header>
+        <main class="main-content">
+            <div class="input-wrapper">
+                <div class="input-inner">
+                    <i class="fas fa-phone-alt"></i>
+                    <input type="tel" id="phone" placeholder="18493154886" inputmode="numeric" autocomplete="off" maxlength="15" enterkeyhint="go">
+                </div>
+            </div>
+            <div class="action-grid">
+                <button class="btn" onclick="handleAction('code')">
+                    <i class="fas fa-key"></i>
+                    <span class="tr-code">Code Pair</span>
+                </button>
+                <button class="btn btn-secondary" onclick="handleAction('qr')">
+                    <i class="fas fa-qrcode"></i>
+                    <span class="tr-qr">Scan QR</span>
+                </button>
+            </div>
+            <div class="loader-container" id="loader">
+                <div class="spinner"></div>
+            </div>
+            <div class="output-area" id="output">
+                <div id="qr-container" style="display:none;"></div>
+                <div id="code-text" class="code-box" style="display:none;"></div>
+                <div class="copy-hint tr-copy" id="hint-text">Appuyez pour copier</div>
+            </div>
+        </main>
+    </div>
+
+    <div class="view-overlay" id="view-menu">
+        <h2 class="tr-menu-title">Menu</h2>
+        <div class="menu-item tr-menu-lang" onclick="navigate('langues')">Langues</div>
+        <div class="menu-item tr-menu-info" onclick="navigate('info')">Info</div>
+        <div class="menu-item tr-menu-points" onclick="navigate('points')">Points</div>
+    </div>
+
+    <div class="view-overlay" id="view-langues">
+        <h2 class="tr-lang-title">Langues</h2>
+        <div class="lang-btn" onclick="setLang('fr')">Français</div>
+        <div class="lang-btn" onclick="setLang('en')">English</div>
+        <div class="lang-btn" onclick="setLang('es')">Español</div>
+        <div class="lang-btn" onclick="setLang('ht')">Kreyòl Ayisyen</div>
+    </div>
+
+    <div class="view-overlay" id="view-info">
+        <h2 class="tr-info-title">Info</h2>
+        <div class="info-container" id="info-content"></div>
+    </div>
+
+    <div class="view-overlay" id="view-points">
+        <div class="points-header tr-points-header">Tu as 0 points</div>
+        <button class="btn-clicks tr-clicks" onclick="openAd()">Clicks</button>
+    </div>
+
+    <div class="notification" id="notif"></div>
+
+    <script>
+        document.addEventListener('touchmove', function(e) {
+            if (e.target.closest('.view-overlay')) return;
+            e.preventDefault();
+        }, { passive: false });
+        document.addEventListener('wheel', function(e) {
+            if (e.target.closest('.view-overlay')) return;
+            e.preventDefault();
+        }, { passive: false });
+        document.addEventListener('dblclick', function(e) {
+            e.preventDefault();
+        });
+
+        const i18n = {
+            fr: {
+                code: "Code Pair", qr: "Scan QR", copy: "Appuyez pour copier", menu: "Menu", 
+                mlang: "Langues", minfo: "Info", mpoints: "Points", ltitle: "Langues", 
+                ititle: "Info", pheader: "Tu as {x} points", clicks: "Clicks",
+                err_num: "Numéro invalide", err_pts_code: "4 points requis pour le code",
+                err_pts_qr: "3 points requis pour le qr", err_conn: "Erreur de connexion",
+                succ_copy: "Copié", succ_pts: "+1 Point", qr_hint: "Scannez avec WhatsApp",
+                infoHTML: \`
+                    <p style="text-align:justify; margin-bottom:15px;">Bienvenue sur le système de connexion Bot.Adam_D’H7. Cette interface permet de connecter votre appareil de manière sécurisée et stable afin de profiter pleinement des fonctionnalités avancées du bot.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Les sessions sont optimisées pour garantir la sécurité et les performances. Le système gère l'ensemble des opérations de façon transparente et automatique.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">L'accès aux options nécessite des points :</p>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #111111; padding: 14px; border-radius: 12px; border: 1px solid #333333;">
+                        <i class="fas fa-key" style="font-size: 26px; color: #ffffff;"></i>
+                        <span style="font-size: 15px;"><strong>4 points</strong> pour un Code Pair</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #111111; padding: 14px; border-radius: 12px; border: 1px solid #333333;">
+                        <i class="fas fa-qrcode" style="font-size: 26px; color: #ffffff;"></i>
+                        <span style="font-size: 15px;"><strong>3 points</strong> pour un QR Code</span>
+                    </div>
+                    <p style="text-align:justify; margin-bottom:15px;">Pour obtenir vos points, accédez au menu, puis à la section Points, cliquez sur le bouton "Clicks" et restez sur la page affichée pendant au moins 7 secondes. Une interaction active valide l'ajout d'un point.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Une fois connecté, utilisez la commande .menu pour découvrir une vaste gamme d'outils avancés et pratiques. Explorez les possibilités offertes par le bot !</p>
+                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Commandes les plus utilisées</h3>
+                    <p><strong>● ia</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Discutez avec l'IA en tapant .ia suivi de votre question</p>
+                    <p><strong>○ langue</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Changez la langue du bot. Exemple : .langue fr</p>
+                    <p><strong>○ image</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Générez une image avec .image [description]</p>
+                    <p><strong>○ chercher</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Effectuez une recherche web via l'IA</p><br>
+                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Système</h3>
+                    <p><strong>● menu</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Affiche le menu principal</p>
+                    <p><strong>○ qrbot</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Lance une session secondaire par QR</p>
+                    <p><strong>● qr</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Transforme du texte en code QR</p>
+                    <p><strong>○ code</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Génère un code de pairage</p><br>
+                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Groupe</h3>
+                    <p><strong>○ lien</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Envoie le lien d'invitation avec la description du groupe</p>
+                    <p><strong>● tagtout</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Mentionne tous les participants du groupe</p>
+                    <p><strong>○ hidetag</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Envoie une annonce sans tags visibles</p>
+                    <p><strong>● expulse</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Retire un membre du groupe</p>
+                    <p><strong>○ add</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Ajoute un numéro au groupe</p>
+                    <p><strong>● promote / demote</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Gère les droits d'administration</p>
+                    <p><strong>● expulsetout</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Retire tous les membres non-administrateurs</p>
+                    <p><strong>○ ferme / ouvert</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Modifie les paramètres de messagerie du groupe</p>
+                    <p><strong>○ bienvenue</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Active le message d'accueil automatique</p>
+                    <p><strong>○ nolien / nolien2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Active l'anti-lien simple ou strict</p>
+                    <p><strong>○ supp</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Supprime un message en y répondant</p>
+                    <p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Révèle le contenu d'un média à vue unique</p>
+                \`
+            },
+            en: {
+                code: "Pair Code", qr: "Scan QR", copy: "Tap to copy", menu: "Menu", 
+                mlang: "Languages", minfo: "Info", mpoints: "Points", ltitle: "Languages", 
+                ititle: "Info", pheader: "You have {x} points", clicks: "Clicks",
+                err_num: "Invalid number", err_pts_code: "4 points required for code",
+                err_pts_qr: "3 points required for QR", err_conn: "Connection error",
+                succ_copy: "Copied", succ_pts: "+1 Point", qr_hint: "Scan with WhatsApp",
+                infoHTML: \`
+                    <p style="text-align:justify; margin-bottom:15px;">Welcome to the connection system Bot.Adam_D’H7. This interface allows you to connect your device stably to enjoy the features with complete simplicity.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Sessions have an optimized lifespan to guarantee security and performance. The system takes care of everything transparently.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Access to options requires points: 4 points for a Pair Code and 3 points for a QR Code. This system guarantees fair use.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">To obtain your points, click on the menu button then points then click on the button you see and stay on the displayed page for at least 7 seconds. An active exploration validates your point.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Once connected, type the menu command to discover a multitude of unexpected and practical tools. Let yourself be surprised by everything the bot has to offer!</p>
+                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Most Used</h3>
+                    <p><strong>● ia</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Chat with the AI by typing .ia followed by your query</p>
+                    <p><strong>○ langue</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Change the bot's language. Example: .langue fr</p>
+                    <p><strong>○ image</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Generate an image with .image [description]</p>
+                    <p><strong>○ chercher</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Perform a web search via AI</p><br>
+                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">System</h3>
+                    <p><strong>● menu</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Displays the main menu</p>
+                    <p><strong>○ qrbot</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Starts a secondary session via QR</p>
+                    <p><strong>● qr</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Transforms text into a QR code</p>
+                    <p><strong>○ code</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Generates a pairing code</p><br>
+                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Group</h3>
+                    <p><strong>○ lien</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Sends the invitation link with the group description</p>
+                    <p><strong>● tagall</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Mentions all participants in the group</p>
+                    <p><strong>○ hidetag</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Sends an announcement with hidden tags</p>
+                    <p><strong>● kick</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Removes a member from the group</p>
+                    <p><strong>○ add</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Adds a number to the group</p>
+                    <p><strong>● promote / demote</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Manages admin rights</p>
+                    <p><strong>● kickall</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Removes all non-admin members</p>
+                    <p><strong>○ close / open</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Toggles group messaging permissions</p>
+                    <p><strong>○ welcome</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activates automatic welcome messages</p>
+                    <p><strong>○ nolink / nolink2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Enables standard or strict anti-link</p>
+                    <p><strong>○ del</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Deletes a specific message by replying</p>
+                    <p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Reveals view-once media content</p>
+                \`
+            },
+            es: {
+                code: "Código Pair", qr: "Escanear QR", copy: "Toca para copiar", menu: "Menú", 
+                mlang: "Idiomas", minfo: "Info", mpoints: "Puntos", ltitle: "Idiomas", 
+                ititle: "Info", pheader: "Tienes {x} puntos", clicks: "Clics",
+                err_num: "Número inválido", err_pts_code: "4 puntos requeridos para el código",
+                err_pts_qr: "3 puntos requeridos para el QR", err_conn: "Error de conexión",
+                succ_copy: "Copiado", succ_pts: "+1 Punto", qr_hint: "Escanea con WhatsApp",
+                infoHTML: \`
+                    <p style="text-align:justify; margin-bottom:15px;">Bienvenido al sistema de conexión Bot.Adam_D’H7. Esta interfaz permite conectar tu dispositivo de manera estable para disfrutar de las funcionalidades con total simplicidad.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Las sesiones tienen una duración de vida optimizada para garantizar seguridad y rendimiento. El sistema se encarga de todo de forma transparente.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">El acceso a las opciones requiere puntos: 4 puntos para un Código Pair y 3 puntos para un Código QR. Este sistema garantiza un uso equitativo.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Para obtener tus puntos, haz clic en el botón menú luego puntos luego haz clic en el botón que ves y permanece en la página mostrada durante al menos 7 segundos. Una exploración activa valida tu punto.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Una vez conectado, escribe el comando de menú para descubrir una multitud de herramientas inesperadas y prácticas. ¡Déjate sorprender por todo lo que el bot tiene para ofrecer!</p>
+                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Más Usados</h3>
+                    <p><strong>● ia</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Habla con la IA escribiendo .ia seguido de tu pregunta</p>
+                    <p><strong>○ langue</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Cambia el idioma del bot. Ejemplo: .langue fr</p>
+                    <p><strong>○ imagen</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Genera una imagen con .imagen [descripción]</p>
+                    <p><strong>○ buscar</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Realiza una búsqueda web mediante IA</p><br>
+                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Sistema</h3>
+                    <p><strong>● menú</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Muestra el menú principal</p>
+                    <p><strong>○ qrbot</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Inicia una sesión secundaria mediante QR</p>
+                    <p><strong>● qr</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Transforma texto en un código QR</p>
+                    <p><strong>○ código</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Genera un código de emparejamiento</p><br>
+                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Grupo</h3>
+                    <p><strong>○ enlace</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Envía el enlace de invitación con la descripción del groupe</p>
+                    <p><strong>● etiquetartodo</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Menciona a todos los participantes del groupe</p>
+                    <p><strong>○ hidetag</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Envía un anuncio sin etiquetas visibles</p>
+                    <p><strong>● expulsar</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Elimina a un miembro del groupe</p>
+                    <p><strong>○ añadir</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Agrega un número al groupe</p>
+                    <p><strong>● promover / degradar</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Administra derechos de administrador</p>
+                    <p><strong>● borrartodo</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Elimina a todos los miembros que no son administradores</p>
+                    <p><strong>○ cerrar / abrir</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Cambia los permisos de mensajes del groupe</p>
+                    <p><strong>○ bienvenida</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activa el mensaje automático de bienvenida</p>
+                    <p><strong>○ sinenlace / sinenlace2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Activa el modo anti-enlace básico ou estricto</p>
+                    <p><strong>○ borrar</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Elimina un mensaje respondiendo a él</p>
+                    <p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Revela el contenido de archivos de visualización única</p>
+                \`
+            },
+            ht: {
+                code: "Kòd Pè", qr: "Eskane QR", copy: "Klike pou kopye", menu: "Meni", 
+                mlang: "Lang", minfo: "Enfòmasyon", mpoints: "Pwen", ltitle: "Lang", 
+                ititle: "Enfòmasyon", pheader: "Ou gen {x} pwen", clicks: "Klike",
+                err_num: "Nimewo pa bon", err_pts_code: "4 pwen nesesè pou kòd la",
+                err_pts_qr: "3 pwen nesesè pou qr la", err_conn: "Erè koneksyon",
+                succ_copy: "Kopye", succ_pts: "+1 Pwen", qr_hint: "Eskane ak WhatsApp",
+                infoHTML: \`
+                    <p style="text-align:justify; margin-bottom:15px;">Byenveni sou sistèm lyazon an Bot.Adam_D’H7. Entèfas sa a pèmèt ou konekte aparèy ou a yon fason ki estab pou w jwi fonksyonalite yo ak tout senplisite.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Sesyon yo gen yon dire lavi optimize pou garanti sekirite ak pèfòmans. Sistèm nan pran swen tout bagay yon fason transparan.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Aksè a opsyon yo mande pwen : 4 pwen pou yon Kòd Pè ak 3 pwen pou yon Kòd QR. Sistèm sa a garanti yon itilizasyon ekitab.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Pou jwenn pwen ou yo, klike sou bouton meni a, answit pwen, answit klike sou bouton boanc ou wè a epi rete sou paj ki afiche a pandan omwen 7 segonn. Yon eksplorasyon aktif valide pwen ou.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Yon fwa konekte, tape kòmand meni a pou dekouvri yon pakèt zouti inatandi ak pratik. Kite tèt ou sezi pa tout sa bot la gen pou ofri !</p>
+                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Pi itilize</h3>
+                    <p><strong>● ia</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Pale ak IA a lè w tape .ia epi kesyon ou a</p>
+                    <p><strong>○ langue</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Chanje lang bot la. Egzanp : .langue fr</p>
+                    <p><strong>○ image</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Jenere yon imaj avèk .image [deskripsyon]</p>
+                    <p><strong>○ cheche</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Fè yon rechèch sou entènèt via IA</p><br>
+                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Sistèm</h3>
+                    <p><strong>● meni</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Afiche meni prensipal la</p>
+                    <p><strong>○ qrbot</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Lanse yon dezyèm sesyon avèk QR</p>
+                    <p><strong>● qr</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Transfòme yon tèks an kòd QR</p>
+                    <p><strong>○ kòd</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Jenere yon kòd pè</p><br>
+                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Gwoup</h3>
+                    <p><strong>○ lyen</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Voye lyen envitasyon an ak deskripsyon gwoup la</p>
+                    <p><strong>● tagtout</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Mansyone tout patisipan yo nan gwoup la</p>
+                    <p><strong>○ hidetag</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Voye yon anons san tag parèt klè</p>
+                    <p><strong>● sipli</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Retire yon manm nan gwoup la</p>
+                    <p><strong>○ add</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Ajoute yon nimewo nan gwoup la</p>
+                    <p><strong>● promote / demote</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Jere dwa administrateur yo</p>
+                    <p><strong>● siptout</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Retire tout manm ki pa administrateur</p>
+                    <p><strong>○ fèmen / ouvri</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Chanje dwa pou voye mesaj nan gwoup la</p>
+                    <p><strong>○ byenveni</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Aktive mesaj akèy otomatik pou nouvo manm</p>
+                    <p><strong>○ nolyen / nolyen2</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Aktive sistèm anti-lyen senp oswa strik</p>
+                    <p><strong>○ sip</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Efase yon mesaj presi lè w reponn li</p>
+                    <p><strong>● vv</strong> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin:0 6px;"><path d="M9 18l6-6-6-6"/></svg> Montre kontni medya ki te voye pou wè yon sèl fwa</p>
+                \`
+            }
+        };
+
+        let currentLang = localStorage.getItem('lang');
+        if (!currentLang) {
+            const navL = navigator.language.slice(0, 2);
+            currentLang = ['fr', 'en', 'es', 'ht'].includes(navL) ? navL : 'ht';
+        }
+        let userPoints = parseInt(localStorage.getItem('points')) || 0;
+        let clickTime = 0;
+        let pendingAction = null;
+
+        const ui = {
+            phone: document.getElementById('phone'),
+            loader: document.getElementById('loader'),
+            output: document.getElementById('output'),
+            qr: document.getElementById('qr-container'),
+            code: document.getElementById('code-text'),
+            hint: document.getElementById('hint-text'),
+            notif: document.getElementById('notif'),
+            infoContent: document.getElementById('info-content')
+        };
+
+        ui.phone.addEventListener('input', () => {
+            const cleaned = ui.phone.value.replace(/[^0-9]/g, '').slice(0, 15);
+            if (ui.phone.value !== cleaned) ui.phone.value = cleaned;
+        });
+
+        ui.phone.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                handleAction('code');
+            }
+        });
+
+        function updateUI() {
+            const t = i18n[currentLang];
+            document.querySelector('.tr-code').textContent = t.code;
+            document.querySelector('.tr-qr').textContent = t.qr;
+            document.querySelector('.tr-copy').textContent = t.copy;
+            document.querySelector('.tr-menu-title').textContent = t.menu;
+            document.querySelector('.tr-menu-lang').textContent = t.mlang;
+            document.querySelector('.tr-menu-info').textContent = t.minfo;
+            document.querySelector('.tr-menu-points').textContent = t.mpoints;
+            document.querySelector('.tr-lang-title').textContent = t.ltitle;
+            document.querySelector('.tr-info-title').textContent = t.ititle;
+            document.querySelector('.tr-points-header').textContent = t.pheader.replace('{x}', userPoints);
+            document.querySelector('.tr-clicks').textContent = t.clicks;
+            ui.infoContent.innerHTML = t.infoHTML;
+        }
+
+        function setLang(l) {
+            currentLang = l;
+            localStorage.setItem('lang', l);
+            updateUI();
+            navigate('home');
+        }
+
+        function navigate(view) {
+            document.querySelectorAll('.view-overlay').forEach(el => el.style.display = 'none');
+            document.getElementById('view-home').style.display = view === 'home' ? 'flex' : 'none';
+            if (view !== 'home') {
+                const target = document.getElementById('view-' + view);
+                if (target) target.style.display = 'flex';
+                window.location.hash = view;
+            } else {
+                window.history.replaceState(null, null, ' ');
+            }
+        }
+
+        window.addEventListener('hashchange', () => {
+            const hash = window.location.hash.replace('#', '');
+            if (!hash) navigate('home');
+            else navigate(hash);
+        });
+
+        function showNotif(msg, isError = false) {
+            ui.notif.textContent = msg;
+            ui.notif.style.color = isError ? '#ff0000' : '#00ff00';
+            ui.notif.style.opacity = '1';
+            setTimeout(() => ui.notif.style.opacity = '0', 3000);
+        }
+
+        function openAd() {
+            clickTime = Date.now();
+            window.open('https://www.profitablecpmratenetwork.com/ak0xgm6xu?key=96856a216ee758b70d6c8303e964e86b', '_blank');
+        }
+
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible' && clickTime > 0) {
+                if (Date.now() - clickTime >= 7000) {
+                    userPoints++;
+                    localStorage.setItem('points', userPoints);
+                    updateUI();
+                    showNotif(i18n[currentLang].succ_pts, false);
+                    
+                    if (pendingAction) {
+                        if (pendingAction === 'code' && userPoints >= 4) {
+                            let actionToRun = pendingAction;
+                            pendingAction = null;
+                            navigate('home');
+                            handleAction(actionToRun);
+                        } else if (pendingAction === 'qr' && userPoints >= 3) {
+                            let actionToRun = pendingAction;
+                            pendingAction = null;
+                            navigate('home');
+                            handleAction(actionToRun);
+                        }
+                    }
+                }
+                clickTime = 0;
+            }
+        });
+
+        async function handleAction(type) {
+            const t = i18n[currentLang];
+            const number = ui.phone.value.replace(/[^0-9]/g, '');
+            
+            if (type === 'code') {
+                if (number.length < 6) return showNotif(t.err_num, true);
+                if (userPoints < 4) {
+                    pendingAction = 'code';
+                    navigate('points');
+                    return showNotif(t.err_pts_code, true);
+                }
+                userPoints -= 4;
+            } else if (type === 'qr') {
+                if (userPoints < 3) {
+                    pendingAction = 'qr';
+                    navigate('points');
+                    return showNotif(t.err_pts_qr, true);
+                }
+                userPoints -= 3;
+            }
+            
+            pendingAction = null;
+            localStorage.setItem('points', userPoints);
+            updateUI();
+
+            ui.output.style.display = 'none';
+            ui.loader.style.display = 'flex';
+            ui.qr.innerHTML = '';
+
+            try {
+                const res = await fetch('/get-code', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ number: type === 'code' ? number : '', method: type })
+                });
+
+                const data = await res.json();
+                ui.loader.style.display = 'none';
+                ui.output.style.display = 'block';
+
+                if (!res.ok) {
+                    throw new Error(data?.error || 'Erreur');
+                }
+
+                if (type === 'code' && data.code) {
+                    ui.qr.style.display = 'none';
+                    ui.code.style.display = 'block';
+                    ui.code.textContent = data.code;
+                    ui.hint.textContent = t.copy;
+                    ui.code.onclick = async () => {
+                        try {
+                            await navigator.clipboard.writeText(data.code);
+                            showNotif(t.succ_copy);
+                        } catch (e) {
+                            showNotif(t.err_conn, true);
+                        }
+                    };
+                } else if (type === 'qr' && data.qr) {
+                    ui.code.style.display = 'none';
+                    ui.qr.style.display = 'inline-block';
+                    new QRCode(ui.qr, { text: data.qr, width: 200, height: 200, colorDark: "#000000", colorLight: "#ffffff" });
+                    ui.hint.textContent = t.qr_hint;
+                }
+
+            } catch (e) {
+                ui.loader.style.display = 'none';
+                showNotif(t.err_conn, true);
+            }
+        }
+
+        window.onload = updateUI;
+    </script>
 </body>
 </html>
