@@ -41,11 +41,17 @@ function fixBuffers(obj) {
     return obj;
 }
 
-async function useMongoAuthState(sessionId) {
+async function useMongoAuthState(sessionId, expectExisting = false) {
   const collection = db.collection('baileys_auth');
   const sessionKey = `auth-${sessionId}`;
   let credsDoc = await collection.findOne({ _id: `${sessionKey}-creds` });
+  
+  if (expectExisting && !credsDoc) {
+      throw new Error("SessionNotExists");
+  }
+
   let creds = credsDoc ? fixBuffers(credsDoc.creds) : initAuthCreds();
+  
   const keyStore = {
     get: async (type, ids) => {
       const result = {};
@@ -88,13 +94,6 @@ async function useMongoAuthState(sessionId) {
   };
 }
 
-async function sessionExistsInMongo(sessionId) {
-  const collection = db.collection('baileys_auth');
-  const sessionKey = `auth-${sessionId}`;
-  const doc = await collection.findOne({ _id: `${sessionKey}-creds` });
-  return !!doc;
-}
-
 async function deleteMongoSession(sessionId) {
   const collection = db.collection('baileys_auth');
   const sessionKey = `auth-${sessionId}`;
@@ -122,6 +121,16 @@ const retryCache = {
 
 let activeSessions = new Map();
 
+process.on('unhandledRejection', (err) => {
+    const msg = String(err?.message || err || '');
+    if (msg.includes('Bad MAC') || msg.includes('Failed to decrypt message with any known session')) return;
+});
+process.on('uncaughtException', (err) => {
+    const msg = String(err?.message || err || '');
+    if (msg.includes('Bad MAC') || msg.includes('Failed to decrypt message with any known session')) return;
+});
+
+app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -242,14 +251,30 @@ async function tavilySearch(query) {
   }
 }
 
+function formatUptime(seconds, t) {
+    let d = Math.floor(seconds / (3600*24));
+    let h = Math.floor((seconds % (3600*24)) / 3600);
+    let m = Math.floor((seconds % 3600) / 60);
+    let s = Math.floor(seconds % 60);
+    let parts = [];
+    if(d > 0) parts.push(`${d} ${t.days}`);
+    if(h > 0) parts.push(`${h} ${t.hours}`);
+    if(m > 0) parts.push(`${m} ${t.minutes}`);
+    if(s > 0) parts.push(`${s} ${t.seconds}`);
+    if (parts.length === 0) parts.push(`0 ${t.seconds}`);
+    return parts.join(', ');
+}
+
 const translations = {
   fr: {
     cmd_ai: "ia", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "chercher",
     cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "lien", cmd_tagall: "tagtout",
     cmd_hidetag: "hidetag", cmd_kick: "expulse", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "expulsetout", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
-    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "supp", cmd_vv: "vv", cmd_sites: "sit", cmd_alive: "alive",
-    welcome_title: "Bienvenue dans",
+    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "supp", cmd_vv: "vv", cmd_sites: "sit",
+    cmd_alive: "alive", alive_title: "Alive", connected_since: "Connecté depuis", days: "jour(s)", hours: "heure(s)", minutes: "minute(s)", seconds: "seconde(s)",
+    enabled: "activé", disabled: "désactivé", welcome_on: "Bienvenue activée", welcome_off: "Bienvenue désactivée", nolien_on: "Nolien activé", nolien_off: "Nolien désactivé", nolien2_on: "Nolien2 activé", nolien2_off: "Nolien2 désactivé",
+    welcome_title: "Bienvenue dans", welcome_to: "Bienvenue dans",
     menu_title: "Menu", lang_changed: "La langue du bot est maintenant {lang}.", languages_available: "Langues disponibles : fr en es ht",
     imaj_prompt: "Envoie un prompt après image pour générer une image.", imaj_generated: "*{prompt}*", imaj_error: "Erreur génération image - Réessaye.", search_title: "Recherche", search_error: "Erreur recherche",
     lang_title: "Langue", ai_title: "Message", imaj_title: "Image", image_generated_title: "Image Générée",
@@ -258,23 +283,17 @@ const translations = {
     qrbot_created: "Nouvelle Session Créée",
     qrbot_scan: "Scannez ce code pour connecter la nouvelle session.",
     qrbot_connected: "Session Connectée",
-    qrbot_active: "La nouvelle session est active.\nID: {id}",
-    welcome_activated: "✅ Bienvenue activé",
-    welcome_deactivated: "❌ Bienvenue désactivé",
-    nolien_activated: "✅ Anti-lien activé",
-    nolien_deactivated: "❌ Anti-lien désactivé",
-    nolien2_activated: "✅ Anti-lien strict activé",
-    nolien2_deactivated: "❌ Anti-lien strict désactivé",
-    alive_title: "Alive",
-    alive_connected: "Connecté depuis"
+    qrbot_active: "La nouvelle session est active.\nID: {id}"
   },
   en: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "search",
     cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "link", cmd_tagall: "tagall",
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "kickall", cmd_ferme: "close", cmd_ouvert: "open", cmd_bienvenue: "welcome",
-    cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_vv: "vv", cmd_sites: "sit", cmd_alive: "alive",
-    welcome_title: "Welcome to",
+    cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_vv: "vv", cmd_sites: "sit",
+    cmd_alive: "alive", alive_title: "Alive", connected_since: "Connected for", days: "day(s)", hours: "hour(s)", minutes: "minute(s)", seconds: "second(s)",
+    enabled: "enabled", disabled: "disabled", welcome_on: "Welcome enabled", welcome_off: "Welcome disabled", nolien_on: "No link enabled", nolien_off: "No link disabled", nolien2_on: "Strict no link enabled", nolien2_off: "Strict no link disabled",
+    welcome_title: "Welcome to", welcome_to: "Welcome to",
     menu_title: "Menu", lang_changed: "Bot language is now {lang}.", languages_available: "Available languages: fr en es ht",
     imaj_prompt: "Send a prompt after image to generate an image.", imaj_generated: "*{prompt}*", imaj_error: "Image generation error - Try again.", search_title: "Search", search_error: "Search error",
     lang_title: "Language", ai_title: "Message", imaj_title: "Image", image_generated_title: "Generated Image",
@@ -283,23 +302,17 @@ const translations = {
     qrbot_created: "New Session Created",
     qrbot_scan: "Scan this QR code to connect the new session.",
     qrbot_connected: "Session Connected",
-    qrbot_active: "The new session is active.\nID: {id}",
-    welcome_activated: "✅ Welcome activated",
-    welcome_deactivated: "❌ Welcome deactivated",
-    nolien_activated: "✅ Anti-link activated",
-    nolien_deactivated: "❌ Anti-link deactivated",
-    nolien2_activated: "✅ Strict anti-link activated",
-    nolien2_deactivated: "❌ Strict anti-link deactivated",
-    alive_title: "Alive",
-    alive_connected: "Connected for"
+    qrbot_active: "The new session is active.\nID: {id}"
   },
   es: {
     cmd_ai: "ia", cmd_lang: "lang", cmd_imaj: "imagen", cmd_cheche: "buscar",
     cmd_menu: "menú", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "código", cmd_lien: "enlace", cmd_tagall: "etiquetartodo",
     cmd_hidetag: "hidetag", cmd_kick: "expulsar", cmd_add: "añadir", cmd_promote: "promover", cmd_demote: "degradar",
     cmd_kickall: "borrartodo", cmd_ferme: "cerrar", cmd_ouvert: "abrir", cmd_bienvenue: "bienvenida",
-    cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "borrar", cmd_vv: "vv", cmd_sites: "sit", cmd_alive: "vivo",
-    welcome_title: "Bienvenida en",
+    cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "borrar", cmd_vv: "vv", cmd_sites: "sit",
+    cmd_alive: "alive", alive_title: "Alive", connected_since: "Conectado por", days: "día(s)", hours: "hora(s)", minutes: "minuto(s)", seconds: "segundo(s)",
+    enabled: "activado", disabled: "desactivado", welcome_on: "Bienvenida activada", welcome_off: "Bienvenida desactivada", nolien_on: "Sin enlaces activado", nolien_off: "Sin enlaces desactivado", nolien2_on: "Sin enlaces estricto activado", nolien2_off: "Sin enlaces estricto desactivado",
+    welcome_title: "Bienvenida a", welcome_to: "Bienvenida a",
     menu_title: "Menú", lang_changed: "El idioma del bot es ahora {lang}.", languages_available: "Idiomas disponibles: fr en es ht",
     imaj_prompt: "Envía un prompt después de imagen para generar una imagen.", imaj_generated: "*{prompt}*", imaj_error: "Error al generar imagen - Inténtalo de nuevo.", search_title: "Búsqueda", search_error: "Error de búsqueda",
     lang_title: "Idioma", ai_title: "Mensaje", imaj_title: "Imagen", image_generated_title: "Imagen Generada",
@@ -308,23 +321,17 @@ const translations = {
     qrbot_created: "Nueva Sesión Creada",
     qrbot_scan: "Escanea este código para conectar la nueva sesión.",
     qrbot_connected: "Sesión Conectada",
-    qrbot_active: "La nueva sesión está activa.\nID: {id}",
-    welcome_activated: "✅ Bienvenida activada",
-    welcome_deactivated: "❌ Bienvenida desactivada",
-    nolien_activated: "✅ Anti-enlace activado",
-    nolien_deactivated: "❌ Anti-enlace desactivado",
-    nolien2_activated: "✅ Anti-enlace estricto activado",
-    nolien2_deactivated: "❌ Anti-enlace estricto desactivado",
-    alive_title: "Vivo",
-    alive_connected: "Conectado desde hace"
+    qrbot_active: "La nueva sesión está activa.\nID: {id}"
   },
   ht: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "imaj", cmd_cheche: "cheche",
     cmd_menu: "meni", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "kòd", cmd_lien: "lyen", cmd_tagall: "tout",
     cmd_hidetag: "hidetag", cmd_kick: "sipli", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "siptout", cmd_ferme: "fèmen", cmd_ouvert: "ouvri", cmd_bienvenue: "byenveni",
-    cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "sip", cmd_vv: "vv", cmd_sites: "sit", cmd_alive: "viv",
-    welcome_title: "Byenveni nan",
+    cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "sip", cmd_vv: "vv", cmd_sites: "sit",
+    cmd_alive: "alive", alive_title: "Alive", connected_since: "Konekte depi", days: "jou", hours: "èdtan", minutes: "minit", seconds: "segonn",
+    enabled: "aktive", disabled: "dezaktive", welcome_on: "Byenveni aktive", welcome_off: "Byenveni dezaktive", nolien_on: "Nolyen aktive", nolien_off: "Nolyen dezaktive", nolien2_on: "Nolyen2 aktive", nolien2_off: "Nolyen2 dezaktive",
+    welcome_title: "Byenveni nan", welcome_to: "Byenveni nan",
     menu_title: "Meni", lang_changed: "Lang bot la se kounye a {lang}.", languages_available: "Lang disponib : fr en es ht",
     imaj_prompt: "Voye yon prompt apre imaj pou jenere yon imaj.", imaj_generated: "*{prompt}*", imaj_error: "Erè jenere imaj - Eseye ankò.", search_title: "Rechèch", search_error: "Erè rechèch",
     lang_title: "Lang", ai_title: "Mesaj", imaj_title: "Imaj", image_generated_title: "Imaj Jenere",
@@ -333,17 +340,76 @@ const translations = {
     qrbot_created: "Nouvo Sesyon Kreye",
     qrbot_scan: "Eskane kòd sa a pou konekte nouvo sesyon an.",
     qrbot_connected: "Sesyon Konekte",
-    qrbot_active: "Nouvo sesyon an aktif.\nID: {id}",
-    welcome_activated: "✅ Byenveni aktive",
-    welcome_deactivated: "❌ Byenveni dezaktive",
-    nolien_activated: "✅ Anti-lyen aktive",
-    nolien_deactivated: "❌ Anti-lyen dezaktive",
-    nolien2_activated: "✅ Anti-lyen strik aktive",
-    nolien2_deactivated: "❌ Anti-lyen strik dezaktive",
-    alive_title: "Viv",
-    alive_connected: "Konekte depi"
+    qrbot_active: "Nouvo sesyon an aktif.\nID: {id}"
   }
 };
+
+
+function normalizePhoneNumber(number) {
+    return String(number || '').replace(/[^0-9]/g, '');
+}
+
+function unwrapMessageContent(message) {
+    let msg = message || {};
+    if (msg.ephemeralMessage?.message) msg = msg.ephemeralMessage.message;
+    if (msg.viewOnceMessage?.message) msg = msg.viewOnceMessage.message;
+    if (msg.viewOnceMessageV2?.message) msg = msg.viewOnceMessageV2.message;
+    if (msg.viewOnceMessageV2Extension?.message) msg = msg.viewOnceMessageV2Extension.message;
+    return msg;
+}
+
+function extractBody(m) {
+    const msg = unwrapMessageContent(m?.message);
+    return msg.conversation || msg.extendedTextMessage?.text || msg.imageMessage?.caption || msg.videoMessage?.caption || msg.documentMessage?.caption || msg.buttonsResponseMessage?.selectedButtonId || msg.listResponseMessage?.singleSelectReply?.selectedRowId || '';
+}
+
+function waitForConnectionOpen(sock, timeoutMs = 45000) {
+    return new Promise((resolve, reject) => {
+        if (sock?.user?.id) {
+            resolve(true);
+            return;
+        }
+        let done = false;
+        const timer = setTimeout(() => {
+            if (done) return;
+            done = true;
+            sock.ev.off('connection.update', handler);
+            reject(new Error('Timeout'));
+        }, timeoutMs);
+        const handler = (u) => {
+            if (u?.connection === 'open') {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                sock.ev.off('connection.update', handler);
+                resolve(true);
+            }
+        };
+        sock.ev.on('connection.update', handler);
+    });
+}
+
+function waitForQr(sock, timeoutMs = 45000) {
+    return new Promise((resolve, reject) => {
+        let done = false;
+        const timer = setTimeout(() => {
+            if (done) return;
+            done = true;
+            sock.ev.off('connection.update', handler);
+            reject(new Error('Timeout'));
+        }, timeoutMs);
+        const handler = (u) => {
+            if (u?.qr) {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                sock.ev.off('connection.update', handler);
+                resolve(u.qr);
+            }
+        };
+        sock.ev.on('connection.update', handler);
+    });
+}
 
 const commandMaps = {
   fr: {
@@ -353,10 +419,10 @@ const commandMaps = {
     "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "close": "ferme", "open": "ouvert", "welcome": "bienvenue", "nolink": "nolien", "nolink2": "nolien2", "del": "del", "vv": "vv", "sit": "sites", "alive": "alive"
   },
   es: {
-    "ia": "ai", "lang": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del", "vv": "vv", "sit": "sites", "vivo": "alive"
+    "ia": "ai", "lang": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del", "vv": "vv", "sit": "sites", "alive": "alive"
   },
   ht: {
-    "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "sip": "del", "vv": "vv", "sit": "sites", "viv": "alive"
+    "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "sip": "del", "vv": "vv", "sit": "sites", "alive": "alive"
   }
 };
 
@@ -364,800 +430,399 @@ function normalizeText(str) {
     return str ? str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase() : "";
 }
 
-function formatUptime(startTime, lang) {
-  const t = translations[lang] || translations.fr;
-  const diff = Math.floor(Date.now() / 1000) - startTime;
-  const days = Math.floor(diff / 86400);
-  const hours = Math.floor((diff % 86400) / 3600);
-  const minutes = Math.floor((diff % 3600) / 60);
-  const seconds = diff % 60;
-
-  let parts = [];
-  if (days > 0) parts.push(`${days}j`);
-  if (hours > 0) parts.push(`${hours}h`);
-  if (minutes > 0) parts.push(`${minutes}m`);
-  if (seconds > 0 || parts.length === 0) parts.push(`${seconds}s`);
-
-  return `${t.alive_connected} ${parts.join(' ')}`;
-}
-
-async function sendFormatted(sock, from, type, text, lang) {
-  const fullCaption = `*○ ${type}*\n${text}\n\n> ${Adam_DH7}`;
-  if (adamLogoBuffer) {
-    await sock.sendMessage(from, { image: adamLogoBuffer, caption: fullCaption });
-  } else {
+async function sendFormatted(sock, from, type, text, lang, isAI = false) {
+  const fullCaption = `*○ ${type}*\n\n${text}\n\n> ${Adam_DH7}`;
+  if (isAI) {
     await sock.sendMessage(from, { text: fullCaption });
+  } else {
+    if (adamLogoBuffer) {
+      await sock.sendMessage(from, { image: adamLogoBuffer, caption: fullCaption });
+    } else {
+      await sock.sendMessage(from, { text: fullCaption });
+    }
   }
 }
 
-async function startAdamBot(sessionId, autoExpire = false, format = 'pair') {
-    if (!(await sessionExistsInMongo(sessionId))) {
-        const currentSession = activeSessions.get(sessionId);
-        if (currentSession) currentSession.status = 'deconnecte';
-        return null;
-    }
+async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expectExisting = false) {
+    try {
+        const { state, saveCreds } = await useMongoAuthState(sessionId, expectExisting);
+        const { version } = await fetchLatestBaileysVersion();
+        const botStartTime = Math.floor(Date.now() / 1000);
+        const processedIds = new Set();
 
-    const { state, saveCreds } = await useMongoAuthState(sessionId);
-    const { version } = await fetchLatestBaileysVersion();
-    const botStartTime = Math.floor(Date.now() / 1000);
-    const processedIds = new Set();
-
-    const sock = makeWASocket({
-        version,
-        logger: pino({ level: 'silent' }),
-        printQRInTerminal: false,
-        auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })) },
-        browser: Browsers.macOS('Safari'),
-        markOnlineOnConnect: true,
-        generateHighQualityLinkPreview: true,
-        msgRetryCounterCache: retryCache,
-        retryRequestDelayMs: 2000,
-        getMessage: async (key) => {
-            return undefined;
-        }
-    });
-
-    const sessionData = {
-        sock: sock,
-        qrString: null,
-        ownerJid: null,
-        noLienMode: {},
-        bienvenueEnabled: {}
-    };
-
-    const chatHistories = new Map();
-    let globalLang = 'en';
-    const userInfo = new Map();
-    const pendingAIResponses = new Map();
-
-    const buildAIMessages = (hist, userInfoObj, botLang) => {
-      let historyCopy = [...hist];
-      const systemContent = `You are Adam_D’H7. Do not talk about internal information or other subjects about Yourself outside of your name. The user is: ${userInfoObj.pseudo || 'Unknown'} (number: ${userInfoObj.number || 'unknown'}). The conversation is in language: ${botLang}. Always respond in the language the user is using.`;
-      let msgs = [
-        {role: "system", content: systemContent},
-        ...historyCopy
-      ];
-      let jsonStr = JSON.stringify(msgs);
-      while (jsonStr.length > 17000 && historyCopy.length > 1) {
-        historyCopy.shift();
-        msgs = [
-          {role: "system", content: systemContent},
-          ...historyCopy
-        ];
-        jsonStr = JSON.stringify(msgs);
-      }
-      if (jsonStr.length > 17000 && historyCopy.length > 0) {
-        const last = {...historyCopy[historyCopy.length - 1]};
-        if (last.content && last.content.length > 14000) {
-          last.content = last.content.substring(0, 14000) + ` ... [tronqué à 14000 caractères pour ne pas dépasser la limite]`;
-        }
-        msgs = [
-          {role: "system", content: systemContent},
-          last
-        ];
-      }
-      return msgs;
-    };
-
-    activeSessions.set(sessionId, {
-        id: sessionId,
-        number: null,
-        format: format,
-        status: 'initialisation',
-        createdAt: Date.now(),
-        botStartTime: botStartTime
-    });
-
-    sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        if (qr) {
-            sessionData.qrString = qr;
-            const currentSession = activeSessions.get(sessionId);
-            if (currentSession) currentSession.status = 'qr_disponible';
-        }
-        if (connection === 'connecting') {
-            const currentSession = activeSessions.get(sessionId);
-            if (currentSession) currentSession.status = 'synchronisation';
-        }
-        if (connection === 'open') {
-            const botId = sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id;
-            sessionData.ownerJid = botId;
-            const currentSession = activeSessions.get(sessionId);
-            if (currentSession) {
-                currentSession.number = sock.user ? sock.user.id.split(':')[0] : null;
-                currentSession.status = 'connecte';
-                currentSession.format = format;
+        const sock = makeWASocket({
+            version,
+            logger: pino({ level: 'silent' }),
+            printQRInTerminal: false,
+            auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })) },
+            browser: Browsers.macOS('Safari'),
+            markOnlineOnConnect: true,
+            generateHighQualityLinkPreview: true,
+            msgRetryCounterCache: retryCache,
+            retryRequestDelayMs: 2000,
+            getMessage: async (key) => {
+                return undefined;
             }
-            if (autoExpire) {
-                setTimeout(async () => {
-                    try {
-                        await deleteMongoSession(sessionId);
-                        sock.logout();
-                    } catch(e) {}
-                }, 17 * 60 * 60 * 1000);
+        });
+
+        const sessionData = {
+            sock: sock,
+            qrString: null,
+            ownerJid: null,
+            noLienMode: {},
+            bienvenueEnabled: {},
+            active: true,
+            readyAt: Date.now()
+        };
+
+        const chatHistories = new Map();
+        let globalLang = 'en';
+        const userInfo = new Map();
+        const pendingAIResponses = new Map();
+
+        const buildAIMessages = (hist, userInfoObj, botLang) => {
+          let historyCopy = [...hist];
+          const systemContent = `You are Adam_D’H7. Do not talk about internal information or other subjects about Yourself outside of your name. The user is: ${userInfoObj.pseudo || 'Unknown'} (number: ${userInfoObj.number || 'unknown'}). The conversation is in language: ${botLang}. Always respond in the language the user is using.`;
+          let msgs = [
+            {role: "system", content: systemContent},
+            ...historyCopy
+          ];
+          const jsonStr = JSON.stringify(msgs);
+          while (jsonStr.length > 17000 && historyCopy.length > 1) {
+            historyCopy.shift();
+            msgs = [
+              {role: "system", content: systemContent},
+              ...historyCopy
+            ];
+          }
+          if (JSON.stringify(msgs).length > 17000 && historyCopy.length > 0) {
+            const last = {...historyCopy[historyCopy.length - 1]};
+            if (last.content && last.content.length > 14000) {
+              last.content = last.content.substring(0, 14000) + ` ... [tronqué à 14000 caractères pour ne pas dépasser la limite]`;
             }
-        }
-        if (connection === 'close') {
-            const currentSession = activeSessions.get(sessionId);
-            if (currentSession) currentSession.status = 'deconnecte';
-            const statusCode = lastDisconnect?.error?.output?.statusCode;
-            if (statusCode !== DisconnectReason.loggedOut) {
-                setTimeout(() => startAdamBot(sessionId, autoExpire, format), 5000);
-            } else {
-                try {
-                    if (sessionId.startsWith('temp_')) {
-                        await deleteMongoSession(sessionId);
-                    }
-                } catch (e) {}
-            }
-        }
-    });
+            msgs = [
+              {role: "system", content: systemContent},
+              last
+            ];
+          }
+          return msgs;
+        };
 
-    const safeGroupUpdate = async (jid, participants, action) => {
-        try {
-            const cleanParticipants = participants.map(p => p.includes('@') ? p : `${p.replace(/[^0-9]/g, '')}@s.whatsapp.net`);
-            await sock.groupParticipantsUpdate(jid, cleanParticipants, action);
-            return true;
-        } catch (e) {
-            return false;
-        }
-    };
+        activeSessions.set(sessionId, {
+            id: sessionId,
+            number: null,
+            format: format,
+            status: 'initialisation',
+            createdAt: Date.now(),
+            sock: sock,
+            qrString: null
+        });
 
-    const resolveTargets = async (arg, m) => {
-        const ctx = m.message?.extendedTextMessage?.contextInfo;
-        if (ctx?.mentionedJid?.length) return ctx.mentionedJid;
-        if (ctx?.participant) return [ctx.participant];
-        if (arg) return [arg.replace(/[^0-9]/g, '') + '@s.whatsapp.net'];
-        return [];
-    };
+        sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('group-participants.update', async (update) => {
-        const { id: gjid, participants: newParts, action } = update;
-        if (action !== 'add' || !sessionData.bienvenueEnabled[gjid]) return;
-        const gmeta = await sock.groupMetadata(gjid);
-        const tWelcome = translations[globalLang] || translations.ht;
-        const welcomeTitle = tWelcome.welcome_title || "Bienvenue";
-        for (const user of newParts) {
-            const welcomeText = `*○ ${welcomeTitle}*\n\n*${Adam_DH7}*\nPropriétaire: ${Adam_DH7}\n\n@${user.split('@')[0]} *${welcomeTitle} ${gmeta.subject}*\n\n> ${Adam_DH7}`;
-            if (adamLogoBuffer) {
-                await sock.sendMessage(gjid, { image: adamLogoBuffer, caption: welcomeText, mentions: [user] });
-            } else {
-                await sock.sendMessage(gjid, { text: welcomeText, mentions: [user] });
-            }
-        }
-    });
-
-    sock.ev.on('messages.upsert', async (up) => {
-        try {
-            const m = up.messages[0];
-            if (!m.message || m.key.remoteJid === 'status@broadcast') return;
-            if (processedIds.has(m.key.id)) return;
-
-            const currentSession = activeSessions.get(sessionId);
-            if (!currentSession || currentSession.status !== 'connecte') return;
-
-            const messageTime = m.messageTimestamp.low || m.messageTimestamp; 
-            if (messageTime < (botStartTime - 5)) {
-                processedIds.add(m.key.id);
-                return;
-            }
-            processedIds.add(m.key.id);
-            if (processedIds.size > 2000) {
-                 const iterator = processedIds.values();
-                 processedIds.delete(iterator.next().value);
-            }
-
-            const from = m.key.remoteJid;
-            const pushName = m.pushName || 'Inconnu';
-            const sender = m.key.participant || m.key.remoteJid;
-            const bodyRaw = m.message.conversation || m.message.extendedTextMessage?.text || m.message.imageMessage?.caption || m.message.videoMessage?.caption || '';
-            const body = bodyRaw.trim();
-
-            userInfo.set(sender, {
-              pseudo: pushName,
-              number: sender.split('@')[0].replace(/[^0-9]/g, ''),
-              lang: globalLang
-            });
-
-            if (!body || body.includes('Message non chargé')) return;
-
-            const messageType = Object.keys(m.message || {})[0];
-            if (['protocolMessage', 'senderKeyDistributionMessage', 'appStateSyncKeyRequest', 'appStateSyncKeyShare', 'deviceSentMessage', 'reactionMessage'].includes(messageType)) return;
-
-            const isGroup = from.endsWith('@g.us');
-            let metadata = isGroup ? await sock.groupMetadata(from) : null;
-            const botId = sock.user?.id ? (sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id) : null;
-            const isOwner = sender === botId;
-            const isAdmin = isGroup ? metadata?.participants.some(p => p.id === sender && p.admin) || isOwner : false;
-            
-            const cmdRegex = /^[. ]?\s*([\p{L}0-9_]+)(?:\s+([\s\S]*))?$/u;
-            const match = body.match(cmdRegex);
-
-            if (isGroup && !match) {
-                const textContent = bodyRaw;
-                const mode = sessionData.noLienMode[from] || 'off';
-                if (mode !== 'off' && textContent && /https?:\/\/|www\./i.test(textContent)) {
-                    const senderIsAdmin = metadata.participants.find(p => p.id === sender)?.admin != null;
-                    const strict = mode === 'strict';
-                    if ((strict && sender !== botId) || (!strict && !senderIsAdmin)) {
-                        await sock.sendMessage(from, { delete: m.key });
-                    }
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+            if (qr) {
+                sessionData.qrString = qr;
+                const currentSession = activeSessions.get(sessionId);
+                if (currentSession) {
+                    currentSession.status = 'qr_disponible';
+                    currentSession.qrString = qr;
+                    currentSession.sock = sock;
                 }
             }
+            if (connection === 'connecting') {
+                const currentSession = activeSessions.get(sessionId);
+                if (currentSession) currentSession.status = 'synchronisation';
+            }
+            if (connection === 'open') {
+                const botId = sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id;
+                sessionData.ownerJid = botId;
+                sessionData.active = true;
+                sessionData.readyAt = Date.now();
+                const currentSession = activeSessions.get(sessionId);
+                if (currentSession) {
+                    currentSession.number = sock.user ? sock.user.id.split(':')[0] : null;
+                    currentSession.status = 'connecte';
+                    currentSession.format = format;
+                    currentSession.sock = sock;
+                }
+                if (autoExpire) {
+                    setTimeout(async () => {
+                        try {
+                            await deleteMongoSession(sessionId);
+                            sock.logout();
+                        } catch(e) {}
+                    }, 17 * 60 * 60 * 1000);
+                }
+            }
+            if (connection === 'close') {
+                sessionData.active = false;
+                const currentSession = activeSessions.get(sessionId);
+                if (currentSession) currentSession.status = 'deconnecte';
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                const collection = db.collection('baileys_auth');
+                const sessionExists = await collection.findOne({ _id: `auth-${sessionId}-creds` });
+                if (statusCode !== DisconnectReason.loggedOut && sessionExists) {
+                    setTimeout(() => startAdamBot(sessionId, autoExpire, format, true), 5000);
+                } else {
+                    try {
+                        if (sessionId.startsWith('temp_')) {
+                            await deleteMongoSession(sessionId);
+                        }
+                    } catch (e) {}
+                }
+            }
+        });
 
-            if (!match) return;
+        const safeGroupUpdate = async (jid, participants, action) => {
+            try {
+                const cleanParticipants = participants.map(p => p.includes('@') ? p : `${p.replace(/[^0-9]/g, '')}@s.whatsapp.net`);
+                await sock.groupParticipantsUpdate(jid, cleanParticipants, action);
+                return true;
+            } catch (e) {
+                return false;
+            }
+        };
 
-            let command = match[1].toLowerCase();
-            let args = match[2] ? match[2].trim() : '';
+        const resolveTargets = async (arg, m) => {
+            const ctx = m.message?.extendedTextMessage?.contextInfo;
+            if (ctx?.mentionedJid?.length) return ctx.mentionedJid;
+            if (ctx?.participant) return [ctx.participant];
+            if (arg) return [arg.replace(/[^0-9]/g, '') + '@s.whatsapp.net'];
+            return [];
+        };
 
-            let internalCommand = null;
-            if (command === 'lang') {
-                internalCommand = 'lang';
-            } else {
-                const normCmd = normalizeText(command);
-                const currentMap = commandMaps[globalLang];
-                if (currentMap) {
-                    for (const [alias, intern] of Object.entries(currentMap)) {
-                        if (normalizeText(alias) === normCmd) {
-                            internalCommand = intern;
-                            break;
+        sock.ev.on('group-participants.update', async (update) => {
+            const { id: gjid, participants: newParts, action } = update;
+            if (action !== 'add' || !sessionData.bienvenueEnabled[gjid]) return;
+            const gmeta = await sock.groupMetadata(gjid);
+            const tWelcome = translations[globalLang] || translations.ht;
+            const welcomeTitle = tWelcome.welcome_title || "Bienvenue";
+            const welcomeTo = tWelcome.welcome_to || "Welcome to";
+            for (const user of newParts) {
+                const username = user.split('@')[0];
+                const welcomeText = `*○ ${welcomeTitle}*
+
+*Adam_D'H7*
+Utilisateur: "Adam_D’H7"
+Propriétaire: Adam_D'H7
+
+*${welcomeTo} ${gmeta.subject}*
+Nom: @${username}
+
+> *Adam_D'H7*`;
+                if (adamLogoBuffer) {
+                    await sock.sendMessage(gjid, { image: adamLogoBuffer, caption: welcomeText, mentions: [user] });
+                } else {
+                    await sock.sendMessage(gjid, { text: welcomeText, mentions: [user] });
+                }
+            }
+        });
+
+        sock.ev.on('messages.upsert', async (up) => {
+            try {
+                const m = up.messages[0];
+                if (!m.message || m.key.remoteJid === 'status@broadcast') return;
+                if (!sessionData.active) return;
+                if (processedIds.has(m.key.id)) return;
+                processedIds.add(m.key.id);
+                
+                if (processedIds.size > 2000) {
+                     const iterator = processedIds.values();
+                     processedIds.delete(iterator.next().value);
+                }
+
+                const from = m.key.remoteJid;
+                const pushName = m.pushName || 'Inconnu';
+                const sender = m.key.participant || m.key.remoteJid;
+                const bodyRaw = extractBody(m);
+                const body = bodyRaw.trim();
+
+                userInfo.set(sender, {
+                  pseudo: pushName,
+                  number: sender.split('@')[0].replace(/[^0-9]/g, ''),
+                  lang: globalLang
+                });
+
+                if (!body || body.includes('Message non chargé')) return;
+
+                const messageType = Object.keys(unwrapMessageContent(m.message) || {})[0];
+                if (['protocolMessage', 'senderKeyDistributionMessage', 'appStateSyncKeyRequest', 'appStateSyncKeyShare', 'deviceSentMessage', 'reactionMessage'].includes(messageType)) return;
+
+                const isGroup = from.endsWith('@g.us');
+                let metadata = isGroup ? await sock.groupMetadata(from) : null;
+                const botId = sock.user?.id ? (sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id) : null;
+                const isOwner = sender === botId;
+                const isAdmin = isGroup ? metadata?.participants.some(p => p.id === sender && p.admin) || isOwner : false;
+                
+                const cmdRegex = /^[. ]?\s*([\p{L}0-9_]+)(?:\s+([\s\S]*))?$/u;
+                const match = body.match(cmdRegex);
+
+                if (isGroup && !match) {
+                    const textContent = bodyRaw;
+                    const mode = sessionData.noLienMode[from] || 'off';
+                    if (mode !== 'off' && textContent && /https?:\/\/|www\./i.test(textContent)) {
+                        const senderIsAdmin = metadata.participants.find(p => p.id === sender)?.admin != null;
+                        const strict = mode === 'strict';
+                        if ((strict && sender !== botId) || (!strict && !senderIsAdmin)) {
+                            await sock.sendMessage(from, { delete: m.key });
                         }
                     }
                 }
-                if (!internalCommand) {
-                    for (const l of Object.keys(commandMaps)) {
-                        if (l === globalLang) continue;
-                        const mapL = commandMaps[l];
-                        for (const [alias, intern] of Object.entries(mapL)) {
+
+                if (!match) return;
+
+                let command = match[1].toLowerCase();
+                let args = match[2] ? match[2].trim() : '';
+
+                let internalCommand = null;
+                if (command === 'lang') {
+                    internalCommand = 'lang';
+                } else {
+                    const normCmd = normalizeText(command);
+                    const currentMap = commandMaps[globalLang];
+                    if (currentMap) {
+                        for (const [alias, intern] of Object.entries(currentMap)) {
                             if (normalizeText(alias) === normCmd) {
                                 internalCommand = intern;
                                 break;
                             }
                         }
-                        if (internalCommand) break;
+                    }
+                    if (!internalCommand) {
+                        for (const l of Object.keys(commandMaps)) {
+                            if (l === globalLang) continue;
+                            const mapL = commandMaps[l];
+                            for (const [alias, intern] of Object.entries(mapL)) {
+                                if (normalizeText(alias) === normCmd) {
+                                    internalCommand = intern;
+                                    break;
+                                }
+                            }
+                            if (internalCommand) break;
+                        }
                     }
                 }
-            }
-            if (!internalCommand) return;
+                if (!internalCommand) return;
 
-            const quoted = m.message?.extendedTextMessage?.contextInfo;
-            const quotedMessage = quoted?.quotedMessage;
+                const quoted = m.message?.extendedTextMessage?.contextInfo;
+                const quotedMessage = quoted?.quotedMessage;
 
-            const t = translations[globalLang] || translations.ht;
+                const t = translations[globalLang] || translations.ht;
 
-            switch (internalCommand) {
-                case 'menu':
-                    if (args.length > 0) break;
-                    const menuCaption = `*○ ${t.menu_title}*\n\n*${Adam_DH7}*\nUtilisateur: "${pushName}"\nPropriétaire: ${Adam_DH7}\n\n*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_vv}*\n*○ ${t.cmd_alive}*\n\n> *${Adam_DH7}*`;
-                    const menuOpts = {};
-                    if (adamLogoBuffer) {
-                        menuOpts.image = adamLogoBuffer;
-                        menuOpts.caption = menuCaption;
-                    } else {
-                        menuOpts.text = menuCaption;
-                    }
-                    await sock.sendMessage(from, menuOpts);
-                    break;
-
-                case 'alive':
-                    const uptimeText = formatUptime(botStartTime, globalLang);
-                    await sendFormatted(sock, from, t.alive_title, uptimeText, globalLang);
-                    break;
-
-                case 'qr':
-                    if (!args) break;
-                    const qrBuffer = await QRCode.toBuffer(args);
-                    await sock.sendMessage(from, { image: qrBuffer, caption: args });
-                    break;
-
-                case 'qrbot':
-                    const tempId = `temp_${Date.now()}`;
-                    const { state: tempState, saveCreds: tempSaveCreds } = await useMongoAuthState(tempId);
-                    const tempSock = makeWASocket({
-                        version,
-                        logger: pino({ level: 'silent' }),
-                        printQRInTerminal: false,
-                        auth: { creds: tempState.creds, keys: makeCacheableSignalKeyStore(tempState.keys, pino({ level: "silent" })) },
-                        browser: Browsers.macOS('Safari'),
-                        msgRetryCounterCache: retryCache
-                    });
-
-                    tempSock.ev.on('creds.update', tempSaveCreds);
-                    let qrSent = false;
-
-                    tempSock.ev.on('connection.update', async (update) => {
-                        const { qr, connection } = update;
-                        if (qr && !qrSent) {
-                            qrSent = true;
-                            try {
-                                const qrbuf = await QRCode.toBuffer(qr);
-                                const createdCaption = `*○ ${t.qrbot_created}*\n\n${t.qrbot_scan}\n\n> ${Adam_DH7}`;
-                                await sock.sendMessage(from, { image: qrbuf, caption: createdCaption });
-                            } catch (e) {}
-                        }
-                        if (connection === 'open') {
-                            const realId = tempSock.user.id.split(':')[0];
-                            await sock.sendMessage(from, { text: `*○ ${t.qrbot_connected}*\n\n${t.qrbot_active.replace('{id}', realId)}` });
-                            tempSock.end(undefined);
-                            try {
-                                await renameMongoSession(tempId, `session_${realId}`);
-                                startAdamBot(`session_${realId}`, false, 'qr');
-                            } catch (e) {}
-                        }
-                        if (connection === 'close') {
-                            const code = update.lastDisconnect?.error?.output?.statusCode;
-                            if (code === DisconnectReason.loggedOut) {
-                                try { await deleteMongoSession(tempId); } catch {}
-                            }
-                        }
-                    });
-                    setTimeout(() => {
-                         if (!qrSent && !tempSock.user) {
-                             tempSock.end(undefined);
-                             try { deleteMongoSession(tempId); } catch {}
-                         }
-                    }, 60000);
-                    break;
-
-                case 'lien':
-                    if (!isGroup) break;
-                    const tLien = translations[globalLang] || translations.ht;
-                    const c = await sock.groupInviteCode(from);
-                    const link = `https://chat.whatsapp.com/${c}`;
-                    const groupName = metadata.subject ? `*${metadata.subject}*\n` : '';
-                    const groupDesc = metadata.desc ? metadata.desc.toString().trim() + '\n\n' : '';
-                    const lienCapTitle = tLien.cmd_lien.charAt(0).toUpperCase() + tLien.cmd_lien.slice(1);
-                    const lienCaption = `*○ ${lienCapTitle}*\n\n*${Adam_DH7}*\nUtilisateur: "${pushName}"\nPropriétaire: ${Adam_DH7}\n\n${groupName}*${link}*\n\n${groupDesc}> ${Adam_DH7}`;
-                    const lienOpts = { caption: lienCaption };
-                    try {
-                        const ppUrl = await sock.profilePictureUrl(from, 'image');
-                        const response = await fetch(ppUrl);
-                        const ppBuffer = Buffer.from(await response.arrayBuffer());
-                        lienOpts.image = ppBuffer;
-                    } catch {
-                        if (adamLogoBuffer) {
-                            lienOpts.image = adamLogoBuffer;
-                        } else {
-                            lienOpts.text = lienCaption;
-                        }
-                    }
-                    await sock.sendMessage(from, lienOpts);
-                    break;
-
-                case 'tagall':
-                    if (!isGroup || !isAdmin) break;
-                    const tagTitle = t.cmd_tagall.charAt(0).toUpperCase() + t.cmd_tagall.slice(1);
-                    const participants = metadata.participants.map(p => p.id);
-                    const tagCaption = `*○ ${tagTitle}*\n\n*${Adam_DH7}*\nUtilisateur: ${pushName}\n\n${participants.map((p, i) => (i % 2 === 0 ? '●' : '○') + ' @' + p.split('@')[0]).join('\n')}\n\n> *${Adam_DH7}*`;
-                    const tagOpts = { mentions: participants };
-                    if (adamLogoBuffer) {
-                        tagOpts.image = adamLogoBuffer;
-                        tagOpts.caption = tagCaption;
-                    } else {
-                        tagOpts.text = tagCaption;
-                    }
-                    await sock.sendMessage(from, tagOpts);
-                    break;
-
-                case 'code':
-                    if (!args) return;
-                    try {
-                        const response = await fetch('https://tf.bot.adamdh7.org/get-code', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ number: args.replace(/[^0-9]/g, ''), method: 'code', autoExpire: true })
-                        });
-                        const data = await response.json();
-                        if (data && data.code) {
-                            const tfid = Math.floor(1000000 + Math.random() * 9000000);
-                            const confirmLink = `https://tf.bot.adamdh7.org/TF-${tfid}`;
-                            const confirmText = t.code_confirm.replace('{link}', confirmLink);
-                            const msgConfirmation = await sock.sendMessage(from, { text: confirmText });
-                            tfEvents.once('ok-' + tfid, async () => {
-                                await sock.sendMessage(from, { delete: msgConfirmation.key });
-                                await sock.sendMessage(from, { text: data.code });
-                            });
-                        }
-                    } catch (e) {}
-                    break;
-
-                case 'hidetag':
-                    if (!isGroup || !(isAdmin || isOwner)) break;
-                    const allMentions = metadata.participants.map(p => p.id);
-                    const msgOpts = { mentions: allMentions };
-                    const findQuoted = () => {
-                        if (typeof quotedMessage !== 'undefined' && quotedMessage) return quotedMessage;
-                        if (m.message?.extendedTextMessage?.contextInfo?.quotedMessage) return m.message.extendedTextMessage.contextInfo.quotedMessage;
-                        return m.message;
-                    };
-                    const unwrap = (obj) => {
-                        if (!obj) return null;
-                        let x = obj;
-                        if (x.ephemeralMessage) x = x.ephemeralMessage.message;
-                        if (x.viewOnceMessage || x.viewOnceMessageV2 || x.viewOnceMessageV2Extension) {
-                            const vo = x.viewOnceMessage || x.viewOnceMessageV2 || x.viewOnceMessageV2Extension;
-                            x = vo.message;
-                        }
-                        if (x.templateMessage) x = x.templateMessage.message;
-                        while (x && (x.message || x.messages)) x = x.message || x.messages[0];
-                        return x;
-                    };
-                    let sourceWrapper = findQuoted();
-                    let viewOnceOpts = {};
-                    let sourceMessage = unwrap(sourceWrapper);
-                    if (sourceWrapper) {
-                        const keys0 = Object.keys(sourceWrapper || {});
-                        if (keys0.some(k => k.toLowerCase().includes('viewonce'))) {
-                            viewOnceOpts = { viewOnce: true };
-                        }
-                    }
-                    let hasMedia = false;
-                    if (sourceMessage) {
-                        const mediaKeys = Object.keys(sourceMessage).filter(k => k.endsWith('Message') && !['conversation', 'extendedTextMessage'].includes(k));
-                        if (mediaKeys.length > 0) {
-                            hasMedia = true;
-                            const mediaTypeKey = mediaKeys[0];
-                            const media = sourceMessage[mediaTypeKey];
-                            const dlType = mediaTypeKey === 'documentMessage' ? 'document' : mediaTypeKey.replace('Message', '').toLowerCase();
-                            const stream = await downloadContentFromMessage(media, dlType);
-                            let buffer = Buffer.from([]);
-                            for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
-                            msgOpts[dlType] = buffer;
-                            if (media.caption) msgOpts.caption = media.caption;
-                            if (dlType === 'document') {
-                                if (media.fileName) msgOpts.fileName = media.fileName;
-                                if (media.mimetype) msgOpts.mimetype = media.mimetype;
-                                if (media.fileLength) msgOpts.fileLength = media.fileLength;
-                            }
-                            if (dlType === 'audio') {
-                                msgOpts.ptt = !!media.ptt;
-                                if (media.seconds) msgOpts.seconds = media.seconds;
-                                if (media.waveform) msgOpts.waveform = media.waveform;
-                            }
-                            if (dlType === 'video') {
-                                msgOpts.gifPlayback = !!media.gifPlayback;
-                                if (media.seconds) msgOpts.seconds = media.seconds;
-                            }
-                            if (media.jpegThumbnail) msgOpts.jpegThumbnail = media.jpegThumbnail;
-                        } else {
-                            if (sourceMessage.conversation) msgOpts.text = sourceMessage.conversation;
-                            else if (sourceMessage.extendedTextMessage?.text) msgOpts.text = sourceMessage.extendedTextMessage.text;
-                            else if (sourceMessage.listResponseMessage?.singleSelectReply?.selectedRowId) msgOpts.text = sourceMessage.listResponseMessage.singleSelectReply.selectedRowId;
-                            else if (sourceMessage.buttonsResponseMessage?.selectedButtonId) msgOpts.text = sourceMessage.buttonsResponseMessage.selectedButtonId;
-                        }
-                    }
-                    if (args) {
-                        if (hasMedia) {
-                            msgOpts.caption = args;
-                        } else {
-                            msgOpts.text = args;
-                        }
-                    }
-                    if (Object.keys(msgOpts).length === 1) {
-                        msgOpts.text = '‎';
-                    } else if (hasMedia && !msgOpts.caption) {
-                        msgOpts.caption = '‎';
-                    }
-                    await sock.sendMessage(from, { ...msgOpts, ...viewOnceOpts });
-                    break;
-
-                case 'kick':
-                case 'add':
-                case 'promote':
-                case 'demote':
-                    if (!isGroup || !isAdmin) break;
-                    const targets = await resolveTargets(args, m);
-                    if (targets.length === 0) break;
-                    const filteredTargets = targets.filter(t => t !== botId);
-                    if (filteredTargets.length === 0) break;
-                    const actionMap = { kick: 'remove', add: 'add', promote: 'promote', demote: 'demote' };
-                    await safeGroupUpdate(from, filteredTargets, actionMap[internalCommand]);
-                    break;
-
-                case 'kickall':
-                    if (!isGroup || !isAdmin) break;
-                    const toKick = metadata.participants.filter(p => p.admin === null && p.id !== botId).map(p => p.id);
-                    if (toKick.length > 0) await safeGroupUpdate(from, toKick, 'remove');
-                    break;
-
-                case 'ferme':
-                    if (!isGroup || !isAdmin) break;
-                    await sock.groupSettingUpdate(from, 'announcement');
-                    break;
-
-                case 'ouvert':
-                    if (!isGroup || !isAdmin) break;
-                    await sock.groupSettingUpdate(from, 'not_announcement');
-                    break;
-
-                case 'bienvenue':
-                    if (!isGroup || !isAdmin) break;
-                    sessionData.bienvenueEnabled[from] = !sessionData.bienvenueEnabled[from];
-                    const welcomeStatus = sessionData.bienvenueEnabled[from] ? t.welcome_activated : t.welcome_deactivated;
-                    await sendFormatted(sock, from, t.cmd_bienvenue.charAt(0).toUpperCase() + t.cmd_bienvenue.slice(1), welcomeStatus, globalLang);
-                    break;
-
-                case 'nolien':
-                    if (!isGroup || !isAdmin) break;
-                    const currentM = sessionData.noLienMode[from] || 'off';
-                    sessionData.noLienMode[from] = currentM === 'normal' ? 'off' : 'normal';
-                    const nolienStatus = sessionData.noLienMode[from] === 'normal' ? t.nolien_activated : t.nolien_deactivated;
-                    await sendFormatted(sock, from, t.cmd_nolien.charAt(0).toUpperCase() + t.cmd_nolien.slice(1), nolienStatus, globalLang);
-                    break;
-
-                case 'nolien2':
-                    if (!isGroup || !isAdmin) break;
-                    const currentS = sessionData.noLienMode[from] || 'off';
-                    sessionData.noLienMode[from] = currentS === 'strict' ? 'off' : 'strict';
-                    const nolien2Status = sessionData.noLienMode[from] === 'strict' ? t.nolien2_activated : t.nolien2_deactivated;
-                    await sendFormatted(sock, from, t.cmd_nolien2.charAt(0).toUpperCase() + t.cmd_nolien2.slice(1), nolien2Status, globalLang);
-                    break;
-
-                case 'del':
-                    if (!quoted) break;
-                    const quotedParticipant = quoted.participant || quoted.remoteJid;
-                    const isQuotedBot = quotedParticipant === botId;
-                    const delKey = { remoteJid: from, id: quoted.stanzaId, participant: quotedParticipant };
-                    if (isQuotedBot) {
-                        if (!isOwner) break;
-                        await sock.sendMessage(from, { delete: delKey });
-                    } else {
-                        if (!isGroup || !isAdmin) break;
-                        await sock.sendMessage(from, { delete: delKey });
-                    }
-                    break;
-
-                case 'vv':
-                    if (!quotedMessage) break;
-                    let voType = Object.keys(quotedMessage)[0];
-                    let voMsg = quotedMessage;
-                    if (voType.includes('viewOnce')) {
-                        voMsg = quotedMessage[voType].message || quotedMessage[voType];
-                        voType = Object.keys(voMsg)[0];
-                    }
-                    const mediaVO = voMsg[voType];
-                    const dlTypeVO = voType === 'documentMessage' ? 'document' : voType.replace('Message', '').toLowerCase();
-                    const streamVO = await downloadContentFromMessage(mediaVO, dlTypeVO);
-                    let bufferVO = Buffer.from([]);
-                    for await (const chunk of streamVO) bufferVO = Buffer.concat([bufferVO, chunk]);
-                    const sendOptsVO = { [dlTypeVO]: bufferVO };
-                    if (mediaVO.caption) sendOptsVO.caption = mediaVO.caption;
-                    await sock.sendMessage(from, sendOptsVO);
-                    break;
-
-                case 'ai':
-                    const promptText = args.trim() ? args : body;
-                    if (!promptText) break;
-                    let history = chatHistories.get(from) || [];
-                    history.push({role: "user", content: promptText});
-                    chatHistories.set(from, history);
-                    const userInfoObj = userInfo.get(sender) || {pseudo: pushName, number: sender.split('@')[0], lang: globalLang};
-                    const userMsgCount = history.filter(h => h.role === 'user').length;
-                    const needsAd = (userMsgCount % 4 === 0);
-                    let messagesForAI = buildAIMessages(history, userInfoObj, globalLang);
-                    const aiResponseText = await callCloudflareAI("@cf/meta/llama-3.3-70b-instruct-fp8-fast", messagesForAI, 3000);
-                    if (!needsAd) {
-                        history.push({role: "assistant", content: aiResponseText});
-                        if (history.length > 7) history = history.slice(-7);
-                        chatHistories.set(from, history);
-                        const formattedAiResponse = `*○ ${t.ai_title}*\n${aiResponseText}\n\n> ${Adam_DH7}`;
-                        await sock.sendMessage(from, { text: formattedAiResponse });
-                    } else {
-                        const tfid = Math.floor(1000000 + Math.random() * 9000000);
-                        const confirmLink = `https://tf.bot.adamdh7.org/TF-${tfid}`;
-                        const clickText = t.ai_click_to_receive.replace('{link}', confirmLink);
-                        const clickMsg = await sock.sendMessage(from, { text: clickText });
-                        const formattedAiResponse = `*○ ${t.ai_title}*\n${aiResponseText}\n\n> ${Adam_DH7}`;
-                        const timeoutId = setTimeout(async () => {
-                            try {
-                                await sock.sendMessage(from, { delete: clickMsg.key });
-                            } catch (e) {}
-                            pendingAIResponses.delete(tfid);
-                        }, 7000);
-                        pendingAIResponses.set(tfid, {
-                            from: from,
-                            aiResponseText: aiResponseText,
-                            formattedResponse: formattedAiResponse,
-                            clickMsgKey: clickMsg.key,
-                            timeoutId: timeoutId
-                        });
-                        tfEvents.once('ok-' + tfid, async () => {
-                            const pending = pendingAIResponses.get(tfid);
-                            if (!pending) return;
-                            clearTimeout(pending.timeoutId);
-                            try {
-                                await sock.sendMessage(pending.from, { delete: pending.clickMsgKey });
-                            } catch (e) {}
-                            await sock.sendMessage(pending.from, { text: pending.formattedResponse });
-                            let hist = chatHistories.get(pending.from) || [];
-                            hist.push({role: "assistant", content: pending.aiResponseText});
-                            if (hist.length > 7) hist = hist.slice(-7);
-                            chatHistories.set(pending.from, hist);
-                            pendingAIResponses.delete(tfid);
-                        });
-                    }
-                    break;
-
-                case 'lang':
-                    const langCode = args.toLowerCase();
-                    if (['fr', 'en', 'es', 'ht'].includes(langCode)) {
-                        globalLang = langCode;
-                        const msgText = t.lang_changed.replace('{lang}', langCode.toUpperCase());
-                        await sendFormatted(sock, from, t.lang_title, msgText, langCode);
-                    } else {
-                        await sendFormatted(sock, from, t.lang_title, t.languages_available, globalLang);
-                    }
-                    break;
-
-                case 'imaj':
-                    if (!args) {
-                        await sendFormatted(sock, from, t.imaj_title, t.imaj_prompt, globalLang);
+                switch (internalCommand) {
+                    case 'menu':
+                        if (args.length > 0) break;
+                        const menuCaptionText = `*Adam_D'H7*\nUtilisateur: "Adam_D’H7"\nPropriétaire: Adam_D'H7`;
+                        await sendFormatted(sock, from, t.menu_title, menuCaptionText, globalLang);
                         break;
-                    }
-                    try {
-                        const accountId = "c754bf19fa1b21106a6885e3be79274e";
-                        const token = "cfut_PxZCBwgwkUnnh38zccPPUSy4K5E6zYDc9xiUwcqc05395e5a";
-                        const aiRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-1-schnell`, {
-                          method: "POST",
-                          headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-                          body: JSON.stringify({ prompt: args, num_steps: 4 })
-                        });
-                        const aiData = await aiRes.json();
-                        if (!aiData.result || !aiData.result.image) throw new Error();
-                        const imageBuffer = Buffer.from(aiData.result.image, "base64");
-                        const capText = t.imaj_generated.replace('{prompt}', args);
-                        await sock.sendMessage(from, { 
-                          image: imageBuffer, 
-                          caption: `*○ ${t.image_generated_title}*\n${capText}\n\n> ${Adam_DH7}` 
-                        });
-                    } catch (e) {
-                        await sendFormatted(sock, from, t.imaj_title, t.imaj_error, globalLang);
-                    }
-                    break;
-
-                case 'cheche':
-                    if (!args) break;
-                    try {
-                        const searchData = await tavilySearch(args);
-                        let responseText = searchData.answer || "Pas de résultat trouvé.";
-                        if (searchData.results) {
-                          responseText += "\n\nSources:\n" + searchData.results.slice(0,3).map(r => `- ${r.url}`).join("\n");
-                        }
-                        await sendFormatted(sock, from, t.search_title, responseText, globalLang);
-                        if (searchData.images && searchData.images.length > 0) {
-                          for (let i = 0; i < Math.min(2, searchData.images.length); i++) {
-                            await sock.sendMessage(from, { image: { url: searchData.images[i] }, caption: `*○ ${t.search_title}*\nImage de recherche\n\n> ${Adam_DH7}` });
-                          }
-                        }
-                    } catch (e) {
-                        await sendFormatted(sock, from, t.search_title, t.search_error, globalLang);
-                    }
-                    break;
-
-                case 'sites':
-                    const sitesCaption = `*○ Sites*\n\n*Bot.Adam_D'H7 : https://bot.adamdh7.org*\n*Bref : https://bref.adamdh7.org*\n*MIZIK : https://mizik.adamdh7.org*\n*Tout : https://tout.adamdh7.org*\n*Chaine : https://whatsapp.com/channel/0029Vb6WLps7oQhWrUlyPQ2m*\n*Canal : https://t.me/dh7adam , t.me/tfmizik*\n*Pages : https://m.facebook.com/dh7adam , https://m.facebook.com/tfmizik*\n\n> ${Adam_DH7}`;
-                    const sitesOpts = {};
-                    if (adamLogoBuffer) {
-                        sitesOpts.image = adamLogoBuffer;
-                        sitesOpts.caption = sitesCaption;
-                    } else {
-                        sitesOpts.text = sitesCaption;
-                    }
-                    await sock.sendMessage(from, sitesOpts);
-                    break;
+                    case 'alive':
+                        const upTimeStr = formatUptime(process.uptime(), t);
+                        const aliveMsg = `*Adam_D'H7*\nUtilisateur: "Adam_D’H7"\nPropriétaire: Adam_D'H7\n\n*${t.connected_since} ${upTimeStr}*\n\n> *Adam_D'H7*`;
+                        await sendFormatted(sock, from, t.alive_title, aliveMsg, globalLang);
+                        break;
+                    case 'bienvenue':
+                        sessionData.bienvenueEnabled[from] = !sessionData.bienvenueEnabled[from];
+                        const bwStat = sessionData.bienvenueEnabled[from] ? t.welcome_on : t.welcome_off;
+                        await sendFormatted(sock, from, t.cmd_bienvenue, `${t.cmd_bienvenue} ${sessionData.bienvenueEnabled[from] ? t.enabled : t.disabled}\n${bwStat}`, globalLang);
+                        break;
+                    case 'nolien':
+                        sessionData.noLienMode[from] = sessionData.noLienMode[from] === 'simple' ? 'off' : 'simple';
+                        const nlStat = sessionData.noLienMode[from] === 'simple' ? t.nolien_on : t.nolien_off;
+                        await sendFormatted(sock, from, t.cmd_nolien, `${t.cmd_nolien} ${sessionData.noLienMode[from] === 'simple' ? t.enabled : t.disabled}\n${nlStat}`, globalLang);
+                        break;
+                    case 'nolien2':
+                        sessionData.noLienMode[from] = sessionData.noLienMode[from] === 'strict' ? 'off' : 'strict';
+                        const nl2Stat = sessionData.noLienMode[from] === 'strict' ? t.nolien2_on : t.nolien2_off;
+                        await sendFormatted(sock, from, t.cmd_nolien2, `${t.cmd_nolien2} ${sessionData.noLienMode[from] === 'strict' ? t.enabled : t.disabled}\n${nl2Stat}`, globalLang);
+                        break;
+                }
+            } catch (e) {
             }
-        } catch (e) {}
-    });
-
-    setInterval(async () => {
-        try {
-            await sock.authState.keys.get('app', ['']);
-        } catch (e) {}
-    }, 420000);
-
-    return sessionData;
+        });
+        return sessionData;
+    } catch (err) {
+        if (err.message === "SessionNotExists") {
+            const currentSession = activeSessions.get(sessionId);
+            if (currentSession) currentSession.status = 'deconnecte';
+            return;
+        }
+    }
 }
 
-const loadExistingSessions = async () => {
-  const collection = db.collection('baileys_auth');
-  const credsDocs = await collection.find({ _id: { $regex: /^auth-session_.*-creds$/ } }).toArray();
-  const sessionIds = [];
-  for (const doc of credsDocs) {
-    const match = doc._id.match(/^auth-(session_.*)-creds$/);
-    if (match) sessionIds.push(match[1]);
-  }
-  for (const sessionId of sessionIds) {
-    await startAdamBot(sessionId);
-  }
-};
 
 app.post('/get-code', async (req, res) => {
-    const { number, method, autoExpire = false } = req.body;
-    if (!method || (method === 'code' && !number)) {
-        return res.status(400).json({ error: 'Requête invalide' });
-    }
-    const sId = `session_${Date.now()}`;
-    const isQRMethod = method === 'qr';
-    const sess = await startAdamBot(sId, autoExpire, isQRMethod ? 'qr' : 'pair');
-    
-    if (method === 'code') {
-        try {
-            let attempts = 0;
-            while (attempts < 20 && !sess.sock.authState.creds.me) {
-                 await sleep(500);
-                 attempts++;
-            }
-            await sleep(2000);
-            
-            const cleanNumber = number.replace(/[^0-9]/g, '');
-            const code = await sess.sock.requestPairingCode(cleanNumber);
-            res.json({ code: code.match(/.{1,4}/g).join('-') });
-        } catch (e) {
-            res.status(500).json({ error: 'Échec de la demande de code' });
+    try {
+        const number = normalizePhoneNumber(req.body?.number);
+        const method = String(req.body?.method || '').toLowerCase();
+        if (!['code', 'qr', 'pair'].includes(method)) {
+            return res.status(400).json({ error: 'Requête invalide' });
         }
-    } else if (method === 'qr') {
-        try {
-            const qr = await new Promise((resolve, reject) => {
-                let resolved = false;
-                sess.sock.ev.on('connection.update', (update) => {
-                    if (update.qr && !resolved) {
-                        resolved = true;
-                        resolve(update.qr);
-                    }
-                });
-                setTimeout(() => {
-                    if (!resolved) reject(new Error('Timeout'));
-                }, 45000);
-            });
-            res.json({ qr });
-        } catch (e) {
-            res.status(500).json({ error: 'Échec de génération du QR code' });
+        const normalizedMethod = method === 'pair' ? 'code' : method;
+        if (normalizedMethod === 'code' && number.length < 6) {
+            return res.status(400).json({ error: 'Numéro invalide' });
         }
+
+        const sessionId = `temp_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+        const session = await startAdamBot(sessionId, false, normalizedMethod === 'qr' ? 'qr' : 'pair', false);
+        if (!session || !session.sock) {
+            return res.status(500).json({ error: 'Session indisponible' });
+        }
+
+        if (normalizedMethod === 'code') {
+            await waitForConnectionOpen(session.sock, 45000);
+            await sleep(1500);
+            const pairingCode = await session.sock.requestPairingCode(number);
+            const formatted = String(pairingCode || '').replace(/[^0-9A-Za-z]/g, '').match(/.{1,4}/g)?.join('-') || pairingCode;
+            return res.json({ code: formatted });
+        }
+
+        const qr = await waitForQr(session.sock, 45000);
+        return res.json({ qr });
+    } catch (err) {
+        return res.status(500).json({ error: 'Échec de génération' });
     }
 });
 
-const startBot = async () => {
-  await connectMongo();
-  setInterval(async () => {
-    try {
-      const stats = await db.stats();
-      if (stats.storageSize > 400 * 1024 * 1024) {
-        await db.dropDatabase();
-        process.exit(0);
-      }
-    } catch (e) {}
-  }, 60000);
-  await loadExistingSessions();
-  setInterval(() => {
-    const now = Date.now();
-    for (const [sid, sess] of activeSessions.entries()) {
-      if (!sess.number && (now - sess.createdAt > 4 * 60 * 1000)) {
-        activeSessions.delete(sid);
-      }
+
+async function loadExistingSessions() {
+    if (!db) return;
+    const collection = db.collection('baileys_auth');
+    const credsDocs = await collection.find({ _id: { $regex: /^auth-.*-creds$/ } }).toArray();
+    const sessionIds = [];
+    for (const doc of credsDocs) {
+        const match = doc._id.match(/^auth-(.*)-creds$/);
+        if (match && !match[1].startsWith('temp_')) sessionIds.push(match[1]);
     }
-  }, 30000);
-};
-startBot().catch(e => {});
-app.listen(PORT);
+    for (const sessionId of sessionIds) {
+        await startAdamBot(sessionId);
+    }
+}
+
+setInterval(async () => {
+    if (!db) return;
+    const collection = db.collection('baileys_auth');
+    const activeIds = Array.from(activeSessions.keys());
+    for (const id of activeIds) {
+        const sessionKey = `auth-${id}`;
+        const exists = await collection.findOne({ _id: `${sessionKey}-creds` });
+        if (!exists) {
+            const s = activeSessions.get(id);
+            if (s) {
+                if (s.sock) {
+                    try { s.sock.logout(); } catch(e) {}
+                }
+                s.status = 'deconnecte';
+            }
+        }
+    }
+}, 7 * 60 * 1000);
+
+connectMongo().then(async () => {
+    try {
+        await loadExistingSessions();
+    } catch (e) {}
+    app.listen(PORT, () => {
+    });
+}).catch(console.error);
