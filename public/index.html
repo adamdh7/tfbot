@@ -630,7 +630,7 @@
 
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible' && clickTime > 0) {
-                if (Date.now() - clickTime >= 7000) {
+                if (Date.now() - clickTime >= 4000) {
                     userPoints++;
                     localStorage.setItem('points', userPoints);
                     updateUI();
