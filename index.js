@@ -41,14 +41,6 @@ function fixBuffers(obj) {
     return obj;
 }
 
-function formatBytes(bytes) {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
 async function useMongoAuthState(sessionId, expectExisting = false) {
   const collection = db.collection('baileys_auth');
   const sessionKey = `auth-${sessionId}`;
@@ -273,6 +265,14 @@ function formatUptime(seconds, t) {
     return parts.join(', ');
 }
 
+function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
 const translations = {
   fr: {
     cmd_ai: "ia", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "chercher",
@@ -282,7 +282,7 @@ const translations = {
     cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "supp", cmd_vv: "vv", cmd_sites: "sit", cmd_ping: "ping", cmd_bref: "bref",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Connecté depuis", days: "jour(s)", hours: "heure(s)", minutes: "minute(s)", seconds: "seconde(s)",
     enabled: "activé", disabled: "désactivé", welcome_on: "Bienvenue activée", welcome_off: "Bienvenue désactivée", nolien_on: "Nolien activé", nolien_off: "Nolien désactivé", nolien2_on: "Nolien2 activé", nolien2_off: "Nolien2 désactivé",
-    welcome_title: "Bienvenue", welcome_to: "Bienvenue dans", just_hidetag: "C'est juste un hidetag",
+    welcome_title: "Bienvenue", welcome_to: "Bienvenue dans",
     menu_title: "Menu", lang_changed: "La langue du bot est maintenant {lang}.", languages_available: "Langues disponibles : fr en es ht",
     imaj_prompt: "Envoie un prompt après image pour générer une image.", imaj_generated: "*{prompt}*", imaj_error: "Erreur génération image - Réessaye.", search_title: "Recherche", search_error: "Erreur recherche",
     lang_title: "Langue", ai_title: "Message", imaj_title: "Image", image_generated_title: "Image Générée",
@@ -291,7 +291,8 @@ const translations = {
     qrbot_created: "Nouvelle Session Créée",
     qrbot_scan: "Scannez ce code pour connecter la nouvelle session.",
     qrbot_connected: "Session Connectée",
-    qrbot_active: "La nouvelle session est active.\nID: {id}"
+    qrbot_active: "La nouvelle session est active.\nID: {id}",
+    hidetag_title: "Hidetag", hidetag_default: "Il s'agit juste d'un hidetag"
   },
   en: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "search",
@@ -301,7 +302,7 @@ const translations = {
     cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_vv: "vv", cmd_sites: "sit", cmd_ping: "ping", cmd_bref: "bref",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Connected for", days: "day(s)", hours: "hour(s)", minutes: "minute(s)", seconds: "second(s)",
     enabled: "enabled", disabled: "disabled", welcome_on: "Welcome enabled", welcome_off: "Welcome disabled", nolien_on: "No link enabled", nolien_off: "No link disabled", nolien2_on: "Strict no link enabled", nolien2_off: "Strict no link disabled",
-    welcome_title: "Welcome", welcome_to: "Welcome to", just_hidetag: "It's just a hidetag",
+    welcome_title: "Welcome", welcome_to: "Welcome to",
     menu_title: "Menu", lang_changed: "Bot language is now {lang}.", languages_available: "Available languages: fr en es ht",
     imaj_prompt: "Send a prompt after image to generate an image.", imaj_generated: "*{prompt}*", imaj_error: "Image generation error - Try again.", search_title: "Search", search_error: "Search error",
     lang_title: "Language", ai_title: "Message", imaj_title: "Image", image_generated_title: "Generated Image",
@@ -310,7 +311,8 @@ const translations = {
     qrbot_created: "New Session Created",
     qrbot_scan: "Scan this QR code to connect the new session.",
     qrbot_connected: "Session Connected",
-    qrbot_active: "The new session is active.\nID: {id}"
+    qrbot_active: "The new session is active.\nID: {id}",
+    hidetag_title: "Hidetag", hidetag_default: "It’s just a hidetag"
   },
   es: {
     cmd_ai: "ia", cmd_lang: "lang", cmd_imaj: "imagen", cmd_cheche: "buscar",
@@ -320,7 +322,7 @@ const translations = {
     cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "borrar", cmd_vv: "vv", cmd_sites: "sit", cmd_ping: "ping", cmd_bref: "bref",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Conectado por", days: "día(s)", hours: "hora(s)", minutes: "minuto(s)", seconds: "segundo(s)",
     enabled: "activado", disabled: "desactivado", welcome_on: "Bienvenida activada", welcome_off: "Bienvenida desactivada", nolien_on: "Sin enlaces activado", nolien_off: "Sin enlaces desactivado", nolien2_on: "Sin enlaces estricto activado", nolien2_off: "Sin enlaces estricto desactivado",
-    welcome_title: "Bienvenida", welcome_to: "Bienvenida a", just_hidetag: "Es solo un hidetag",
+    welcome_title: "Bienvenida", welcome_to: "Bienvenida a",
     menu_title: "Menú", lang_changed: "El idioma del bot es ahora {lang}.", languages_available: "Idiomas disponibles: fr en es ht",
     imaj_prompt: "Envía un prompt después de imagen para generar una imagen.", imaj_generated: "*{prompt}*", imaj_error: "Error al generar imagen - Inténtalo de nuevo.", search_title: "Búsqueda", search_error: "Error de búsqueda",
     lang_title: "Idioma", ai_title: "Mensaje", imaj_title: "Imagen", image_generated_title: "Imagen Generada",
@@ -329,7 +331,8 @@ const translations = {
     qrbot_created: "Nueva Sesión Creada",
     qrbot_scan: "Escanea este código para conectar la nueva sesión.",
     qrbot_connected: "Sesión Conectada",
-    qrbot_active: "La nueva sesión está activa.\nID: {id}"
+    qrbot_active: "La nueva sesión está activa.\nID: {id}",
+    hidetag_title: "Hidetag", hidetag_default: "Es solo un hidetag"
   },
   ht: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "imaj", cmd_cheche: "cheche",
@@ -339,7 +342,7 @@ const translations = {
     cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "sip", cmd_vv: "vv", cmd_sites: "sit", cmd_ping: "ping", cmd_bref: "bref",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Konekte depi", days: "jou", hours: "èdtan", minutes: "minit", seconds: "segonn",
     enabled: "aktive", disabled: "dezaktive", welcome_on: "Byenveni aktive", welcome_off: "Byenveni dezaktive", nolien_on: "Nolyen aktive", nolien_off: "Nolyen dezaktive", nolien2_on: "Nolyen2 aktive", nolien2_off: "Nolyen2 dezaktive",
-    welcome_title: "Byenveni", welcome_to: "Byenveni nan", just_hidetag: "Se jis yon hidetag",
+    welcome_title: "Byenveni", welcome_to: "Byenveni nan",
     menu_title: "Meni", lang_changed: "Lang bot la se kounye a {lang}.", languages_available: "Lang disponib : fr en es ht",
     imaj_prompt: "Voye yon prompt apre imaj pou jenere yon imaj.", imaj_generated: "*{prompt}*", imaj_error: "Erè jenere imaj - Eseye ankò.", search_title: "Rechèch", search_error: "Erè rechèch",
     lang_title: "Lang", ai_title: "Mesaj", imaj_title: "Imaj", image_generated_title: "Imaj Jenere",
@@ -348,7 +351,8 @@ const translations = {
     qrbot_created: "Nouvo Sesyon Kreye",
     qrbot_scan: "Eskane kòd sa a pou konekte nouvo sesyon an.",
     qrbot_connected: "Sesyon Konekte",
-    qrbot_active: "Nouvo sesyon an aktif.\nID: {id}"
+    qrbot_active: "Nouvo sesyon an aktif.\nID: {id}",
+    hidetag_title: "Hidetag", hidetag_default: "Se jis yon hidetag"
   }
 };
 
@@ -454,9 +458,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
     try {
         const { state, saveCreds } = await useMongoAuthState(sessionId, expectExisting);
         const { version } = await fetchLatestBaileysVersion();
-        const botStartTime = Math.floor(Date.now() / 1000);
         const processedIds = new Set();
-        const groupCache = new Map();
 
         const sock = makeWASocket({
             version,
@@ -465,11 +467,11 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
             auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })) },
             browser: Browsers.macOS('Safari'),
             markOnlineOnConnect: true,
-            generateHighQualityLinkPreview: false,
-            syncFullHistory: false,
-            keepAliveIntervalMs: 30000,
+            generateHighQualityLinkPreview: true,
             msgRetryCounterCache: retryCache,
-            retryRequestDelayMs: 2000,
+            retryRequestDelayMs: 250,
+            maxMsgRetryCount: 3,
+            keepAliveIntervalMs: 30000,
             getMessage: async (key) => {
                 return undefined;
             }
@@ -653,27 +655,34 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 if (['protocolMessage', 'senderKeyDistributionMessage', 'appStateSyncKeyRequest', 'appStateSyncKeyShare', 'deviceSentMessage', 'reactionMessage'].includes(messageType)) return;
 
                 const isGroup = from.endsWith('@g.us');
-                const cmdRegex = /^[. ]?\s*([\p{L}0-9_]+)(?:\s+([\s\S]*))?$/u;
-                const match = body.match(cmdRegex);
-                const mode = sessionData.noLienMode[from] || 'off';
-
-                let metadata = isGroup ? groupCache.get(from) : null;
-                if (isGroup && !metadata && (match || mode !== 'off')) {
-                    try {
-                        metadata = await sock.groupMetadata(from);
-                        groupCache.set(from, metadata);
-                        setTimeout(() => groupCache.delete(from), 120000);
-                    } catch (e) {}
-                }
-
+                
                 const botId = sock.user?.id ? (sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id) : null;
                 const isOwner = sender === botId;
-                const isAdmin = isGroup && metadata ? metadata.participants.some(p => p.id === sender && p.admin) || isOwner : false;
+
+                let metadataCache = null;
+                const getMeta = async () => {
+                    if (metadataCache) return metadataCache;
+                    if (isGroup) {
+                        try { metadataCache = await sock.groupMetadata(from); } catch (e) {}
+                    }
+                    return metadataCache;
+                };
+
+                const checkAdmin = async () => {
+                    if (isOwner) return true;
+                    if (!isGroup) return false;
+                    const metadataA = await getMeta();
+                    return metadataA ? metadataA.participants.some(p => p.id === sender && p.admin) : false;
+                };
+                
+                const cmdRegex = /^[. ]?\s*([\p{L}0-9_]+)(?:\s+([\s\S]*))?$/u;
+                const match = body.match(cmdRegex);
 
                 if (isGroup && !match) {
-                    const textContent = bodyRaw;
-                    if (mode !== 'off' && textContent && /https?:\/\/|www\./i.test(textContent)) {
-                        const senderIsAdmin = metadata && metadata.participants.find(p => p.id === sender)?.admin != null;
+                    const mode = sessionData.noLienMode[from] || 'off';
+                    if (mode !== 'off' && bodyRaw && /https?:\/\/|www\./i.test(bodyRaw)) {
+                        const metadataLink = await getMeta();
+                        const senderIsAdmin = metadataLink && metadataLink.participants.find(p => p.id === sender)?.admin != null;
                         const strict = mode === 'strict';
                         if ((strict && sender !== botId) || (!strict && !senderIsAdmin)) {
                             await sock.sendMessage(from, { delete: m.key });
@@ -795,10 +804,11 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         break;
                     case 'lien':
                         if (!isGroup) break;
+                        const metadataLien = await getMeta();
                         const c = await sock.groupInviteCode(from);
                         const link = `https://chat.whatsapp.com/${c}`;
-                        const groupName = metadata.subject ? `*${metadata.subject}*\n` : '';
-                        const groupDesc = metadata.desc ? metadata.desc.toString().trim() + '\n\n' : '';
+                        const groupName = metadataLien.subject ? `*${metadataLien.subject}*\n` : '';
+                        const groupDesc = metadataLien.desc ? metadataLien.desc.toString().trim() + '\n\n' : '';
                         const lienCapTitle = t.cmd_lien.charAt(0).toUpperCase() + t.cmd_lien.slice(1);
                         const lienCaption = `*○ ${lienCapTitle}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n${groupName}*${link}*\n\n${groupDesc}> Adam_D'H7`;
                         const lienOpts = { caption: lienCaption };
@@ -817,9 +827,11 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         await sock.sendMessage(from, lienOpts);
                         break;
                     case 'tagall':
-                        if (!isGroup || !isOwner) break;
+                        const isAdminTA = await checkAdmin();
+                        if (!isGroup || !isAdminTA) break;
+                        const metadataTag = await getMeta();
                         const tagTitle = t.cmd_tagall.charAt(0).toUpperCase() + t.cmd_tagall.slice(1);
-                        const participants = metadata.participants.map(p => p.id);
+                        const participants = metadataTag.participants.map(p => p.id);
                         const tagBody = participants.map((p, i) => (i % 2 === 0 ? '●' : '○') + ' @' + p.split('@')[0]).join('\n');
                         const tagCaption = `*○ ${tagTitle}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n${tagBody}\n\n> Adam_D'H7`;
                         const tagOpts = { mentions: participants };
@@ -853,8 +865,10 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         } catch (e) {}
                         break;
                     case 'hidetag':
-                        if (!isGroup || !isOwner) break;
-                        const allMentions = metadata.participants.map(p => p.id);
+                        const isAdminHT = await checkAdmin();
+                        if (!isGroup || !(isAdminHT || isOwner)) break;
+                        const metadataHT = await getMeta();
+                        const allMentions = metadataHT.participants.map(p => p.id);
                         const msgOpts = { mentions: allMentions };
                         const findQuoted = () => {
                             if (typeof quotedMessage !== 'undefined' && quotedMessage) return quotedMessage;
@@ -917,68 +931,77 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                 else if (sourceMessage.buttonsResponseMessage?.selectedButtonId) msgOpts.text = sourceMessage.buttonsResponseMessage.selectedButtonId;
                             }
                         }
-                        
-                        let extractedText = args;
-                        if (!extractedText) {
-                            if (hasMedia && msgOpts.caption) {
-                                extractedText = msgOpts.caption;
-                                delete msgOpts.caption;
-                            } else if (msgOpts.text) {
-                                extractedText = msgOpts.text;
-                                delete msgOpts.text;
+                        if (args) {
+                            if (hasMedia) {
+                                msgOpts.caption = args;
+                            } else {
+                                msgOpts.text = args;
                             }
                         }
-                        if (!extractedText || extractedText === '‎') extractedText = t.just_hidetag;
-                        
-                        const formattedHidetagText = `*○ Hidetag*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n*${extractedText}*\n\n> Adam_D'H7`;
-                        
-                        if (hasMedia) {
-                            msgOpts.caption = formattedHidetagText;
-                        } else {
-                            msgOpts.text = formattedHidetagText;
+                        if (!msgOpts.text && !msgOpts.caption && !hasMedia) {
+                            msgOpts.text = '‎';
+                        } else if (hasMedia && !msgOpts.caption) {
+                            msgOpts.caption = '‎';
                         }
-                        
+                        if ((!msgOpts.text || msgOpts.text === '‎') && (!msgOpts.caption || msgOpts.caption === '‎')) {
+                            const htTitle = t.hidetag_title || "Hidetag";
+                            const htDefault = t.hidetag_default || "It’s just a hidetag";
+                            const defaultText = `*○ ${htTitle}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n*${htDefault}*\n\n> Adam_D'H7`;
+                            if (hasMedia) {
+                                msgOpts.caption = defaultText;
+                            } else {
+                                msgOpts.text = defaultText;
+                            }
+                        }
                         await sock.sendMessage(from, { ...msgOpts, ...viewOnceOpts });
                         break;
                     case 'kick':
                     case 'add':
                     case 'promote':
                     case 'demote':
-                        if (!isGroup || !isAdmin) break;
+                        const isAdminK = await checkAdmin();
+                        if (!isGroup || !isAdminK) break;
                         const targets = await resolveTargets(args, m);
                         if (targets.length === 0) break;
-                        const filteredTargets = targets.filter(t => t !== botId);
+                        const filteredTargets = targets.filter(tr => tr !== botId);
                         if (filteredTargets.length === 0) break;
                         const actionMap = { kick: 'remove', add: 'add', promote: 'promote', demote: 'demote' };
                         await safeGroupUpdate(from, filteredTargets, actionMap[internalCommand]);
                         break;
                     case 'kickall':
-                        if (!isGroup || !isAdmin) break;
-                        const toKick = metadata.participants.filter(p => p.admin === null && p.id !== botId).map(p => p.id);
+                        const isAdminKA = await checkAdmin();
+                        if (!isGroup || !isAdminKA) break;
+                        const metadataKA = await getMeta();
+                        const toKick = metadataKA.participants.filter(p => p.admin === null && p.id !== botId).map(p => p.id);
                         if (toKick.length > 0) await safeGroupUpdate(from, toKick, 'remove');
                         break;
                     case 'ferme':
-                        if (!isGroup || !isAdmin) break;
+                        const isAdminF = await checkAdmin();
+                        if (!isGroup || !isAdminF) break;
                         await sock.groupSettingUpdate(from, 'announcement');
                         break;
                     case 'ouvert':
-                        if (!isGroup || !isAdmin) break;
+                        const isAdminO = await checkAdmin();
+                        if (!isGroup || !isAdminO) break;
                         await sock.groupSettingUpdate(from, 'not_announcement');
                         break;
                     case 'bienvenue':
-                        if (!isGroup || !isAdmin) break;
+                        const isAdminB = await checkAdmin();
+                        if (!isGroup || !isAdminB) break;
                         sessionData.bienvenueEnabled[from] = !sessionData.bienvenueEnabled[from];
                         const bwStat = sessionData.bienvenueEnabled[from] ? t.welcome_on : t.welcome_off;
                         await sendFormatted(sock, from, t.cmd_bienvenue, `*${bwStat}*`, pushName, false);
                         break;
                     case 'nolien':
-                        if (!isGroup || !isAdmin) break;
+                        const isAdminNL = await checkAdmin();
+                        if (!isGroup || !isAdminNL) break;
                         sessionData.noLienMode[from] = sessionData.noLienMode[from] === 'simple' ? 'off' : 'simple';
                         const nlStat = sessionData.noLienMode[from] === 'simple' ? t.nolien_on : t.nolien_off;
                         await sendFormatted(sock, from, t.cmd_nolien, `*${nlStat}*`, pushName, false);
                         break;
                     case 'nolien2':
-                        if (!isGroup || !isAdmin) break;
+                        const isAdminNL2 = await checkAdmin();
+                        if (!isGroup || !isAdminNL2) break;
                         sessionData.noLienMode[from] = sessionData.noLienMode[from] === 'strict' ? 'off' : 'strict';
                         const nl2Stat = sessionData.noLienMode[from] === 'strict' ? t.nolien2_on : t.nolien2_off;
                         await sendFormatted(sock, from, t.cmd_nolien2, `*${nl2Stat}*`, pushName, false);
@@ -992,7 +1015,8 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             if (!isOwner) break;
                             await sock.sendMessage(from, { delete: delKey });
                         } else {
-                            if (!isGroup || !isAdmin) break;
+                            const isAdminD = await checkAdmin();
+                            if (!isGroup || !isAdminD) break;
                             await sock.sendMessage(from, { delete: delKey });
                         }
                         break;
@@ -1052,7 +1076,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             if (bJson.success || bJson.url) {
                                 const fUrl = bJson.fileUrl || bJson.url;
                                 const rawSize = bJson.size || bBuffer.length;
-                                const formattedSize = formatBytes(rawSize);
+                                const formattedSize = typeof rawSize === 'number' ? formatBytes(rawSize) : formatBytes(parseInt(rawSize) || bBuffer.length);
                                 const brefText = `*${fUrl}*\n*size* : ${formattedSize}`;
                                 await sendFormatted(sock, from, "Bref", brefText, pushName, false);
                             }
@@ -1243,24 +1267,22 @@ async function loadExistingSessions() {
 
 setInterval(async () => {
     if (!db) return;
-    try {
-        const collection = db.collection('baileys_auth');
-        const activeIds = Array.from(activeSessions.keys());
-        for (const id of activeIds) {
-            const sessionKey = `auth-${id}`;
-            const exists = await collection.findOne({ _id: `${sessionKey}-creds` });
-            if (!exists) {
-                const s = activeSessions.get(id);
-                if (s) {
-                    if (s.sock) {
-                        try { s.sock.logout(); } catch(e) {}
-                    }
-                    s.status = 'deconnecte';
+    const collection = db.collection('baileys_auth');
+    const activeIds = Array.from(activeSessions.keys());
+    for (const id of activeIds) {
+        const sessionKey = `auth-${id}`;
+        const exists = await collection.findOne({ _id: `${sessionKey}-creds` });
+        if (!exists) {
+            const s = activeSessions.get(id);
+            if (s) {
+                if (s.sock) {
+                    try { s.sock.logout(); } catch(e) {}
                 }
+                s.status = 'deconnecte';
             }
         }
-    } catch(e) {}
-}, 7 * 60 * 1000);
+    }
+}, 3 * 60 * 1000);
 
 connectMongo().then(async () => {
     try {
