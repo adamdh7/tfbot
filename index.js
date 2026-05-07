@@ -41,6 +41,14 @@ function fixBuffers(obj) {
     return obj;
 }
 
+function formatBytes(bytes) {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
 async function useMongoAuthState(sessionId, expectExisting = false) {
   const collection = db.collection('baileys_auth');
   const sessionKey = `auth-${sessionId}`;
@@ -274,7 +282,7 @@ const translations = {
     cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "supp", cmd_vv: "vv", cmd_sites: "sit", cmd_ping: "ping", cmd_bref: "bref",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Connecté depuis", days: "jour(s)", hours: "heure(s)", minutes: "minute(s)", seconds: "seconde(s)",
     enabled: "activé", disabled: "désactivé", welcome_on: "Bienvenue activée", welcome_off: "Bienvenue désactivée", nolien_on: "Nolien activé", nolien_off: "Nolien désactivé", nolien2_on: "Nolien2 activé", nolien2_off: "Nolien2 désactivé",
-    welcome_title: "Bienvenue", welcome_to: "Bienvenue dans",
+    welcome_title: "Bienvenue", welcome_to: "Bienvenue dans", just_hidetag: "C'est juste un hidetag",
     menu_title: "Menu", lang_changed: "La langue du bot est maintenant {lang}.", languages_available: "Langues disponibles : fr en es ht",
     imaj_prompt: "Envoie un prompt après image pour générer une image.", imaj_generated: "*{prompt}*", imaj_error: "Erreur génération image - Réessaye.", search_title: "Recherche", search_error: "Erreur recherche",
     lang_title: "Langue", ai_title: "Message", imaj_title: "Image", image_generated_title: "Image Générée",
@@ -293,7 +301,7 @@ const translations = {
     cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_vv: "vv", cmd_sites: "sit", cmd_ping: "ping", cmd_bref: "bref",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Connected for", days: "day(s)", hours: "hour(s)", minutes: "minute(s)", seconds: "second(s)",
     enabled: "enabled", disabled: "disabled", welcome_on: "Welcome enabled", welcome_off: "Welcome disabled", nolien_on: "No link enabled", nolien_off: "No link disabled", nolien2_on: "Strict no link enabled", nolien2_off: "Strict no link disabled",
-    welcome_title: "Welcome", welcome_to: "Welcome to",
+    welcome_title: "Welcome", welcome_to: "Welcome to", just_hidetag: "It's just a hidetag",
     menu_title: "Menu", lang_changed: "Bot language is now {lang}.", languages_available: "Available languages: fr en es ht",
     imaj_prompt: "Send a prompt after image to generate an image.", imaj_generated: "*{prompt}*", imaj_error: "Image generation error - Try again.", search_title: "Search", search_error: "Search error",
     lang_title: "Language", ai_title: "Message", imaj_title: "Image", image_generated_title: "Generated Image",
@@ -312,7 +320,7 @@ const translations = {
     cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "borrar", cmd_vv: "vv", cmd_sites: "sit", cmd_ping: "ping", cmd_bref: "bref",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Conectado por", days: "día(s)", hours: "hora(s)", minutes: "minuto(s)", seconds: "segundo(s)",
     enabled: "activado", disabled: "desactivado", welcome_on: "Bienvenida activada", welcome_off: "Bienvenida desactivada", nolien_on: "Sin enlaces activado", nolien_off: "Sin enlaces desactivado", nolien2_on: "Sin enlaces estricto activado", nolien2_off: "Sin enlaces estricto desactivado",
-    welcome_title: "Bienvenida", welcome_to: "Bienvenida a",
+    welcome_title: "Bienvenida", welcome_to: "Bienvenida a", just_hidetag: "Es solo un hidetag",
     menu_title: "Menú", lang_changed: "El idioma del bot es ahora {lang}.", languages_available: "Idiomas disponibles: fr en es ht",
     imaj_prompt: "Envía un prompt después de imagen para generar una imagen.", imaj_generated: "*{prompt}*", imaj_error: "Error al generar imagen - Inténtalo de nuevo.", search_title: "Búsqueda", search_error: "Error de búsqueda",
     lang_title: "Idioma", ai_title: "Mensaje", imaj_title: "Imagen", image_generated_title: "Imagen Generada",
@@ -331,7 +339,7 @@ const translations = {
     cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "sip", cmd_vv: "vv", cmd_sites: "sit", cmd_ping: "ping", cmd_bref: "bref",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Konekte depi", days: "jou", hours: "èdtan", minutes: "minit", seconds: "segonn",
     enabled: "aktive", disabled: "dezaktive", welcome_on: "Byenveni aktive", welcome_off: "Byenveni dezaktive", nolien_on: "Nolyen aktive", nolien_off: "Nolyen dezaktive", nolien2_on: "Nolyen2 aktive", nolien2_off: "Nolyen2 dezaktive",
-    welcome_title: "Byenveni", welcome_to: "Byenveni nan",
+    welcome_title: "Byenveni", welcome_to: "Byenveni nan", just_hidetag: "Se jis yon hidetag",
     menu_title: "Meni", lang_changed: "Lang bot la se kounye a {lang}.", languages_available: "Lang disponib : fr en es ht",
     imaj_prompt: "Voye yon prompt apre imaj pou jenere yon imaj.", imaj_generated: "*{prompt}*", imaj_error: "Erè jenere imaj - Eseye ankò.", search_title: "Rechèch", search_error: "Erè rechèch",
     lang_title: "Lang", ai_title: "Mesaj", imaj_title: "Imaj", image_generated_title: "Imaj Jenere",
@@ -448,6 +456,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
         const { version } = await fetchLatestBaileysVersion();
         const botStartTime = Math.floor(Date.now() / 1000);
         const processedIds = new Set();
+        const groupCache = new Map();
 
         const sock = makeWASocket({
             version,
@@ -456,7 +465,9 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
             auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })) },
             browser: Browsers.macOS('Safari'),
             markOnlineOnConnect: true,
-            generateHighQualityLinkPreview: true,
+            generateHighQualityLinkPreview: false,
+            syncFullHistory: false,
+            keepAliveIntervalMs: 30000,
             msgRetryCounterCache: retryCache,
             retryRequestDelayMs: 2000,
             getMessage: async (key) => {
@@ -642,20 +653,25 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 if (['protocolMessage', 'senderKeyDistributionMessage', 'appStateSyncKeyRequest', 'appStateSyncKeyShare', 'deviceSentMessage', 'reactionMessage'].includes(messageType)) return;
 
                 const isGroup = from.endsWith('@g.us');
-                let metadata = null;
-                if (isGroup) {
-                    try { metadata = await sock.groupMetadata(from); } catch (e) {}
+                const cmdRegex = /^[. ]?\s*([\p{L}0-9_]+)(?:\s+([\s\S]*))?$/u;
+                const match = body.match(cmdRegex);
+                const mode = sessionData.noLienMode[from] || 'off';
+
+                let metadata = isGroup ? groupCache.get(from) : null;
+                if (isGroup && !metadata && (match || mode !== 'off')) {
+                    try {
+                        metadata = await sock.groupMetadata(from);
+                        groupCache.set(from, metadata);
+                        setTimeout(() => groupCache.delete(from), 120000);
+                    } catch (e) {}
                 }
+
                 const botId = sock.user?.id ? (sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id) : null;
                 const isOwner = sender === botId;
                 const isAdmin = isGroup && metadata ? metadata.participants.some(p => p.id === sender && p.admin) || isOwner : false;
-                
-                const cmdRegex = /^[. ]?\s*([\p{L}0-9_]+)(?:\s+([\s\S]*))?$/u;
-                const match = body.match(cmdRegex);
 
                 if (isGroup && !match) {
                     const textContent = bodyRaw;
-                    const mode = sessionData.noLienMode[from] || 'off';
                     if (mode !== 'off' && textContent && /https?:\/\/|www\./i.test(textContent)) {
                         const senderIsAdmin = metadata && metadata.participants.find(p => p.id === sender)?.admin != null;
                         const strict = mode === 'strict';
@@ -801,7 +817,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         await sock.sendMessage(from, lienOpts);
                         break;
                     case 'tagall':
-                        if (!isGroup || !isAdmin) break;
+                        if (!isGroup || !isOwner) break;
                         const tagTitle = t.cmd_tagall.charAt(0).toUpperCase() + t.cmd_tagall.slice(1);
                         const participants = metadata.participants.map(p => p.id);
                         const tagBody = participants.map((p, i) => (i % 2 === 0 ? '●' : '○') + ' @' + p.split('@')[0]).join('\n');
@@ -837,7 +853,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         } catch (e) {}
                         break;
                     case 'hidetag':
-                        if (!isGroup || !(isAdmin || isOwner)) break;
+                        if (!isGroup || !isOwner) break;
                         const allMentions = metadata.participants.map(p => p.id);
                         const msgOpts = { mentions: allMentions };
                         const findQuoted = () => {
@@ -901,18 +917,27 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                 else if (sourceMessage.buttonsResponseMessage?.selectedButtonId) msgOpts.text = sourceMessage.buttonsResponseMessage.selectedButtonId;
                             }
                         }
-                        if (args) {
-                            if (hasMedia) {
-                                msgOpts.caption = args;
-                            } else {
-                                msgOpts.text = args;
+                        
+                        let extractedText = args;
+                        if (!extractedText) {
+                            if (hasMedia && msgOpts.caption) {
+                                extractedText = msgOpts.caption;
+                                delete msgOpts.caption;
+                            } else if (msgOpts.text) {
+                                extractedText = msgOpts.text;
+                                delete msgOpts.text;
                             }
                         }
-                        if (Object.keys(msgOpts).length === 1) {
-                            msgOpts.text = '‎';
-                        } else if (hasMedia && !msgOpts.caption) {
-                            msgOpts.caption = '‎';
+                        if (!extractedText || extractedText === '‎') extractedText = t.just_hidetag;
+                        
+                        const formattedHidetagText = `*○ Hidetag*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n*${extractedText}*\n\n> Adam_D'H7`;
+                        
+                        if (hasMedia) {
+                            msgOpts.caption = formattedHidetagText;
+                        } else {
+                            msgOpts.text = formattedHidetagText;
                         }
+                        
                         await sock.sendMessage(from, { ...msgOpts, ...viewOnceOpts });
                         break;
                     case 'kick':
@@ -1026,9 +1051,9 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             const bJson = await bRes.json();
                             if (bJson.success || bJson.url) {
                                 const fUrl = bJson.fileUrl || bJson.url;
-                                const fSize = bJson.size || bBuffer.length;
-                                const fExp = bJson.expires || "N/A";
-                                const brefText = `*${fUrl}*\n*size* : ${fSize}\n*expires* : ${fExp}`;
+                                const rawSize = bJson.size || bBuffer.length;
+                                const formattedSize = formatBytes(rawSize);
+                                const brefText = `*${fUrl}*\n*size* : ${formattedSize}`;
                                 await sendFormatted(sock, from, "Bref", brefText, pushName, false);
                             }
                         } catch (e) {}
@@ -1218,21 +1243,23 @@ async function loadExistingSessions() {
 
 setInterval(async () => {
     if (!db) return;
-    const collection = db.collection('baileys_auth');
-    const activeIds = Array.from(activeSessions.keys());
-    for (const id of activeIds) {
-        const sessionKey = `auth-${id}`;
-        const exists = await collection.findOne({ _id: `${sessionKey}-creds` });
-        if (!exists) {
-            const s = activeSessions.get(id);
-            if (s) {
-                if (s.sock) {
-                    try { s.sock.logout(); } catch(e) {}
+    try {
+        const collection = db.collection('baileys_auth');
+        const activeIds = Array.from(activeSessions.keys());
+        for (const id of activeIds) {
+            const sessionKey = `auth-${id}`;
+            const exists = await collection.findOne({ _id: `${sessionKey}-creds` });
+            if (!exists) {
+                const s = activeSessions.get(id);
+                if (s) {
+                    if (s.sock) {
+                        try { s.sock.logout(); } catch(e) {}
+                    }
+                    s.status = 'deconnecte';
                 }
-                s.status = 'deconnecte';
             }
         }
-    }
+    } catch(e) {}
 }, 7 * 60 * 1000);
 
 connectMongo().then(async () => {
