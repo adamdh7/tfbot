@@ -26,7 +26,7 @@ let db;
 async function connectMongo() {
   mongoClient = new MongoClient(mongoUri);
   await mongoClient.connect();
-  db = mongoClient.db('botadamdh7');
+  db = mongoClient.db('dh7bot');
 }
 
 function fixBuffers(obj) {
