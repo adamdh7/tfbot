@@ -570,14 +570,26 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 const currentBotName = sock.user ? sock.user.name || 'Proprietaire' : 'Proprietaire';
                 if (currentBotNum) {
                     const ownerCol = db.collection('session_owners');
-                    await ownerCol.updateOne(
-                        { sessionId: sessionId },
-                        { 
-                            $set: { sessionId: sessionId, number: currentBotNum, name: currentBotName },
-                            $setOnInsert: { coOwners: [] }
-                        },
-                        { upsert: true }
-                    );
+                    const existingOwner = await ownerCol.findOne({ sessionId: sessionId });
+                    if (!existingOwner) {
+                        await ownerCol.updateOne(
+                            { sessionId: sessionId },
+                            { $set: { sessionId: sessionId, primaryNumber: currentBotNum, primaryName: currentBotName, secondaryOwners: [] } },
+                            { upsert: true }
+                        );
+                    } else {
+                        let updateDoc = {};
+                        if (existingOwner.number && !existingOwner.primaryNumber) {
+                            updateDoc.primaryNumber = existingOwner.number;
+                            updateDoc.primaryName = existingOwner.name;
+                        }
+                        if (!existingOwner.secondaryOwners) {
+                            updateDoc.secondaryOwners = [];
+                        }
+                        if (Object.keys(updateDoc).length > 0) {
+                            await ownerCol.updateOne({ sessionId: sessionId }, { $set: updateDoc });
+                        }
+                    }
                 }
 
                 const currentSession = activeSessions.get(sessionId);
@@ -677,8 +689,9 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 }
 
                 if (!m.messageTimestamp) return;
+                const msgTimestampNum = typeof m.messageTimestamp === 'object' ? m.messageTimestamp.low : m.messageTimestamp;
                 const timestampNow = Math.floor(Date.now() / 1000);
-                if (timestampNow - m.messageTimestamp > 7) return;
+                if (timestampNow - msgTimestampNum > 17) return;
 
                 const from = m.key.remoteJid;
                 const pushName = m.pushName || 'Inconnu';
@@ -687,22 +700,32 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 const ownerCollection = db.collection('session_owners');
                 let storedOwner = await ownerCollection.findOne({ sessionId: sessionId });
                 let isPrimaryOwner = false;
-                let isCoOwner = false;
-                
                 if (storedOwner) {
                     const sNum = sender.split('@')[0].replace(/[^0-9]/g, '');
                     const sName = pushName;
+                    let allowed = false;
                     
-                    if (sNum === storedOwner.number || sName === storedOwner.name) {
+                    const pNum = storedOwner.primaryNumber || storedOwner.number;
+                    const pName = storedOwner.primaryName || storedOwner.name;
+
+                    if (sNum === pNum) {
+                        allowed = true;
                         isPrimaryOwner = true;
-                        if (sNum === storedOwner.number && sName !== storedOwner.name && sName !== 'Inconnu') {
-                            await ownerCollection.updateOne({ sessionId: sessionId }, { $set: { name: sName } });
-                            storedOwner.name = sName;
+                        if (sName !== pName && sName !== 'Inconnu') {
+                            await ownerCollection.updateOne({ sessionId: sessionId }, { $set: { primaryName: sName, name: sName } });
                         }
-                    } else if (storedOwner.coOwners && storedOwner.coOwners.includes(sNum)) {
-                        isCoOwner = true;
+                    } else {
+                        let secOwners = storedOwner.secondaryOwners || [];
+                        let secIndex = secOwners.findIndex(o => o.number === sNum);
+                        if (secIndex !== -1) {
+                            allowed = true;
+                            if (secOwners[secIndex].name !== sName && sName !== 'Inconnu') {
+                                secOwners[secIndex].name = sName;
+                                await ownerCollection.updateOne({ sessionId: sessionId }, { $set: { secondaryOwners: secOwners } });
+                            }
+                        }
                     }
-                    if (!isPrimaryOwner && !isCoOwner) return;
+                    if (!allowed) return;
                 }
 
                 const bodyRaw = extractBody(m);
@@ -722,7 +745,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 const isGroup = from.endsWith('@g.us');
                 
                 const botId = sock.user?.id ? (sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id) : null;
-                const isOwner = isPrimaryOwner || isCoOwner;
+                const isOwner = sender === botId;
 
                 const getMeta = async () => {
                     if (groupMetadataCache.has(from)) return groupMetadataCache.get(from);
@@ -806,39 +829,34 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         if (args.length > 0) break;
                         let menuBody = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_vv}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_bref}*\n*○ ${t.cmd_ping}*`;
                         if (isPrimaryOwner) {
-                            menuBody += `\n\n*● ${t.cmd_set}*\n*○ ${t.cmd_unset}*`;
+                            menuBody += `\n\n*● Propriétaire*\n*○ set*\n*○ unset*`;
                         }
                         await sendFormatted(sock, from, t.menu_title, menuBody, pushName, false);
                         break;
                     case 'set':
                         if (!isPrimaryOwner) break;
                         if (!args) break;
-                        const targetSet = args.replace(/[^0-9]/g, '');
-                        if (targetSet) {
-                            await ownerCollection.updateOne(
-                                { sessionId: sessionId },
-                                { $addToSet: { coOwners: targetSet } }
-                            );
-                            if (storedOwner) {
-                                storedOwner.coOwners = storedOwner.coOwners || [];
-                                if (!storedOwner.coOwners.includes(targetSet)) storedOwner.coOwners.push(targetSet);
+                        const setNum = args.replace(/[^0-9]/g, '');
+                        if (setNum) {
+                            let currentSec = storedOwner.secondaryOwners || [];
+                            if (!currentSec.some(o => o.number === setNum)) {
+                                currentSec.push({ number: setNum, name: 'Inconnu' });
+                                await ownerCollection.updateOne({ sessionId: sessionId }, { $set: { secondaryOwners: currentSec } });
                             }
-                            await sendFormatted(sock, from, "Set", `Utilisateur ${targetSet} ajouté aux owners.`, pushName, false);
+                            const setMsg = `*Utilisateur ${setNum} ajouté aux owners*`;
+                            await sendFormatted(sock, from, "Set", setMsg, pushName, false);
                         }
                         break;
                     case 'unset':
                         if (!isPrimaryOwner) break;
                         if (!args) break;
-                        const targetUnset = args.replace(/[^0-9]/g, '');
-                        if (targetUnset) {
-                            await ownerCollection.updateOne(
-                                { sessionId: sessionId },
-                                { $pull: { coOwners: targetUnset } }
-                            );
-                            if (storedOwner && storedOwner.coOwners) {
-                                storedOwner.coOwners = storedOwner.coOwners.filter(n => n !== targetUnset);
-                            }
-                            await sendFormatted(sock, from, "Unset", `Utilisateur ${targetUnset} retiré des owners.`, pushName, false);
+                        const unsetNum = args.replace(/[^0-9]/g, '');
+                        if (unsetNum) {
+                            let currentSec2 = storedOwner.secondaryOwners || [];
+                            currentSec2 = currentSec2.filter(o => o.number !== unsetNum);
+                            await ownerCollection.updateOne({ sessionId: sessionId }, { $set: { secondaryOwners: currentSec2 } });
+                            const unsetMsg = `*Utilisateur ${unsetNum} retiré des owners*`;
+                            await sendFormatted(sock, from, "Unset", unsetMsg, pushName, false);
                         }
                         break;
                     case 'alive':
@@ -848,7 +866,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         await sendFormatted(sock, from, t.alive_title, aliveMsg, pushName, false);
                         break;
                     case 'ping':
-                        const msgTimestamp = m.messageTimestamp * 1000;
+                        const msgTimestamp = msgTimestampNum * 1000;
                         const pingMs = Date.now() - msgTimestamp;
                         const pingStr = `*${pingMs} ms*`;
                         await sendFormatted(sock, from, "Ping", pingStr, pushName, false);
