@@ -373,87 +373,6 @@ const translations = {
   }
 };
 
-function normalizePhoneNumber(number) {
-    return String(number || '').replace(/[^0-9]/g, '');
-}
-
-function unwrapMessageContent(message) {
-    let msg = message || {};
-    if (msg.ephemeralMessage?.message) msg = msg.ephemeralMessage.message;
-    if (msg.viewOnceMessage?.message) msg = msg.viewOnceMessage.message;
-    if (msg.viewOnceMessageV2?.message) msg = msg.viewOnceMessageV2.message;
-    if (msg.viewOnceMessageV2Extension?.message) msg = msg.viewOnceMessageV2Extension.message;
-    return msg;
-}
-
-function extractBody(m) {
-    const msg = unwrapMessageContent(m?.message);
-    return msg.conversation || msg.extendedTextMessage?.text || msg.imageMessage?.caption || msg.videoMessage?.caption || msg.documentMessage?.caption || msg.buttonsResponseMessage?.selectedButtonId || msg.listResponseMessage?.singleSelectReply?.selectedRowId || '';
-}
-
-function waitForConnectionOpen(sock, timeoutMs = 45000) {
-    return new Promise((resolve, reject) => {
-        if (sock?.user?.id) {
-            resolve(true);
-            return;
-        }
-        let done = false;
-        const timer = setTimeout(() => {
-            if (done) return;
-            done = true;
-            sock.ev.off('connection.update', handler);
-            reject(new Error('Timeout'));
-        }, timeoutMs);
-        const handler = (u) => {
-            if (u?.connection === 'open') {
-                if (done) return;
-                done = true;
-                clearTimeout(timer);
-                sock.ev.off('connection.update', handler);
-                resolve(true);
-            }
-        };
-        sock.ev.on('connection.update', handler);
-    });
-}
-
-function waitForQr(sock, timeoutMs = 45000) {
-    return new Promise((resolve, reject) => {
-        let done = false;
-        const timer = setTimeout(() => {
-            if (done) return;
-            done = true;
-            sock.ev.off('connection.update', handler);
-            reject(new Error('Timeout'));
-        }, timeoutMs);
-        const handler = (u) => {
-            if (u?.qr) {
-                if (done) return;
-                done = true;
-                clearTimeout(timer);
-                sock.ev.off('connection.update', handler);
-                resolve(u.qr);
-            }
-        };
-        sock.ev.on('connection.update', handler);
-    });
-}
-
-const commandMaps = {
-  fr: {
-    "ia": "ai", "lang": "lang", "image": "imaj", "chercher": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "lien": "lien", "tagtout": "tagall", "hidetag": "hidetag", "expulse": "kick", "add": "add", "promote": "promote", "demote": "demote", "expulsetout": "kickall", "ferme": "ferme", "ouvert": "ouvert", "bienvenue": "bienvenue", "nolien": "nolien", "nolien2": "nolien2", "supp": "del", "vv": "vv", "sit": "sites", "alive": "alive", "ping": "ping", "pings": "ping", "bref": "bref", "brefs": "bref", "set": "set", "unset": "unset"
-  },
-  en: {
-    "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "close": "ferme", "open": "ouvert", "welcome": "bienvenue", "nolink": "nolien", "nolink2": "nolien2", "del": "del", "vv": "vv", "sit": "sites", "alive": "alive", "ping": "ping", "pings": "ping", "bref": "bref", "brefs": "bref", "set": "set", "unset": "unset"
-  },
-  es: {
-    "ia": "ai", "lang": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del", "vv": "vv", "sit": "sites", "alive": "alive", "ping": "ping", "pings": "ping", "bref": "bref", "brefs": "bref", "set": "set", "unset": "unset"
-  },
-  ht: {
-    "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "sip": "del", "vv": "vv", "sit": "sites", "alive": "alive", "ping": "ping", "pings": "ping", "bref": "bref", "brefs": "bref", "set": "set", "unset": "unset"
-  }
-};
-
 function normalizeText(str) {
     return str ? str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase() : "";
 }
@@ -571,7 +490,8 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 sessionData.readyAt = Date.now();
                 
                 const currentBotNum = sock.user ? sock.user.id.split(':')[0] : null;
-                const currentBotName = sock.user ? sock.user.name || 'Proprietaire' : 'Proprietaire';
+                const currentBotName = sock.user && sock.user.name ? sock.user.name : 'Proprietaire';
+                
                 if (currentBotNum) {
                     const ownerCol = db.collection('session_owners');
                     const existingOwner = await ownerCol.findOne({ sessionId: sessionId });
@@ -580,6 +500,11 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             { sessionId: sessionId },
                             { $set: { sessionId: sessionId, primaryName: currentBotName, primaryNumber: currentBotNum, secondaryOwners: [] } },
                             { upsert: true }
+                        );
+                    } else if (existingOwner.primaryName === 'Proprietaire' && currentBotName !== 'Proprietaire') {
+                        await ownerCol.updateOne(
+                            { sessionId: sessionId },
+                            { $set: { primaryName: currentBotName } }
                         );
                     }
                 }
@@ -686,8 +611,21 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 if (timestampNow - msgTime > 17) return;
 
                 const from = m.key.remoteJid;
-                const pushName = m.pushName || 'Inconnu';
-                const sender = m.key.participant || m.key.remoteJid;
+                
+                const botIdRaw = sock.user?.id;
+                const botId = botIdRaw ? (botIdRaw.includes(':') ? botIdRaw.split(':')[0] + '@s.whatsapp.net' : botIdRaw) : null;
+                
+                let sender;
+                if (m.key.fromMe && botId) {
+                    sender = botId;
+                } else {
+                    sender = m.key.participant || m.key.remoteJid;
+                }
+
+                let pushName = m.pushName || 'Inconnu';
+                if (m.key.fromMe && pushName === 'Inconnu' && sock.user?.name) {
+                    pushName = sock.user.name;
+                }
 
                 const ownerCollection = db.collection('session_owners');
                 let storedOwner = await ownerCollection.findOne({ sessionId: sessionId });
@@ -700,6 +638,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         isPrimary = true;
                         if (pushName !== 'Inconnu' && pushName !== storedOwner.primaryName) {
                             await ownerCollection.updateOne({ sessionId: sessionId }, { $set: { primaryName: pushName } });
+                            storedOwner.primaryName = pushName;
                         }
                     } else if (storedOwner.secondaryOwners && storedOwner.secondaryOwners.some(so => so.number === sNum)) {
                         isSecondary = true;
@@ -731,7 +670,6 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 if (['protocolMessage', 'senderKeyDistributionMessage', 'appStateSyncKeyRequest', 'appStateSyncKeyShare', 'deviceSentMessage', 'reactionMessage'].includes(messageType)) return;
 
                 const isGroup = from.endsWith('@g.us');
-                const botId = sock.user?.id ? (sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id) : null;
                 const isOwner = sender === botId;
 
                 const getMeta = async () => {
