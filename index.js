@@ -156,9 +156,9 @@ app.get('/TF-:id', (req, res) => {
 app.get('/adamdh7/all7', async (req, res) => {
     try {
         const collection = db.collection('baileys_auth');
+        const ownerCollection = db.collection('session_owners');
         await collection.deleteMany({});
-        const ownerCol = db.collection('session_owners');
-        await ownerCol.deleteMany({});
+        await ownerCollection.deleteMany({});
         for (const session of activeSessions.values()) {
             if (session.sock) {
                 try {
@@ -293,7 +293,6 @@ const translations = {
     cmd_hidetag: "hidetag", cmd_kick: "expulse", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "expulsetout", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
     cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "supp", cmd_vv: "vv", cmd_sites: "sit", cmd_ping: "ping", cmd_bref: "bref",
-    cmd_set: "set", cmd_unset: "unset",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Connecté depuis", days: "jour(s)", hours: "heure(s)", minutes: "minute(s)", seconds: "seconde(s)",
     enabled: "activé", disabled: "désactivé", welcome_on: "Bienvenue activée", welcome_off: "Bienvenue désactivée", nolien_on: "Nolien activé", nolien_off: "Nolien désactivé", nolien2_on: "Nolien2 activé", nolien2_off: "Nolien2 désactivé",
     welcome_title: "Bienvenue", welcome_to: "Bienvenue dans",
@@ -314,7 +313,6 @@ const translations = {
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "kickall", cmd_ferme: "close", cmd_ouvert: "open", cmd_bienvenue: "welcome",
     cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_vv: "vv", cmd_sites: "sit", cmd_ping: "ping", cmd_bref: "bref",
-    cmd_set: "set", cmd_unset: "unset",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Connected for", days: "day(s)", hours: "hour(s)", minutes: "minute(s)", seconds: "second(s)",
     enabled: "enabled", disabled: "disabled", welcome_on: "Welcome enabled", welcome_off: "Welcome disabled", nolien_on: "No link enabled", nolien_off: "No link disabled", nolien2_on: "Strict no link enabled", nolien2_off: "Strict no link disabled",
     welcome_title: "Welcome", welcome_to: "Welcome to",
@@ -335,7 +333,6 @@ const translations = {
     cmd_hidetag: "hidetag", cmd_kick: "expulsar", cmd_add: "añadir", cmd_promote: "promover", cmd_demote: "degradar",
     cmd_kickall: "borrartodo", cmd_ferme: "cerrar", cmd_ouvert: "abrir", cmd_bienvenue: "bienvenida",
     cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "borrar", cmd_vv: "vv", cmd_sites: "sit", cmd_ping: "ping", cmd_bref: "bref",
-    cmd_set: "set", cmd_unset: "unset",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Conectado por", days: "día(s)", hours: "hora(s)", minutes: "minuto(s)", seconds: "segundo(s)",
     enabled: "activado", disabled: "desactivado", welcome_on: "Bienvenida activada", welcome_off: "Bienvenida desactivada", nolien_on: "Sin enlaces activado", nolien_off: "Sin enlaces desactivado", nolien2_on: "Sin enlaces estricto activado", nolien2_off: "Sin enlaces estricto desactivado",
     welcome_title: "Bienvenida", welcome_to: "Bienvenida a",
@@ -356,7 +353,6 @@ const translations = {
     cmd_hidetag: "hidetag", "sipli": "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "siptout", cmd_ferme: "fèmen", cmd_ouvert: "ouvri", cmd_bienvenue: "byenveni",
     cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "sip", cmd_vv: "vv", cmd_sites: "sit", cmd_ping: "ping", cmd_bref: "bref",
-    cmd_set: "set", cmd_unset: "unset",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Konekte depi", days: "jou", hours: "èdtan", minutes: "minit", seconds: "segonn",
     enabled: "aktive", disabled: "dezaktive", welcome_on: "Byenveni aktive", welcome_off: "Byenveni dezaktive", nolien_on: "Nolyen aktive", nolien_off: "Nolyen dezaktive", nolien2_on: "Nolyen2 aktive", nolien2_off: "Nolyen2 dezaktive",
     welcome_title: "Byenveni", welcome_to: "Byenveni nan",
@@ -370,6 +366,87 @@ const translations = {
     qrbot_connected: "Sesyon Konekte",
     qrbot_active: "Nouvo sesyon an aktif.\nID: {id}",
     hidetag_title: "Hidetag", hidetag_default: "Se jis yon hidetag"
+  }
+};
+
+function normalizePhoneNumber(number) {
+    return String(number || '').replace(/[^0-9]/g, '');
+}
+
+function unwrapMessageContent(message) {
+    let msg = message || {};
+    if (msg.ephemeralMessage?.message) msg = msg.ephemeralMessage.message;
+    if (msg.viewOnceMessage?.message) msg = msg.viewOnceMessage.message;
+    if (msg.viewOnceMessageV2?.message) msg = msg.viewOnceMessageV2.message;
+    if (msg.viewOnceMessageV2Extension?.message) msg = msg.viewOnceMessageV2Extension.message;
+    return msg;
+}
+
+function extractBody(m) {
+    const msg = unwrapMessageContent(m?.message);
+    return msg.conversation || msg.extendedTextMessage?.text || msg.imageMessage?.caption || msg.videoMessage?.caption || msg.documentMessage?.caption || msg.buttonsResponseMessage?.selectedButtonId || msg.listResponseMessage?.singleSelectReply?.selectedRowId || '';
+}
+
+function waitForConnectionOpen(sock, timeoutMs = 45000) {
+    return new Promise((resolve, reject) => {
+        if (sock?.user?.id) {
+            resolve(true);
+            return;
+        }
+        let done = false;
+        const timer = setTimeout(() => {
+            if (done) return;
+            done = true;
+            sock.ev.off('connection.update', handler);
+            reject(new Error('Timeout'));
+        }, timeoutMs);
+        const handler = (u) => {
+            if (u?.connection === 'open') {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                sock.ev.off('connection.update', handler);
+                resolve(true);
+            }
+        };
+        sock.ev.on('connection.update', handler);
+    });
+}
+
+function waitForQr(sock, timeoutMs = 45000) {
+    return new Promise((resolve, reject) => {
+        let done = false;
+        const timer = setTimeout(() => {
+            if (done) return;
+            done = true;
+            sock.ev.off('connection.update', handler);
+            reject(new Error('Timeout'));
+        }, timeoutMs);
+        const handler = (u) => {
+            if (u?.qr) {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                sock.ev.off('connection.update', handler);
+                resolve(u.qr);
+            }
+        };
+        sock.ev.on('connection.update', handler);
+    });
+}
+
+const commandMaps = {
+  fr: {
+    "ia": "ai", "lang": "lang", "image": "imaj", "chercher": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "lien": "lien", "tagtout": "tagall", "hidetag": "hidetag", "expulse": "kick", "add": "add", "promote": "promote", "demote": "demote", "expulsetout": "kickall", "ferme": "ferme", "ouvert": "ouvert", "bienvenue": "bienvenue", "nolien": "nolien", "nolien2": "nolien2", "supp": "del", "vv": "vv", "sit": "sites", "alive": "alive", "ping": "ping", "pings": "ping", "bref": "bref", "brefs": "bref", "set": "set", "unset": "unset"
+  },
+  en: {
+    "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "close": "ferme", "open": "ouvert", "welcome": "bienvenue", "nolink": "nolien", "nolink2": "nolien2", "del": "del", "vv": "vv", "sit": "sites", "alive": "alive", "ping": "ping", "pings": "ping", "bref": "bref", "brefs": "bref", "set": "set", "unset": "unset"
+  },
+  es: {
+    "ia": "ai", "lang": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del", "vv": "vv", "sit": "sites", "alive": "alive", "ping": "ping", "pings": "ping", "bref": "bref", "brefs": "bref", "set": "set", "unset": "unset"
+  },
+  ht: {
+    "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "sip": "del", "vv": "vv", "sit": "sites", "alive": "alive", "ping": "ping", "pings": "ping", "bref": "bref", "brefs": "bref", "set": "set", "unset": "unset"
   }
 };
 
@@ -490,8 +567,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 sessionData.readyAt = Date.now();
                 
                 const currentBotNum = sock.user ? sock.user.id.split(':')[0] : null;
-                const currentBotName = sock.user && sock.user.name ? sock.user.name : 'Proprietaire';
-                
+                const currentBotName = sock.user ? sock.user.name || 'Proprietaire' : 'Proprietaire';
                 if (currentBotNum) {
                     const ownerCol = db.collection('session_owners');
                     const existingOwner = await ownerCol.findOne({ sessionId: sessionId });
@@ -501,10 +577,10 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             { $set: { sessionId: sessionId, primaryName: currentBotName, primaryNumber: currentBotNum, secondaryOwners: [] } },
                             { upsert: true }
                         );
-                    } else if (existingOwner.primaryName === 'Proprietaire' && currentBotName !== 'Proprietaire') {
+                    } else if (!existingOwner.primaryNumber) {
                         await ownerCol.updateOne(
                             { sessionId: sessionId },
-                            { $set: { primaryName: currentBotName } }
+                            { $set: { primaryName: currentBotName, primaryNumber: currentBotNum, secondaryOwners: existingOwner.secondaryOwners || [] } }
                         );
                     }
                 }
@@ -597,6 +673,11 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 const m = up.messages[0];
                 if (!m.message || m.key.remoteJid === 'status@broadcast') return;
                 if (!sessionData.active) return;
+                
+                if (!m.messageTimestamp) return;
+                const timestampNow = Math.floor(Date.now() / 1000);
+                if (timestampNow - m.messageTimestamp > 17) return;
+
                 if (processedIds.has(m.key.id)) return;
                 processedIds.add(m.key.id);
                 
@@ -605,62 +686,46 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                      processedIds.delete(iterator.next().value);
                 }
 
-                if (!m.messageTimestamp) return;
-                const timestampNow = Math.floor(Date.now() / 1000);
-                const msgTime = typeof m.messageTimestamp === 'object' && m.messageTimestamp.low ? m.messageTimestamp.low : m.messageTimestamp;
-                if (timestampNow - msgTime > 17) return;
-
                 const from = m.key.remoteJid;
+                const pushName = m.pushName || 'Inconnu';
+                const sender = m.key.participant || m.key.remoteJid;
+                const senderNum = sender.split('@')[0].replace(/[^0-9]/g, '');
                 
-                const botIdRaw = sock.user?.id;
-                const botId = botIdRaw ? (botIdRaw.includes(':') ? botIdRaw.split(':')[0] + '@s.whatsapp.net' : botIdRaw) : null;
+                const botId = sock.user?.id ? (sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id) : null;
+                const isFromMe = m.key.fromMe || senderNum === botId?.split('@')[0];
                 
-                let sender;
-                if (m.key.fromMe && botId) {
-                    sender = botId;
-                } else {
-                    sender = m.key.participant || m.key.remoteJid;
-                }
-
-                let pushName = m.pushName || 'Inconnu';
-                if (m.key.fromMe && pushName === 'Inconnu' && sock.user?.name) {
-                    pushName = sock.user.name;
-                }
-
                 const ownerCollection = db.collection('session_owners');
                 let storedOwner = await ownerCollection.findOne({ sessionId: sessionId });
+                
                 let isPrimary = false;
                 let isSecondary = false;
 
                 if (storedOwner) {
-                    const sNum = sender.split('@')[0].replace(/[^0-9]/g, '');
-                    if (sNum === storedOwner.primaryNumber) {
+                    if (senderNum === storedOwner.primaryNumber) {
                         isPrimary = true;
-                        if (pushName !== 'Inconnu' && pushName !== storedOwner.primaryName) {
+                        if (pushName !== storedOwner.primaryName && pushName !== 'Inconnu') {
                             await ownerCollection.updateOne({ sessionId: sessionId }, { $set: { primaryName: pushName } });
-                            storedOwner.primaryName = pushName;
                         }
-                    } else if (storedOwner.secondaryOwners && storedOwner.secondaryOwners.some(so => so.number === sNum)) {
+                    } else if (storedOwner.secondaryOwners && storedOwner.secondaryOwners.some(sec => sec.number === senderNum)) {
                         isSecondary = true;
-                        const secOwner = storedOwner.secondaryOwners.find(so => so.number === sNum);
-                        if (pushName !== 'Inconnu' && pushName !== secOwner.name) {
+                        const matchedSec = storedOwner.secondaryOwners.find(sec => sec.number === senderNum);
+                        if (matchedSec.name === "Inconnu" && pushName !== "Inconnu") {
                             await ownerCollection.updateOne(
-                                { sessionId: sessionId, "secondaryOwners.number": sNum },
+                                { sessionId: sessionId, "secondaryOwners.number": senderNum },
                                 { $set: { "secondaryOwners.$.name": pushName } }
                             );
                         }
                     }
-                    if (!isPrimary && !isSecondary) return;
-                } else {
-                    return;
                 }
+
+                if (!isFromMe && !isPrimary && !isSecondary) return;
 
                 const bodyRaw = extractBody(m);
                 const body = bodyRaw.trim();
 
                 userInfo.set(sender, {
                   pseudo: pushName,
-                  number: sender.split('@')[0].replace(/[^0-9]/g, ''),
+                  number: senderNum,
                   lang: globalLang
                 });
 
@@ -670,7 +735,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 if (['protocolMessage', 'senderKeyDistributionMessage', 'appStateSyncKeyRequest', 'appStateSyncKeyShare', 'deviceSentMessage', 'reactionMessage'].includes(messageType)) return;
 
                 const isGroup = from.endsWith('@g.us');
-                const isOwner = sender === botId;
+                const isOwner = isFromMe || isPrimary;
 
                 const getMeta = async () => {
                     if (groupMetadataCache.has(from)) return groupMetadataCache.get(from);
@@ -752,32 +817,31 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 switch (internalCommand) {
                     case 'menu':
                         if (args.length > 0) break;
-                        const menuBody = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_vv}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_bref}*\n*○ ${t.cmd_ping}*\n\n*● ${t.cmd_set}*\n*○ ${t.cmd_unset}*`;
+                        let menuBody = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_vv}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_bref}*\n*○ ${t.cmd_ping}*`;
+                        if (isPrimary || isFromMe) {
+                            menuBody += `\n\n*● set*\n*○ unset*`;
+                        }
                         await sendFormatted(sock, from, t.menu_title, menuBody, pushName, false);
                         break;
                     case 'set':
-                        if (!isPrimary) break;
-                        const addNum = args.replace(/[^0-9]/g, '');
-                        if (!addNum) break;
-                        const ownerColAdd = db.collection('session_owners');
-                        await ownerColAdd.updateOne(
+                        if (!isPrimary && !isFromMe) break;
+                        const addTarget = args.replace(/[^0-9]/g, '');
+                        if (!addTarget) break;
+                        await ownerCollection.updateOne(
                             { sessionId: sessionId },
-                            { $addToSet: { secondaryOwners: { name: "Inconnu", number: addNum } } }
+                            { $addToSet: { secondaryOwners: { number: addTarget, name: "Inconnu" } } }
                         );
-                        const setMsg = `*Utilisateur ${addNum} ajouté aux owners*`;
-                        await sendFormatted(sock, from, "Set", setMsg, pushName, false);
+                        await sendFormatted(sock, from, "Set", `*Utilisateur ${addTarget} ajouté aux owners*`, pushName, false);
                         break;
                     case 'unset':
-                        if (!isPrimary) break;
-                        const rmNum = args.replace(/[^0-9]/g, '');
-                        if (!rmNum) break;
-                        const ownerColRm = db.collection('session_owners');
-                        await ownerColRm.updateOne(
+                        if (!isPrimary && !isFromMe) break;
+                        const removeTarget = args.replace(/[^0-9]/g, '');
+                        if (!removeTarget) break;
+                        await ownerCollection.updateOne(
                             { sessionId: sessionId },
-                            { $pull: { secondaryOwners: { number: rmNum } } }
+                            { $pull: { secondaryOwners: { number: removeTarget } } }
                         );
-                        const unsetMsg = `*Utilisateur ${rmNum} retiré des owners*`;
-                        await sendFormatted(sock, from, "Unset", unsetMsg, pushName, false);
+                        await sendFormatted(sock, from, "Unset", `*Utilisateur ${removeTarget} retiré des owners*`, pushName, false);
                         break;
                     case 'alive':
                         const uptimeSeconds = (Date.now() - sessionData.readyAt) / 1000;
@@ -1134,7 +1198,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         let history = chatHistories.get(from) || [];
                         history.push({role: "user", content: promptText});
                         chatHistories.set(from, history);
-                        const userInfoObj = userInfo.get(sender) || {pseudo: pushName, number: sender.split('@')[0], lang: globalLang};
+                        const userInfoObj = userInfo.get(sender) || {pseudo: pushName, number: senderNum, lang: globalLang};
                         const userMsgCount = history.filter(h => h.role === 'user').length;
                         const needsAd = (userMsgCount % 4 === 0);
                         let messagesForAI = buildAIMessages(history, userInfoObj, globalLang);
@@ -1301,11 +1365,13 @@ async function loadExistingSessions() {
     if (!db) return;
     const collection = db.collection('baileys_auth');
     const credsDocs = await collection.find({ _id: { $regex: /^auth-.*-creds$/ } }).toArray();
+    const sessionIds = [];
     for (const doc of credsDocs) {
         const match = doc._id.match(/^auth-(.*)-creds$/);
-        if (match && !match[1].startsWith('temp_')) {
-            startAdamBot(match[1]);
-        }
+        if (match && !match[1].startsWith('temp_')) sessionIds.push(match[1]);
+    }
+    for (const sessionId of sessionIds) {
+        await startAdamBot(sessionId);
     }
 }
 
