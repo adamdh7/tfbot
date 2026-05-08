@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Bot.Adam_D'H7</title>
+    <meta name="description" content="Bot.Adam_D'H7, D'H7 | Tergene est un service web qui permet aux utilisateurs de déployer facilement des bots.">
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+    <meta name="theme-color" content="#000000">
+    <link rel="canonical" href="https://bot.adamdh7.org/">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://bot.adamdh7.org/">
+    <meta property="og:title" content="Bot">
+    <meta property="og:description" content="Bot.Adam_D'H7, D'H7 | Tergene est un service web qui permet aux utilisateurs de déployer facilement des bots.">
+    <meta property="og:image" content="https://adamdh7.org/adamdh7.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:url" content="https://bot.adamdh7.org/">
+    <meta name="twitter:title" content="Bot.Adam_D'H7">
+    <meta name="twitter:description" content="Bot.Adam_D'H7, D'H7 | Tergene est un service web qui permet aux utilisateurs de déployer facilement des bots.">
+    <meta name="twitter:image" content="https://adamdh7.org/adamdh7.png">
+    <link rel="icon" href="https://adamdh7.org/adamdh7.png" type="image/png">
+    <link rel="apple-touch-icon" href="https://adamdh7.org/adamdh7.png">
+    <link rel="manifest" href="/manifest.json">
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000000;
+        }
+        iframe {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            border: none;
+            display: block;
+        }
+    </style>
+    <script>
+        if (window.location.pathname !== "/") {
+            window.history.replaceState(null, "", "/");
+        }
+    </script>
+</head>
+<body>
+    <iframe src="https://tf.bot.adamdh7.org/" allow="fullscreen; autoplay; clipboard-write; encrypted-media; picture-in-picture"></iframe>
+</body>
+</html>
