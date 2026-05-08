@@ -98,6 +98,8 @@ async function deleteMongoSession(sessionId) {
   const collection = db.collection('baileys_auth');
   const sessionKey = `auth-${sessionId}`;
   await collection.deleteMany({ _id: { $regex: `^${sessionKey}` } });
+  const ownerCol = db.collection('session_owners');
+  await ownerCol.deleteMany({ sessionId: sessionId });
 }
 
 async function renameMongoSession(oldSessionId, newSessionId) {
@@ -153,8 +155,10 @@ app.get('/TF-:id', (req, res) => {
 
 app.get('/adamdh7/all7', async (req, res) => {
     try {
-        await db.collection('baileys_auth').deleteMany({});
-        await db.collection('session_owners').deleteMany({});
+        const collection = db.collection('baileys_auth');
+        await collection.deleteMany({});
+        const ownerCol = db.collection('session_owners');
+        await ownerCol.deleteMany({});
         for (const session of activeSessions.values()) {
             if (session.sock) {
                 try {
@@ -433,16 +437,16 @@ function waitForQr(sock, timeoutMs = 45000) {
 
 const commandMaps = {
   fr: {
-    "ia": "ai", "lang": "lang", "image": "imaj", "chercher": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "lien": "lien", "tagtout": "tagall", "hidetag": "hidetag", "expulse": "kick", "add": "add", "promote": "promote", "demote": "demote", "expulsetout": "kickall", "ferme": "ferme", "ouvert": "ouvert", "bienvenue": "bienvenue", "nolien": "nolien", "nolien2": "nolien2", "supp": "del", "vv": "vv", "sit": "sites", "alive": "alive", "ping": "ping", "pings": "ping", "bref": "bref", "brefs": "bref", "addowner": "addowner", "delowner": "delowner"
+    "ia": "ai", "lang": "lang", "image": "imaj", "chercher": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "lien": "lien", "tagtout": "tagall", "hidetag": "hidetag", "expulse": "kick", "add": "add", "promote": "promote", "demote": "demote", "expulsetout": "kickall", "ferme": "ferme", "ouvert": "ouvert", "bienvenue": "bienvenue", "nolien": "nolien", "nolien2": "nolien2", "supp": "del", "vv": "vv", "sit": "sites", "alive": "alive", "ping": "ping", "pings": "ping", "bref": "bref", "brefs": "bref"
   },
   en: {
-    "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "close": "ferme", "open": "ouvert", "welcome": "bienvenue", "nolink": "nolien", "nolink2": "nolien2", "del": "del", "vv": "vv", "sit": "sites", "alive": "alive", "ping": "ping", "pings": "ping", "bref": "bref", "brefs": "bref", "addowner": "addowner", "delowner": "delowner"
+    "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "close": "ferme", "open": "ouvert", "welcome": "bienvenue", "nolink": "nolien", "nolink2": "nolien2", "del": "del", "vv": "vv", "sit": "sites", "alive": "alive", "ping": "ping", "pings": "ping", "bref": "bref", "brefs": "bref"
   },
   es: {
-    "ia": "ai", "lang": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del", "vv": "vv", "sit": "sites", "alive": "alive", "ping": "ping", "pings": "ping", "bref": "bref", "brefs": "bref", "addowner": "addowner", "delowner": "delowner"
+    "ia": "ai", "lang": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del", "vv": "vv", "sit": "sites", "alive": "alive", "ping": "ping", "pings": "ping", "bref": "bref", "brefs": "bref"
   },
   ht: {
-    "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "sip": "del", "vv": "vv", "sit": "sites", "alive": "alive", "ping": "ping", "pings": "ping", "bref": "bref", "brefs": "bref", "addowner": "addowner", "delowner": "delowner"
+    "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "sip": "del", "vv": "vv", "sit": "sites", "alive": "alive", "ping": "ping", "pings": "ping", "bref": "bref", "brefs": "bref"
   }
 };
 
@@ -450,8 +454,8 @@ function normalizeText(str) {
     return str ? str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase() : "";
 }
 
-async function sendFormatted(sock, from, type, text, pushName, isAI = false) {
-  const fullCaption = `*○ ${type}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n${text}\n\n> Adam_D'H7`;
+async function sendFormatted(sock, from, type, text, pushName, isAI = false, hostName = "Adam_D'H7") {
+  const fullCaption = `*○ ${type}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: ${hostName}\n\n${text}\n\n> Adam_D'H7`;
   if (isAI) {
     await sock.sendMessage(from, { text: fullCaption });
   } else {
@@ -563,17 +567,14 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 sessionData.readyAt = Date.now();
                 
                 const currentBotNum = sock.user ? sock.user.id.split(':')[0] : null;
-                const currentBotName = sock.user ? sock.user.name || 'Proprietaire' : 'Proprietaire';
+                const currentBotName = sock.user ? sock.user.name || "Adam_D'H7" : "Adam_D'H7";
                 if (currentBotNum) {
                     const ownerCol = db.collection('session_owners');
-                    const existingOwner = await ownerCol.findOne({ sessionId: sessionId });
-                    if (!existingOwner) {
-                        await ownerCol.updateOne(
-                            { sessionId: sessionId },
-                            { $set: { sessionId: sessionId, primaryName: currentBotName, primaryNumber: currentBotNum }, $setOnInsert: { secondaryOwners: [] } },
-                            { upsert: true }
-                        );
-                    }
+                    await ownerCol.updateOne(
+                        { sessionId: sessionId },
+                        { $set: { sessionId: sessionId, Number: currentBotNum, Name: currentBotName } },
+                        { upsert: true }
+                    );
                 }
 
                 const currentSession = activeSessions.get(sessionId);
@@ -587,7 +588,6 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                     setTimeout(async () => {
                         try {
                             await deleteMongoSession(sessionId);
-                            await db.collection('session_owners').deleteMany({ sessionId: sessionId });
                             activeSessions.delete(sessionId);
                             sock.logout();
                             sock.end(undefined);
@@ -607,7 +607,6 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 } else {
                     try {
                         await deleteMongoSession(sessionId);
-                        await db.collection('session_owners').deleteMany({ sessionId: sessionId });
                         activeSessions.delete(sessionId);
                     } catch (e) {}
                 }
@@ -649,9 +648,14 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                     gSubject = gmeta.subject;
                 } catch (e) {}
             }
+            
+            const ownerCol = db.collection('session_owners');
+            const sessionOwnerDoc = await ownerCol.findOne({ sessionId: sessionId });
+            const hostNameToDisplay = sessionOwnerDoc ? sessionOwnerDoc.Name || "Adam_D'H7" : "Adam_D'H7";
+
             for (const user of newParts) {
                 const username = user.split('@')[0];
-                const welcomeText = `*○ ${welcomeTitle}*\n\n*Adam_D'H7*\nUtilisateur: "Adam_D’H7"\nPropriétaire: Adam_D'H7\n\n*${welcomeTo} ${gSubject}*\nNom: @${username}\n\n> *Adam_D'H7*`;
+                const welcomeText = `*○ ${welcomeTitle}*\n\n*Adam_D'H7*\nUtilisateur: "Adam_D’H7"\nPropriétaire: ${hostNameToDisplay}\n\n*${welcomeTo} ${gSubject}*\nNom: @${username}\n\n> *Adam_D'H7*`;
                 if (adamLogoBuffer) {
                     await sock.sendMessage(gjid, { image: adamLogoBuffer, caption: welcomeText, mentions: [user] });
                 } else {
@@ -666,6 +670,10 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 const m = up.messages[0];
                 if (!m.message || m.key.remoteJid === 'status@broadcast') return;
                 
+                const timestampNow = Math.floor(Date.now() / 1000);
+                if (m.messageTimestamp && (timestampNow - m.messageTimestamp > 17)) return;
+
+                if (!sessionData.active) return;
                 if (processedIds.has(m.key.id)) return;
                 processedIds.add(m.key.id);
                 
@@ -674,39 +682,27 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                      processedIds.delete(iterator.next().value);
                 }
 
-                if (!m.messageTimestamp) return;
-                const timestampNow = Math.floor(Date.now() / 1000);
-                if (timestampNow - m.messageTimestamp > 17) return;
-
                 const from = m.key.remoteJid;
                 const pushName = m.pushName || 'Inconnu';
                 const sender = m.key.participant || m.key.remoteJid;
-                const senderNum = sender.split('@')[0].replace(/[^0-9]/g, '');
+                let activeHostName = "Adam_D'H7";
 
                 const ownerCollection = db.collection('session_owners');
                 let storedOwner = await ownerCollection.findOne({ sessionId: sessionId });
-                let isSessionOwner = false;
-                let isPrimaryOwner = false;
-
                 if (storedOwner) {
-                    if (senderNum === storedOwner.primaryNumber) {
-                        isSessionOwner = true;
-                        isPrimaryOwner = true;
-                        if (pushName !== storedOwner.primaryName && pushName !== 'Inconnu') {
-                            await ownerCollection.updateOne({ sessionId: sessionId }, { $set: { primaryName: pushName } });
-                            storedOwner.primaryName = pushName;
+                    activeHostName = storedOwner.Name || "Adam_D'H7";
+                    const sNum = sender.split('@')[0].replace(/[^0-9]/g, '');
+                    const sName = pushName;
+                    let allowed = false;
+                    if (sNum === storedOwner.Number || sName === storedOwner.Name) {
+                        allowed = true;
+                        if (sNum === storedOwner.Number && sName !== storedOwner.Name && sName !== 'Inconnu') {
+                            await ownerCollection.updateOne({ sessionId: sessionId }, { $set: { Name: sName } });
+                            storedOwner.Name = sName;
+                            activeHostName = sName;
                         }
-                    } else if (storedOwner.secondaryOwners && storedOwner.secondaryOwners.includes(senderNum)) {
-                        isSessionOwner = true;
                     }
-                    if (!isSessionOwner) return;
-                } else {
-                    const botNum = sock.user ? sock.user.id.split(':')[0] : null;
-                    if (botNum && senderNum !== botNum) return;
-                    if (botNum && senderNum === botNum) {
-                        isSessionOwner = true;
-                        isPrimaryOwner = true;
-                    }
+                    if (!allowed) return;
                 }
 
                 const bodyRaw = extractBody(m);
@@ -714,7 +710,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
 
                 userInfo.set(sender, {
                   pseudo: pushName,
-                  number: senderNum,
+                  number: sender.split('@')[0].replace(/[^0-9]/g, ''),
                   lang: globalLang
                 });
 
@@ -724,9 +720,11 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 if (['protocolMessage', 'senderKeyDistributionMessage', 'appStateSyncKeyRequest', 'appStateSyncKeyShare', 'deviceSentMessage', 'reactionMessage'].includes(messageType)) return;
 
                 const isGroup = from.endsWith('@g.us');
-                
                 const botId = sock.user?.id ? (sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id) : null;
                 const isOwner = sender === botId;
+
+                const cmdRegex = /^[.\/! ]?\s*([\p{L}0-9_]+)(?:\s+([\s\S]*))?$/u;
+                const match = body.match(cmdRegex);
 
                 const getMeta = async () => {
                     if (groupMetadataCache.has(from)) return groupMetadataCache.get(from);
@@ -736,9 +734,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             groupMetadataCache.set(from, meta);
                             setTimeout(() => groupMetadataCache.delete(from), 300000);
                             return meta;
-                        } catch (e) {
-                            return null;
-                        }
+                        } catch (e) {}
                     }
                     return null;
                 };
@@ -749,9 +745,6 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                     const metadataA = await getMeta();
                     return metadataA ? metadataA.participants.some(p => p.id === sender && p.admin) : false;
                 };
-                
-                const cmdRegex = /^[.\/! ]?\s*([\p{L}0-9_]+)(?:\s+([\s\S]*))?$/u;
-                const match = body.match(cmdRegex);
 
                 if (isGroup && !match) {
                     const mode = sessionData.noLienMode[from] || 'off';
@@ -798,6 +791,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         }
                     }
                 }
+                
                 if (!internalCommand) return;
 
                 try { await sock.readMessages([m.key]); } catch (e) {}
@@ -808,51 +802,27 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 const t = translations[globalLang] || translations.ht;
 
                 switch (internalCommand) {
-                    case 'addowner':
-                        if (!isPrimaryOwner) break;
-                        let newOwnerNum = args.replace(/[^0-9]/g, '');
-                        if (!newOwnerNum && quoted) newOwnerNum = (quoted.participant || quoted.remoteJid).replace(/[^0-9]/g, '');
-                        if (newOwnerNum) {
-                            await db.collection('session_owners').updateOne(
-                                { sessionId: sessionId },
-                                { $addToSet: { secondaryOwners: newOwnerNum } }
-                            );
-                            await sendFormatted(sock, from, "Owner", `*Utilisateur @${newOwnerNum} ajouté aux owners*`, pushName, false);
-                        }
-                        break;
-                    case 'delowner':
-                        if (!isPrimaryOwner) break;
-                        let delOwnerNum = args.replace(/[^0-9]/g, '');
-                        if (!delOwnerNum && quoted) delOwnerNum = (quoted.participant || quoted.remoteJid).replace(/[^0-9]/g, '');
-                        if (delOwnerNum) {
-                            await db.collection('session_owners').updateOne(
-                                { sessionId: sessionId },
-                                { $pull: { secondaryOwners: delOwnerNum } }
-                            );
-                            await sendFormatted(sock, from, "Owner", `*Utilisateur @${delOwnerNum} retiré des owners*`, pushName, false);
-                        }
-                        break;
                     case 'menu':
                         if (args.length > 0) break;
                         const menuBody = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_vv}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_bref}*\n*○ ${t.cmd_ping}*`;
-                        await sendFormatted(sock, from, t.menu_title, menuBody, pushName, false);
+                        await sendFormatted(sock, from, t.menu_title, menuBody, pushName, false, activeHostName);
                         break;
                     case 'alive':
                         const uptimeSeconds = (Date.now() - sessionData.readyAt) / 1000;
                         const upTimeStr = formatUptime(uptimeSeconds, t);
                         const aliveMsg = `*${t.connected_since} ${upTimeStr}*`;
-                        await sendFormatted(sock, from, t.alive_title, aliveMsg, pushName, false);
+                        await sendFormatted(sock, from, t.alive_title, aliveMsg, pushName, false, activeHostName);
                         break;
                     case 'ping':
                         const msgTimestamp = m.messageTimestamp * 1000;
                         const pingMs = Date.now() - msgTimestamp;
                         const pingStr = `*${pingMs} ms*`;
-                        await sendFormatted(sock, from, "Ping", pingStr, pushName, false);
+                        await sendFormatted(sock, from, "Ping", pingStr, pushName, false, activeHostName);
                         break;
                     case 'qr':
                         if (!args) break;
                         const qrBuffer = await QRCode.toBuffer(args);
-                        await sock.sendMessage(from, { image: qrBuffer, caption: `*○ ${t.cmd_qr}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n${args}\n\n> Adam_D'H7` });
+                        await sock.sendMessage(from, { image: qrBuffer, caption: `*○ ${t.cmd_qr}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: ${activeHostName}\n\n${args}\n\n> Adam_D'H7` });
                         break;
                     case 'qrbot':
                         const tempId = `temp_${Date.now()}`;
@@ -875,18 +845,18 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                 qrSent = true;
                                 try {
                                     const qrbuf = await QRCode.toBuffer(qr);
-                                    const createdCaption = `*○ ${t.qrbot_created}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n${t.qrbot_scan}\n\n> Adam_D'H7`;
+                                    const createdCaption = `*○ ${t.qrbot_created}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: ${activeHostName}\n\n${t.qrbot_scan}\n\n> Adam_D'H7`;
                                     await sock.sendMessage(from, { image: qrbuf, caption: createdCaption });
                                 } catch (e) {}
                             }
                             if (connection === 'open') {
                                 const realId = tempSock.user.id.split(':')[0];
                                 const activeMsg = `${t.qrbot_active.replace('{id}', realId)}`;
-                                await sendFormatted(sock, from, t.qrbot_connected, activeMsg, pushName, false);
+                                await sendFormatted(sock, from, t.qrbot_connected, activeMsg, pushName, false, activeHostName);
                                 tempSock.end(undefined);
                                 try {
                                     await renameMongoSession(tempId, `session_${realId}`);
-                                    startAdamBot(`session_${realId}`, false, 'qr', false);
+                                    startAdamBot(`session_${realId}`, true, 'qr', false);
                                 } catch (e) {}
                             }
                             if (connection === 'close') {
@@ -912,7 +882,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             const groupName = metadataLien && metadataLien.subject ? `*${metadataLien.subject}*\n` : '';
                             const groupDesc = metadataLien && metadataLien.desc ? metadataLien.desc.toString().trim() + '\n\n' : '';
                             const lienCapTitle = t.cmd_lien.charAt(0).toUpperCase() + t.cmd_lien.slice(1);
-                            const lienCaption = `*○ ${lienCapTitle}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n${groupName}*${link}*\n\n${groupDesc}> Adam_D'H7`;
+                            const lienCaption = `*○ ${lienCapTitle}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: ${activeHostName}\n\n${groupName}*${link}*\n\n${groupDesc}> Adam_D'H7`;
                             const lienOpts = { caption: lienCaption };
                             try {
                                 const ppUrl = await sock.profilePictureUrl(from, 'image');
@@ -936,7 +906,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         const tagTitle = t.cmd_tagall.charAt(0).toUpperCase() + t.cmd_tagall.slice(1);
                         const participants = metadataTag.participants.map(p => p.id);
                         const tagBody = participants.map((p, i) => (i % 2 === 0 ? '●' : '○') + ' @' + p.split('@')[0]).join('\n');
-                        const tagCaption = `*○ ${tagTitle}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n${tagBody}\n\n> Adam_D'H7`;
+                        const tagCaption = `*○ ${tagTitle}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: ${activeHostName}\n\n${tagBody}\n\n> Adam_D'H7`;
                         const tagOpts = { mentions: participants };
                         if (adamLogoBuffer) {
                             tagOpts.image = adamLogoBuffer;
@@ -1049,7 +1019,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         if ((!msgOpts.text || msgOpts.text === '‎') && (!msgOpts.caption || msgOpts.caption === '‎')) {
                             const htTitle = t.hidetag_title || "Hidetag";
                             const htDefault = t.hidetag_default || "It’s just a hidetag";
-                            const defaultText = `*○ ${htTitle}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n*${htDefault}*\n\n> Adam_D'H7`;
+                            const defaultText = `*○ ${htTitle}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: ${activeHostName}\n\n*${htDefault}*\n\n> Adam_D'H7`;
                             if (hasMedia) {
                                 msgOpts.caption = defaultText;
                             } else {
@@ -1094,21 +1064,21 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         if (!isGroup || !isAdminB) break;
                         sessionData.bienvenueEnabled[from] = !sessionData.bienvenueEnabled[from];
                         const bwStat = sessionData.bienvenueEnabled[from] ? t.welcome_on : t.welcome_off;
-                        await sendFormatted(sock, from, t.cmd_bienvenue, `*${bwStat}*`, pushName, false);
+                        await sendFormatted(sock, from, t.cmd_bienvenue, `*${bwStat}*`, pushName, false, activeHostName);
                         break;
                     case 'nolien':
                         const isAdminNL = await checkAdmin();
                         if (!isGroup || !isAdminNL) break;
                         sessionData.noLienMode[from] = sessionData.noLienMode[from] === 'simple' ? 'off' : 'simple';
                         const nlStat = sessionData.noLienMode[from] === 'simple' ? t.nolien_on : t.nolien_off;
-                        await sendFormatted(sock, from, t.cmd_nolien, `*${nlStat}*`, pushName, false);
+                        await sendFormatted(sock, from, t.cmd_nolien, `*${nlStat}*`, pushName, false, activeHostName);
                         break;
                     case 'nolien2':
                         const isAdminNL2 = await checkAdmin();
                         if (!isGroup || !isAdminNL2) break;
                         sessionData.noLienMode[from] = sessionData.noLienMode[from] === 'strict' ? 'off' : 'strict';
                         const nl2Stat = sessionData.noLienMode[from] === 'strict' ? t.nolien2_on : t.nolien2_off;
-                        await sendFormatted(sock, from, t.cmd_nolien2, `*${nl2Stat}*`, pushName, false);
+                        await sendFormatted(sock, from, t.cmd_nolien2, `*${nl2Stat}*`, pushName, false, activeHostName);
                         break;
                     case 'del':
                         if (!quoted) break;
@@ -1182,7 +1152,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                 const rawSize = bJson.size || bBuffer.length;
                                 const formattedSize = typeof rawSize === 'number' ? formatBytes(rawSize) : formatBytes(parseInt(rawSize) || bBuffer.length);
                                 const brefText = `*${fUrl}*\n*size* : ${formattedSize}`;
-                                await sendFormatted(sock, from, "Bref", brefText, pushName, false);
+                                await sendFormatted(sock, from, "Bref", brefText, pushName, false, activeHostName);
                             }
                         } catch (e) {}
                         break;
@@ -1192,7 +1162,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         let history = chatHistories.get(from) || [];
                         history.push({role: "user", content: promptText});
                         chatHistories.set(from, history);
-                        const userInfoObj = userInfo.get(sender) || {pseudo: pushName, number: senderNum, lang: globalLang};
+                        const userInfoObj = userInfo.get(sender) || {pseudo: pushName, number: sender.split('@')[0], lang: globalLang};
                         const userMsgCount = history.filter(h => h.role === 'user').length;
                         const needsAd = (userMsgCount % 4 === 0);
                         let messagesForAI = buildAIMessages(history, userInfoObj, globalLang);
@@ -1201,13 +1171,13 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             history.push({role: "assistant", content: aiResponseText});
                             if (history.length > 7) history = history.slice(-7);
                             chatHistories.set(from, history);
-                            await sendFormatted(sock, from, t.ai_title, aiResponseText, pushName, false);
+                            await sendFormatted(sock, from, t.ai_title, aiResponseText, pushName, false, activeHostName);
                         } else {
                             const tfid = Math.floor(1000000 + Math.random() * 9000000);
                             const confirmLink = `https://tf.bot.adamdh7.org/TF-${tfid}`;
                             const clickText = t.ai_click_to_receive.replace('{link}', confirmLink);
                             const clickMsg = await sock.sendMessage(from, { text: clickText });
-                            const formattedAiResponse = `*○ ${t.ai_title}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n${aiResponseText}\n\n> Adam_D'H7`;
+                            const formattedAiResponse = `*○ ${t.ai_title}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: ${activeHostName}\n\n${aiResponseText}\n\n> Adam_D'H7`;
                             const timeoutId = setTimeout(async () => {
                                 try {
                                     await sock.sendMessage(from, { delete: clickMsg.key });
@@ -1242,14 +1212,14 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         if (['fr', 'en', 'es', 'ht'].includes(langCode)) {
                             globalLang = langCode;
                             const msgText = t.lang_changed.replace('{lang}', langCode.toUpperCase());
-                            await sendFormatted(sock, from, t.lang_title, msgText, pushName, false);
+                            await sendFormatted(sock, from, t.lang_title, msgText, pushName, false, activeHostName);
                         } else {
-                            await sendFormatted(sock, from, t.lang_title, t.languages_available, pushName, false);
+                            await sendFormatted(sock, from, t.lang_title, t.languages_available, pushName, false, activeHostName);
                         }
                         break;
                     case 'imaj':
                         if (!args) {
-                            await sendFormatted(sock, from, t.imaj_title, t.imaj_prompt, pushName, false);
+                            await sendFormatted(sock, from, t.imaj_title, t.imaj_prompt, pushName, false, activeHostName);
                             break;
                         }
                         try {
@@ -1266,10 +1236,10 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             const capText = t.imaj_generated.replace('{prompt}', args);
                             await sock.sendMessage(from, { 
                               image: imageBuffer, 
-                              caption: `*○ ${t.image_generated_title}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n${capText}\n\n> Adam_D'H7` 
+                              caption: `*○ ${t.image_generated_title}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: ${activeHostName}\n\n${capText}\n\n> Adam_D'H7` 
                             });
                         } catch (e) {
-                            await sendFormatted(sock, from, t.imaj_title, t.imaj_error, pushName, false);
+                            await sendFormatted(sock, from, t.imaj_title, t.imaj_error, pushName, false, activeHostName);
                         }
                         break;
                     case 'cheche':
@@ -1280,19 +1250,19 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             if (searchData.results) {
                               responseText += "\n\nSources:\n" + searchData.results.slice(0,3).map(r => `- ${r.url}`).join("\n");
                             }
-                            await sendFormatted(sock, from, t.search_title, responseText, pushName, false);
+                            await sendFormatted(sock, from, t.search_title, responseText, pushName, false, activeHostName);
                             if (searchData.images && searchData.images.length > 0) {
                               for (let i = 0; i < Math.min(2, searchData.images.length); i++) {
-                                await sock.sendMessage(from, { image: { url: searchData.images[i] }, caption: `*○ ${t.search_title}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\nImage de recherche\n\n> Adam_D'H7` });
+                                await sock.sendMessage(from, { image: { url: searchData.images[i] }, caption: `*○ ${t.search_title}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: ${activeHostName}\n\nImage de recherche\n\n> Adam_D'H7` });
                               }
                             }
                         } catch (e) {
-                            await sendFormatted(sock, from, t.search_title, t.search_error, pushName, false);
+                            await sendFormatted(sock, from, t.search_title, t.search_error, pushName, false, activeHostName);
                         }
                         break;
                     case 'sites':
                         const sitesCaption = `*Bot.Adam_D'H7 : https://bot.adamdh7.org*\n*Bref : https://bref.adamdh7.org*\n*MIZIK : https://mizik.adamdh7.org*\n*Tout : https://tout.adamdh7.org*\n*Chaine : https://whatsapp.com/channel/0029Vb6WLps7oQhWrUlyPQ2m*\n*Canal : https://t.me/dh7adam , t.me/tfmizik*\n*Pages : https://m.facebook.com/dh7adam , https://m.facebook.com/tfmizik*`;
-                        await sendFormatted(sock, from, 'Sites', sitesCaption, pushName, false);
+                        await sendFormatted(sock, from, 'Sites', sitesCaption, pushName, false, activeHostName);
                         break;
                 }
             } catch (e) {
