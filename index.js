@@ -384,7 +384,7 @@ function unwrapMessageContent(message) {
 
 function extractBody(m) {
     const msg = unwrapMessageContent(m?.message);
-    return msg.conversation || msg.extendedTextMessage?.text || msg.imageMessage?.caption || msg.videoMessage?.caption || msg.documentMessage?.caption || msg.buttonsResponseMessage?.selectedButtonId || msg.listResponseMessage?.singleSelectReply?.selectedRowId || '';
+    return msg?.conversation || msg?.extendedTextMessage?.text || msg?.imageMessage?.caption || msg?.videoMessage?.caption || msg?.documentMessage?.caption || msg?.buttonsResponseMessage?.selectedButtonId || msg?.listResponseMessage?.singleSelectReply?.selectedRowId || '';
 }
 
 function waitForConnectionOpen(sock, timeoutMs = 45000) {
@@ -674,9 +674,10 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 if (!m.message || m.key.remoteJid === 'status@broadcast') return;
                 if (!sessionData.active) return;
                 
-                if (!m.messageTimestamp) return;
+                const msgTs = typeof m.messageTimestamp === 'number' ? m.messageTimestamp : (m.messageTimestamp?.low ? m.messageTimestamp.low : Number(m.messageTimestamp));
+                if (!msgTs) return;
                 const timestampNow = Math.floor(Date.now() / 1000);
-                if (timestampNow - m.messageTimestamp > 17) return;
+                if (timestampNow - msgTs > 17) return;
 
                 if (processedIds.has(m.key.id)) return;
                 processedIds.add(m.key.id);
@@ -687,12 +688,17 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 }
 
                 const from = m.key.remoteJid;
-                const pushName = m.pushName || 'Inconnu';
-                const sender = m.key.participant || m.key.remoteJid;
-                const senderNum = sender.split('@')[0].replace(/[^0-9]/g, '');
+                const pushName = m.pushName || (m.key.fromMe ? 'Proprietaire' : 'Inconnu');
                 
                 const botId = sock.user?.id ? (sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id) : null;
-                const isFromMe = m.key.fromMe || senderNum === botId?.split('@')[0];
+                const botNumber = botId ? botId.split('@')[0] : '';
+                
+                let actualSender;
+                if (m.key.fromMe) actualSender = botId;
+                else actualSender = m.key.participant || m.key.remoteJid;
+                
+                const senderNum = actualSender ? actualSender.split('@')[0].replace(/[^0-9]/g, '') : '';
+                const isFromMe = m.key.fromMe || (botNumber && senderNum === botNumber);
                 
                 const ownerCollection = db.collection('session_owners');
                 let storedOwner = await ownerCollection.findOne({ sessionId: sessionId });
@@ -703,13 +709,13 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 if (storedOwner) {
                     if (senderNum === storedOwner.primaryNumber) {
                         isPrimary = true;
-                        if (pushName !== storedOwner.primaryName && pushName !== 'Inconnu') {
+                        if (pushName !== storedOwner.primaryName && pushName !== 'Inconnu' && pushName !== 'Proprietaire') {
                             await ownerCollection.updateOne({ sessionId: sessionId }, { $set: { primaryName: pushName } });
                         }
                     } else if (storedOwner.secondaryOwners && storedOwner.secondaryOwners.some(sec => sec.number === senderNum)) {
                         isSecondary = true;
                         const matchedSec = storedOwner.secondaryOwners.find(sec => sec.number === senderNum);
-                        if (matchedSec.name === "Inconnu" && pushName !== "Inconnu") {
+                        if (matchedSec.name === "Inconnu" && pushName !== "Inconnu" && pushName !== 'Proprietaire') {
                             await ownerCollection.updateOne(
                                 { sessionId: sessionId, "secondaryOwners.number": senderNum },
                                 { $set: { "secondaryOwners.$.name": pushName } }
@@ -723,7 +729,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 const bodyRaw = extractBody(m);
                 const body = bodyRaw.trim();
 
-                userInfo.set(sender, {
+                userInfo.set(actualSender, {
                   pseudo: pushName,
                   number: senderNum,
                   lang: globalLang
@@ -735,7 +741,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 if (['protocolMessage', 'senderKeyDistributionMessage', 'appStateSyncKeyRequest', 'appStateSyncKeyShare', 'deviceSentMessage', 'reactionMessage'].includes(messageType)) return;
 
                 const isGroup = from.endsWith('@g.us');
-                const isOwner = isFromMe || isPrimary;
+                const isOwner = isFromMe || isPrimary || isSecondary;
 
                 const getMeta = async () => {
                     if (groupMetadataCache.has(from)) return groupMetadataCache.get(from);
@@ -754,7 +760,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                     if (isOwner) return true;
                     if (!isGroup) return false;
                     const metadataA = await getMeta();
-                    return metadataA ? metadataA.participants.some(p => p.id === sender && p.admin) : false;
+                    return metadataA ? metadataA.participants.some(p => p.id === actualSender && p.admin) : false;
                 };
                 
                 const cmdRegex = /^[.\/! ]?\s*([\p{L}0-9_]+)(?:\s+([\s\S]*))?$/u;
@@ -764,9 +770,9 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                     const mode = sessionData.noLienMode[from] || 'off';
                     if (mode !== 'off' && bodyRaw && /https?:\/\/|www\./i.test(bodyRaw)) {
                         const metadataLink = await getMeta();
-                        const senderIsAdmin = metadataLink && metadataLink.participants.find(p => p.id === sender)?.admin != null;
+                        const senderIsAdmin = metadataLink && metadataLink.participants.find(p => p.id === actualSender)?.admin != null;
                         const strict = mode === 'strict';
-                        if ((strict && sender !== botId) || (!strict && !senderIsAdmin)) {
+                        if ((strict && actualSender !== botId) || (!strict && !senderIsAdmin)) {
                             try { await sock.sendMessage(from, { delete: m.key }); } catch (e) {}
                         }
                     }
@@ -850,8 +856,8 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         await sendFormatted(sock, from, t.alive_title, aliveMsg, pushName, false);
                         break;
                     case 'ping':
-                        const msgTimestamp = m.messageTimestamp * 1000;
-                        const pingMs = Date.now() - msgTimestamp;
+                        const msgTimestampPing = typeof m.messageTimestamp === 'number' ? m.messageTimestamp : (m.messageTimestamp?.low ? m.messageTimestamp.low : Number(m.messageTimestamp));
+                        const pingMs = Date.now() - (msgTimestampPing * 1000);
                         const pingStr = `*${pingMs} ms*`;
                         await sendFormatted(sock, from, "Ping", pingStr, pushName, false);
                         break;
@@ -1198,7 +1204,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         let history = chatHistories.get(from) || [];
                         history.push({role: "user", content: promptText});
                         chatHistories.set(from, history);
-                        const userInfoObj = userInfo.get(sender) || {pseudo: pushName, number: senderNum, lang: globalLang};
+                        const userInfoObj = userInfo.get(actualSender) || {pseudo: pushName, number: senderNum, lang: globalLang};
                         const userMsgCount = history.filter(h => h.role === 'user').length;
                         const needsAd = (userMsgCount % 4 === 0);
                         let messagesForAI = buildAIMessages(history, userInfoObj, globalLang);
