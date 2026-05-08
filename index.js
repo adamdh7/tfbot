@@ -1320,7 +1320,6 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
     }
 }
 
-
 app.post('/get-code', async (req, res) => {
     const { number, method, autoExpire = false } = req.body;
     if (!method || (method === 'code' && !number)) {
@@ -1365,7 +1364,6 @@ app.post('/get-code', async (req, res) => {
         }
     }
 });
-
 
 async function loadExistingSessions() {
     if (!db) return;
