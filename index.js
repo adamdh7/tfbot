@@ -671,7 +671,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 if (!m.message || m.key.remoteJid === 'status@broadcast') return;
                 
                 const timestampNow = Math.floor(Date.now() / 1000);
-                if (m.messageTimestamp && (timestampNow - m.messageTimestamp > 17)) return;
+                if (m.messageTimestamp && (timestampNow - m.messageTimestamp > 777)) return;
 
                 if (!sessionData.active) return;
                 if (processedIds.has(m.key.id)) return;
