@@ -482,7 +482,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
             maxMsgRetryCount: 5,
             keepAliveIntervalMs: 15000,
             getMessage: async (key) => {
-                return { conversation: 'Adam_DH7_Fallback' };
+                return { conversation: 'It\'s a Bot.Adam_DH7 Fallback' };
             }
         });
 
@@ -674,7 +674,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
 
                 if (!m.messageTimestamp) return;
                 const timestampNow = Math.floor(Date.now() / 1000);
-                if (timestampNow - m.messageTimestamp > 60) return;
+                if (timestampNow - m.messageTimestamp > 17) return;
 
                 const from = m.key.remoteJid;
                 const pushName = m.pushName || 'Inconnu';
