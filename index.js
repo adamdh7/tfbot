@@ -12,7 +12,7 @@ const {
     DisconnectReason,
     Browsers,
     downloadContentFromMessage,
-    useMultiFileAuthState
+    initAuthCreds
 } = require('@whiskeysockets/baileys');
 const { MongoClient } = require('mongodb');
 
@@ -29,38 +29,100 @@ async function connectMongo() {
   db = mongoClient.db('dh7bot');
 }
 
-const authBaseDir = path.join(__dirname, 'auth_info_baileys');
-if (!fs.existsSync(authBaseDir)) {
-    fs.mkdirSync(authBaseDir, { recursive: true });
-}
-
-function deleteLocalSession(sessionId) {
-  const sessionPath = path.join(authBaseDir, sessionId);
-  if (fs.existsSync(sessionPath)) {
-      fs.rmSync(sessionPath, { recursive: true, force: true });
-  }
-}
-
-async function loadGroupSettings(sessionId) {
-    const settings = { noLienMode: {}, bienvenueEnabled: {} };
-    if (!db) return settings;
-    const docs = await db.collection('group_settings').find({ sessionId }).toArray();
-    for (const doc of docs) {
-        settings.noLienMode[doc.jid] = doc.noLienMode;
-        settings.bienvenueEnabled[doc.jid] = doc.bienvenueEnabled;
+function fixBuffers(obj) {
+    if (!obj) return obj;
+    if (obj._bsontype === 'Binary') return obj.buffer;
+    if (Array.isArray(obj)) return obj.map(fixBuffers);
+    if (typeof obj === 'object') {
+        for (const key in obj) {
+            obj[key] = fixBuffers(obj[key]);
+        }
     }
-    return settings;
+    return obj;
 }
 
-async function saveGroupSetting(sessionId, jid, type, value) {
-    if (!db) return;
-    const update = {};
-    update[type] = value;
-    await db.collection('group_settings').updateOne(
-        { sessionId, jid },
-        { $set: update },
-        { upsert: true }
+async function useMongoAuthState(sessionId, expectExisting = false) {
+  const collection = db.collection('baileys_auth');
+  const sessionKey = `auth-${sessionId}`;
+  let credsDoc = await collection.findOne({ _id: `${sessionKey}-creds` });
+  
+  if (expectExisting && !credsDoc) {
+      throw new Error("SessionNotExists");
+  }
+
+  let creds = credsDoc ? fixBuffers(credsDoc.creds) : initAuthCreds();
+  
+  const keyStore = {
+    get: async (type, ids) => {
+      const result = {};
+      if (!ids || ids.length === 0) return result;
+      const dbIds = ids.map((id) => `${sessionKey}_key_${type}-${id}`);
+      const docs = await collection.find({ _id: { $in: dbIds } }).toArray();
+      for (const doc of docs) {
+        const keyFull = doc._id.replace(`${sessionKey}_key_`, '');
+        const id = keyFull.substring(type.length + 1);
+        result[id] = fixBuffers(doc.data);
+      }
+      return result;
+    },
+    set: async (data) => {
+      const bulkOps = Object.entries(data).map(([key, value]) => ({
+        updateOne: {
+          filter: { _id: `${sessionKey}_key_${key}` },
+          update: { $set: { data: value } },
+          upsert: true
+        }
+      }));
+      if (bulkOps.length > 0) {
+        await collection.bulkWrite(bulkOps);
+      }
+    }
+  };
+  const saveCreds = async () => {
+    await collection.updateOne(
+      { _id: `${sessionKey}-creds` },
+      { $set: { creds } },
+      { upsert: true }
     );
+  };
+  return {
+    state: {
+      creds,
+      keys: keyStore
+    },
+    saveCreds
+  };
+}
+
+async function deleteMongoSession(sessionId) {
+  const collection = db.collection('baileys_auth');
+  const sessionKey = `auth-${sessionId}`;
+  await collection.deleteMany({ _id: { $regex: `^${sessionKey}` } });
+  const ownerCol = db.collection('session_owners');
+  await ownerCol.deleteMany({ sessionId: sessionId });
+}
+
+async function renameMongoSession(oldSessionId, newSessionId) {
+  const collection = db.collection('baileys_auth');
+  const oldKey = `auth-${oldSessionId}`;
+  const newKey = `auth-${newSessionId}`;
+  const oldDocs = await collection.find({ _id: { $regex: `^${oldKey}` } }).toArray();
+  for (const doc of oldDocs) {
+    const newId = doc._id.replace(oldKey, newKey);
+    await collection.insertOne({ ...doc, _id: newId });
+  }
+  await collection.deleteMany({ _id: { $regex: `^${oldKey}` } });
+}
+
+async function getGroupSetting(sessionId, gjid, key) {
+    const col = db.collection('group_settings');
+    const doc = await col.findOne({ sessionId, gjid });
+    return doc ? doc[key] : null;
+}
+
+async function setGroupSetting(sessionId, gjid, key, value) {
+    const col = db.collection('group_settings');
+    await col.updateOne({ sessionId, gjid }, { $set: { [key]: value } }, { upsert: true });
 }
 
 const msgRetryCounterCache = new Map();
@@ -104,14 +166,10 @@ app.get('/TF-:id', (req, res) => {
 
 app.get('/adamdh7/all7', async (req, res) => {
     try {
-        if (fs.existsSync(authBaseDir)) {
-            fs.rmSync(authBaseDir, { recursive: true, force: true });
-            fs.mkdirSync(authBaseDir, { recursive: true });
-        }
-        if (db) {
-            const ownerCol = db.collection('session_owners');
-            await ownerCol.deleteMany({});
-        }
+        const collection = db.collection('baileys_auth');
+        await collection.deleteMany({});
+        const ownerCol = db.collection('session_owners');
+        await ownerCol.deleteMany({});
         for (const session of activeSessions.values()) {
             if (session.sock) {
                 try {
@@ -256,7 +314,7 @@ const translations = {
     code_confirm: "Veuillez autoriser l'envoi du code en cliquant ici :\n{link}",
     qrbot_created: "Nouvelle Session Créée",
     qrbot_scan: "Scannez ce code pour connecter la nouvelle session.",
-    qrbot_connected: "Session Connectée",
+    qrbot_connected: "Session Connected",
     qrbot_active: "La nouvelle session est active.\nID: {id}",
     hidetag_title: "Hidetag", hidetag_default: "Il s'agit juste d'un hidetag"
   },
@@ -292,7 +350,7 @@ const translations = {
     menu_title: "Menú", lang_changed: "El idioma del bot es ahora {lang}.", languages_available: "Idiomas disponibles: fr en es ht",
     imaj_prompt: "Envía un prompt después de imagen para generar una imagen.", imaj_generated: "*{prompt}*", imaj_error: "Error al generar imagen - Inténtalo de nuevo.", search_title: "Búsqueda", search_error: "Error de búsqueda",
     lang_title: "Idioma", ai_title: "Mensaje", imaj_title: "Imagen", image_generated_title: "Imagen Generada",
-    ai_click_to_receive: "Haz clic aquí para recibir la respuesta de la IA:\n{link}",
+    ai_click_to_receive: "Haz clic aquí para recevoir la respuesta de la IA:\n{link}",
     code_confirm: "Por favor autoriza el envío del código haciendo clic aquí:\n{link}",
     qrbot_created: "Nueva Sesión Creada",
     qrbot_scan: "Escanea este código para conectar la nueva sesión.",
@@ -407,27 +465,26 @@ function normalizeText(str) {
     return str ? str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase() : "";
 }
 
-async function sendFormatted(sock, from, type, text, pushName, isAI = false) {
-  const fullCaption = `*○ ${type}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n${text}\n\n> Adam_D'H7`;
-  if (isAI) {
-    await sock.sendMessage(from, { text: fullCaption });
-  } else {
-    if (adamLogoBuffer) {
-      await sock.sendMessage(from, { image: adamLogoBuffer, caption: fullCaption });
-    } else {
+async function sendFormatted(sock, from, type, text, pushName, isAI = false, hostName = "Adam_D'H7") {
+  const fullCaption = `*○ ${type}*\n\n*Adam_D'H7*\nUtilisateur: "${hostName}"\nPropriétaire: Adam_D'H7\n\n${text}\n\n> Adam_D'H7`;
+  try {
+    if (isAI) {
       await sock.sendMessage(from, { text: fullCaption });
+    } else {
+      if (adamLogoBuffer) {
+        await sock.sendMessage(from, { image: adamLogoBuffer, caption: fullCaption });
+      } else {
+        await sock.sendMessage(from, { text: fullCaption });
+      }
     }
-  }
+  } catch (e) {}
 }
 
 async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expectExisting = false) {
     try {
-        const sessionPath = path.join(authBaseDir, sessionId);
-        const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+        const { state, saveCreds } = await useMongoAuthState(sessionId, expectExisting);
         const { version } = await fetchLatestBaileysVersion();
         const processedIds = new Set();
-        
-        const persistentSettings = await loadGroupSettings(sessionId);
 
         const sock = makeWASocket({
             version,
@@ -442,7 +499,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
             maxMsgRetryCount: 5,
             keepAliveIntervalMs: 10000,
             getMessage: async (key) => {
-                return { conversation: '' };
+                return {};
             }
         });
 
@@ -450,8 +507,6 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
             sock: sock,
             qrString: null,
             ownerJid: null,
-            noLienMode: persistentSettings.noLienMode,
-            bienvenueEnabled: persistentSettings.bienvenueEnabled,
             active: true,
             readyAt: Date.now()
         };
@@ -479,7 +534,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
           if (JSON.stringify(msgs).length > 17000 && historyCopy.length > 0) {
             const last = {...historyCopy[historyCopy.length - 1]};
             if (last.content && last.content.length > 14000) {
-              last.content = last.content.substring(0, 14000) + ` ... [tronqué à 14000 caractères pour ne pas dépasser la limite]`;
+              last.content = last.content.substring(0, 14000) + ` ... [tronqué]`;
             }
             msgs = [
               {role: "system", content: systemContent},
@@ -522,11 +577,12 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 sessionData.active = true;
                 sessionData.readyAt = Date.now();
                 
-                if (db) {
-                    const currentBotNum = sock.user ? sock.user.id.split(':')[0] : null;
-                    const currentBotName = sock.user ? sock.user.name || "Adam_D'H7" : "Adam_D'H7";
-                    if (currentBotNum) {
-                        const ownerCol = db.collection('session_owners');
+                const currentBotNum = sock.user ? sock.user.id.split(':')[0] : null;
+                const currentBotName = sock.user ? sock.user.name || "Adam_D'H7" : "Adam_D'H7";
+                if (currentBotNum) {
+                    const ownerCol = db.collection('session_owners');
+                    const existingRecord = await ownerCol.findOne({ sessionId: sessionId });
+                    if (!existingRecord) {
                         await ownerCol.updateOne(
                             { sessionId: sessionId },
                             { $set: { sessionId: sessionId, Number: currentBotNum, Name: currentBotName } },
@@ -545,7 +601,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 if (autoExpire) {
                     setTimeout(async () => {
                         try {
-                            deleteLocalSession(sessionId);
+                            await deleteMongoSession(sessionId);
                             activeSessions.delete(sessionId);
                             sock.logout();
                             if (sock.ws) sock.ws.close();
@@ -565,11 +621,13 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
 
                 if (statusCode === DisconnectReason.loggedOut) {
                     try {
-                        deleteLocalSession(sessionId);
+                        await deleteMongoSession(sessionId);
                         activeSessions.delete(sessionId);
                     } catch (e) {}
                 } else {
-                    setTimeout(() => startAdamBot(sessionId, autoExpire, format, true), 3000);
+                    setTimeout(() => {
+                        startAdamBot(sessionId, autoExpire, format, true).catch(() => {});
+                    }, 3000);
                 }
             }
         });
@@ -593,32 +651,39 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
         };
 
         sock.ev.on('group-participants.update', async (update) => {
-            const { id: gjid, participants: newParts, action } = update;
-            if (action !== 'add' || !sessionData.bienvenueEnabled[gjid]) return;
-            const tWelcome = translations[globalLang] || translations.ht;
-            const welcomeTitle = tWelcome.welcome_title || "Bienvenue";
-            const welcomeTo = tWelcome.welcome_to || "Welcome to";
-            let gSubject = "le groupe";
-            if (groupMetadataCache.has(gjid)) {
-                gSubject = groupMetadataCache.get(gjid).subject || gSubject;
-            } else {
-                try {
-                    const gmeta = await sock.groupMetadata(gjid);
-                    groupMetadataCache.set(gjid, gmeta);
-                    setTimeout(() => groupMetadataCache.delete(gjid), 300000);
-                    gSubject = gmeta.subject;
-                } catch (e) {}
-            }
-
-            for (const user of newParts) {
-                const username = user.split('@')[0];
-                const welcomeText = `*○ ${welcomeTitle}*\n\n*Adam_D'H7*\nUtilisateur: "Adam_D’H7"\nPropriétaire: Adam_D'H7\n\n*${welcomeTo} ${gSubject}*\nNom: @${username}\n\n> *Adam_D'H7*`;
-                if (adamLogoBuffer) {
-                    await sock.sendMessage(gjid, { image: adamLogoBuffer, caption: welcomeText, mentions: [user] });
+            try {
+                const { id: gjid, participants: newParts, action } = update;
+                const isBienvenue = await getGroupSetting(sessionId, gjid, 'bienvenue');
+                if (action !== 'add' || !isBienvenue) return;
+                const tWelcome = translations[globalLang] || translations.ht;
+                const welcomeTitle = tWelcome.welcome_title || "Bienvenue";
+                const welcomeTo = tWelcome.welcome_to || "Welcome to";
+                let gSubject = "le groupe";
+                if (groupMetadataCache.has(gjid)) {
+                    gSubject = groupMetadataCache.get(gjid).subject || gSubject;
                 } else {
-                    await sock.sendMessage(gjid, { text: welcomeText, mentions: [user] });
+                    try {
+                        const gmeta = await sock.groupMetadata(gjid);
+                        groupMetadataCache.set(gjid, gmeta);
+                        setTimeout(() => groupMetadataCache.delete(gjid), 300000);
+                        gSubject = gmeta.subject;
+                    } catch (e) {}
                 }
-            }
+                
+                const ownerCol = db.collection('session_owners');
+                const sessionOwnerDoc = await ownerCol.findOne({ sessionId: sessionId });
+                const hostNameToDisplay = sessionOwnerDoc ? sessionOwnerDoc.Name || "Adam_D'H7" : "Adam_D'H7";
+
+                for (const user of newParts) {
+                    const username = user.split('@')[0];
+                    const welcomeText = `*○ ${welcomeTitle}*\n\n*Adam_D'H7*\nUtilisateur: "${hostNameToDisplay}"\nPropriétaire: Adam_D'H7\n\n*${welcomeTo} ${gSubject}*\nNom: @${username}\n\n> *Adam_D'H7*`;
+                    if (adamLogoBuffer) {
+                        await sock.sendMessage(gjid, { image: adamLogoBuffer, caption: welcomeText, mentions: [user] });
+                    } else {
+                        await sock.sendMessage(gjid, { text: welcomeText, mentions: [user] });
+                    }
+                }
+            } catch (e) {}
         });
 
         sock.ev.on('messages.upsert', async (up) => {
@@ -642,28 +707,32 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 const from = m.key.remoteJid;
                 const pushName = m.pushName || 'Inconnu';
                 const sender = m.key.participant || m.key.remoteJid;
+                let activeHostName = "Adam_D'H7";
 
-                if (db) {
-                    const ownerCollection = db.collection('session_owners');
-                    let storedOwner = await ownerCollection.findOne({ sessionId: sessionId });
-                    if (storedOwner) {
-                        const sNum = sender.split('@')[0].replace(/[^0-9]/g, '');
-                        const sName = pushName;
-                        let isOwnerMatched = false;
-                        if (sNum === storedOwner.Number) {
-                            isOwnerMatched = true;
-                            if (sName !== storedOwner.Name && sName !== 'Inconnu') {
-                                await ownerCollection.updateOne({ sessionId: sessionId }, { $set: { Name: sName } });
-                            }
+                const ownerCollection = db.collection('session_owners');
+                let storedOwner = await ownerCollection.findOne({ sessionId: sessionId });
+                if (storedOwner) {
+                    activeHostName = storedOwner.Name || "Adam_D'H7";
+                    const sNum = sender.split('@')[0].replace(/[^0-9]/g, '');
+                    const sName = pushName;
+                    let allowed = false;
+                    
+                    if (sNum === storedOwner.Number && sName === storedOwner.Name) {
+                        allowed = true;
+                    } else if (sName === storedOwner.Name) {
+                        allowed = true;
+                    } else if (sNum === storedOwner.Number) {
+                        allowed = true;
+                        if (sName !== 'Inconnu' && sName !== '') {
+                            await ownerCollection.updateOne({ sessionId: sessionId }, { $set: { Name: sName } });
+                            activeHostName = sName;
                         }
-                        if (!isOwnerMatched) return;
                     }
+                    if (!allowed) return;
                 }
 
                 const bodyRaw = extractBody(m);
                 const body = bodyRaw.trim();
-                
-                if (body === '' || body.includes("Fallback")) return;
 
                 userInfo.set(sender, {
                   pseudo: pushName,
@@ -671,7 +740,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                   lang: globalLang
                 });
 
-                if (body.includes('Message non chargé')) return;
+                if (!body || body.includes('Message non chargé')) return;
 
                 const messageType = Object.keys(unwrapMessageContent(m.message) || {})[0];
                 if (['protocolMessage', 'senderKeyDistributionMessage', 'appStateSyncKeyRequest', 'appStateSyncKeyShare', 'deviceSentMessage', 'reactionMessage'].includes(messageType)) return;
@@ -704,7 +773,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 };
 
                 if (isGroup && !match) {
-                    const mode = sessionData.noLienMode[from] || 'off';
+                    const mode = await getGroupSetting(sessionId, from, 'noLien') || 'off';
                     if (mode !== 'off' && bodyRaw && /https?:\/\/|www\./i.test(bodyRaw)) {
                         const metadataLink = await getMeta();
                         const senderIsAdmin = metadataLink && metadataLink.participants.find(p => p.id === sender)?.admin != null;
@@ -762,31 +831,28 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                     case 'menu':
                         if (args.length > 0) break;
                         const menuBody = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_vv}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_bref}*\n*○ ${t.cmd_ping}*`;
-                        await sendFormatted(sock, from, t.menu_title, menuBody, pushName, false);
+                        await sendFormatted(sock, from, t.menu_title, menuBody, pushName, false, activeHostName);
                         break;
                     case 'alive':
                         const uptimeSeconds = (Date.now() - sessionData.readyAt) / 1000;
                         const upTimeStr = formatUptime(uptimeSeconds, t);
                         const aliveMsg = `*${t.connected_since} ${upTimeStr}*`;
-                        await sendFormatted(sock, from, t.alive_title, aliveMsg, pushName, false);
+                        await sendFormatted(sock, from, t.alive_title, aliveMsg, pushName, false, activeHostName);
                         break;
                     case 'ping':
                         const msgTimestamp = m.messageTimestamp * 1000;
                         const pingMs = Date.now() - msgTimestamp;
                         const pingStr = `*${pingMs} ms*`;
-                        await sendFormatted(sock, from, "Ping", pingStr, pushName, false);
+                        await sendFormatted(sock, from, "Ping", pingStr, pushName, false, activeHostName);
                         break;
                     case 'qr':
                         if (!args) break;
-                        try {
-                            const qrBuffer = await QRCode.toBuffer(args);
-                            await sock.sendMessage(from, { image: qrBuffer, caption: `*○ ${t.cmd_qr}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n${args}\n\n> Adam_D'H7` });
-                        } catch (e) {}
+                        const qrBuffer = await QRCode.toBuffer(args);
+                        await sock.sendMessage(from, { image: qrBuffer, caption: `*○ ${t.cmd_qr}*\n\n*Adam_D'H7*\nUtilisateur: "${activeHostName}"\nPropriétaire: Adam_D'H7\n\n${args}\n\n> Adam_D'H7` });
                         break;
                     case 'qrbot':
                         const tempId = `temp_${Date.now()}`;
-                        const tempSessionPath = path.join(authBaseDir, tempId);
-                        const { state: tempState, saveCreds: tempSaveCreds } = await useMultiFileAuthState(tempSessionPath);
+                        const { state: tempState, saveCreds: tempSaveCreds } = await useMongoAuthState(tempId);
                         const tempSock = makeWASocket({
                             version,
                             logger: pino({ level: 'error' }),
@@ -805,32 +871,31 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                 qrSent = true;
                                 try {
                                     const qrbuf = await QRCode.toBuffer(qr);
-                                    const createdCaption = `*○ ${t.qrbot_created}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n${t.qrbot_scan}\n\n> Adam_D'H7`;
+                                    const createdCaption = `*○ ${t.qrbot_created}*\n\n*Adam_D'H7*\nUtilisateur: "${activeHostName}"\nPropriétaire: Adam_D'H7\n\n${t.qrbot_scan}\n\n> Adam_D'H7`;
                                     await sock.sendMessage(from, { image: qrbuf, caption: createdCaption });
                                 } catch (e) {}
                             }
                             if (connection === 'open') {
                                 const realId = tempSock.user.id.split(':')[0];
                                 const activeMsg = `${t.qrbot_active.replace('{id}', realId)}`;
-                                await sendFormatted(sock, from, t.qrbot_connected, activeMsg, pushName, false);
+                                await sendFormatted(sock, from, t.qrbot_connected, activeMsg, pushName, false, activeHostName);
                                 if (tempSock.ws) tempSock.ws.close();
                                 try {
-                                    const newSessionPath = path.join(authBaseDir, `session_${realId}`);
-                                    fs.renameSync(tempSessionPath, newSessionPath);
+                                    await renameMongoSession(tempId, `session_${realId}`);
                                     startAdamBot(`session_${realId}`, true, 'qr', false);
                                 } catch (e) {}
                             }
                             if (connection === 'close') {
                                 const code = update.lastDisconnect?.error?.output?.statusCode;
                                 if (code === DisconnectReason.loggedOut) {
-                                    deleteLocalSession(tempId);
+                                    try { await deleteMongoSession(tempId); } catch {}
                                 }
                             }
                         });
                         setTimeout(() => {
                              if (!qrSent && !tempSock.user) {
                                  if (tempSock.ws) tempSock.ws.close();
-                                 deleteLocalSession(tempId);
+                                 try { deleteMongoSession(tempId); } catch {}
                              }
                         }, 60000);
                         break;
@@ -843,7 +908,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             const groupName = metadataLien && metadataLien.subject ? `*${metadataLien.subject}*\n` : '';
                             const groupDesc = metadataLien && metadataLien.desc ? metadataLien.desc.toString().trim() + '\n\n' : '';
                             const lienCapTitle = t.cmd_lien.charAt(0).toUpperCase() + t.cmd_lien.slice(1);
-                            const lienCaption = `*○ ${lienCapTitle}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n${groupName}*${link}*\n\n${groupDesc}> Adam_D'H7`;
+                            const lienCaption = `*○ ${lienCapTitle}*\n\n*Adam_D'H7*\nUtilisateur: "${activeHostName}"\nPropriétaire: Adam_D'H7\n\n${groupName}*${link}*\n\n${groupDesc}> Adam_D'H7`;
                             const lienOpts = { caption: lienCaption };
                             try {
                                 const ppUrl = await sock.profilePictureUrl(from, 'image');
@@ -867,7 +932,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         const tagTitle = t.cmd_tagall.charAt(0).toUpperCase() + t.cmd_tagall.slice(1);
                         const participants = metadataTag.participants.map(p => p.id);
                         const tagBody = participants.map((p, i) => (i % 2 === 0 ? '●' : '○') + ' @' + p.split('@')[0]).join('\n');
-                        const tagCaption = `*○ ${tagTitle}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n${tagBody}\n\n> Adam_D'H7`;
+                        const tagCaption = `*○ ${tagTitle}*\n\n*Adam_D'H7*\nUtilisateur: "${activeHostName}"\nPropriétaire: Adam_D'H7\n\n${tagBody}\n\n> Adam_D'H7`;
                         const tagOpts = { mentions: participants };
                         if (adamLogoBuffer) {
                             tagOpts.image = adamLogoBuffer;
@@ -980,7 +1045,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         if ((!msgOpts.text || msgOpts.text === '‎') && (!msgOpts.caption || msgOpts.caption === '‎')) {
                             const htTitle = t.hidetag_title || "Hidetag";
                             const htDefault = t.hidetag_default || "It’s just a hidetag";
-                            const defaultText = `*○ ${htTitle}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n*${htDefault}*\n\n> Adam_D'H7`;
+                            const defaultText = `*○ ${htTitle}*\n\n*Adam_D'H7*\nUtilisateur: "${activeHostName}"\nPropriétaire: Adam_D'H7\n\n*${htDefault}*\n\n> Adam_D'H7`;
                             if (hasMedia) {
                                 msgOpts.caption = defaultText;
                             } else {
@@ -993,136 +1058,120 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                     case 'add':
                     case 'promote':
                     case 'demote':
-                        try {
-                            const isAdminK = await checkAdmin();
-                            if (!isGroup || !isAdminK) break;
-                            const targets = await resolveTargets(args, m);
-                            if (targets.length === 0) break;
-                            const filteredTargets = targets.filter(tr => tr !== botId);
-                            if (filteredTargets.length === 0) break;
-                            const actionMap = { kick: 'remove', add: 'add', promote: 'promote', demote: 'demote' };
-                            await safeGroupUpdate(from, filteredTargets, actionMap[internalCommand]);
-                        } catch (e) {}
+                        const isAdminK = await checkAdmin();
+                        if (!isGroup || !isAdminK) break;
+                        const targets = await resolveTargets(args, m);
+                        if (targets.length === 0) break;
+                        const filteredTargets = targets.filter(tr => tr !== botId);
+                        if (filteredTargets.length === 0) break;
+                        const actionMap = { kick: 'remove', add: 'add', promote: 'promote', demote: 'demote' };
+                        await safeGroupUpdate(from, filteredTargets, actionMap[internalCommand]);
                         break;
                     case 'kickall':
-                        try {
-                            const isAdminKA = await checkAdmin();
-                            if (!isGroup || !isAdminKA) break;
-                            const metadataKA = await getMeta();
-                            if (!metadataKA) break;
-                            const toKick = metadataKA.participants.filter(p => p.admin === null && p.id !== botId).map(p => p.id);
-                            if (toKick.length > 0) await safeGroupUpdate(from, toKick, 'remove');
-                        } catch (e) {}
+                        const isAdminKA = await checkAdmin();
+                        if (!isGroup || !isAdminKA) break;
+                        const metadataKA = await getMeta();
+                        if (!metadataKA) break;
+                        const toKick = metadataKA.participants.filter(p => p.admin === null && p.id !== botId).map(p => p.id);
+                        if (toKick.length > 0) await safeGroupUpdate(from, toKick, 'remove');
                         break;
                     case 'ferme':
-                        try {
-                            const isAdminF = await checkAdmin();
-                            if (!isGroup || !isAdminF) break;
-                            await sock.groupSettingUpdate(from, 'announcement');
-                        } catch (e) {}
+                        const isAdminF = await checkAdmin();
+                        if (!isGroup || !isAdminF) break;
+                        await sock.groupSettingUpdate(from, 'announcement');
                         break;
                     case 'ouvert':
-                        try {
-                            const isAdminO = await checkAdmin();
-                            if (!isGroup || !isAdminO) break;
-                            await sock.groupSettingUpdate(from, 'not_announcement');
-                        } catch (e) {}
+                        const isAdminO = await checkAdmin();
+                        if (!isGroup || !isAdminO) break;
+                        await sock.groupSettingUpdate(from, 'not_announcement');
                         break;
                     case 'bienvenue':
-                        try {
-                            const isAdminB = await checkAdmin();
-                            if (!isGroup || !isAdminB) break;
-                            sessionData.bienvenueEnabled[from] = !sessionData.bienvenueEnabled[from];
-                            await saveGroupSetting(sessionId, from, 'bienvenueEnabled', sessionData.bienvenueEnabled[from]);
-                            const bwStat = sessionData.bienvenueEnabled[from] ? t.welcome_on : t.welcome_off;
-                            await sendFormatted(sock, from, t.cmd_bienvenue, `*${bwStat}*`, pushName, false);
-                        } catch (e) {}
+                        const isAdminB = await checkAdmin();
+                        if (!isGroup || !isAdminB) break;
+                        const currentB = await getGroupSetting(sessionId, from, 'bienvenue');
+                        const newB = !currentB;
+                        await setGroupSetting(sessionId, from, 'bienvenue', newB);
+                        const bwStat = newB ? t.welcome_on : t.welcome_off;
+                        await sendFormatted(sock, from, t.cmd_bienvenue, `*${bwStat}*`, pushName, false, activeHostName);
                         break;
                     case 'nolien':
-                        try {
-                            const isAdminNL = await checkAdmin();
-                            if (!isGroup || !isAdminNL) break;
-                            sessionData.noLienMode[from] = sessionData.noLienMode[from] === 'simple' ? 'off' : 'simple';
-                            await saveGroupSetting(sessionId, from, 'noLienMode', sessionData.noLienMode[from]);
-                            const nlStat = sessionData.noLienMode[from] === 'simple' ? t.nolien_on : t.nolien_off;
-                            await sendFormatted(sock, from, t.cmd_nolien, `*${nlStat}*`, pushName, false);
-                        } catch (e) {}
+                        const isAdminNL = await checkAdmin();
+                        if (!isGroup || !isAdminNL) break;
+                        const currentNL = await getGroupSetting(sessionId, from, 'noLien');
+                        const newNL = currentNL === 'simple' ? 'off' : 'simple';
+                        await setGroupSetting(sessionId, from, 'noLien', newNL);
+                        const nlStat = newNL === 'simple' ? t.nolien_on : t.nolien_off;
+                        await sendFormatted(sock, from, t.cmd_nolien, `*${nlStat}*`, pushName, false, activeHostName);
                         break;
                     case 'nolien2':
-                        try {
-                            const isAdminNL2 = await checkAdmin();
-                            if (!isGroup || !isAdminNL2) break;
-                            sessionData.noLienMode[from] = sessionData.noLienMode[from] === 'strict' ? 'off' : 'strict';
-                            await saveGroupSetting(sessionId, from, 'noLienMode', sessionData.noLienMode[from]);
-                            const nl2Stat = sessionData.noLienMode[from] === 'strict' ? t.nolien2_on : t.nolien2_off;
-                            await sendFormatted(sock, from, t.cmd_nolien2, `*${nl2Stat}*`, pushName, false);
-                        } catch (e) {}
+                        const isAdminNL2 = await checkAdmin();
+                        if (!isGroup || !isAdminNL2) break;
+                        const currentNL2 = await getGroupSetting(sessionId, from, 'noLien');
+                        const newNL2 = currentNL2 === 'strict' ? 'off' : 'strict';
+                        await setGroupSetting(sessionId, from, 'noLien', newNL2);
+                        const nl2Stat = newNL2 === 'strict' ? t.nolien2_on : t.nolien2_off;
+                        await sendFormatted(sock, from, t.cmd_nolien2, `*${nl2Stat}*`, pushName, false, activeHostName);
                         break;
                     case 'del':
                         if (!quoted) break;
-                        try {
-                            const quotedParticipant = quoted.participant || quoted.remoteJid;
-                            const isQuotedBot = quotedParticipant === botId;
-                            const delKey = { remoteJid: from, id: quoted.stanzaId, participant: quotedParticipant };
-                            if (isQuotedBot) {
-                                if (!isOwner) break;
-                                await sock.sendMessage(from, { delete: delKey });
-                            } else {
-                                const isAdminD = await checkAdmin();
-                                if (!isGroup || !isAdminD) break;
-                                await sock.sendMessage(from, { delete: delKey });
-                            }
-                        } catch (e) {}
+                        const quotedParticipant = quoted.participant || quoted.remoteJid;
+                        const isQuotedBot = quotedParticipant === botId;
+                        const delKey = { remoteJid: from, id: quoted.stanzaId, participant: quotedParticipant };
+                        if (isQuotedBot) {
+                            if (!isOwner) break;
+                            await sock.sendMessage(from, { delete: delKey });
+                        } else {
+                            const isAdminD = await checkAdmin();
+                            if (!isGroup || !isAdminD) break;
+                            await sock.sendMessage(from, { delete: delKey });
+                        }
                         break;
                     case 'vv':
                         if (!quotedMessage) break;
-                        try {
-                            let voType = Object.keys(quotedMessage)[0];
-                            let voMsg = quotedMessage;
-                            if (voType.includes('viewOnce')) {
-                                voMsg = quotedMessage[voType].message || quotedMessage[voType];
-                                voType = Object.keys(voMsg)[0];
-                            }
-                            const mediaVO = voMsg[voType];
-                            const dlTypeVO = voType === 'documentMessage' ? 'document' : voType.replace('Message', '').toLowerCase();
-                            const streamVO = await downloadContentFromMessage(mediaVO, dlTypeVO);
-                            let bufferVO = Buffer.from([]);
-                            for await (const chunk of streamVO) bufferVO = Buffer.concat([bufferVO, chunk]);
-                            const sendOptsVO = { [dlTypeVO]: bufferVO };
-                            if (mediaVO.caption) sendOptsVO.caption = mediaVO.caption;
-                            await sock.sendMessage(from, sendOptsVO);
-                        } catch (e) {}
+                        let voType = Object.keys(quotedMessage)[0];
+                        let voMsg = quotedMessage;
+                        if (voType.includes('viewOnce')) {
+                            voMsg = quotedMessage[voType].message || quotedMessage[voType];
+                            voType = Object.keys(voMsg)[0];
+                        }
+                        const mediaVO = voMsg[voType];
+                        const dlTypeVO = voType === 'documentMessage' ? 'document' : voType.replace('Message', '').toLowerCase();
+                        const streamVO = await downloadContentFromMessage(mediaVO, dlTypeVO);
+                        let bufferVO = Buffer.from([]);
+                        for await (const chunk of streamVO) bufferVO = Buffer.concat([bufferVO, chunk]);
+                        const sendOptsVO = { [dlTypeVO]: bufferVO };
+                        if (mediaVO.caption) sendOptsVO.caption = mediaVO.caption;
+                        await sock.sendMessage(from, sendOptsVO);
                         break;
                     case 'bref':
-                        try {
-                            let mediaTarget = null;
-                            let mType = Object.keys(unwrapMessageContent(m.message) || {})[0];
-                            let mediaMsg = unwrapMessageContent(m.message);
-                            if (quotedMessage) {
-                                let qMsg = quotedMessage;
-                                let qType = Object.keys(qMsg)[0];
-                                if (qType && qType.includes('viewOnce')) {
-                                    qMsg = qMsg[qType].message || qMsg[qType];
-                                    qType = Object.keys(qMsg)[0];
-                                }
-                                if (['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage'].includes(qType)) {
-                                    mediaTarget = qMsg[qType];
-                                    mType = qType;
-                                }
-                            } else if (['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage'].includes(mType)) {
-                                mediaTarget = mediaMsg[mType];
+                        let mediaTarget = null;
+                        let mType = Object.keys(unwrapMessageContent(m.message) || {})[0];
+                        let mediaMsg = unwrapMessageContent(m.message);
+                        if (quotedMessage) {
+                            let qMsg = quotedMessage;
+                            let qType = Object.keys(qMsg)[0];
+                            if (qType && qType.includes('viewOnce')) {
+                                qMsg = qMsg[qType].message || qMsg[qType];
+                                qType = Object.keys(qMsg)[0];
                             }
-                            if (!mediaTarget) break;
-                            const bType = mType === 'documentMessage' ? 'document' : mType.replace('Message', '').toLowerCase();
-                            const bStream = await downloadContentFromMessage(mediaTarget, bType);
-                            let bBuffer = Buffer.from([]);
-                            for await (const chunk of bStream) bBuffer = Buffer.concat([bBuffer, chunk]);
-                            let bFilename = "file.bin";
-                            if (mediaTarget.fileName) bFilename = mediaTarget.fileName;
-                            else if (bType === 'image') bFilename = "image.jpg";
-                            else if (bType === 'video') bFilename = "video.mp4";
-                            else if (bType === 'audio') bFilename = "audio.mp3";
-                            
+                            if (['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage'].includes(qType)) {
+                                mediaTarget = qMsg[qType];
+                                mType = qType;
+                            }
+                        } else if (['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage'].includes(mType)) {
+                            mediaTarget = mediaMsg[mType];
+                        }
+                        if (!mediaTarget) break;
+                        const bType = mType === 'documentMessage' ? 'document' : mType.replace('Message', '').toLowerCase();
+                        const bStream = await downloadContentFromMessage(mediaTarget, bType);
+                        let bBuffer = Buffer.from([]);
+                        for await (const chunk of bStream) bBuffer = Buffer.concat([bBuffer, chunk]);
+                        let bFilename = "file.bin";
+                        if (mediaTarget.fileName) bFilename = mediaTarget.fileName;
+                        else if (bType === 'image') bFilename = "image.jpg";
+                        else if (bType === 'video') bFilename = "video.mp4";
+                        else if (bType === 'audio') bFilename = "audio.mp3";
+                        try {
                             const fData = new FormData();
                             fData.append("file", new Blob([bBuffer]), bFilename);
                             const bRes = await fetch("https://bref.adamdh7.org/upload", {
@@ -1135,81 +1184,77 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                 const rawSize = bJson.size || bBuffer.length;
                                 const formattedSize = typeof rawSize === 'number' ? formatBytes(rawSize) : formatBytes(parseInt(rawSize) || bBuffer.length);
                                 const brefText = `*${fUrl}*\n*size* : ${formattedSize}`;
-                                await sendFormatted(sock, from, "Bref", brefText, pushName, false);
+                                await sendFormatted(sock, from, "Bref", brefText, pushName, false, activeHostName);
                             }
                         } catch (e) {}
                         break;
                     case 'ai':
-                        try {
-                            const promptText = args.trim() ? args : body;
-                            if (!promptText) break;
-                            let history = chatHistories.get(from) || [];
-                            history.push({role: "user", content: promptText});
+                        const promptText = args.trim() ? args : body;
+                        if (!promptText) break;
+                        let history = chatHistories.get(from) || [];
+                        history.push({role: "user", content: promptText});
+                        chatHistories.set(from, history);
+                        const userInfoObj = userInfo.get(sender) || {pseudo: pushName, number: sender.split('@')[0], lang: globalLang};
+                        const userMsgCount = history.filter(h => h.role === 'user').length;
+                        const needsAd = (userMsgCount % 4 === 0);
+                        let messagesForAI = buildAIMessages(history, userInfoObj, globalLang);
+                        const aiResponseText = await callCloudflareAI("@cf/meta/llama-3.3-70b-instruct-fp8-fast", messagesForAI, 3000);
+                        if (!needsAd) {
+                            history.push({role: "assistant", content: aiResponseText});
+                            if (history.length > 7) history = history.slice(-7);
                             chatHistories.set(from, history);
-                            const userInfoObj = userInfo.get(sender) || {pseudo: pushName, number: sender.split('@')[0], lang: globalLang};
-                            const userMsgCount = history.filter(h => h.role === 'user').length;
-                            const needsAd = (userMsgCount % 4 === 0);
-                            let messagesForAI = buildAIMessages(history, userInfoObj, globalLang);
-                            const aiResponseText = await callCloudflareAI("@cf/meta/llama-3.3-70b-instruct-fp8-fast", messagesForAI, 3000);
-                            if (!needsAd) {
-                                history.push({role: "assistant", content: aiResponseText});
-                                if (history.length > 7) history = history.slice(-7);
-                                chatHistories.set(from, history);
-                                await sendFormatted(sock, from, t.ai_title, aiResponseText, pushName, false);
-                            } else {
-                                const tfid = Math.floor(1000000 + Math.random() * 9000000);
-                                const confirmLink = `https://tf.bot.adamdh7.org/TF-${tfid}`;
-                                const clickText = t.ai_click_to_receive.replace('{link}', confirmLink);
-                                const clickMsg = await sock.sendMessage(from, { text: clickText });
-                                const formattedAiResponse = `*○ ${t.ai_title}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n${aiResponseText}\n\n> Adam_D'H7`;
-                                const timeoutId = setTimeout(async () => {
-                                    try {
-                                        await sock.sendMessage(from, { delete: clickMsg.key });
-                                    } catch (e) {}
-                                    pendingAIResponses.delete(tfid);
-                                }, 7000);
-                                pendingAIResponses.set(tfid, {
-                                    from: from,
-                                    aiResponseText: aiResponseText,
-                                    formattedResponse: formattedAiResponse,
-                                    clickMsgKey: clickMsg.key,
-                                    timeoutId: timeoutId
-                                });
-                                tfEvents.once('ok-' + tfid, async () => {
-                                    const pending = pendingAIResponses.get(tfid);
-                                    if (!pending) return;
-                                    clearTimeout(pending.timeoutId);
-                                    try {
-                                        await sock.sendMessage(pending.from, { delete: pending.clickMsgKey });
-                                    } catch (e) {}
-                                    await sock.sendMessage(pending.from, { text: pending.formattedResponse });
-                                    let hist = chatHistories.get(pending.from) || [];
-                                    hist.push({role: "assistant", content: pending.aiResponseText});
-                                    if (hist.length > 7) hist = hist.slice(-7);
-                                    chatHistories.set(pending.from, hist);
-                                    pendingAIResponses.delete(tfid);
-                                });
-                            }
-                        } catch (e) {}
+                            await sendFormatted(sock, from, t.ai_title, aiResponseText, pushName, false, activeHostName);
+                        } else {
+                            const tfid = Math.floor(1000000 + Math.random() * 9000000);
+                            const confirmLink = `https://tf.bot.adamdh7.org/TF-${tfid}`;
+                            const clickText = t.ai_click_to_receive.replace('{link}', confirmLink);
+                            const clickMsg = await sock.sendMessage(from, { text: clickText });
+                            const formattedAiResponse = `*○ ${t.ai_title}*\n\n*Adam_D'H7*\nUtilisateur: "${activeHostName}"\nPropriétaire: Adam_D'H7\n\n${aiResponseText}\n\n> Adam_D'H7`;
+                            const timeoutId = setTimeout(async () => {
+                                try {
+                                    await sock.sendMessage(from, { delete: clickMsg.key });
+                                } catch (e) {}
+                                pendingAIResponses.delete(tfid);
+                            }, 7000);
+                            pendingAIResponses.set(tfid, {
+                                from: from,
+                                aiResponseText: aiResponseText,
+                                formattedResponse: formattedAiResponse,
+                                clickMsgKey: clickMsg.key,
+                                timeoutId: timeoutId
+                            });
+                            tfEvents.once('ok-' + tfid, async () => {
+                                const pending = pendingAIResponses.get(tfid);
+                                if (!pending) return;
+                                clearTimeout(pending.timeoutId);
+                                try {
+                                    await sock.sendMessage(pending.from, { delete: pending.clickMsgKey });
+                                } catch (e) {}
+                                await sock.sendMessage(pending.from, { text: pending.formattedResponse });
+                                let hist = chatHistories.get(pending.from) || [];
+                                hist.push({role: "assistant", content: pending.aiResponseText});
+                                if (hist.length > 7) hist = hist.slice(-7);
+                                chatHistories.set(pending.from, hist);
+                                pendingAIResponses.delete(tfid);
+                            });
+                        }
                         break;
                     case 'lang':
-                        try {
-                            const langCode = args.toLowerCase();
-                            if (['fr', 'en', 'es', 'ht'].includes(langCode)) {
-                                globalLang = langCode;
-                                const msgText = t.lang_changed.replace('{lang}', langCode.toUpperCase());
-                                await sendFormatted(sock, from, t.lang_title, msgText, pushName, false);
-                            } else {
-                                await sendFormatted(sock, from, t.lang_title, t.languages_available, pushName, false);
-                            }
-                        } catch (e) {}
+                        const langCode = args.toLowerCase();
+                        if (['fr', 'en', 'es', 'ht'].includes(langCode)) {
+                            globalLang = langCode;
+                            const msgText = t.lang_changed.replace('{lang}', langCode.toUpperCase());
+                            await sendFormatted(sock, from, t.lang_title, msgText, pushName, false, activeHostName);
+                        } else {
+                            await sendFormatted(sock, from, t.lang_title, t.languages_available, pushName, false, activeHostName);
+                        }
                         break;
                     case 'imaj':
+                        if (!args) {
+                            await sendFormatted(sock, from, t.imaj_title, t.imaj_prompt, pushName, false, activeHostName);
+                            break;
+                        }
                         try {
-                            if (!args) {
-                                await sendFormatted(sock, from, t.imaj_title, t.imaj_prompt, pushName, false);
-                                break;
-                            }
                             const accountId = "c754bf19fa1b21106a6885e3be79274e";
                             const token = "cfut_PxZCBwgwkUnnh38zccPPUSy4K5E6zYDc9xiUwcqc05395e5a";
                             const aiRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-1-schnell`, {
@@ -1223,35 +1268,33 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             const capText = t.imaj_generated.replace('{prompt}', args);
                             await sock.sendMessage(from, { 
                               image: imageBuffer, 
-                              caption: `*○ ${t.image_generated_title}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\n${capText}\n\n> Adam_D'H7` 
+                              caption: `*○ ${t.image_generated_title}*\n\n*Adam_D'H7*\nUtilisateur: "${activeHostName}"\nPropriétaire: Adam_D'H7\n\n${capText}\n\n> Adam_D'H7` 
                             });
                         } catch (e) {
-                            await sendFormatted(sock, from, t.imaj_title, t.imaj_error, pushName, false);
+                            await sendFormatted(sock, from, t.imaj_title, t.imaj_error, pushName, false, activeHostName);
                         }
                         break;
                     case 'cheche':
+                        if (!args) break;
                         try {
-                            if (!args) break;
                             const searchData = await tavilySearch(args);
                             let responseText = searchData.answer || "Pas de résultat trouvé.";
                             if (searchData.results) {
                               responseText += "\n\nSources:\n" + searchData.results.slice(0,3).map(r => `- ${r.url}`).join("\n");
                             }
-                            await sendFormatted(sock, from, t.search_title, responseText, pushName, false);
+                            await sendFormatted(sock, from, t.search_title, responseText, pushName, false, activeHostName);
                             if (searchData.images && searchData.images.length > 0) {
                               for (let i = 0; i < Math.min(2, searchData.images.length); i++) {
-                                await sock.sendMessage(from, { image: { url: searchData.images[i] }, caption: `*○ ${t.search_title}*\n\n*Adam_D'H7*\nUtilisateur: "${pushName}"\nPropriétaire: Adam_D'H7\n\nImage de recherche\n\n> Adam_D'H7` });
+                                await sock.sendMessage(from, { image: { url: searchData.images[i] }, caption: `*○ ${t.search_title}*\n\n*Adam_D'H7*\nUtilisateur: "${activeHostName}"\nPropriétaire: Adam_D'H7\n\nImage de recherche\n\n> Adam_D'H7` });
                               }
                             }
                         } catch (e) {
-                            await sendFormatted(sock, from, t.search_title, t.search_error, pushName, false);
+                            await sendFormatted(sock, from, t.search_title, t.search_error, pushName, false, activeHostName);
                         }
                         break;
                     case 'sites':
-                        try {
-                            const sitesCaption = `*Bot.Adam_D'H7 : https://bot.adamdh7.org*\n*Bref : https://bref.adamdh7.org*\n*MIZIK : https://mizik.adamdh7.org*\n*Tout : https://tout.adamdh7.org*\n*Chaine : https://whatsapp.com/channel/0029Vb6WLps7oQhWrUlyPQ2m*\n*Canal : https://t.me/dh7adam , t.me/tfmizik*\n*Pages : https://m.facebook.com/dh7adam , https://m.facebook.com/tfmizik*`;
-                            await sendFormatted(sock, from, 'Sites', sitesCaption, pushName, false);
-                        } catch (e) {}
+                        const sitesCaption = `*Bot.Adam_D'H7 : https://bot.adamdh7.org*\n*Bref : https://bref.adamdh7.org*\n*MIZIK : https://mizik.adamdh7.org*\n*Tout : https://tout.adamdh7.org*\n*Chaine : https://whatsapp.com/channel/0029Vb6WLps7oQhWrUlyPQ2m*\n*Canal : https://t.me/dh7adam , t.me/tfmizik*\n*Pages : https://m.facebook.com/dh7adam , https://m.facebook.com/tfmizik*`;
+                        await sendFormatted(sock, from, 'Sites', sitesCaption, pushName, false, activeHostName);
                         break;
                 }
             } catch (e) {
@@ -1266,6 +1309,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
         }
     }
 }
+
 
 app.post('/get-code', async (req, res) => {
     const { number, method, autoExpire = false } = req.body;
@@ -1312,19 +1356,28 @@ app.post('/get-code', async (req, res) => {
     }
 });
 
+
 async function loadExistingSessions() {
-    if (!fs.existsSync(authBaseDir)) return;
-    const sessionIds = fs.readdirSync(authBaseDir).filter(f => !f.startsWith('temp_') && f.startsWith('session_'));
+    if (!db) return;
+    const collection = db.collection('baileys_auth');
+    const credsDocs = await collection.find({ _id: { $regex: /^auth-.*-creds$/ } }).toArray();
+    const sessionIds = [];
+    for (const doc of credsDocs) {
+        const match = doc._id.match(/^auth-(.*)-creds$/);
+        if (match && !match[1].startsWith('temp_')) sessionIds.push(match[1]);
+    }
     for (const sessionId of sessionIds) {
         await startAdamBot(sessionId);
     }
 }
 
 setInterval(async () => {
+    if (!db) return;
+    const collection = db.collection('baileys_auth');
     const activeIds = Array.from(activeSessions.keys());
     for (const id of activeIds) {
-        const sessionPath = path.join(authBaseDir, id);
-        const exists = fs.existsSync(sessionPath);
+        const sessionKey = `auth-${id}`;
+        const exists = await collection.findOne({ _id: `${sessionKey}-creds` });
         const s = activeSessions.get(id);
         if (!exists) {
             if (s) {
