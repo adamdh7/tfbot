@@ -1433,10 +1433,10 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             if (!metadataKA2) break;
                             const toKick2 = metadataKA2.participants.filter(p => p.admin === null && p.id !== botId).map(p => p.id);
                             if (toKick2.length > 0) {
-                                const fractionCount = Math.max(1, Math.floor(toKick2.length / 8));
+                                const fractionCount = Math.max(1, Math.floor(toKick2.length / 7));
                                 const fractionToKick = toKick2.slice(0, fractionCount);
-                                for (let i = 0; i < fractionToKick.length; i += 5) {
-                                    const chunk = fractionToKick.slice(i, i + 5);
+                                for (let i = 0; i < fractionToKick.length; i +=  7) {
+                                    const chunk = fractionToKick.slice(i, i + 7);
                                     await safeGroupUpdate(from, chunk, 'remove');
                                     await sleep(1500);
                                 }
