@@ -267,7 +267,7 @@ const translations = {
     cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "lien", cmd_tagall: "tagtout",
     cmd_hidetag: "hidetag", cmd_kick: "expulse", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "expulsetout", cmd_kickall2: "expulsetout2", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
-    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "supp", cmd_dek: "dek", cmd_del2: "del2", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
+    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "supp", cmd_del2: "del2", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Connecté depuis", days: "jour(s)", hours: "heure(s)", minutes: "minute(s)", seconds: "seconde(s)",
     enabled: "activé", disabled: "désactivé", welcome_on: "Bienvenue activée", welcome_off: "Bienvenue désactivée", nolien_on: "Nolien activé", nolien_off: "Nolien désactivé", nolien2_on: "Nolien2 activé", nolien2_off: "Nolien2 désactivé",
     welcome_title: "Bienvenue", welcome_to: "Bienvenue dans",
@@ -296,7 +296,7 @@ const translations = {
     cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "link", cmd_tagall: "tagall",
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "kickall", cmd_kickall2: "kickall2", cmd_ferme: "close", cmd_ouvert: "open", cmd_bienvenue: "welcome",
-    cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_dek: "dek", cmd_del2: "del2", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
+    cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_del2: "del2", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Connected for", days: "day(s)", hours: "hour(s)", minutes: "minute(s)", seconds: "second(s)",
     enabled: "enabled", disabled: "disabled", welcome_on: "Welcome enabled", welcome_off: "Welcome disabled", nolien_on: "No link enabled", nolien_off: "No link disabled", nolien2_on: "Strict no link enabled", nolien2_off: "Strict no link disabled",
     welcome_title: "Welcome", welcome_to: "Welcome to",
@@ -325,7 +325,7 @@ const translations = {
     cmd_menu: "menú", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "código", cmd_lien: "enlace", cmd_tagall: "etiquetartodo",
     cmd_hidetag: "hidetag", cmd_kick: "expulsar", cmd_add: "añadir", cmd_promote: "promover", cmd_demote: "degradar",
     cmd_kickall: "borrartodo", cmd_kickall2: "borrartodo2", cmd_ferme: "cerrar", cmd_ouvert: "abrir", cmd_bienvenue: "bienvenida",
-    cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "borrar", cmd_dek: "dek", cmd_del2: "del2", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
+    cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "borrar", cmd_del2: "del2", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Conectado por", days: "día(s)", hours: "hora(s)", minutes: "minuto(s)", seconds: "segundo(s)",
     enabled: "activado", disabled: "desactivado", welcome_on: "Bienvenida activada", welcome_off: "Bienvenida desactivada", nolien_on: "Sin enlaces activado", nolien_off: "Sin enlaces desactivado", nolien2_on: "Sin enlaces estricto activado", nolien2_off: "Sin enlaces estricto desactivado",
     welcome_title: "Bienvenida", welcome_to: "Bienvenida a",
@@ -354,7 +354,7 @@ const translations = {
     cmd_menu: "meni", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "kòd", cmd_lien: "lyen", cmd_tagall: "tout",
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "siptout", cmd_kickall2: "siptout2", cmd_ferme: "fèmen", cmd_ouvri: "ouvri", cmd_bienvenue: "byenveni",
-    cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "sip", cmd_dek: "dek", cmd_del2: "del2", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
+    cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "sip", cmd_del2: "del2", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Konekte depi", days: "jou", hours: "èdtan", minutes: "minit", seconds: "segonn",
     enabled: "aktive", disabled: "dezaktive", welcome_on: "Byenveni aktive", welcome_off: "Byenveni dezaktive", nolien_on: "Nolyen aktive", nolien_off: "Nolyen dezaktive", nolien2_on: "Nolyen2 aktive", nolien2_off: "Nolyen2 dezaktive",
     welcome_title: "Byenveni", welcome_to: "Byenveni nan",
@@ -681,16 +681,16 @@ function waitForQr(sock, timeoutMs = 45000) {
 
 const commandMaps = {
   fr: {
-    "ia": "ai", "lang": "lang", "image": "imaj", "chercher": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "lien": "lien", "tagtout": "tagall", "hidetag": "hidetag", "expulse": "kick", "add": "add", "promote": "promote", "demote": "demote", "expulsetout": "kickall", "expulsetout2": "kickall2", "ferme": "ferme", "ouvert": "ouvert", "bienvenue": "bienvenue", "nolien": "nolien", "nolien2": "nolien2", "supp": "del", "dek": "dek", "del2": "del2", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "prive": "prive", "public": "public"
+    "ia": "ai", "lang": "lang", "image": "imaj", "chercher": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "lien": "lien", "tagtout": "tagall", "hidetag": "hidetag", "expulse": "kick", "add": "add", "promote": "promote", "demote": "demote", "expulsetout": "kickall", "expulsetout2": "kickall2", "ferme": "ferme", "ouvert": "ouvert", "bienvenue": "bienvenue", "nolien": "nolien", "nolien2": "nolien2", "supp": "del", "del2": "del2", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "prive": "prive", "public": "public"
   },
   en: {
-    "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "kickall2": "kickall2", "close": "ferme", "open": "ouvert", "welcome": "bienvenue", "nolink": "nolien", "nolink2": "nolien2", "del": "del", "dek": "dek", "del2": "del2", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "private": "prive", "public": "public"
+    "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "kickall2": "kickall2", "close": "ferme", "open": "ouvert", "welcome": "bienvenue", "nolink": "nolien", "nolink2": "nolien2", "del": "del", "del2": "del2", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "private": "prive", "public": "public"
   },
   es: {
-    "ia": "ai", "lang": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "borrartodo2": "kickall2", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del", "dek": "dek", "del2": "del2", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "privado": "prive", "publico": "public"
+    "ia": "ai", "lang": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "borrartodo2": "kickall2", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del", "del2": "del2", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "privado": "prive", "publico": "public"
   },
   ht: {
-    "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "siptout2": "kickall2", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "sip": "del", "dek": "dek", "del2": "del2", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "prive": "prive", "piblik": "public"
+    "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "siptout2": "kickall2", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "sip": "del", "del2": "del2", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "prive": "prive", "piblik": "public"
   }
 };
 
@@ -955,844 +955,907 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
 
         sock.ev.on('messages.upsert', async (up) => {
             if (up.type !== 'notify') return;
-            for (const m of up.messages) {
-                if (m.messageStubType) continue;
-                if (!m.message || Object.keys(m.message).length === 0) continue;
-                if (m.message.protocolMessage) continue;
-                if (m.message.messageContextInfo?.deviceListMetadata) continue;
-                if (m.key && m.key.remoteJid === 'status@broadcast') continue;
-
+            try {
+                const m = up.messages[0];
+                if (m.messageStubType) return;
+                if (!m.message || Object.keys(m.message).length === 0) return;
+                if (m.message.protocolMessage) return;
+                if (m.message.messageContextInfo?.deviceListMetadata) return;
+                if (m.key && m.key.remoteJid === 'status@broadcast') return;
+                
                 const timestampNow = Math.floor(Date.now() / 1000);
-                if (m.messageTimestamp && (timestampNow - m.messageTimestamp > 60)) continue;
+                if (m.messageTimestamp && (timestampNow - m.messageTimestamp > 60)) return;
 
                 const from = m.key.remoteJid;
                 const isFromMe = m.key.fromMe;
                 const pushName = m.pushName || 'Inconnu';
                 const botId = sock.user?.id ? (sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id) : null;
                 const sender = m.key.participant || m.key.remoteJid || (isFromMe ? botId : null);
-                const isGroup = from.endsWith('@g.us');
                 
-                if (isGroup && sender && sender !== botId) {
+                const isGroup = from.endsWith('@g.us');
+                const messageType = Object.keys(unwrapMessageContent(m.message) || {})[0];
+
+                const ownerColTop = db.collection('session_owners');
+                let sOwnerTop = sessionOwnersCache.get(sessionId);
+                if (!sOwnerTop) {
+                    sOwnerTop = await ownerColTop.findOne({ sessionId: sessionId });
+                    if (sOwnerTop) sessionOwnersCache.set(sessionId, sOwnerTop);
+                }
+
+                let isOwnerReal = false;
+                let activeHostName = sOwnerTop ? (sOwnerTop.Name || "Adam_D'H7") : "Adam_D'H7";
+                const sNum = sender ? sender.split('@')[0].replace(/[^0-9]/g, '') : '';
+                const sName = pushName;
+
+                if (isFromMe) {
+                    isOwnerReal = true;
+                    if (sName !== 'Inconnu' && sName !== '' && sName !== activeHostName && sOwnerTop) {
+                        sOwnerTop.Name = sName;
+                        await ownerColTop.updateOne({ sessionId: sessionId }, { $set: { Name: sName } }, { upsert: true });
+                        activeHostName = sName;
+                    }
+                } else if (sOwnerTop) {
+                    if (sNum === sOwnerTop.Number) {
+                        isOwnerReal = true;
+                        if (sName !== 'Inconnu' && sName !== '' && sName !== activeHostName) {
+                            sOwnerTop.Name = sName;
+                            await ownerColTop.updateOne({ sessionId: sessionId }, { $set: { Name: sName } });
+                            activeHostName = sName;
+                        }
+                    } else if (sName === sOwnerTop.Name) {
+                        isOwnerReal = true;
+                    }
+                }
+
+                // [AMÉLIORATION DEL2] : Suppression prioritaire ultra-brutale sans exception
+                if (isGroup && sender && sender !== botId && !isOwnerReal) {
                     try {
-                        const cacheKey = `${sessionId}_${from}`;
-                        const del2List = activeDel2UsersCache.get(cacheKey);
-                        if (del2List && del2List.includes(sender)) {
-                            sock.sendMessage(from, { delete: m.key }).catch(() => {});
-                            continue;
+                        const del2List = await getDel2Targets(sessionId, from);
+                        if (del2List.includes(sender)) {
+                            await sock.sendMessage(from, { delete: m.key });
+                            return;
                         }
                     } catch (e) {}
                 }
 
-                (async () => {
+                const getMeta = async () => {
                     try {
-                        const messageType = Object.keys(unwrapMessageContent(m.message) || {})[0];
-                        const ownerColTop = db.collection('session_owners');
-                        let sOwnerTop = sessionOwnersCache.get(sessionId);
-                        if (!sOwnerTop) {
-                            sOwnerTop = await ownerColTop.findOne({ sessionId: sessionId });
-                            if (sOwnerTop) sessionOwnersCache.set(sessionId, sOwnerTop);
-                        }
-
-                        let isOwnerReal = false;
-                        let activeHostName = sOwnerTop ? (sOwnerTop.Name || "Adam_D'H7") : "Adam_D'H7";
-                        const sNum = sender ? sender.split('@')[0].replace(/[^0-9]/g, '') : '';
-                        const sName = pushName;
-
-                        if (isFromMe) {
-                            isOwnerReal = true;
-                            if (sName !== 'Inconnu' && sName !== '' && sName !== activeHostName && sOwnerTop) {
-                                sOwnerTop.Name = sName;
-                                await ownerColTop.updateOne({ sessionId: sessionId }, { $set: { Name: sName } }, { upsert: true });
-                                activeHostName = sName;
-                            }
-                        } else if (sOwnerTop) {
-                            if (sNum === sOwnerTop.Number) {
-                                isOwnerReal = true;
-                                if (sName !== 'Inconnu' && sName !== '' && sName !== activeHostName) {
-                                    sOwnerTop.Name = sName;
-                                    await ownerColTop.updateOne({ sessionId: sessionId }, { $set: { Name: sName } });
-                                    activeHostName = sName;
-                                }
-                            } else if (sName === sOwnerTop.Name) {
-                                isOwnerReal = true;
-                            }
-                        }
-
-                        const getMeta = async () => {
-                            try {
-                                if (groupMetadataCache.has(from)) return groupMetadataCache.get(from);
-                                if (isGroup) {
-                                    const meta = await sock.groupMetadata(from).catch(() => null);
-                                    if (meta) {
-                                        groupMetadataCache.set(from, meta);
-                                        return meta;
-                                    }
-                                }
-                            } catch (e) {}
-                            return null;
-                        };
-
-                        const checkAdmin = async () => {
-                            try {
-                                if (isOwnerReal) return true;
-                                if (!isGroup) return false;
-                                const metadataA = await getMeta();
-                                return metadataA ? metadataA.participants.some(p => p.id === sender && p.admin) : false;
-                            } catch (e) {
-                                return false;
-                            }
-                        };
-
+                        if (groupMetadataCache.has(from)) return groupMetadataCache.get(from);
                         if (isGroup) {
-                            try {
-                                const antiLinkMode = await getGroupSetting(sessionId, from, 'noLien') || 'off';
-                                if (antiLinkMode !== 'off') {
-                                    const metadata = await getMeta();
-                                    const senderIsAdmin = metadata?.participants?.some(p => p.id === sender && (p.admin === 'admin' || p.admin === 'superadmin')) || false;
-                                    const isStrict = antiLinkMode === 'strict';
-                                    let shouldDelete = false;
-
-                                    const msgContent = unwrapMessageContent(m.message);
-                                    const actualType = Object.keys(msgContent || {})[0] || messageType;
-
-                                    const allowedTypes = [
-                                        'conversation', 'extendedTextMessage', 'imageMessage', 'videoMessage',
-                                        'audioMessage', 'documentMessage', 'stickerMessage', 'viewOnceMessage',
-                                        'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'reactionMessage', 
-                                        'protocolMessage', 'pollCreationMessage', 'pollCreationMessageV2', 
-                                        'pollCreationMessageV3', 'pollUpdateMessage', 'senderKeyDistributionMessage', 
-                                        'messageContextInfo', 'deviceSentMessage'
-                                    ];
-
-                                    if (!allowedTypes.includes(actualType)) {
-                                        shouldDelete = true;
-                                    } else {
-                                        const bodyRawStr = extractBody(m);
-                                        const linkRegex = /https?:\/\/[^\s]+|wa\.me|whatsapp\.com\/channel|chat\.whatsapp\.com/i;
-                                        if (linkRegex.test(bodyRawStr)) {
-                                            shouldDelete = true;
-                                        }
-                                    }
-
-                                    if (shouldDelete) {
-                                        let canDelete = false;
-                                        if (isStrict) {
-                                            if (sender !== botId && !isOwnerReal) canDelete = true;
-                                        } else {
-                                            if (!senderIsAdmin && sender !== botId && !isOwnerReal) canDelete = true;
-                                        }
-
-                                        if (canDelete) {
-                                            try {
-                                                await sock.sendMessage(from, { delete: m.key });
-                                            } catch (e) {}
-                                            return;
-                                        }
-                                    }
-                                }
-                            } catch (errGroupCheck) {}
-                        }
-
-                        const msgId = m.key.id;
-                        const processedCol = db.collection('processed_messages');
-                        const isProcessed = await processedCol.findOne({ _id: msgId });
-                        if (isProcessed) return;
-                        await processedCol.updateOne({ _id: msgId }, { $set: { ts: Date.now() } }, { upsert: true });
-
-                        let allowed = false;
-                        let botMode = sOwnerTop ? (sOwnerTop.mode || 'prive') : 'prive';
-                        
-                        if (botMode === 'public') {
-                            allowed = true;
-                        } else if (isOwnerReal) {
-                            allowed = true;
-                        }
-
-                        const bodyRaw = extractBody(m);
-                        const body = bodyRaw.trim();
-
-                        if (!allowed) return;
-                        if (!body) return;
-                        
-                        const ignoreTexts = [
-                            'Message non chargé', 
-                            'Waiting for this message', 
-                            'En attente de ce message', 
-                            'Ceci pourrait prendre un peu de temps',
-                            'This may take a while'
-                        ];
-                        if (ignoreTexts.some(text => body.includes(text))) return;
-
-                        userInfo.set(sender, {
-                          pseudo: pushName,
-                          number: sender ? sender.split('@')[0].replace(/[^0-9]/g, '') : '',
-                          lang: globalLang
-                        });
-
-                        const cmdRegex = /^[.\/! ]?\s*([\p{L}0-9_]+)(?:\s+([\s\S]*))?$/u;
-                        const match = body.match(cmdRegex);
-
-                        if (!match) return;
-
-                        let command = match[1].toLowerCase();
-                        let args = match[2] ? match[2].trim() : '';
-
-                        let internalCommand = null;
-                        if (command === 'lang') {
-                            internalCommand = 'lang';
-                        } else {
-                            const normCmd = normalizeText(command);
-                            const currentMap = commandMaps[globalLang];
-                            if (currentMap) {
-                                for (const [alias, intern] of Object.entries(currentMap)) {
-                                    if (normalizeText(alias) === normCmd) {
-                                        internalCommand = intern;
-                                        break;
-                                    }
-                                }
-                            }
-                            if (!internalCommand) {
-                                for (const l of Object.keys(commandMaps)) {
-                                    if (l === globalLang) continue;
-                                    const mapL = commandMaps[l];
-                                    for (const [alias, intern] of Object.entries(mapL)) {
-                                        if (normalizeText(alias) === normCmd) {
-                                            internalCommand = intern;
-                                            break;
-                                        }
-                                    }
-                                    if (internalCommand) break;
-                                }
+                            const meta = await sock.groupMetadata(from).catch(() => null);
+                            if (meta) {
+                                groupMetadataCache.set(from, meta);
+                                return meta;
                             }
                         }
-                        
-                        if (!internalCommand) return;
+                    } catch (e) {}
+                    return null;
+                };
 
-                        try { await sock.readMessages([m.key]); } catch (e) {}
-                        try { await sock.sendPresenceUpdate('composing', from); } catch (e) {}
+                const checkAdmin = async () => {
+                    try {
+                        if (isOwnerReal) return true;
+                        if (!isGroup) return false;
+                        const metadataA = await getMeta();
+                        return metadataA ? metadataA.participants.some(p => p.id === sender && p.admin) : false;
+                    } catch (e) {
+                        return false;
+                    }
+                };
 
-                        const quoted = m.message?.extendedTextMessage?.contextInfo;
-                        const quotedMessage = quoted?.quotedMessage;
-                        const t = translations[globalLang] || translations.ht;
+                if (isGroup) {
+                    try {
+                        const antiLinkMode = await getGroupSetting(sessionId, from, 'noLien') || 'off';
+                        if (antiLinkMode !== 'off') {
+                            const metadata = await getMeta();
+                            const senderIsAdmin = metadata?.participants?.some(p => p.id === sender && (p.admin === 'admin' || p.admin === 'superadmin')) || false;
+                            const isStrict = antiLinkMode === 'strict';
+                            let shouldDelete = false;
 
-                        const executeCommandLogic = async () => {
-                            switch (internalCommand) {
-                                case 'prive':
-                                    if (!isOwnerReal) break;
-                                    if (sOwnerTop.mode === 'prive') {
-                                        await sendFormatted(sock, from, "Mode", t.already_private, pushName, false, activeHostName);
-                                    } else {
-                                        sOwnerTop.mode = 'prive';
-                                        await db.collection('session_owners').updateOne({ sessionId: sessionId }, { $set: { mode: 'prive' } });
-                                        sessionOwnersCache.set(sessionId, sOwnerTop);
-                                        await sendFormatted(sock, from, "Mode", t.mode_changed_private, pushName, false, activeHostName);
-                                    }
-                                    break;
-                                case 'public':
-                                    if (!isOwnerReal) break;
-                                    if (sOwnerTop.mode === 'public') {
-                                        await sendFormatted(sock, from, "Mode", t.already_public, pushName, false, activeHostName);
-                                    } else {
-                                        sOwnerTop.mode = 'public';
-                                        await db.collection('session_owners').updateOne({ sessionId: sessionId }, { $set: { mode: 'public' } });
-                                        sessionOwnersCache.set(sessionId, sOwnerTop);
-                                        await sendFormatted(sock, from, "Mode", t.mode_changed_public, pushName, false, activeHostName);
-                                    }
-                                    break;
-                                case 'menu':
-                                    if (args.length > 0) break;
-                                    let menuBodyText = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n*○ ${t.cmd_info}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*● ${t.cmd_kickall2}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_dek}*\n*● ${t.cmd_del2}*\n*● ${t.cmd_vv}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_url}*\n*○ ${t.cmd_ping}*`;
-                                    await sendFormatted(sock, from, t.menu_title, menuBodyText, pushName, false, activeHostName);
-                                    break;
-                                case 'info':
-                                    let infoBodyText = '';
-                                    if (globalLang === 'fr') {
-                                        infoBodyText = `*● IA & RECHERCHE*\n*○ ${t.cmd_ai}* : Interroger l'Intelligence Artificielle pour obtenir des réponses textuelles détaillées.\n*○ ${t.cmd_lang}* : Modifier la langue de configuration du bot.\n*○ ${t.cmd_imaj}* : Générer une image numérique à partir d'une description textuelle.\n*○ ${t.cmd_cheche}* : Effectuer des recherches approfondies sur le web.\n\n*● UTILITAIRES & SYSTEME*\n*○ ${t.cmd_menu}* : Afficher l'arborescence complète et la liste de toutes les commandes.\n*○ ${t.cmd_qrbot}* : Initier et lier une nouvelle sous-session via code QR.\n*○ ${t.cmd_qr}* : Convertir un texte ou un lien spécifié en code QR scannable.\n*○ ${t.cmd_code}* : Générer ou vérifier un code d'autorisation système.\n*○ ${t.cmd_lien}* : Obtenir le lien d'invitation officiel.\n*○ ${t.cmd_sites}* : Consulter les sites officiels.\n*○ ${t.cmd_info}* : Fournir les informations explicatives d'utilisation de chaque commande.\n\n*● LOGISTIQUE DE GROUPE*\n*○ ${t.cmd_tagall}* : Mentionner explicitement tous les membres (Admin uniquement).\n*○ ${t.cmd_hidetag}* : Diffuser un message en mentionnant secrètement tous les membres.\n*○ ${t.cmd_kick}* : Retirer un membre spécifique du groupe actuel.\n*○ ${t.cmd_add}* : Ajouter un numéro de téléphone directement au groupe.\n*○ ${t.cmd_promote}* : Élever un membre régulier au rang d'administrateur.\n*○ ${t.cmd_demote}* : Rétrograder un administrateur existant au statut de membre.\n*○ ${t.cmd_kickall}* : Procéder à une expulsion globale de tous les non-administrateurs.\n*○ ${t.cmd_kickall2}* : Exécuter une méthode d'expulsion collective secondaire.\n*○ ${t.cmd_ferme}* : Restreindre l'envoi de messages uniquement aux administrateurs.\n*○ ${t.cmd_ouvert}* : Autoriser l'envoi de messages à tous les membres.\n*○ ${t.cmd_bienvenue}* : Activer ou désactiver les messages d'accueil automatiques.\n\n*● SECURITE & MODERATION*\n*○ ${t.cmd_nolien}* : Activer ou désactiver la modération automatique simple des liens.\n*○ ${t.cmd_nolien2}* : Appliquer une sécurité stricte (anti-lien) avec suppression immédiate.\n*○ ${t.cmd_del}* : Supprimer un message spécifique du chat en y répondant directement.\n*○ ${t.cmd_dek}* : Supprimer le message cité et expulser l'utilisateur (Delete + Kick).\n*○ ${t.cmd_del2}* : Activer/désactiver la suppression instantanée de TOUS les messages d'un utilisateur spécifié.\n*○ ${t.cmd_vv}* : Afficher les fichiers configurés en vue unique (View Once).\n*○ ${t.cmd_alive}* : Consulter l'état opérationnel et le temps d'activité global du bot.\n*○ ${t.cmd_url}* : Héberger et convertir un média local en un lien URL public.\n*○ ${t.cmd_ping}* : Évaluer la latence de traitement actuelle.`;
-                                    } else if (globalLang === 'en') {
-                                        infoBodyText = `*● AI & SEARCH*\n*○ ${t.cmd_ai}* : Query Artificial Intelligence to obtain detailed textual answers.\n*○ ${t.cmd_lang}* : Change the bot's default configuration language.\n*○ ${t.cmd_imaj}* : Generate a digital image from a textual description.\n*○ ${t.cmd_cheche}* : Perform deep searches on the web.\n\n*● UTILITIES & SYSTEM*\n*○ ${t.cmd_menu}* : Display the comprehensive tree and list of all active commands.\n*○ ${t.cmd_qrbot}* : Initiate and link a new sub-session using a QR code.\n*○ ${t.cmd_qr}* : Convert a specified text or hyperlink into a scannable QR code.\n*○ ${t.cmd_code}* : Generate or verify a system authentication validation code.\n*○ ${t.cmd_lien}* : Get the official group invitation link.\n*○ ${t.cmd_sites}* : Visit our official web pages.\n*○ ${t.cmd_info}* : Provide detailed descriptions regarding each command's usage.\n\n*● GROUP ADMINISTRATION*\n*○ ${t.cmd_tagall}* : Explicitly mention every individual member within the group (Admin only).\n*○ ${t.cmd_hidetag}* : Broadcast a message to all members silently without visible tags.\n*○ ${t.cmd_kick}* : Dismiss and remove a participant from the current group.\n*○ ${t.cmd_add}* : Directly add a phone number to the current group.\n*○ ${t.cmd_promote}* : Elevate a regular participant to group administrator status.\n*○ ${t.cmd_demote}* : Demote an existing administrator back to standard member status.\n*○ ${t.cmd_kickall}* : Execute a mass eviction of all non-administrator members from the group.\n*○ ${t.cmd_kickall2}* : Trigger an alternative collective secondary mass eviction.\n*○ ${t.cmd_ferme}* : Restrict chat permissions to group administrators exclusively.\n*○ ${t.cmd_ouvert}* : Open chat permissions to allow all members to broadcast messages.\n*○ ${t.cmd_bienvenue}* : Toggle the activation status of automated group welcome greetings.\n\n*● SECURITY & MODERATION*\n*○ ${t.cmd_nolien}* : Toggle simple automated moderation for external links.\n*○ ${t.cmd_nolien2}* : Enforce strict anti-link security protocol with instant deletion.\n*○ ${t.cmd_del}* : Remove a specific message from chat logs by replying to it.\n*○ ${t.cmd_dek}* : Delete the quoted message and kick the sender (Delete + Kick).\n*○ ${t.cmd_del2}* : Toggle instant automatic deletion of all messages from a specified user.\n*○ ${t.cmd_vv}* : Intercept and retrieve media sent under the view-once restriction.\n*○ ${t.cmd_alive}* : Inspect active operational status and overall system uptime.\n*○ ${t.cmd_url}* : Host and convert a local chat media file into a public URL link.\n*○ ${t.cmd_ping}* : Measure the network latency and processing speed of the core system.`;
-                                    } else if (globalLang === 'es') {
-                                        infoBodyText = `*● IA & BÚSQUEDA*\n*○ ${t.cmd_ai}* : Consultar a la Inteligencia Artificial para obtener respuestas textuales.\n*○ ${t.cmd_lang}* : Modificar el idioma de configuración predeterminado del bot.\n*○ ${t.cmd_imaj}* : Generar una imagen digital a partir de una descripción de texto.\n*○ ${t.cmd_cheche}* : Realizar búsquedas avanzadas en la web.\n\n*● UTILIDADES & SISTEMA*\n*○ ${t.cmd_menu}* : Mostrar la lista completa de comandos activos disponibles.\n*○ ${t.cmd_qrbot}* : Iniciar y vincular una nueva subsesión mediante código QR.\n*○ ${t.cmd_qr}* : Convertir un texto o enlace en un código QR escaneable.\n*○ ${t.cmd_code}* : Generar o verificar un código de validación del sistema.\n*○ ${t.cmd_lien}* : Obtener el enlace de invitación oficial.\n*○ ${t.cmd_sites}* : Consultar los sitios web oficiales.\n*○ ${t.cmd_info}* : Proporcionar explicaciones de uso detalladas para cada comando.\n\n*● ADMINISTRACIÓN DE GRUPOS*\n*○ ${t.cmd_tagall}* : Mencionar a todos los miembros del grupo actual (Solo administradores).\n*○ ${t.cmd_hidetag}* : Difundir un de forma invisible a todos los miembros.\n*○ ${t.cmd_kick}* : Eliminar a un participante específico del grupo.\n*○ ${t.cmd_add}* : Agregar un número de teléfono directamente al grupo.\n*○ ${t.cmd_promote}* : Ascender a un participante al rango de administrador.\n*○ ${t.cmd_demote}* : Degradar a un administrador al estado de miembro común.\n*○ ${t.cmd_kickall}* : Expulsar de forma masiva a todos los no administradores.\n*○ ${t.cmd_kickall2}* : Ejecutar un método de purga masiva secundaria.\n*○ ${t.cmd_ferme}* : Restringir los permisos de chat solo a los administradores.\n*○ ${t.cmd_ouvert}* : Abrir los permisos de chat para todos los miembros.\n*○ ${t.cmd_bienvenue}* : Activar o desactivar los mensajes automatizados de bienvenida.\n\n*● SEGURIDAD & MODERACIÓN*\n*○ ${t.cmd_nolien}* : Activar o desactivar moderación simple de enlaces externos.\n*○ ${t.cmd_nolien2}* : Aplicar una política estricta de seguridad anti-enlaces con eliminación instantánea.\n*○ ${t.cmd_del}* : Eliminar un mensaje específico respondiendo directamente a él.\n*○ ${t.cmd_dek}* : Eliminar el mensaje citado y expulsar al usuario (Delete + Kick).\n*○ ${t.cmd_del2}* : Activar/desactivar la eliminación instantánea de todos los mensajes de un usuario.\n*○ ${t.cmd_vv}* : Interceptar y recuperar archivos multimedia enviados en modo de una sola vista.\n*○ ${t.cmd_alive}* : Consultar el estado operativo actual y tiempo de actividad del bot.\n*○ ${t.cmd_url}* : Alojar y convertir un archivo multimedia local en un enlace URL público.\n*○ ${t.cmd_ping}* : Medir la latencia de red y velocidad de procesamiento del sistema.`;
-                                    } else {
-                                        infoBodyText = `*● AI AK RECHÈCH*\n*○ ${t.cmd_ai}* : Poze Entèlijans Atifisyèl la kesyon pou jwenn repons tèks ki byen detaye.\n*○ ${t.cmd_lang}* : Chanje lang konfigirasyon bot la itilize.\n*○ ${t.cmd_imaj}* : Jenere yon imaj nimerik apati yon deskripsyon an tèks.\n*○ ${t.cmd_cheche}* : Fè gwo rechèch sou entènèt la.\n\n*● OUTI AK SISTÈM*\n*○ ${t.cmd_menu}* : Afiche lis konplè ak tout kòmandman ki disponib yo.\n*○ ${t.cmd_qrbot}* : Kreye ak konekte yon nouvo sous-sesyon avèk kòd QR.\n*○ ${t.cmd_qr}* : Konvèti yon tèks oswa lyen an kòd QR ki ka eskane.\n*○ ${t.cmd_code}* : Jenere oswa verifye kòd validasyon pou otorizasyon sistèm lan.\n*○ ${t.cmd_lien}* : Jwenn lyen envitasyon ofisyèl gwoup la.\n*○ ${t.cmd_sites}* : Vizite sit entènèt ofisyèl nou yo.\n*○ ${t.cmd_info}* : Bay eksplikasyon byen klè sou sa chak kòmandman ap fè.\n\n*● ADMINISTRASYON GWÈP*\n*○ ${t.cmd_tagall}* : Tag tout moun ki nan gwoup la an menm tan (Pou admin sèlman).\n*○ ${t.cmd_hidetag}* : Voye yon mesaj kote ou tag tout moun an kachèt san non yo pa parèt.\n*○ ${t.cmd_kick}* : Retire yon manm ou pa vle nan gwoup la.\n*○ ${t.cmd_add}* : Ajoute yon nouvo nimewo dirèkteman nan gwoup la.\n*○ ${t.cmd_promote}* : Mete yon manm senp nan klas administratè gwoup la.\n*○ ${t.cmd_demote}* : Desann yon administratè pou remete l nan klas manm senp.\n*○ ${t.cmd_kickall}* : Mete deyò an mas tout moun nan gwoup la ki pa administratè.\n*○ ${t.cmd_kickall2}* : Sèvi ak yon dezyèm metòd pou netwaye gwoup la an mas.\n*○ ${t.cmd_ferme}* : Fèmen gwoup la pou se sèlman administratè yo ki ka voye mesaj.\n*○ ${t.cmd_ouvert}* : Ouvri gwoup la pou bay tout manm yo pèmisyon voye mesaj.\n*○ ${t.cmd_bienvenue}* : Aktive oswa dezaktive mesaj daprè fwa lè yon nouvo moun antre.\n\n*● SEKIRITE AK MODERASYON*\n*○ ${t.cmd_nolien}* : Aktive oswa dezaktive sistèm k ap siprime lyen gwoup ekstèn yo.\n*○ ${t.cmd_nolien2}* : Aplike sekirite sevè anti-lyen k ap siprime mesaj la touswit san pèdi tan.\n*○ ${t.cmd_del}* : Efase yon mesaj byen presi lè w reponn li dirèkteman.\n*○ ${t.cmd_dek}* : Siprime mesaj site a epi mete moun nan deyò nan gwoup la (Delete + Kick).\n*○ ${t.cmd_del2}* : Aktive/dezaktive sipresyon otomatik touswit pou tout mesaj yon moun ap voye.\n*○ ${t.cmd_vv}* : Pran epi afiche medya yo voye pou moun wè yon sèl fwa yo.\n*○ ${t.cmd_alive}* : Tcheke si bot la ap travay byen ak depi konbyen tan li limen.\n*○ ${t.cmd_url}* : Konvèti yon medya nan chat la pou fè l tounen yon lyen URL piblik.\n*○ ${t.cmd_ping}* : Mezire vitès repons ak latans sistèm bot la genyen.`;
-                                    }
-                                    await sendFormatted(sock, from, 'Info', infoBodyText, pushName, false, activeHostName);
-                                    break;
-                                case 'alive':
-                                    let uptimeStr = "0s";
-                                    const oCol = db.collection('session_owners');
-                                    const oDoc = await oCol.findOne({ sessionId: sessionId });
-                                    if (oDoc && oDoc.connectedSince) {
-                                        const uptimeSeconds = (Date.now() - oDoc.connectedSince) / 1000;
-                                        uptimeStr = formatUptime(uptimeSeconds, t);
-                                    } else {
-                                        const uptimeSeconds = (Date.now() - sessionData.readyAt) / 1000;
-                                        uptimeStr = formatUptime(uptimeSeconds, t);
-                                    }
-                                    const aliveMsg = `*${t.connected_since} ${uptimeStr}*`;
-                                    await sendFormatted(sock, from, t.alive_title, aliveMsg, pushName, false, activeHostName);
-                                    break;
-                                case 'ping':
-                                    const msgTimestamp = m.messageTimestamp * 1000;
-                                    const pingMs = Date.now() - msgTimestamp;
-                                    const pingStr = `*${pingMs} ms*`;
-                                    await sendFormatted(sock, from, "Ping", pingStr, pushName, false, activeHostName);
-                                    break;
-                                case 'qr':
-                                    if (!isOwnerReal) break;
-                                    if (!args) break;
-                                    const qrBuffer = await QRCode.toBuffer(args);
-                                    await sock.sendMessage(from, { image: qrBuffer, caption: buildCaption(t.cmd_qr, args, activeHostName) });
-                                    break;
-                                case 'qrbot':
-                                    if (!isOwnerReal) break;
-                                    const tempId = `temp_${Date.now()}`;
-                                    const { state: tempState, saveCreds: tempSaveCreds } = await useMongoAuthState(tempId);
-                                    const tempSock = makeWASocket({
-                                        version,
-                                        logger: pino({ level: 'silent' }),
-                                        printQRInTerminal: false,
-                                        auth: { creds: tempState.creds, keys: makeCacheableSignalKeyStore(tempState.keys, pino({ level: "silent" })) },
-                                        browser: Browsers.macOS('Safari'),
-                                        msgRetryCounterCache: retryCache
-                                    });
+                            const msgContent = unwrapMessageContent(m.message);
+                            const actualType = Object.keys(msgContent || {})[0] || messageType;
 
-                                    tempSock.ev.on('creds.update', tempSaveCreds);
-                                    let qrSent = false;
+                            const allowedTypes = [
+                                'conversation', 'extendedTextMessage', 'imageMessage', 'videoMessage',
+                                'audioMessage', 'documentMessage', 'stickerMessage', 'viewOnceMessage',
+                                'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'reactionMessage', 
+                                'protocolMessage', 'pollCreationMessage', 'pollCreationMessageV2', 
+                                'pollCreationMessageV3', 'pollUpdateMessage', 'senderKeyDistributionMessage', 
+                                'messageContextInfo', 'deviceSentMessage'
+                            ];
 
-                                    tempSock.ev.on('connection.update', async (update) => {
-                                        const { qr, connection } = update;
-                                        if (qr && !qrSent) {
-                                            qrSent = true;
-                                            try {
-                                                const qrbuf = await QRCode.toBuffer(qr);
-                                                const createdCaption = buildCaption(t.qrbot_created, t.qrbot_scan, activeHostName);
-                                                await sock.sendMessage(from, { image: qrbuf, caption: createdCaption });
-                                            } catch (e) {}
-                                        }
-                                        if (connection === 'open') {
-                                            const realId = tempSock.user.id.split(':')[0];
-                                            const activeMsg = `${t.qrbot_active.replace('{id}', realId)}`;
-                                            await sendFormatted(sock, from, t.qrbot_connected, activeMsg, pushName, false, activeHostName);
-                                            if (tempSock.ws) tempSock.ws.close();
-                                            try {
-                                                await renameMongoSession(tempId, `session_${realId}`);
-                                                startAdamBot(`session_${realId}`, true, 'qr', false);
-                                            } catch (e) {}
-                                        }
-                                        if (connection === 'close') {
-                                            const code = update.lastDisconnect?.error?.output?.statusCode;
-                                            if (code === DisconnectReason.loggedOut) {
-                                                try { await deleteMongoSession(tempId); } catch {}
-                                            }
-                                        }
-                                    });
-                                    setTimeout(() => {
-                                         if (!qrSent && !tempSock.user) {
-                                             if (tempSock.ws) tempSock.ws.close();
-                                             try { deleteMongoSession(tempId); } catch {}
-                                         }
-                                    }, 60000);
-                                    break;
-                                case 'lien':
-                                    if (!isGroup) break;
+                            if (!allowedTypes.includes(actualType)) {
+                                shouldDelete = true;
+                            } else {
+                                const bodyRawStr = extractBody(m);
+                                const linkRegex = /https?:\/\/[^\s]+|wa\.me|whatsapp\.com\/channel|chat\.whatsapp\.com/i;
+                                if (linkRegex.test(bodyRawStr)) {
+                                    shouldDelete = true;
+                                }
+                            }
+
+                            if (shouldDelete) {
+                                let canDelete = false;
+                                if (isStrict) {
+                                    if (sender !== botId && !isOwnerReal) canDelete = true;
+                                } else {
+                                    if (!senderIsAdmin && sender !== botId && !isOwnerReal) canDelete = true;
+                                }
+
+                                if (canDelete) {
                                     try {
-                                        const metadataLien = await getMeta();
-                                        const c = await sock.groupInviteCode(from);
-                                        const link = `https://chat.whatsapp.com/${c}`;
-                                        
-                                        const groupName = metadataLien && metadataLien.subject ? `*${metadataLien.subject}*\n` : '';
-                                        const formattedLink = `*_${link}_*`;
-                                        const groupDesc = metadataLien && metadataLien.desc ? metadataLien.desc.toString().trim() : '';
-                                        
-                                        const lienCapTitle = t.cmd_lien.charAt(0).toUpperCase() + t.cmd_lien.slice(1);
-                                        
-                                        let lienBodyContent = `${groupName}${formattedLink}`;
-                                        if (groupDesc) {
-                                            lienBodyContent += `\n\n${groupDesc}`;
-                                        }
-                                        
-                                        const lienCaption = buildCaption(lienCapTitle, lienBodyContent, activeHostName);
-                                        const lienOpts = { caption: lienCaption };
-                                        
+                                        await sock.sendMessage(from, { delete: m.key });
+                                    } catch (e) {}
+                                    return;
+                                }
+                            }
+                        }
+                    } catch (errGroupCheck) {}
+                }
+
+                const msgId = m.key.id;
+                const processedCol = db.collection('processed_messages');
+                const isProcessed = await processedCol.findOne({ _id: msgId });
+                if (isProcessed) return;
+                await processedCol.updateOne({ _id: msgId }, { $set: { ts: Date.now() } }, { upsert: true });
+
+                let allowed = false;
+                let botMode = sOwnerTop ? (sOwnerTop.mode || 'prive') : 'prive';
+                
+                if (botMode === 'public') {
+                    allowed = true;
+                } else if (isOwnerReal) {
+                    allowed = true;
+                }
+
+                const bodyRaw = extractBody(m);
+                const body = bodyRaw.trim();
+
+                if (!allowed) return;
+                if (!body) return;
+                
+                const ignoreTexts = [
+                    'Message non chargé', 
+                    'Waiting for this message', 
+                    'En attente de ce message', 
+                    'Ceci pourrait prendre un peu de temps',
+                    'This may take a while'
+                ];
+                if (ignoreTexts.some(text => body.includes(text))) return;
+
+                userInfo.set(sender, {
+                  pseudo: pushName,
+                  number: sender ? sender.split('@')[0].replace(/[^0-9]/g, '') : '',
+                  lang: globalLang
+                });
+
+                const cmdRegex = /^[.\/! ]?\s*([\p{L}0-9_]+)(?:\s+([\s\S]*))?$/u;
+                const match = body.match(cmdRegex);
+
+                if (!match) return;
+
+                let command = match[1].toLowerCase();
+                let args = match[2] ? match[2].trim() : '';
+
+                let internalCommand = null;
+                if (command === 'lang') {
+                    internalCommand = 'lang';
+                } else {
+                    const normCmd = normalizeText(command);
+                    const currentMap = commandMaps[globalLang];
+                    if (currentMap) {
+                        for (const [alias, intern] of Object.entries(currentMap)) {
+                            if (normalizeText(alias) === normCmd) {
+                                internalCommand = intern;
+                                break;
+                            }
+                        }
+                    }
+                    if (!internalCommand) {
+                        for (const l of Object.keys(commandMaps)) {
+                            if (l === globalLang) continue;
+                            const mapL = commandMaps[l];
+                            for (const [alias, intern] of Object.entries(mapL)) {
+                                if (normalizeText(alias) === normCmd) {
+                                    internalCommand = intern;
+                                    break;
+                                }
+                            }
+                            if (internalCommand) break;
+                        }
+                    }
+                }
+                
+                if (!internalCommand) return;
+
+                try { await sock.readMessages([m.key]); } catch (e) {}
+                try { await sock.sendPresenceUpdate('composing', from); } catch (e) {}
+
+                const quoted = m.message?.extendedTextMessage?.contextInfo;
+                const quotedMessage = quoted?.quotedMessage;
+                const t = translations[globalLang] || translations.ht;
+
+                await sleep(Math.floor(Math.random() * 500) + 300);
+
+                // [AMÉLIORATION MULTITÂCHE & TIMEOUT DE 7 SECONDES] : Lancement de l'action dans un contexte isolé
+                (async () => {
+                    let actionFinished = false;
+                    const actionTimeout = setTimeout(() => {
+                        if (!actionFinished) {
+                            actionFinished = true;
+                        }
+                    }, 7000);
+
+                    try {
+                        const checkTimeout = () => {
+                            if (actionFinished) {
+                                throw new Error('TimeoutExceeded');
+                            }
+                        };
+
+                        switch (internalCommand) {
+                            case 'prive':
+                                checkTimeout();
+                                if (!isOwnerReal) break;
+                                if (sOwnerTop.mode === 'prive') {
+                                    await sendFormatted(sock, from, "Mode", t.already_private, pushName, false, activeHostName);
+                                } else {
+                                    sOwnerTop.mode = 'prive';
+                                    await db.collection('session_owners').updateOne({ sessionId: sessionId }, { $set: { mode: 'prive' } });
+                                    sessionOwnersCache.set(sessionId, sOwnerTop);
+                                    await sendFormatted(sock, from, "Mode", t.mode_changed_private, pushName, false, activeHostName);
+                                }
+                                break;
+                            case 'public':
+                                checkTimeout();
+                                if (!isOwnerReal) break;
+                                if (sOwnerTop.mode === 'public') {
+                                    await sendFormatted(sock, from, "Mode", t.already_public, pushName, false, activeHostName);
+                                } else {
+                                    sOwnerTop.mode = 'public';
+                                    await db.collection('session_owners').updateOne({ sessionId: sessionId }, { $set: { mode: 'public' } });
+                                    sessionOwnersCache.set(sessionId, sOwnerTop);
+                                    await sendFormatted(sock, from, "Mode", t.mode_changed_public, pushName, false, activeHostName);
+                                }
+                                break;
+                            case 'menu':
+                                checkTimeout();
+                                if (args.length > 0) break;
+                                let menuBodyText = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n*○ ${t.cmd_info}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*● ${t.cmd_kickall2}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_del2}*\n*● ${t.cmd_vv}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_url}*\n*○ ${t.cmd_ping}*`;
+                                await sendFormatted(sock, from, t.menu_title, menuBodyText, pushName, false, activeHostName);
+                                break;
+                            case 'info':
+                                checkTimeout();
+                                let infoBodyText = '';
+                                if (globalLang === 'fr') {
+                                    infoBodyText = `*● IA & RECHERCHE*\n*○ ${t.cmd_ai}* : Interroger l'Intelligence Artificielle pour obtenir des réponses textuelles détaillées.\n*○ ${t.cmd_lang}* : Modifier la langue de configuration du bot.\n*○ ${t.cmd_imaj}* : Générer une image numérique à partir d'une description textuelle.\n*○ ${t.cmd_cheche}* : Effectuer des recherches approfondies sur le web.\n\n*● UTILITAIRES & SYSTEME*\n*○ ${t.cmd_menu}* : Afficher l'arborescence complète et la liste de toutes les commandes.\n*○ ${t.cmd_qrbot}* : Initier et lier une nouvelle sous-session via code QR.\n*○ ${t.cmd_qr}* : Convertir un texte ou un lien spécifié en code QR scannable.\n*○ ${t.cmd_code}* : Générer ou vérifier un code d'autorisation système.\n*○ ${t.cmd_lien}* : Obtenir le lien d'invitation officiel.\n*○ ${t.cmd_sites}* : Consulter les sites officiels.\n*○ ${t.cmd_info}* : Fournir les informations explicatives d'utilisation de chaque commande.\n\n*● LOGISTIQUE DE GROUPE*\n*○ ${t.cmd_tagall}* : Mentionner explicitement tous les membres (Admin uniquement).\n*○ ${t.cmd_hidetag}* : Diffuser un message en mentionnant secrètement tous les membres.\n*○ ${t.cmd_kick}* : Retirer un membre spécifique du groupe actuel.\n*○ ${t.cmd_add}* : Ajouter un numéro de téléphone directement au groupe.\n*○ ${t.cmd_promote}* : Élever un membre régulier au rang d'administrateur.\n*○ ${t.cmd_demote}* : Rétrograder un administrateur existant au statut de membre.\n*○ ${t.cmd_kickall}* : Procéder à une expulsion globale de tous les non-administrateurs.\n*○ ${t.cmd_kickall2}* : Exécuter une méthode d'expulsion collective secondaire.\n*○ ${t.cmd_ferme}* : Restreindre l'envoi de messages uniquement aux administrateurs.\n*○ ${t.cmd_ouvert}* : Autoriser l'envoi de messages à tous les membres.\n*○ ${t.cmd_bienvenue}* : Activer ou désactiver les messages d'accueil automatiques.\n\n*● SECURITE & MODERATION*\n*○ ${t.cmd_nolien}* : Activer ou désactiver la modération automatique simple des liens.\n*○ ${t.cmd_nolien2}* : Appliquer une sécurité stricte (anti-lien) avec suppression immédiate.\n*○ ${t.cmd_del}* : Supprimer un message spécifique du chat en y répondant directement.\n*○ ${t.cmd_del2}* : Activer/désactiver la suppression instantanée de TOUS les messages d'un utilisateur spécifié.\n*○ ${t.cmd_vv}* : Afficher les fichiers configurés en vue unique (View Once).\n*○ ${t.cmd_alive}* : Consulter l'état opérationnel et le temps d'activité global du bot.\n*○ ${t.cmd_url}* : Héberger et convertir un média local en un lien URL public.\n*○ ${t.cmd_ping}* : Évaluer la latence de traitement actuelle.`;
+                                } else if (globalLang === 'en') {
+                                    infoBodyText = `*● AI & SEARCH*\n*○ ${t.cmd_ai}* : Query Artificial Intelligence to obtain detailed textual answers.\n*○ ${t.cmd_lang}* : Change the bot's default configuration language.\n*○ ${t.cmd_imaj}* : Generate a digital image from a textual description.\n*○ ${t.cmd_cheche}* : Perform deep searches on the web.\n\n*● UTILITIES & SYSTEM*\n*○ ${t.cmd_menu}* : Display the comprehensive tree and list of all active commands.\n*○ ${t.cmd_qrbot}* : Initiate and link a new sub-session using a QR code.\n*○ ${t.cmd_qr}* : Convert a specified text or hyperlink into a scannable QR code.\n*○ ${t.cmd_code}* : Generate or verify a system authentication validation code.\n*○ ${t.cmd_lien}* : Get the official group invitation link.\n*○ ${t.cmd_sites}* : Visit our official web pages.\n*○ ${t.cmd_info}* : Provide detailed descriptions regarding each command's usage.\n\n*● GROUP ADMINISTRATION*\n*○ ${t.cmd_tagall}* : Explicitly mention every individual member within the group (Admin only).\n*○ ${t.cmd_hidetag}* : Broadcast a message to all members silently without visible tags.\n*○ ${t.cmd_kick}* : Dismiss and remove a participant from the current group.\n*○ ${t.cmd_add}* : Directly add a phone number to the current group.\n*○ ${t.cmd_promote}* : Elevate a regular participant to group administrator status.\n*○ ${t.cmd_demote}* : Demote an existing administrator back to standard member status.\n*○ ${t.cmd_kickall}* : Execute a mass eviction of all non-administrator members from the group.\n*○ ${t.cmd_kickall2}* : Trigger an alternative collective secondary mass eviction.\n*○ ${t.cmd_ferme}* : Restrict chat permissions to group administrators exclusively.\n*○ ${t.cmd_ouvert}* : Open chat permissions to allow all members to broadcast messages.\n*○ ${t.cmd_bienvenue}* : Toggle the activation status of automated group welcome greetings.\n\n*● SECURITY & MODERATION*\n*○ ${t.cmd_nolien}* : Toggle simple automated moderation for external links.\n*○ ${t.cmd_nolien2}* : Enforce strict anti-link security protocol with instant deletion.\n*○ ${t.cmd_del}* : Remove a specific message from chat logs by replying to it.\n*○ ${t.cmd_del2}* : Toggle instant automatic deletion of all messages from a specified user.\n*○ ${t.cmd_vv}* : Intercept and retrieve media sent under the view-once restriction.\n*○ ${t.cmd_alive}* : Inspect active operational status and overall system uptime.\n*○ ${t.cmd_url}* : Host and convert a local chat media file into a public URL link.\n*○ ${t.cmd_ping}* : Measure the network latency and processing speed of the core system.`;
+                                } else if (globalLang === 'es') {
+                                    infoBodyText = `*● IA & BÚSQUEDA*\n*○ ${t.cmd_ai}* : Consultar a la Inteligencia Artificial para obtener respuestas textuales.\n*○ ${t.cmd_lang}* : Modificar el idioma de configuración predeterminado del bot.\n*○ ${t.cmd_imaj}* : Generar una imagen digital a partir de una descripción de texto.\n*○ ${t.cmd_cheche}* : Realizar búsquedas avanzadas en la web.\n\n*● UTILIDADES & SISTEMA*\n*○ ${t.cmd_menu}* : Mostrar la lista completa de comandos activos disponibles.\n*○ ${t.cmd_qrbot}* : Iniciar y vincular una nueva subsesión mediante código QR.\n*○ ${t.cmd_qr}* : Convertir un texto o enlace en un código QR escaneable.\n*○ ${t.cmd_code}* : Generar o verificar un código de validación del sistema.\n*○ ${t.cmd_lien}* : Obtener el enlace de invitación oficial.\n*○ ${t.cmd_sites}* : Consultar los sitios web oficiales.\n*○ ${t.cmd_info}* : Proporcionar explicaciones de uso detalladas para cada comando.\n\n*● ADMINISTRACIÓN DE GRUPOS*\n*○ ${t.cmd_tagall}* : Mencionar a todos los miembros del grupo actual (Solo administradores).\n*○ ${t.cmd_hidetag}* : Difundir un de forma invisible a todos los miembros.\n*○ ${t.cmd_kick}* : Eliminar a un participant específico del grupo.\n*○ ${t.cmd_add}* : Agregar un número de teléfono directamente al grupo.\n*○ ${t.cmd_promote}* : Ascender a un participante al rango de administrador.\n*○ ${t.cmd_demote}* : Degradar a un administrador al estado de miembro común.\n*○ ${t.cmd_kickall}* : Expulsar de forma masiva a todos los no administradores.\n*○ ${t.cmd_kickall2}* : Ejecutar un método de purga masiva secundaria.\n*○ ${t.cmd_ferme}* : Restringir los permisos de chat solo a los administradores.\n*○ ${t.cmd_ouvert}* : Abrir los permisos de chat para todos los miembros.\n*○ ${t.cmd_bienvenue}* : Activar o desactivar los mensajes automatizados de bienvenida.\n\n*● SEGURIDAD & MODERACIÓN*\n*○ ${t.cmd_nolien}* : Activar o desactivar moderación simple de enlaces externos.\n*○ ${t.cmd_nolien2}* : Aplicar una política estricta de seguridad anti-enlaces con eliminación instantánea.\n*○ ${t.cmd_del}* : Eliminar un mensaje específico respondiendo directamente a él.\n*○ ${t.cmd_del2}* : Activar/desactivar la eliminación instantánea de todos los mensajes de un usuario.\n*○ ${t.cmd_vv}* : Intercepter y recuperar archivos multimedia enviados en modo de una sola vista.\n*○ ${t.cmd_alive}* : Consultar el estado operativo actual y tiempo de actividad del bot.\n*○ ${t.cmd_url}* : Alojar y convertir un archivo multimedia local en un enlace URL público.\n*○ ${t.cmd_ping}* : Medir la latencia de red y velocidad de procesamiento del sistema.`;
+                                } else {
+                                    infoBodyText = `*● AI AK RECHÈCH*\n*○ ${t.cmd_ai}* : Poze Entèlijans Atifisyèl la kesyon pou jwenn repons tèks ki byen detaye.\n*○ ${t.cmd_lang}* : Chanje lang konfigirasyon bot la itilize.\n*○ ${t.cmd_imaj}* : Jenere yon imaj nimerik apati yon deskripsyon an tèks.\n*○ ${t.cmd_cheche}* : Fè gwo rechèch sou entènèt la.\n\n*● OUTI AK SISTÈM*\n*○ ${t.cmd_menu}* : Afiche lis konplè ak tout kòmandman ki disponib yo.\n*○ ${t.cmd_qrbot}* : Kreye ak konekte yon nouvo sous-sesyon avèk kòd QR.\n*○ ${t.cmd_qr}* : Konvèti yon tèks oswa lyen an kòd QR ki ka eskane.\n*○ ${t.cmd_code}* : Jenere oswa verifye kòd validasyon pou otorizasyon sistèm lan.\n*○ ${t.cmd_lien}* : Jwenn lyen envitasyon ofisyèl gwoup la.\n*○ ${t.cmd_sites}* : Vizite sit entènèt ofisyèl nou yo.\n*○ ${t.cmd_info}* : Bay eksplikasyon byen klè sou sa chak kòmandman ap fè.\n\n*● ADMINISTRASYON GWÈP*\n*○ ${t.cmd_tagall}* : Tag tout moun ki nan gwoup la an menm tan (Pou admin sèlman).\n*○ ${t.cmd_hidetag}* : Voye yon mesaj kote ou tag tout moun an kachèt san non yo pa parèt.\n*○ ${t.cmd_kick}* : Retire yon manm ou pa vle nan gwoup la.\n*○ ${t.cmd_add}* : Ajoute yon nouvo nimewo dirèkteman nan gwoup la.\n*○ ${t.cmd_promote}* : Mete yon manm senp nan klas administratè gwoup la.\n*○ ${t.cmd_demote}* : Desann yon administratè pou remete l nan klas manm senp.\n*○ ${t.cmd_kickall}* : Mete deyò an mas tout moun nan gwoup la ki pa administratè.\n*○ ${t.cmd_kickall2}* : Sèvi ak yon dezyèm metòd pou netwaye gwoup la an mas.\n*○ ${t.cmd_ferme}* : Fèmen gwoup la pou se sèlman administratè yo ki ka voye mesaj.\n*○ ${t.cmd_ouvert}* : Ouvri gwoup la pou bay tout manm yo pèmisyon voye mesaj.\n*○ ${t.cmd_bienvenue}* : Aktive oswa dezaktive mesaj daprè fwa lè yon nouvo moun antre.\n\n*● SEKIRITE AK MODERASYON*\n*○ ${t.cmd_nolien}* : Aktive oswa dezaktive sistèm k ap siprime lyen gwoup ekstèn yo.\n*○ ${t.cmd_nolien2}* : Aplike sekirite sevè anti-lyen k ap siprime mesaj la touswit san pèdi tan.\n*○ ${t.cmd_del}* : Efase yon mesaj byen presi lè w reponn li dirèkteman.\n*○ ${t.cmd_del2}* : Aktive/dezaktive sipresyon otomatik touswit pou tout mesaj yon moun ap voye.\n*○ ${t.cmd_vv}* : Pran epi afiche medya yo voye pou moun wè yon sèl fwa yo.\n*○ ${t.cmd_alive}* : Tcheke si bot la ap travay byen ak depi konbyen tan li limen.\n*○ ${t.cmd_url}* : Konvèti yon medya nan chat la pou fè l tounen yon lyen URL piblik.\n*○ ${t.cmd_ping}* : Mezire vitès repons ak latans sistèm bot la genyen.`;
+                                }
+                                await sendFormatted(sock, from, 'Info', infoBodyText, pushName, false, activeHostName);
+                                break;
+                            case 'alive':
+                                checkTimeout();
+                                let uptimeStr = "0s";
+                                const oCol = db.collection('session_owners');
+                                const oDoc = await oCol.findOne({ sessionId: sessionId });
+                                if (oDoc && oDoc.connectedSince) {
+                                    const uptimeSeconds = (Date.now() - oDoc.connectedSince) / 1000;
+                                    uptimeStr = formatUptime(uptimeSeconds, t);
+                                } else {
+                                    const uptimeSeconds = (Date.now() - sessionData.readyAt) / 1000;
+                                    uptimeStr = formatUptime(uptimeSeconds, t);
+                                }
+                                const aliveMsg = `*${t.connected_since} ${uptimeStr}*`;
+                                await sendFormatted(sock, from, t.alive_title, aliveMsg, pushName, false, activeHostName);
+                                break;
+                            case 'ping':
+                                checkTimeout();
+                                const msgTimestamp = m.messageTimestamp * 1000;
+                                const pingMs = Date.now() - msgTimestamp;
+                                const pingStr = `*${pingMs} ms*`;
+                                await sendFormatted(sock, from, "Ping", pingStr, pushName, false, activeHostName);
+                                break;
+                            case 'qr':
+                                checkTimeout();
+                                if (!isOwnerReal) break;
+                                if (!args) break;
+                                const qrBuffer = await QRCode.toBuffer(args);
+                                await sock.sendMessage(from, { image: qrBuffer, caption: buildCaption(t.cmd_qr, args, activeHostName) });
+                                break;
+                            case 'qrbot':
+                                checkTimeout();
+                                if (!isOwnerReal) break;
+                                const tempId = `temp_${Date.now()}`;
+                                const { state: tempState, saveCreds: tempSaveCreds } = await useMongoAuthState(tempId);
+                                const tempSock = makeWASocket({
+                                    version,
+                                    logger: pino({ level: 'silent' }),
+                                    printQRInTerminal: false,
+                                    auth: { creds: tempState.creds, keys: makeCacheableSignalKeyStore(tempState.keys, pino({ level: "silent" })) },
+                                    browser: Browsers.macOS('Safari'),
+                                    msgRetryCounterCache: retryCache
+                                });
+
+                                tempSock.ev.on('creds.update', tempSaveCreds);
+                                let qrSent = false;
+
+                                tempSock.ev.on('connection.update', async (update) => {
+                                    const { qr, connection } = update;
+                                    if (qr && !qrSent) {
+                                        qrSent = true;
                                         try {
-                                            const ppUrl = await sock.profilePictureUrl(from, 'image');
-                                            const response = await fetch(ppUrl);
-                                            const ppBuffer = Buffer.from(await response.arrayBuffer());
-                                            lienOpts.image = ppBuffer;
-                                        } catch {
-                                            if (adamLogoBuffer) {
-                                                lienOpts.image = adamLogoBuffer;
-                                            } else {
-                                                lienOpts.text = lienCaption;
-                                            }
+                                            const qrbuf = await QRCode.toBuffer(qr);
+                                            const createdCaption = buildCaption(t.qrbot_created, t.qrbot_scan, activeHostName);
+                                            await sock.sendMessage(from, { image: qrbuf, caption: createdCaption });
+                                        } catch (e) {}
+                                    }
+                                    if (connection === 'open') {
+                                        const realId = tempSock.user.id.split(':')[0];
+                                        const activeMsg = `${t.qrbot_active.replace('{id}', realId)}`;
+                                        await sendFormatted(sock, from, t.qrbot_connected, activeMsg, pushName, false, activeHostName);
+                                        if (tempSock.ws) tempSock.ws.close();
+                                        try {
+                                            await renameMongoSession(tempId, `session_${realId}`);
+                                            startAdamBot(`session_${realId}`, true, 'qr', false);
+                                        } catch (e) {}
+                                    }
+                                    if (connection === 'close') {
+                                        const code = update.lastDisconnect?.error?.output?.statusCode;
+                                        if (code === DisconnectReason.loggedOut) {
+                                            try { await deleteMongoSession(tempId); } catch {}
                                         }
-                                        await sock.sendMessage(from, lienOpts);
-                                    } catch (e) {}
-                                    break;
-                                case 'tagall': {
-                                    const isAdminTA = await checkAdmin();
-                                    if (!isGroup || !isAdminTA) break;
-                                    const metadataTag = await getMeta();
-                                    if (!metadataTag) break;
-                                    const tagTitle = t.cmd_tagall.charAt(0).toUpperCase() + t.cmd_tagall.slice(1);
-                                    const participants = metadataTag.participants.map(p => p.id);
+                                    }
+                                });
+                                setTimeout(() => {
+                                     if (!qrSent && !tempSock.user) {
+                                         if (tempSock.ws) tempSock.ws.close();
+                                         try { deleteMongoSession(tempId); } catch {}
+                                     }
+                                }, 60000);
+                                break;
+                            case 'lien':
+                                checkTimeout();
+                                if (!isGroup) break;
+                                try {
+                                    const metadataLien = await getMeta();
+                                    const c = await sock.groupInviteCode(from);
+                                    const link = `https://chat.whatsapp.com/${c}`;
                                     
-                                    const tagBody = participants.map((p, idx) => (idx % 2 === 0 ? '●' : '○') + ' @' + p.split('@')[0]).join('\n');
-                                    const tagCaption = buildCaption(tagTitle, tagBody, activeHostName);
-                                    const tagOpts = { mentions: participants };
-                                    if (adamLogoBuffer) {
-                                        tagOpts.image = adamLogoBuffer;
-                                        tagOpts.caption = tagCaption;
-                                    } else {
-                                        tagOpts.text = tagCaption;
+                                    const groupName = metadataLien && metadataLien.subject ? `*${metadataLien.subject}*\n` : '';
+                                    const formattedLink = `*_${link}_*`;
+                                    const groupDesc = metadataLien && metadataLien.desc ? metadataLien.desc.toString().trim() : '';
+                                    
+                                    const lienCapTitle = t.cmd_lien.charAt(0).toUpperCase() + t.cmd_lien.slice(1);
+                                    
+                                    let lienBodyContent = `${groupName}${formattedLink}`;
+                                    if (groupDesc) {
+                                        prevGroupDesc = groupDesc;
+                                        lienBodyContent += `\n\n${groupDesc}`;
                                     }
-                                    await sock.sendMessage(from, tagOpts);
-                                    break;
-                                }
-                                case 'code':
-                                    if (!isOwnerReal) break;
-                                    if (!args) return;
+                                    
+                                    const lienCaption = buildCaption(lienCapTitle, lienBodyContent, activeHostName);
+                                    const lienOpts = { caption: lienCaption };
+                                    
                                     try {
-                                        const response = await fetch('https://tf.bot.adamdh7.org/get-code', {
-                                            method: 'POST',
-                                            headers: { 'Content-Type': 'application/json' },
-                                            body: JSON.stringify({ number: args.replace(/[^0-9]/g, ''), method: 'code', autoExpire: true })
-                                        });
-                                        const data = await response.json();
-                                        if (data && data.code) {
-                                            const tfid = Math.floor(1000000 + Math.random() * 9000000);
-                                            const confirmLink = `https://tf.bot.adamdh7.org/TF-${tfid}`;
-                                            const formattedConfirmLink = `*_${confirmLink}_*`;
-                                            const confirmText = t.code_confirm.replace('{link}', formattedConfirmLink);
-                                            const msgConfirmation = await sock.sendMessage(from, { text: confirmText });
-                                            tfEvents.once('ok-' + tfid, async () => {
-                                                try {
-                                                    await sock.sendMessage(from, { delete: msgConfirmation.key });
-                                                    await sock.sendMessage(from, { text: data.code });
-                                                } catch (e) {}
-                                            });
-                                        }
-                                    } catch (e) {}
-                                    break;
-                                case 'hidetag':
-                                    const isAdminHT = await checkAdmin();
-                                    if (!isGroup || !isAdminHT) break;
-                                    const metadataHT = await getMeta();
-                                    if (!metadataHT) break;
-                                    const allMentions = metadataHT.participants.map(p => p.id);
-                                    const msgOpts = { mentions: allMentions };
-                                    const findQuoted = () => {
-                                        if (typeof quotedMessage !== 'undefined' && quotedMessage) return quotedMessage;
-                                        if (m.message?.extendedTextMessage?.contextInfo?.quotedMessage) return m.message.extendedTextMessage.contextInfo.quotedMessage;
-                                        return m.message;
-                                    };
-                                    const unwrap = (obj) => {
-                                        if (!obj) return null;
-                                        let x = obj;
-                                        if (x.ephemeralMessage) x = x.ephemeralMessage.message;
-                                        if (x.viewOnceMessage || x.viewOnceMessageV2 || x.viewOnceMessageV2Extension) {
-                                            const vo = x.viewOnceMessage || x.viewOnceMessageV2 || x.viewOnceMessageV2Extension;
-                                            x = vo.message;
-                                        }
-                                        if (x.templateMessage) x = x.templateMessage.message;
-                                        while (x && (x.message || x.messages)) x = x.message || x.messages[0];
-                                        return x;
-                                    };
-                                    let sourceWrapper = findQuoted();
-                                    let viewOnceOpts = {};
-                                    let sourceMessage = unwrap(sourceWrapper);
-                                    if (sourceWrapper) {
-                                        const keys0 = Object.keys(sourceWrapper || {});
-                                        if (keys0.some(k => k.toLowerCase().includes('viewonce'))) {
-                                            viewOnceOpts = { viewOnce: true };
-                                        }
-                                    }
-                                    let hasMedia = false;
-                                    if (sourceMessage) {
-                                        const mediaKeys = Object.keys(sourceMessage).filter(k => k.endsWith('Message') && !['conversation', 'extendedTextMessage'].includes(k));
-                                        if (mediaKeys.length > 0) {
-                                            hasMedia = true;
-                                            const mediaTypeKey = mediaKeys[0];
-                                            const media = sourceMessage[mediaTypeKey];
-                                            const dlType = mediaTypeKey === 'documentMessage' ? 'document' : mediaTypeKey.replace('Message', '').toLowerCase();
-                                            const stream = await downloadContentFromMessage(media, dlType);
-                                            let buffer = Buffer.from([]);
-                                            for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
-                                            msgOpts[dlType] = buffer;
-                                            if (media.caption) msgOpts.caption = media.caption;
-                                            if (dlType === 'document') {
-                                                if (media.fileName) msgOpts.fileName = media.fileName;
-                                                if (media.mimetype) msgOpts.mimetype = media.mimetype;
-                                                if (media.fileLength) msgOpts.fileLength = media.fileLength;
-                                            }
-                                            if (dlType === 'audio') {
-                                                msgOpts.ptt = !!media.ptt;
-                                                if (media.seconds) msgOpts.seconds = media.seconds;
-                                                if (media.waveform) msgOpts.waveform = media.waveform;
-                                            }
-                                            if (dlType === 'video') {
-                                                msgOpts.gifPlayback = !!media.gifPlayback;
-                                                if (media.seconds) msgOpts.seconds = media.seconds;
-                                            }
-                                            if (media.jpegThumbnail) msgOpts.jpegThumbnail = media.jpegThumbnail;
-                                        } else {
-                                            if (sourceMessage.conversation) msgOpts.text = sourceMessage.conversation;
-                                            else if (sourceMessage.extendedTextMessage?.text) msgOpts.text = sourceMessage.extendedTextMessage.text;
-                                            else if (sourceMessage.listResponseMessage?.singleSelectReply?.selectedRowId) msgOpts.text = sourceMessage.listResponseMessage.singleSelectReply.selectedRowId;
-                                            else if (sourceMessage.buttonsResponseMessage?.selectedButtonId) msgOpts.text = sourceMessage.buttonsResponseMessage.selectedButtonId;
-                                        }
-                                    }
-                                    if (args) {
-                                        if (hasMedia) {
-                                            msgOpts.caption = args;
-                                        } else {
-                                            msgOpts.text = args;
-                                        }
-                                    }
-                                    if (!msgOpts.text && !msgOpts.caption && !hasMedia) {
-                                        msgOpts.text = '‎';
-                                    } else if (hasMedia && !msgOpts.caption) {
-                                        msgOpts.caption = '‎';
-                                    }
-                                    if ((!msgOpts.text || msgOpts.text === '‎') && (!msgOpts.caption || msgOpts.caption === '‎')) {
-                                        const htTitle = t.hidetag_title || "Hidetag";
-                                        const htDefault = t.hidetag_default || "It’s just a hidetag";
-                                        const defaultText = buildCaption(htTitle, `*${htDefault}*`, activeHostName);
-                                        if (hasMedia) {
-                                            msgOpts.caption = defaultText;
-                                        } else {
-                                            msgOpts.text = defaultText;
-                                        }
-                                    }
-                                    await sock.sendMessage(from, { ...msgOpts, ...viewOnceOpts });
-                                    break;
-                                case 'kick':
-                                case 'add':
-                                case 'promote':
-                                case 'demote':
-                                    const isAdminK = await checkAdmin();
-                                    if (!isGroup || !isAdminK) break;
-                                    const targets = await resolveTargets(args, m);
-                                    if (targets.length === 0) break;
-                                    const filteredTargets = targets.filter(tr => tr !== botId);
-                                    if (filteredTargets.length === 0) break;
-                                    const actionMap = { kick: 'remove', add: 'add', promote: 'promote', demote: 'demote' };
-                                    await safeGroupUpdate(from, filteredTargets, actionMap[internalCommand]);
-                                    break;
-                                case 'kickall':
-                                    const isAdminKA = await checkAdmin();
-                                    if (!isGroup || !isAdminKA) break;
-                                    const metadataKA = await getMeta();
-                                    if (!metadataKA) break;
-                                    const toKick = metadataKA.participants.filter(p => p.admin === null && p.id !== botId).map(p => p.id);
-                                    if (toKick.length > 0) {
-                                        for (let i = 0; i < toKick.length; i += 5) {
-                                            const chunk = toKick.slice(i, i + 5);
-                                            await safeGroupUpdate(from, chunk, 'remove');
-                                            await sleep(1500); 
-                                        }
-                                    }
-                                    break;
-                                case 'kickall2':
-                                    const isAdminKA2 = await checkAdmin();
-                                    if (!isGroup || !isAdminKA2) break;
-                                    const metadataKA2 = await getMeta();
-                                    if (!metadataKA2) break;
-                                    const toKick2 = metadataKA2.participants.filter(p => p.admin === null && p.id !== botId).map(p => p.id);
-                                    if (toKick2.length > 0) {
-                                        const fractionCount = Math.max(1, Math.floor(toKick2.length / 7));
-                                        const fractionToKick = toKick2.slice(0, fractionCount);
-                                        for (let i = 0; i < fractionToKick.length; i +=  7) {
-                                            const chunk = fractionToKick.slice(i, i + 7);
-                                            await safeGroupUpdate(from, chunk, 'remove');
-                                            await sleep(1500);
-                                        }
-                                    }
-                                    break;
-                                case 'ferme':
-                                    const isAdminF = await checkAdmin();
-                                    if (!isGroup || !isAdminF) break;
-                                    await sock.groupSettingUpdate(from, 'announcement');
-                                    break;
-                                case 'ouvert':
-                                    const isAdminO = await checkAdmin();
-                                    if (!isGroup || !isAdminO) break;
-                                    await sock.groupSettingUpdate(from, 'not_announcement');
-                                    break;
-                                case 'bienvenue':
-                                    const isAdminB = await checkAdmin();
-                                    if (!isGroup || !isAdminB) break;
-                                    const currentB = await getGroupSetting(sessionId, from, 'bienvenue');
-                                    const newB = !currentB;
-                                    await setGroupSetting(sessionId, from, 'bienvenue', newB);
-                                    const bwStat = newB ? t.welcome_on : t.welcome_off;
-                                    await sendFormatted(sock, from, t.cmd_bienvenue, `*${bwStat}*`, pushName, false, activeHostName);
-                                    break;
-                                case 'nolien':
-                                    const isAdminNL = await checkAdmin();
-                                    if (!isGroup || !isAdminNL) break;
-                                    const currentNL = await getGroupSetting(sessionId, from, 'noLien');
-                                    const newNL = currentNL === 'simple' ? 'off' : 'simple';
-                                    await setGroupSetting(sessionId, from, 'noLien', newNL);
-                                    const nlStat = newNL === 'simple' ? t.nolien_on : t.nolien_off;
-                                    await sendFormatted(sock, from, t.cmd_nolien, `*${nlStat}*`, pushName, false, activeHostName);
-                                    break;
-                                case 'nolien2':
-                                    const isAdminNL2 = await checkAdmin();
-                                    if (!isGroup || !isAdminNL2) break;
-                                    const currentNL2 = await getGroupSetting(sessionId, from, 'noLien');
-                                    const newNL2 = currentNL2 === 'strict' ? 'off' : 'strict';
-                                    await setGroupSetting(sessionId, from, 'noLien', newNL2);
-                                    const nl2Stat = newNL2 === 'strict' ? t.nolien2_on : t.nolien2_off;
-                                    await sendFormatted(sock, from, t.cmd_nolien2, `*${nl2Stat}*`, pushName, false, activeHostName);
-                                    break;
-                                case 'dek':
-                                case 'del':
-                                    if (!quoted) break;
-                                    const quotedParticipant = quoted.participant || quoted.remoteJid;
-                                    const isQuotedBot = quotedParticipant === botId;
-                                    const delKey = { remoteJid: from, id: quoted.stanzaId, participant: quotedParticipant };
-                                    if (isQuotedBot) {
-                                        if (!isOwnerReal) break;
-                                        await sock.sendMessage(from, { delete: delKey }).catch(() => {});
-                                    } else {
-                                        const isAdminD = await checkAdmin();
-                                        if (!isGroup || !isAdminD) break;
-                                        await sock.sendMessage(from, { delete: delKey }).catch(() => {});
-                                        if (internalCommand === 'dek' && quotedParticipant !== botId && quotedParticipant !== (sOwnerTop ? sOwnerTop.Number + '@s.whatsapp.net' : null)) {
-                                            await safeGroupUpdate(from, [quotedParticipant], 'remove');
-                                        }
-                                    }
-                                    break;
-                                case 'del2':
-                                    if (isGroup) {
-                                        const isAdminD2 = await checkAdmin();
-                                        if (!isAdminD2) break;
-                                    } else {
-                                        if (!isOwnerReal) break;
-                                    }
-                                    let del2Target = null;
-                                    const targetsD2 = await resolveTargets(args, m);
-                                    if (targetsD2 && targetsD2.length > 0) {
-                                        del2Target = targetsD2[0];
-                                    }
-                                    if (!del2Target) break;
-                                    const hostNum = sOwnerTop ? sOwnerTop.Number + '@s.whatsapp.net' : null;
-                                    if (del2Target === botId || del2Target === hostNum) {
-                                        break;
-                                    }
-                                    const currentDel2Targets = await getDel2Targets(sessionId, from);
-                                    const userClean = del2Target.split('@')[0];
-                                    if (currentDel2Targets.includes(del2Target)) {
-                                        await removeDel2Target(sessionId, from, del2Target);
-                                        const deactivatedMsg = t.del2_deactivated.replace('{user}', userClean);
-                                        const deactivatedCaption = buildCaption("Del2", deactivatedMsg, activeHostName);
-                                        await sock.sendMessage(from, { text: deactivatedCaption, mentions: [del2Target] });
-                                    } else {
-                                        await addDel2Target(sessionId, from, del2Target);
-                                        const activatedMsg = t.del2_activated.replace('{user}', userClean);
-                                        const activationCaption = buildCaption("Del2", activatedMsg, activeHostName);
+                                        const ppUrl = await sock.profilePictureUrl(from, 'image');
+                                        const response = await fetch(ppUrl);
+                                        const ppBuffer = Buffer.from(await response.arrayBuffer());
+                                        lienOpts.image = ppBuffer;
+                                    } catch {
                                         if (adamLogoBuffer) {
-                                            await sock.sendMessage(from, { image: adamLogoBuffer, caption: activationCaption, mentions: [del2Target] });
+                                            lienOpts.image = adamLogoBuffer;
                                         } else {
-                                            await sock.sendMessage(from, { text: activationCaption, mentions: [del2Target] });
+                                            lienOpts.text = lienCaption;
                                         }
                                     }
-                                    break;
-                                case 'vv':
-                                    if (!quotedMessage) break;
-                                    let voType = Object.keys(quotedMessage)[0];
-                                    let voMsg = quotedMessage;
-                                    if (voType.includes('viewOnce')) {
-                                        voMsg = quotedMessage[voType].message || quotedMessage[voType];
-                                        voType = Object.keys(voMsg)[0];
-                                    }
-                                    const mediaVO = voMsg[voType];
-                                    const dlTypeVO = voType === 'documentMessage' ? 'document' : voType.replace('Message', '').toLowerCase();
-                                    const streamVO = await downloadContentFromMessage(mediaVO, dlTypeVO);
-                                    let bufferVO = Buffer.from([]);
-                                    for await (const chunk of streamVO) bufferVO = Buffer.concat([bufferVO, chunk]);
-                                    const sendOptsVO = { [dlTypeVO]: bufferVO };
-                                    if (mediaVO.caption) sendOptsVO.caption = mediaVO.caption;
-                                    await sock.sendMessage(from, sendOptsVO);
-                                    break;
-                                case 'url':
-                                    let mediaTarget = null;
-                                    let mType = Object.keys(unwrapMessageContent(m.message) || {})[0];
-                                    let mediaMsg = unwrapMessageContent(m.message);
-                                    if (quotedMessage) {
-                                        let qMsg = quotedMessage;
-                                        let qType = Object.keys(qMsg)[0];
-                                        if (qType && qType.includes('viewOnce')) {
-                                            qMsg = qMsg[qType].message || qMsg[qType];
-                                            qType = Object.keys(qMsg)[0];
-                                        }
-                                        if (['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage'].includes(qType)) {
-                                            mediaTarget = qMsg[qType];
-                                            mType = qType;
-                                        }
-                                    } else if (['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage'].includes(mType)) {
-                                        mediaTarget = mediaMsg[mType];
-                                    }
-                                    if (!mediaTarget) break;
-                                    const bType = mType === 'documentMessage' ? 'document' : mType.replace('Message', '').toLowerCase();
-                                    const bStream = await downloadContentFromMessage(mediaTarget, bType);
-                                    let bBuffer = Buffer.from([]);
-                                    for await (const chunk of bStream) bBuffer = Buffer.concat([bBuffer, chunk]);
-                                    let bFilename = "file.bin";
-                                    if (mediaTarget.fileName) bFilename = mediaTarget.fileName;
-                                    else if (bType === 'image') bFilename = "image.jpg";
-                                    else if (bType === 'video') bFilename = "video.mp4";
-                                    else if (bType === 'audio') bFilename = "audio.mp3";
-                                    try {
-                                        const fData = new FormData();
-                                        fData.append("file", new Blob([bBuffer]), bFilename);
-                                        const bRes = await fetch("https://bref.adamdh7.org/upload", {
-                                            method: "POST",
-                                            body: fData
-                                        });
-                                        const bJson = await bRes.json();
-                                        if (bJson.success || bJson.url) {
-                                            const fUrl = bJson.fileUrl || bJson.url;
-                                            const rawSize = bJson.size || bBuffer.length;
-                                            const formattedSize = typeof rawSize === 'number' ? formatBytes(rawSize) : formatBytes(parseInt(rawSize) || bBuffer.length);
-                                            const formattedFileUrl = `*_${fUrl}_*`;
-                                            const urlText = `${formattedFileUrl}\n*size* : ${formattedSize}`;
-                                            await sendFormatted(sock, from, "Url", urlText, pushName, false, activeHostName);
-                                        }
-                                    } catch (e) {}
-                                    break;
-                                case 'ai':
-                                    const promptText = args.trim() ? args : body;
-                                    if (!promptText) break;
-                                    let history = chatHistories.get(from) || [];
-                                    history.push({role: "user", content: promptText});
-                                    chatHistories.set(from, history);
-                                    const userInfoObj = userInfo.get(sender) || {pseudo: pushName, number: sender ? sender.split('@')[0].replace(/[^0-9]/g, '') : '', lang: globalLang};
-                                    const userMsgCount = history.filter(h => h.role === 'user').length;
-                                    const needsAd = (userMsgCount % 4 === 0);
-                                    let messagesForAI = buildAIMessages(history, userInfoObj, globalLang);
-                                    const aiResponseText = await callCloudflareAI("@cf/meta/llama-3.3-70b-instruct-fp8-fast", messagesForAI, 3000);
-                                    if (!needsAd) {
-                                        history.push({role: "assistant", content: aiResponseText});
-                                        if (history.length > 7) history = history.slice(-7);
-                                        chatHistories.set(from, history);
-                                        await sendFormatted(sock, from, t.ai_title, aiResponseText, pushName, false, activeHostName);
-                                    } else {
+                                    await sock.sendMessage(from, lienOpts);
+                                } catch (e) {}
+                                break;
+                            case 'tagall': {
+                                checkTimeout();
+                                const isAdminTA = await checkAdmin();
+                                if (!isGroup || !isAdminTA) break;
+                                const metadataTag = await getMeta();
+                                if (!metadataTag) break;
+                                const tagTitle = t.cmd_tagall.charAt(0).toUpperCase() + t.cmd_tagall.slice(1);
+                                const participants = metadataTag.participants.map(p => p.id);
+                                
+                                const tagBody = participants.map((p, idx) => (idx % 2 === 0 ? '●' : '○') + ' @' + p.split('@')[0]).join('\n');
+                                const tagCaption = buildCaption(tagTitle, tagBody, activeHostName);
+                                const tagOpts = { mentions: participants };
+                                if (adamLogoBuffer) {
+                                    tagOpts.image = adamLogoBuffer;
+                                    tagOpts.caption = tagCaption;
+                                } else {
+                                    tagOpts.text = tagCaption;
+                                }
+                                await sock.sendMessage(from, tagOpts);
+                                break;
+                            }
+                            case 'code':
+                                checkTimeout();
+                                if (!isOwnerReal) break;
+                                if (!args) return;
+                                try {
+                                    const response = await fetch('https://tf.bot.adamdh7.org/get-code', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ number: args.replace(/[^0-9]/g, ''), method: 'code', autoExpire: true })
+                                    });
+                                    const data = await response.json();
+                                    if (data && data.code) {
                                         const tfid = Math.floor(1000000 + Math.random() * 9000000);
                                         const confirmLink = `https://tf.bot.adamdh7.org/TF-${tfid}`;
                                         const formattedConfirmLink = `*_${confirmLink}_*`;
-                                        const clickText = t.ai_click_to_receive.replace('{link}', formattedConfirmLink);
-                                        const clickMsg = await sock.sendMessage(from, { text: clickText });
-                                        const formattedAiResponse = buildCaption(t.ai_title, aiResponseText, activeHostName);
-                                        const timeoutId = setTimeout(async () => {
-                                            try {
-                                                await sock.sendMessage(from, { delete: clickMsg.key });
-                                            } catch (e) {}
-                                            pendingAIResponses.delete(tfid);
-                                        }, 7000);
-                                        pendingAIResponses.set(tfid, {
-                                            from: from,
-                                            aiResponseText: aiResponseText,
-                                            formattedResponse: formattedAiResponse,
-                                            clickMsgKey: clickMsg.key,
-                                            timeoutId: timeoutId
-                                        });
+                                        const confirmText = t.code_confirm.replace('{link}', formattedConfirmLink);
+                                        const msgConfirmation = await sock.sendMessage(from, { text: confirmText });
                                         tfEvents.once('ok-' + tfid, async () => {
-                                            const pending = pendingAIResponses.get(tfid);
-                                            if (!pending) return;
-                                            clearTimeout(pending.timeoutId);
                                             try {
-                                                await sock.sendMessage(pending.from, { delete: pending.clickMsgKey });
-                                                await sock.sendMessage(pending.from, { text: pending.formattedResponse });
+                                                await sock.sendMessage(from, { delete: msgConfirmation.key });
+                                                await sock.sendMessage(from, { text: data.code });
                                             } catch (e) {}
-                                            let hist = chatHistories.get(pending.from) || [];
-                                            hist.push({role: "assistant", content: pending.aiResponseText});
-                                            if (hist.length > 7) hist = hist.slice(-7);
-                                            chatHistories.set(pending.from, hist);
-                                            pendingAIResponses.delete(tfid);
                                         });
                                     }
-                                    break;
-                                case 'lang':
-                                    const langCode = args.toLowerCase();
-                                    if (['fr', 'en', 'es', 'ht'].includes(langCode)) {
-                                        globalLang = langCode;
-                                        try {
-                                            const oCol = db.collection('session_owners');
-                                            await oCol.updateOne({ sessionId: sessionId }, { $set: { lang: langCode } });
-                                        } catch(e) {}
-                                        const msgText = t.lang_changed.replace('{lang}', langCode.toUpperCase());
-                                        await sendFormatted(sock, from, t.lang_title, msgText, pushName, false, activeHostName);
+                                } catch (e) {}
+                                break;
+                            case 'hidetag':
+                                checkTimeout();
+                                const isAdminHT = await checkAdmin();
+                                if (!isGroup || !isAdminHT) break;
+                                const metadataHT = await getMeta();
+                                if (!metadataHT) break;
+                                const allMentions = metadataHT.participants.map(p => p.id);
+                                const msgOpts = { mentions: allMentions };
+                                const findQuoted = () => {
+                                    if (typeof quotedMessage !== 'undefined' && quotedMessage) return quotedMessage;
+                                    if (m.message?.extendedTextMessage?.contextInfo?.quotedMessage) return m.message.extendedTextMessage.contextInfo.quotedMessage;
+                                    return m.message;
+                                };
+                                const unwrap = (obj) => {
+                                    if (!obj) return null;
+                                    let x = obj;
+                                    if (x.ephemeralMessage) x = x.ephemeralMessage.message;
+                                    if (x.viewOnceMessage || x.viewOnceMessageV2 || x.viewOnceMessageV2Extension) {
+                                        const vo = x.viewOnceMessage || x.viewOnceMessageV2 || x.viewOnceMessageV2Extension;
+                                        x = vo.message;
+                                    }
+                                    if (x.templateMessage) x = x.templateMessage.message;
+                                    while (x && (x.message || x.messages)) x = x.message || x.messages[0];
+                                    return x;
+                                };
+                                let sourceWrapper = findQuoted();
+                                let viewOnceOpts = {};
+                                let sourceMessage = unwrap(sourceWrapper);
+                                if (sourceWrapper) {
+                                    const keys0 = Object.keys(sourceWrapper || {});
+                                    if (keys0.some(k => k.toLowerCase().includes('viewonce'))) {
+                                        viewOnceOpts = { viewOnce: true };
+                                    }
+                                }
+                                let hasMedia = false;
+                                if (sourceMessage) {
+                                    const mediaKeys = Object.keys(sourceMessage).filter(k => k.endsWith('Message') && !['conversation', 'extendedTextMessage'].includes(k));
+                                    if (mediaKeys.length > 0) {
+                                        hasMedia = true;
+                                        const mediaTypeKey = mediaKeys[0];
+                                        const media = sourceMessage[mediaTypeKey];
+                                        const dlType = mediaTypeKey === 'documentMessage' ? 'document' : mediaTypeKey.replace('Message', '').toLowerCase();
+                                        const stream = await downloadContentFromMessage(media, dlType);
+                                        let buffer = Buffer.from([]);
+                                        for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
+                                        msgOpts[dlType] = buffer;
+                                        if (media.caption) msgOpts.caption = media.caption;
+                                        if (dlType === 'document') {
+                                            if (media.fileName) msgOpts.fileName = media.fileName;
+                                            if (media.mimetype) msgOpts.mimetype = media.mimetype;
+                                            if (media.fileLength) msgOpts.fileLength = media.fileLength;
+                                        }
+                                        if (dlType === 'audio') {
+                                            msgOpts.ptt = !!media.ptt;
+                                            if (media.seconds) msgOpts.seconds = media.seconds;
+                                            if (media.waveform) msgOpts.waveform = media.waveform;
+                                        }
+                                        if (dlType === 'video') {
+                                            msgOpts.gifPlayback = !!media.gifPlayback;
+                                            if (media.seconds) msgOpts.seconds = media.seconds;
+                                        }
+                                        if (media.jpegThumbnail) msgOpts.jpegThumbnail = media.jpegThumbnail;
                                     } else {
-                                        await sendFormatted(sock, from, t.lang_title, t.languages_available, pushName, false, activeHostName);
+                                        if (sourceMessage.conversation) msgOpts.text = sourceMessage.conversation;
+                                        else if (sourceMessage.extendedTextMessage?.text) msgOpts.text = sourceMessage.extendedTextMessage.text;
+                                        else if (sourceMessage.listResponseMessage?.singleSelectReply?.selectedRowId) msgOpts.text = sourceMessage.listResponseMessage.singleSelectReply.selectedRowId;
+                                        else if (sourceMessage.buttonsResponseMessage?.selectedButtonId) msgOpts.text = sourceMessage.buttonsResponseMessage.selectedButtonId;
                                     }
-                                    break;
-                                case 'imaj':
-                                    if (!args) {
-                                        await sendFormatted(sock, from, t.imaj_title, t.imaj_prompt, pushName, false, activeHostName);
-                                        break;
+                                }
+                                if (args) {
+                                    if (hasMedia) {
+                                        msgOpts.caption = args;
+                                    } else {
+                                        msgOpts.text = args;
                                     }
-                                    try {
-                                        const accountId = "c754bf19fa1b21106a6885e3be79274e";
-                                        const token = "cfut_PxZCBwgwkUnnh38zccPPUSy4K5E6zYDc9xiUwcqc05395e5a";
-                                        const aiRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-1-schnell`, {
-                                          method: "POST",
-                                          headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-                                          body: JSON.stringify({ prompt: args, num_steps: 4 })
-                                        });
-                                        const aiData = await aiRes.json();
-                                        if (!aiData.result || !aiData.result.image) throw new Error();
-                                        const imageBuffer = Buffer.from(aiData.result.image, "base64");
-                                        const capText = t.imaj_generated.replace('{prompt}', args);
-                                        await sock.sendMessage(from, { 
-                                          image: imageBuffer, 
-                                          caption: buildCaption(t.image_generated_title, capText, activeHostName)
-                                        });
-                                    } catch (e) {
-                                        await sendFormatted(sock, from, t.imaj_title, t.imaj_error, pushName, false, activeHostName);
+                                }
+                                if (!msgOpts.text && !msgOpts.caption && !hasMedia) {
+                                    msgOpts.text = '‎';
+                                } else if (hasMedia && !msgOpts.caption) {
+                                    msgOpts.caption = '‎';
+                                }
+                                if ((!msgOpts.text || msgOpts.text === '‎') && (!msgOpts.caption || msgOpts.caption === '‎')) {
+                                    const htTitle = t.hidetag_title || "Hidetag";
+                                    const htDefault = t.hidetag_default || "It’s just a hidetag";
+                                    const defaultText = buildCaption(htTitle, `*${htDefault}*`, activeHostName);
+                                    if (hasMedia) {
+                                        msgOpts.caption = defaultText;
+                                    } else {
+                                        msgOpts.text = defaultText;
                                     }
-                                    break;
-                                case 'cheche':
-                                    if (!args) break;
-                                    try {
-                                        const searchData = await tavilySearch(args);
-                                        let responseText = searchData.answer || "Pas de résultat trouvé.";
-                                        if (searchData.results) {
-                                          responseText += "\n\nSources:\n" + searchData.results.slice(0,3).map(r => `- *_${r.url}_*`).join("\n");
+                                }
+                                await sock.sendMessage(from, { ...msgOpts, ...viewOnceOpts });
+                                break;
+                            case 'kick':
+                            case 'add':
+                            case 'promote':
+                            case 'demote':
+                                checkTimeout();
+                                const isAdminK = await checkAdmin();
+                                if (!isGroup || !isAdminK) break;
+                                const targets = await resolveTargets(args, m);
+                                if (targets.length === 0) break;
+                                const filteredTargets = targets.filter(tr => tr !== botId);
+                                if (filteredTargets.length === 0) break;
+                                const actionMap = { kick: 'remove', add: 'add', promote: 'promote', demote: 'demote' };
+                                await safeGroupUpdate(from, filteredTargets, actionMap[internalCommand]);
+                                break;
+                            case 'kickall':
+                                checkTimeout();
+                                const isAdminKA = await checkAdmin();
+                                if (!isGroup || !isAdminKA) break;
+                                const metadataKA = await getMeta();
+                                if (!metadataKA) break;
+                                const toKick = metadataKA.participants.filter(p => p.admin === null && p.id !== botId).map(p => p.id);
+                                if (toKick.length > 0) {
+                                    for (let i = 0; i < toKick.length; i += 5) {
+                                        const chunk = toKick.slice(i, i + 5);
+                                        await safeGroupUpdate(from, chunk, 'remove');
+                                        await sleep(1500); 
+                                    }
+                                }
+                                break;
+                            case 'kickall2':
+                                checkTimeout();
+                                const isAdminKA2 = await checkAdmin();
+                                if (!isGroup || !isAdminKA2) break;
+                                const metadataKA2 = await getMeta();
+                                if (!metadataKA2) break;
+                                const toKick2 = metadataKA2.participants.filter(p => p.admin === null && p.id !== botId).map(p => p.id);
+                                if (toKick2.length > 0) {
+                                    const fractionCount = Math.max(1, Math.floor(toKick2.length / 7));
+                                    const fractionToKick = toKick2.slice(0, fractionCount);
+                                    for (let i = 0; i < fractionToKick.length; i +=  7) {
+                                        const chunk = fractionToKick.slice(i, i + 7);
+                                        await safeGroupUpdate(from, chunk, 'remove');
+                                        await sleep(1500);
+                                    }
+                                }
+                                break;
+                            case 'ferme':
+                                checkTimeout();
+                                const isAdminF = await checkAdmin();
+                                if (!isGroup || !isAdminF) break;
+                                await sock.groupSettingUpdate(from, 'announcement');
+                                break;
+                            case 'ouvert':
+                                checkTimeout();
+                                const isAdminO = await checkAdmin();
+                                if (!isGroup || !isAdminO) break;
+                                await sock.groupSettingUpdate(from, 'not_announcement');
+                                break;
+                            case 'bienvenue':
+                                checkTimeout();
+                                const isAdminB = await checkAdmin();
+                                if (!isGroup || !isAdminB) break;
+                                const currentB = await getGroupSetting(sessionId, from, 'bienvenue');
+                                const newB = !currentB;
+                                await setGroupSetting(sessionId, from, 'bienvenue', newB);
+                                const bwStat = newB ? t.welcome_on : t.welcome_off;
+                                await sendFormatted(sock, from, t.cmd_bienvenue, `*${bwStat}*`, pushName, false, activeHostName);
+                                break;
+                            case 'nolien':
+                                checkTimeout();
+                                const isAdminNL = await checkAdmin();
+                                if (!isGroup || !isAdminNL) break;
+                                const currentNL = await getGroupSetting(sessionId, from, 'noLien');
+                                const newNL = currentNL === 'simple' ? 'off' : 'simple';
+                                await setGroupSetting(sessionId, from, 'noLien', newNL);
+                                const nlStat = newNL === 'simple' ? t.nolien_on : t.nolien_off;
+                                await sendFormatted(sock, from, t.cmd_nolien, `*${nlStat}*`, pushName, false, activeHostName);
+                                break;
+                            case 'nolien2':
+                                checkTimeout();
+                                const isAdminNL2 = await checkAdmin();
+                                if (!isGroup || !isAdminNL2) break;
+                                const currentNL2 = await getGroupSetting(sessionId, from, 'noLien');
+                                const newNL2 = currentNL2 === 'strict' ? 'off' : 'strict';
+                                await setGroupSetting(sessionId, from, 'noLien', newNL2);
+                                const nl2Stat = newNL2 === 'strict' ? t.nolien2_on : t.nolien2_off;
+                                await sendFormatted(sock, from, t.cmd_nolien2, `*${nl2Stat}*`, pushName, false, activeHostName);
+                                break;
+                            case 'del':
+                                checkTimeout();
+                                if (!quoted) break;
+                                const quotedParticipant = quoted.participant || quoted.remoteJid;
+                                const isQuotedBot = quotedParticipant === botId;
+                                
+                                // [AMÉLIORATION DEL] : Suppression multiple robuste pour éviter les spams de lots médias (images, vidéos)
+                                const delKeys = [];
+                                delKeys.push({ remoteJid: from, id: quoted.stanzaId, participant: quotedParticipant });
+                                
+                                if (quotedMessage) {
+                                    // Extraction de clés alternatives si présence de messages multiples
+                                    const possibleMessageIds = Object.keys(quotedMessage);
+                                    for (const key of possibleMessageIds) {
+                                        if (quotedMessage[key]?.contextInfo?.stanzaId) {
+                                            delKeys.push({
+                                                remoteJid: from,
+                                                id: quotedMessage[key].contextInfo.stanzaId,
+                                                participant: quotedMessage[key].contextInfo.participant || quotedParticipant
+                                            });
                                         }
-                                        await sendFormatted(sock, from, t.search_title, responseText, pushName, false, activeHostName);
-                                        if (searchData.images && searchData.images.length > 0) {
-                                          for (let i = 0; i < Math.min(2, searchData.images.length); i++) {
-                                            try {
-                                                await sock.sendMessage(from, { image: { url: searchData.images[i] }, caption: buildCaption(t.search_title, "Image de recherche", activeHostName) });
-                                            } catch (errImg) {}
-                                          }
-                                        }
-                                    } catch (e) {
-                                        await sendFormatted(sock, from, t.search_title, t.search_error, pushName, false, activeHostName);
                                     }
-                                    break;
-                                case 'sites':
-                                    const sitesCaption = t.links_text;
-                                    await sendFormatted(sock, from, 'Sites', sitesCaption, pushName, false, activeHostName);
-                                    break;
-                            }
-                        };
+                                }
 
-                        const timeoutRace = new Promise((_, reject) => {
-                            setTimeout(() => { reject(new Error('TIMEOUT_7S')); }, 7000);
-                        });
-
-                        try {
-                            await Promise.race([executeCommandLogic(), timeoutRace]);
-                        } catch (errRace) {
-                            if (errRace.message !== 'TIMEOUT_7S') {
-                            }
+                                if (isQuotedBot) {
+                                    if (!isOwnerReal) break;
+                                    await Promise.allSettled(delKeys.map(key => sock.sendMessage(from, { delete: key })));
+                                } else {
+                                    const isAdminD = await checkAdmin();
+                                    if (!isGroup || !isAdminD) break;
+                                    await Promise.allSettled(delKeys.map(key => sock.sendMessage(from, { delete: key })));
+                                }
+                                break;
+                            case 'del2':
+                                checkTimeout();
+                                if (isGroup) {
+                                    const isAdminD2 = await checkAdmin();
+                                    if (!isAdminD2) break;
+                                } else {
+                                    if (!isOwnerReal) break;
+                                }
+                                let del2Target = null;
+                                const targetsD2 = await resolveTargets(args, m);
+                                if (targetsD2 && targetsD2.length > 0) {
+                                    del2Target = targetsD2[0];
+                                }
+                                if (!del2Target) break;
+                                const hostNum = sOwnerTop ? sOwnerTop.Number + '@s.whatsapp.net' : null;
+                                if (del2Target === botId || del2Target === hostNum) {
+                                    break;
+                                }
+                                const currentDel2Targets = await getDel2Targets(sessionId, from);
+                                const userClean = del2Target.split('@')[0];
+                                
+                                if (currentDel2Targets.includes(del2Target)) {
+                                    await removeDel2Target(sessionId, from, del2Target);
+                                    const deactivatedMsg = t.del2_deactivated.replace('{user}', userClean);
+                                    // [AMÉLIORATION DEL2] : Mention structurée valide et sécurisée pour cibler l'utilisateur concerné
+                                    const deactivationCaption = buildCaption("Del2", deactivatedMsg, activeHostName);
+                                    if (adamLogoBuffer) {
+                                        await sock.sendMessage(from, { image: adamLogoBuffer, caption: deactivationCaption, mentions: [del2Target] });
+                                    } else {
+                                        await sock.sendMessage(from, { text: deactivationCaption, mentions: [del2Target] });
+                                    }
+                                } else {
+                                    await addDel2Target(sessionId, from, del2Target);
+                                    const activatedMsg = t.del2_activated.replace('{user}', userClean);
+                                    const activationCaption = buildCaption("Del2", activatedMsg, activeHostName);
+                                    if (adamLogoBuffer) {
+                                        await sock.sendMessage(from, { image: adamLogoBuffer, caption: activationCaption, mentions: [del2Target] });
+                                    } else {
+                                        await sock.sendMessage(from, { text: activationCaption, mentions: [del2Target] });
+                                    }
+                                }
+                                break;
+                            case 'vv':
+                                checkTimeout();
+                                if (!quotedMessage) break;
+                                let voType = Object.keys(quotedMessage)[0];
+                                let voMsg = quotedMessage;
+                                if (voType.includes('viewOnce')) {
+                                    voMsg = quotedMessage[voType].message || quotedMessage[voType];
+                                    voType = Object.keys(voMsg)[0];
+                                }
+                                const mediaVO = voMsg[voType];
+                                const dlTypeVO = voType === 'documentMessage' ? 'document' : voType.replace('Message', '').toLowerCase();
+                                const streamVO = await downloadContentFromMessage(mediaVO, dlTypeVO);
+                                let bufferVO = Buffer.from([]);
+                                for await (const chunk of streamVO) bufferVO = Buffer.concat([bufferVO, chunk]);
+                                const sendOptsVO = { [dlTypeVO]: bufferVO };
+                                if (mediaVO.caption) sendOptsVO.caption = mediaVO.caption;
+                                await sock.sendMessage(from, sendOptsVO);
+                                break;
+                            case 'url':
+                                checkTimeout();
+                                let mediaTarget = null;
+                                let mType = Object.keys(unwrapMessageContent(m.message) || {})[0];
+                                let mediaMsg = unwrapMessageContent(m.message);
+                                if (quotedMessage) {
+                                    let qMsg = quotedMessage;
+                                    let qType = Object.keys(qMsg)[0];
+                                    if (qType && qType.includes('viewOnce')) {
+                                        qMsg = qMsg[qType].message || qMsg[qType];
+                                        qType = Object.keys(qMsg)[0];
+                                    }
+                                    if (['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage'].includes(qType)) {
+                                        mediaTarget = qMsg[qType];
+                                        mType = qType;
+                                    }
+                                } else if (['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage'].includes(mType)) {
+                                    mediaTarget = mediaMsg[mType];
+                                }
+                                if (!mediaTarget) break;
+                                const bType = mType === 'documentMessage' ? 'document' : mType.replace('Message', '').toLowerCase();
+                                const bStream = await downloadContentFromMessage(mediaTarget, bType);
+                                let bBuffer = Buffer.from([]);
+                                for await (const chunk of bStream) bBuffer = Buffer.concat([bBuffer, chunk]);
+                                let bFilename = "file.bin";
+                                if (mediaTarget.fileName) bFilename = mediaTarget.fileName;
+                                else if (bType === 'image') bFilename = "image.jpg";
+                                else if (bType === 'video') bFilename = "video.mp4";
+                                else if (bType === 'audio') bFilename = "audio.mp3";
+                                try {
+                                    const fData = new FormData();
+                                    fData.append("file", new Blob([bBuffer]), bFilename);
+                                    const bRes = await fetch("https://bref.adamdh7.org/upload", {
+                                        method: "POST",
+                                        body: fData
+                                    });
+                                    const bJson = await bRes.json();
+                                    if (bJson.success || bJson.url) {
+                                        const fUrl = bJson.fileUrl || bJson.url;
+                                        const rawSize = bJson.size || bBuffer.length;
+                                        const formattedSize = typeof rawSize === 'number' ? formatBytes(rawSize) : formatBytes(parseInt(rawSize) || bBuffer.length);
+                                        const formattedFileUrl = `*_${fUrl}_*`;
+                                        const urlText = `${formattedFileUrl}\n*size* : ${formattedSize}`;
+                                        await sendFormatted(sock, from, "Url", urlText, pushName, false, activeHostName);
+                                    }
+                                } catch (e) {}
+                                break;
+                            case 'ai':
+                                checkTimeout();
+                                const promptText = args.trim() ? args : body;
+                                if (!promptText) break;
+                                let history = chatHistories.get(from) || [];
+                                history.push({role: "user", content: promptText});
+                                chatHistories.set(from, history);
+                                const userInfoObj = userInfo.get(sender) || {pseudo: pushName, number: sender ? sender.split('@')[0].replace(/[^0-9]/g, '') : '', lang: globalLang};
+                                const userMsgCount = history.filter(h => h.role === 'user').length;
+                                const needsAd = (userMsgCount % 4 === 0);
+                                let messagesForAI = buildAIMessages(history, userInfoObj, globalLang);
+                                const aiResponseText = await callCloudflareAI("@cf/meta/llama-3.3-70b-instruct-fp8-fast", messagesForAI, 3000);
+                                checkTimeout();
+                                if (!needsAd) {
+                                    history.push({role: "assistant", content: aiResponseText});
+                                    if (history.length > 7) history = history.slice(-7);
+                                    chatHistories.set(from, history);
+                                    await sendFormatted(sock, from, t.ai_title, aiResponseText, pushName, false, activeHostName);
+                                } else {
+                                    const tfid = Math.floor(1000000 + Math.random() * 9000000);
+                                    const confirmLink = `https://tf.bot.adamdh7.org/TF-${tfid}`;
+                                    const formattedConfirmLink = `*_${confirmLink}_*`;
+                                    const clickText = t.ai_click_to_receive.replace('{link}', formattedConfirmLink);
+                                    const clickMsg = await sock.sendMessage(from, { text: clickText });
+                                    const formattedAiResponse = buildCaption(t.ai_title, aiResponseText, activeHostName);
+                                    const timeoutId = setTimeout(async () => {
+                                        try {
+                                            await sock.sendMessage(from, { delete: clickMsg.key });
+                                        } catch (e) {}
+                                        pendingAIResponses.delete(tfid);
+                                    }, 7000);
+                                    pendingAIResponses.set(tfid, {
+                                        from: from,
+                                        aiResponseText: aiResponseText,
+                                        formattedResponse: formattedAiResponse,
+                                        clickMsgKey: clickMsg.key,
+                                        timeoutId: timeoutId
+                                    });
+                                    tfEvents.once('ok-' + tfid, async () => {
+                                        const pending = pendingAIResponses.get(tfid);
+                                        if (!pending) return;
+                                        clearTimeout(pending.timeoutId);
+                                        try {
+                                            await sock.sendMessage(pending.from, { delete: pending.clickMsgKey });
+                                            await sock.sendMessage(pending.from, { text: pending.formattedResponse });
+                                        } catch (e) {}
+                                        let hist = chatHistories.get(pending.from) || [];
+                                        hist.push({role: "assistant", content: pending.aiResponseText});
+                                        if (hist.length > 7) hist = hist.slice(-7);
+                                        chatHistories.set(pending.from, hist);
+                                        pendingAIResponses.delete(tfid);
+                                    });
+                                }
+                                break;
+                            case 'lang':
+                                checkTimeout();
+                                const langCode = args.toLowerCase();
+                                if (['fr', 'en', 'es', 'ht'].includes(langCode)) {
+                                    globalLang = langCode;
+                                    try {
+                                        const oCol = db.collection('session_owners');
+                                        await oCol.updateOne({ sessionId: sessionId }, { $set: { lang: langCode } });
+                                    } catch(e) {}
+                                    const msgText = t.lang_changed.replace('{lang}', langCode.toUpperCase());
+                                    await sendFormatted(sock, from, t.lang_title, msgText, pushName, false, activeHostName);
+                                } else {
+                                    await sendFormatted(sock, from, t.lang_title, t.languages_available, pushName, false, activeHostName);
+                                }
+                                break;
+                            case 'imaj':
+                                checkTimeout();
+                                if (!args) {
+                                    await sendFormatted(sock, from, t.imaj_title, t.imaj_prompt, pushName, false, activeHostName);
+                                    break;
+                                }
+                                try {
+                                    const accountId = "c754bf19fa1b21106a6885e3be79274e";
+                                    const token = "cfut_PxZCBwgwkUnnh38zccPPUSy4K5E6zYDc9xiUwcqc05395e5a";
+                                    const aiRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-1-schnell`, {
+                                      method: "POST",
+                                      headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+                                      body: JSON.stringify({ prompt: args, num_steps: 4 })
+                                    });
+                                    const aiData = await aiRes.json();
+                                    checkTimeout();
+                                    if (!aiData.result || !aiData.result.image) throw new Error();
+                                    const imageBuffer = Buffer.from(aiData.result.image, "base64");
+                                    const capText = t.imaj_generated.replace('{prompt}', args);
+                                    await sock.sendMessage(from, { 
+                                      image: imageBuffer, 
+                                      caption: buildCaption(t.image_generated_title, capText, activeHostName)
+                                    });
+                                } catch (e) {
+                                    await sendFormatted(sock, from, t.imaj_title, t.imaj_error, pushName, false, activeHostName);
+                                }
+                                break;
+                            case 'cheche':
+                                checkTimeout();
+                                if (!args) break;
+                                try {
+                                    const searchData = await tavilySearch(args);
+                                    checkTimeout();
+                                    let responseText = searchData.answer || "Pas de résultat trouvé.";
+                                    if (searchData.results) {
+                                      responseText += "\n\nSources:\n" + searchData.results.slice(0,3).map(r => `- *_${r.url}_*`).join("\n");
+                                    }
+                                    await sendFormatted(sock, from, t.search_title, responseText, pushName, false, activeHostName);
+                                    if (searchData.images && searchData.images.length > 0) {
+                                      for (let i = 0; i < Math.min(2, searchData.images.length); i++) {
+                                        try {
+                                            await sock.sendMessage(from, { image: { url: searchData.images[i] }, caption: buildCaption(t.search_title, "Image de recherche", activeHostName) });
+                                        } catch (errImg) {}
+                                      }
+                                    }
+                                } catch (e) {
+                                    await sendFormatted(sock, from, t.search_title, t.search_error, pushName, false, activeHostName);
+                                }
+                                break;
+                            case 'sites':
+                                checkTimeout();
+                                const sitesCaption = t.links_text;
+                                await sendFormatted(sock, from, 'Sites', sitesCaption, pushName, false, activeHostName);
+                                break;
                         }
-
-                    } catch (cmdError) {}
+                    } catch (cmdError) {
+                    } finally {
+                        actionFinished = true;
+                        clearTimeout(actionTimeout);
+                    }
                 })();
+
+            } catch (e) {
             }
         });
         return sessionData;
@@ -1882,10 +1945,11 @@ async function loadExistingSessions() {
     }
 }
 
+// [AMÉLIORATION STOCKAGE] : Purge horaire globale du stockage Mongo & Cache local
 setInterval(async () => {
     if (!db) return;
     try {
-        await db.collection('processed_messages').deleteMany({ ts: { $lt: Date.now() - 24 * 3600 * 1000 } });
+        await db.collection('processed_messages').deleteMany({ ts: { $lt: Date.now() - 1 * 3600 * 1000 } });
     } catch(e){}
     await checkSessionLimits();
     const collection = db.collection('baileys_auth');
@@ -1914,23 +1978,13 @@ setInterval(async () => {
             }
         }
     }
-}, 2 * 60 * 1000);
+}, 1 * 60 * 60 * 1000);
 
-setInterval(async () => {
-    if (!db) return;
-    try {
-        const oneHourAgo = Date.now() - 3600000;
-        await db.collection('processed_messages').deleteMany({ ts: { $lt: oneHourAgo } });
-        groupMetadataCache.clear();
-        msgRetryCounterCache.clear();
-    } catch(e){}
-}, 3600000);
-
-connectMongo().then(async () => {
-    try {
-        await loadExistingSessions();
-    } catch (e) {}
-    app.listen(PORT, '0.0.0.0', () => {
-        console.log("Server listening");
-    });
-}).catch(console.error);
+// [AMÉLIORATION DU DÉPLOIMENT RENDER] : Démarrage immédiat de l'écoute du port 
+app.listen(PORT, () => {
+    connectMongo().then(async () => {
+        try {
+            await loadExistingSessions();
+        } catch (e) {}
+    }).catch(console.error);
+});
