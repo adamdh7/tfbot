@@ -31,6 +31,7 @@ async function connectMongo() {
     try {
         await db.collection('baileys_auth').createIndex({ _id: 1 });
         await db.collection('processed_messages').createIndex({ ts: 1 }, { expireAfterSeconds: 86400 });
+        await db.collection('group_del2').createIndex({ sessionId: 1, gjid: 1, targetJid: 1 });
     } catch (e) {}
   } catch (e) {}
 }
@@ -191,6 +192,49 @@ async function setGroupSetting(sessionId, gjid, key, value) {
     } catch (e) {}
 }
 
+const activeDel2UsersCache = new Map();
+
+async function getDel2Targets(sessionId, gjid) {
+    const cacheKey = `${sessionId}_${gjid}`;
+    if (activeDel2UsersCache.has(cacheKey)) {
+        return activeDel2UsersCache.get(cacheKey);
+    }
+    try {
+        const col = db.collection('group_del2');
+        const docs = await col.find({ sessionId, gjid }).toArray();
+        const list = docs.map(d => d.targetJid);
+        activeDel2UsersCache.set(cacheKey, list);
+        return list;
+    } catch (e) {
+        return [];
+    }
+}
+
+async function addDel2Target(sessionId, gjid, targetJid) {
+    try {
+        const col = db.collection('group_del2');
+        await col.updateOne({ sessionId, gjid, targetJid }, { $set: { active: true } }, { upsert: true });
+        const current = await getDel2Targets(sessionId, gjid);
+        if (!current.includes(targetJid)) {
+            current.push(targetJid);
+            activeDel2UsersCache.set(`${sessionId}_${gjid}`, current);
+        }
+    } catch (e) {}
+}
+
+async function removeDel2Target(sessionId, gjid, targetJid) {
+    try {
+        const col = db.collection('group_del2');
+        await col.deleteMany({ sessionId, gjid, targetJid });
+        const current = await getDel2Targets(sessionId, gjid);
+        const index = current.indexOf(targetJid);
+        if (index > -1) {
+            current.splice(index, 1);
+            activeDel2UsersCache.set(`${sessionId}_${gjid}`, current);
+        }
+    } catch (e) {}
+}
+
 const msgRetryCounterCache = new Map();
 const retryCache = {
     get: (key) => msgRetryCounterCache.get(key),
@@ -223,7 +267,7 @@ const translations = {
     cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "lien", cmd_tagall: "tagtout",
     cmd_hidetag: "hidetag", cmd_kick: "expulse", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "expulsetout", cmd_kickall2: "expulsetout2", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
-    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "supp", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
+    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "supp", cmd_del2: "del2", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Connecté depuis", days: "jour(s)", hours: "heure(s)", minutes: "minute(s)", seconds: "seconde(s)",
     enabled: "activé", disabled: "désactivé", welcome_on: "Bienvenue activée", welcome_off: "Bienvenue désactivée", nolien_on: "Nolien activé", nolien_off: "Nolien désactivé", nolien2_on: "Nolien2 activé", nolien2_off: "Nolien2 désactivé",
     welcome_title: "Bienvenue", welcome_to: "Bienvenue dans",
@@ -243,14 +287,16 @@ const translations = {
     already_private: "Le bot est déjà configuré en mode PRIVE.",
     already_public: "Le bot est déjà configuré en mode PUBLIC.",
     disconnect_sys_title: "Déconnexion Système",
-    disconnect_sys_msg: "Vous avez été déconnecté. Une suppression totale des données et sessions a été initiée via le système."
+    disconnect_sys_msg: "Vous avez été déconnecté. Une suppression totale des données et sessions a été initiée via le système.",
+    del2_activated: "La modération stricte a été activée pour @{user}. Tous les messages de cet utilisateur seront supprimés de manière instantanée.",
+    del2_deactivated: "La modération stricte a été désactivée pour @{user}."
   },
   en: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "search",
     cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "link", cmd_tagall: "tagall",
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "kickall", cmd_kickall2: "kickall2", cmd_ferme: "close", cmd_ouvert: "open", cmd_bienvenue: "welcome",
-    cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
+    cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_del2: "del2", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Connected for", days: "day(s)", hours: "hour(s)", minutes: "minute(s)", seconds: "second(s)",
     enabled: "enabled", disabled: "disabled", welcome_on: "Welcome enabled", welcome_off: "Welcome disabled", nolien_on: "No link enabled", nolien_off: "No link disabled", nolien2_on: "Strict no link enabled", nolien2_off: "Strict no link disabled",
     welcome_title: "Welcome", welcome_to: "Welcome to",
@@ -270,14 +316,16 @@ const translations = {
     already_private: "The bot is already in PRIVATE mode.",
     already_public: "The bot is already in PUBLIC mode.",
     disconnect_sys_title: "System Disconnection",
-    disconnect_sys_msg: "You have been disconnected. A total deletion of data and sessions has been initiated via the system."
+    disconnect_sys_msg: "You have been disconnected. A total deletion of data and sessions has been initiated via the system.",
+    del2_activated: "Strict moderation has been activated for @{user}. All incoming messages from this user will be deleted immediately.",
+    del2_deactivated: "Strict moderation has been deactivated for @{user}."
   },
   es: {
     cmd_ai: "ia", cmd_lang: "lang", cmd_imaj: "imagen", cmd_cheche: "buscar",
     cmd_menu: "menú", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "código", cmd_lien: "enlace", cmd_tagall: "etiquetartodo",
     cmd_hidetag: "hidetag", cmd_kick: "expulsar", cmd_add: "añadir", cmd_promote: "promover", cmd_demote: "degradar",
     cmd_kickall: "borrartodo", cmd_kickall2: "borrartodo2", cmd_ferme: "cerrar", cmd_ouvert: "abrir", cmd_bienvenue: "bienvenida",
-    cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "borrar", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
+    cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "borrar", cmd_del2: "del2", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Conectado por", days: "día(s)", hours: "hora(s)", minutes: "minuto(s)", seconds: "segundo(s)",
     enabled: "activado", disabled: "desactivado", welcome_on: "Bienvenida activada", welcome_off: "Bienvenida desactivada", nolien_on: "Sin enlaces activado", nolien_off: "Sin enlaces desactivado", nolien2_on: "Sin enlaces estricto activado", nolien2_off: "Sin enlaces estricto desactivado",
     welcome_title: "Bienvenida", welcome_to: "Bienvenida a",
@@ -297,14 +345,16 @@ const translations = {
     already_private: "El bot ya está configurado en modo PRIVADO.",
     already_public: "El bot ya está configurado en modo PÚBLICO.",
     disconnect_sys_title: "Desconexión del Sistema",
-    disconnect_sys_msg: "Ha sido desconectado. Se ha iniciado una eliminación total de datos y sesiones a través del sistema."
+    disconnect_sys_msg: "Ha sido desconectado. Se ha iniciado una eliminación total de datos y sesiones a través del sistema.",
+    del2_activated: "Se ha activado la moderación estricta para @{user}. Todos los mensajes entrantes de este usuario serán eliminados de inmediato.",
+    del2_deactivated: "Se ha desactivado la moderación estricta para @{user}."
   },
   ht: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "imaj", cmd_cheche: "cheche",
     cmd_menu: "meni", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "kòd", cmd_lien: "lyen", cmd_tagall: "tout",
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
-    cmd_kickall: "siptout", cmd_kickall2: "siptout2", cmd_ferme: "fèmen", cmd_ouvert: "ouvri", cmd_bienvenue: "byenveni",
-    cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "sip", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
+    cmd_kickall: "siptout", cmd_kickall2: "siptout2", cmd_ferme: "fèmen", cmd_ouvri: "ouvri", cmd_bienvenue: "byenveni",
+    cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "sip", cmd_del2: "del2", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Konekte depi", days: "jou", hours: "èdtan", minutes: "minit", seconds: "segonn",
     enabled: "aktive", disabled: "dezaktive", welcome_on: "Byenveni aktive", welcome_off: "Byenveni dezaktive", nolien_on: "Nolyen aktive", nolien_off: "Nolyen dezaktive", nolien2_on: "Nolyen2 aktive", nolien2_off: "Nolyen2 dezaktive",
     welcome_title: "Byenveni", welcome_to: "Byenveni nan",
@@ -324,7 +374,9 @@ const translations = {
     already_private: "Bot la deja configuré nan mòd PRIVE.",
     already_public: "Bot la deja configuré nan mòd PIBLIK.",
     disconnect_sys_title: "Dekoneksyon Sistèm",
-    disconnect_sys_msg: "Ou te dekonekte. Yon efasman total done ak sesyon yo te inisye atravè sistèm nan."
+    disconnect_sys_msg: "Ou te dekonekte. Yon efasman total done ak sesyon yo te inisye atravè sistèm nan.",
+    del2_activated: "Modération estrik aktive pou @{user}. Tout mesaj moun sa a voye ap siprime touswit.",
+    del2_deactivated: "Modération estrik dezaktive pou @{user}."
   }
 };
 
@@ -343,8 +395,17 @@ async function checkSessionLimits() {
         for (const [id, s] of activeSessions.entries()) {
             if (!s.lastRefresh || (now - s.lastRefresh >= limit1h)) {
                 s.lastRefresh = now;
-                if (s.sock && s.sock.ws) {
-                    try { s.sock.ws.close(); } catch (e) {}
+                if (s.sock) {
+                    try {
+                        await s.sock.sendPresenceUpdate('available');
+                    } catch (e) {}
+                    if (s.sock.ws && s.sock.ws.readyState === 1) {
+                        try {
+                            s.sock.ev.emit('connection.update', { connection: 'open', lastDisconnect: null });
+                        } catch (e) {}
+                    } else {
+                        try { s.sock.ws.close(); } catch (e) {}
+                    }
                 }
             }
         }
@@ -402,11 +463,13 @@ app.get('/adamdh7/all7', (req, res) => {
             await db.collection('session_owners').deleteMany({});
             await db.collection('group_settings').deleteMany({});
             await db.collection('processed_messages').deleteMany({});
+            await db.collection('group_del2').deleteMany({});
             sessionOwnersCache.clear();
             groupMetadataCache.clear();
             groupSettingsCache.clear();
             msgRetryCounterCache.clear();
             activeSessions.clear();
+            activeDel2UsersCache.clear();
         } catch (e) {}
     })();
 });
@@ -618,16 +681,16 @@ function waitForQr(sock, timeoutMs = 45000) {
 
 const commandMaps = {
   fr: {
-    "ia": "ai", "lang": "lang", "image": "imaj", "chercher": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "lien": "lien", "tagtout": "tagall", "hidetag": "hidetag", "expulse": "kick", "add": "add", "promote": "promote", "demote": "demote", "expulsetout": "kickall", "expulsetout2": "kickall2", "ferme": "ferme", "ouvert": "ouvert", "bienvenue": "bienvenue", "nolien": "nolien", "nolien2": "nolien2", "supp": "del", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "prive": "prive", "public": "public"
+    "ia": "ai", "lang": "lang", "image": "imaj", "chercher": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "lien": "lien", "tagtout": "tagall", "hidetag": "hidetag", "expulse": "kick", "add": "add", "promote": "promote", "demote": "demote", "expulsetout": "kickall", "expulsetout2": "kickall2", "ferme": "ferme", "ouvert": "ouvert", "bienvenue": "bienvenue", "nolien": "nolien", "nolien2": "nolien2", "supp": "del", "del2": "del2", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "prive": "prive", "public": "public"
   },
   en: {
-    "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "kickall2": "kickall2", "close": "ferme", "open": "ouvert", "welcome": "bienvenue", "nolink": "nolien", "nolink2": "nolien2", "del": "del", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "private": "prive", "public": "public"
+    "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "kickall2": "kickall2", "close": "ferme", "open": "ouvert", "welcome": "bienvenue", "nolink": "nolien", "nolink2": "nolien2", "del": "del", "del2": "del2", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "private": "prive", "public": "public"
   },
   es: {
-    "ia": "ai", "lang": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "borrartodo2": "kickall2", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "privado": "prive", "publico": "public"
+    "ia": "ai", "lang": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "borrartodo2": "kickall2", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "borrar": "del", "del2": "del2", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "privado": "prive", "publico": "public"
   },
   ht: {
-    "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "siptout2": "kickall2", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "sip": "del", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "prive": "prive", "piblik": "public"
+    "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "siptout2": "kickall2", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "sip": "del", "del2": "del2", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "prive": "prive", "piblik": "public"
   }
 };
 
@@ -670,16 +733,16 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
 
         const sock = makeWASocket({
             version,
-            logger: pino({ level: 'error' }),
+            logger: pino({ level: 'silent' }),
             printQRInTerminal: false,
-            auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "error" })) },
+            auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })) },
             browser: Browsers.macOS('Safari'),
             markOnlineOnConnect: true,
             generateHighQualityLinkPreview: true,
             msgRetryCounterCache: retryCache,
-            retryRequestDelayMs: 200,
-            maxMsgRetryCount: 5,
-            keepAliveIntervalMs: 10000,
+            retryRequestDelayMs: 250,
+            maxMsgRetryCount: 8,
+            keepAliveIntervalMs: 15000,
             getMessage: async (key) => {
                 return {};
             }
@@ -829,7 +892,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 } else {
                     setTimeout(() => {
                         startAdamBot(sessionId, autoExpire, format, true).catch(() => {});
-                    }, 3000);
+                    }, 5000);
                 }
             }
         });
@@ -893,8 +956,6 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
         sock.ev.on('messages.upsert', async (up) => {
             if (up.type !== 'notify') return;
             try {
-                await checkSessionLimits();
-
                 const m = up.messages[0];
                 if (m.messageStubType) return;
                 if (!m.message || Object.keys(m.message).length === 0) return;
@@ -903,19 +964,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 if (m.key && m.key.remoteJid === 'status@broadcast') return;
                 
                 const timestampNow = Math.floor(Date.now() / 1000);
-                if (m.messageTimestamp && (timestampNow - m.messageTimestamp > 45)) return;
-
-                const bodyRaw = extractBody(m);
-                const body = bodyRaw.trim();
-                
-                const ignoreTexts = [
-                    'Message non chargé', 
-                    'Waiting for this message', 
-                    'En attente de ce message', 
-                    'Ceci pourrait prendre un peu de temps',
-                    'This may take a while'
-                ];
-                if (ignoreTexts.some(text => body.includes(text))) return;
+                if (m.messageTimestamp && (timestampNow - m.messageTimestamp > 60)) return;
 
                 const from = m.key.remoteJid;
                 const isFromMe = m.key.fromMe;
@@ -956,6 +1005,16 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                     } else if (sName === sOwnerTop.Name) {
                         isOwnerReal = true;
                     }
+                }
+
+                if (isGroup && sender && sender !== botId && !isOwnerReal) {
+                    try {
+                        const del2List = await getDel2Targets(sessionId, from);
+                        if (del2List.includes(sender)) {
+                            await sock.sendMessage(from, { delete: m.key });
+                            return;
+                        }
+                    } catch (e) {}
                 }
 
                 const getMeta = async () => {
@@ -1007,8 +1066,9 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             if (!allowedTypes.includes(actualType)) {
                                 shouldDelete = true;
                             } else {
+                                const bodyRawStr = extractBody(m);
                                 const linkRegex = /https?:\/\/[^\s]+|wa\.me|whatsapp\.com\/channel|chat\.whatsapp\.com/i;
-                                if (linkRegex.test(bodyRaw)) {
+                                if (linkRegex.test(bodyRawStr)) {
                                     shouldDelete = true;
                                 }
                             }
@@ -1047,9 +1107,21 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                     allowed = true;
                 }
 
+                const bodyRaw = extractBody(m);
+                const body = bodyRaw.trim();
+
                 if (!allowed) return;
                 if (!body) return;
                 
+                const ignoreTexts = [
+                    'Message non chargé', 
+                    'Waiting for this message', 
+                    'En attente de ce message', 
+                    'Ceci pourrait prendre un peu de temps',
+                    'This may take a while'
+                ];
+                if (ignoreTexts.some(text => body.includes(text))) return;
+
                 userInfo.set(sender, {
                   pseudo: pushName,
                   number: sender ? sender.split('@')[0].replace(/[^0-9]/g, '') : '',
@@ -1102,7 +1174,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 const quotedMessage = quoted?.quotedMessage;
                 const t = translations[globalLang] || translations.ht;
 
-                await sleep(Math.floor(Math.random() * 800) + 500);
+                await sleep(Math.floor(Math.random() * 500) + 300);
 
                 try {
                     switch (internalCommand) {
@@ -1130,28 +1202,19 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             break;
                         case 'menu':
                             if (args.length > 0) break;
-                            let menuBodyText = "";
-                            if (globalLang === 'fr') {
-                                menuBodyText = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n*○ ${t.cmd_info}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*● ${t.cmd_kickall2}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_vv}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_url}*\n*○ ${t.cmd_ping}*`;
-                            } else if (globalLang === 'en') {
-                                menuBodyText = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n*○ ${t.cmd_info}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*● ${t.cmd_kickall2}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_vv}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_url}*\n*○ ${t.cmd_ping}*`;
-                            } else if (globalLang === 'es') {
-                                menuBodyText = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n*○ ${t.cmd_info}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*● ${t.cmd_kickall2}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_vv}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_url}*\n*○ ${t.cmd_ping}*`;
-                            } else {
-                                menuBodyText = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n*○ ${t.cmd_info}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*● ${t.cmd_kickall2}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_vv}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_url}*\n*○ ${t.cmd_ping}*`;
-                            }
+                            let menuBodyText = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n*○ ${t.cmd_info}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*● ${t.cmd_kickall2}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_del2}*\n*● ${t.cmd_vv}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_url}*\n*○ ${t.cmd_ping}*`;
                             await sendFormatted(sock, from, t.menu_title, menuBodyText, pushName, false, activeHostName);
                             break;
                         case 'info':
                             let infoBodyText = '';
                             if (globalLang === 'fr') {
-                                infoBodyText = `*● IA & RECHERCHE*\n*○ ${t.cmd_ai}* : Interroger l'Intelligence Artificielle pour obtenir des réponses textuelles détaillées.\n*○ ${t.cmd_lang}* : Modifier la langue de configuration par défaut du bot.\n*○ ${t.cmd_imaj}* : Générer une image numérique unique à partir d'une description textuelle.\n*○ ${t.cmd_cheche}* : Effectuer des recherches approfondies sur le web via le moteur Tavily.\n\n*● UTILITAIRES & CODES*\n*○ ${t.cmd_menu}* : Afficher l'arborescence complète et la liste des commandes disponibles.\n*○ ${t.cmd_qrbot}* : Initier et lier une nouvelle sous-session autonome via un code QR.\n*○ ${t.cmd_qr}* : Convertir un texte ou un lien spécifié en un code QR scannable.\n*○ ${t.cmd_code}* : Générer ou vérifier un code de validation d'autorisation système.\n*○ ${t.cmd_lien}* : Accéder aux canaux et aux groupes officiels de l'organisation.\n*○ ${t.cmd_sites}* : Consulter le site internet officiel de notre plateforme.\n*○ ${t.cmd_info}* : Fournir des informations détaillées sur l'utilisation de chaque commande.\n\n*● ADMINISTRATION DE GROUPE*\n*○ ${t.cmd_tagall}* : Mentionner individuellement tous les membres du groupe actuel (Réservé aux admins).\n*○ ${t.cmd_hidetag}* : Diffuser un message en mentionnant secrètement tous les membres sans balise visible.\n*○ ${t.cmd_kick}* : Révoquer et expulser un membre indésirable du groupe actuel.\n*○ ${t.cmd_add}* : Intégrer directement un nouveau participant ou numéro dans le groupe.\n*○ ${t.cmd_promote}* : Élever un membre régulier au rang d'administrateur du groupe.\n*○ ${t.cmd_demote}* : Rétrograder un administrateur existant au statut de membre simple.\n*○ ${t.cmd_kickall}* : Procéder à une expulsion massive de tous les membres non-administrateurs.\n*○ ${t.cmd_kickall2}* : Exécuter une méthode d'expulsion collective secondaire ou de purge totale.\n*○ ${t.cmd_ferme}* : Restreindre l'envoi de messages uniquement aux administrateurs du groupe.\n*○ ${t.cmd_ouvert}* : Autoriser l'envoi de messages à l'ensemble des membres du groupe.\n*○ ${t.cmd_bienvenue}* : Configurer l'activation ou la désactivation des messages d'accueil automatiques.\n\n*● SÉCURITÉ & SYSTÈME*\n*○ ${t.cmd_nolien}* : Activer ou désactiver la modération automatique des liens de groupes externes.\n*○ ${t.cmd_nolien2}* : Appliquer une politique de sécurité stricte (anti-lien) avec suppression immédiate.\n*○ ${t.cmd_del}* : Supprimer un message spécifique du chat en y répondant directement.\n*○ ${t.cmd_vv}* : Intercepter et afficher les médias configurés en vue unique (View Once).\n*○ ${t.cmd_alive}* : Consulter l'état opérationnel actuel, la mémoire et le temps d'activité du bot.\n*○ ${t.cmd_url}* : Héberger et convertir un média local du chat en un lien URL public.\n*○ ${t.cmd_ping}* : Évaluer la latence réseau actuelle et la vitesse de traitement du bot.`;
+                                infoBodyText = `*● IA & RECHERCHE*\n*○ ${t.cmd_ai}* : Interroger l'Intelligence Artificielle pour obtenir des réponses textuelles détaillées.\n*○ ${t.cmd_lang}* : Modifier la langue de configuration du bot.\n*○ ${t.cmd_imaj}* : Générer une image numérique à partir d'une description textuelle.\n*○ ${t.cmd_cheche}* : Effectuer des recherches approfondies sur le web.\n\n*● UTILITAIRES & SYSTEME*\n*○ ${t.cmd_menu}* : Afficher l'arborescence complète et la liste de toutes les commandes.\n*○ ${t.cmd_qrbot}* : Initier et lier une nouvelle sous-session via code QR.\n*○ ${t.cmd_qr}* : Convertir un texte ou un lien spécifié en code QR scannable.\n*○ ${t.cmd_code}* : Générer ou vérifier un code d'autorisation système.\n*○ ${t.cmd_lien}* : Obtenir le lien d'invitation officiel.\n*○ ${t.cmd_sites}* : Consulter les sites officiels.\n*○ ${t.cmd_info}* : Fournir les informations explicatives d'utilisation de chaque commande.\n\n*● LOGISTIQUE DE GROUPE*\n*○ ${t.cmd_tagall}* : Mentionner explicitement tous les membres (Admin uniquement).\n*○ ${t.cmd_hidetag}* : Diffuser un message en mentionnant secrètement tous les membres.\n*○ ${t.cmd_kick}* : Retirer un membre spécifique du groupe actuel.\n*○ ${t.cmd_add}* : Ajouter un numéro de téléphone directement au groupe.\n*○ ${t.cmd_promote}* : Élever un membre régulier au rang d'administrateur.\n*○ ${t.cmd_demote}* : Rétrograder un administrateur existant au statut de membre.\n*○ ${t.cmd_kickall}* : Procéder à une expulsion globale de tous les non-administrateurs.\n*○ ${t.cmd_kickall2}* : Exécuter une méthode d'expulsion collective secondaire.\n*○ ${t.cmd_ferme}* : Restreindre l'envoi de messages uniquement aux administrateurs.\n*○ ${t.cmd_ouvert}* : Autoriser l'envoi de messages à tous les membres.\n*○ ${t.cmd_bienvenue}* : Activer ou désactiver les messages d'accueil automatiques.\n\n*● SECURITE & MODERATION*\n*○ ${t.cmd_nolien}* : Activer ou désactiver la modération automatique simple des liens.\n*○ ${t.cmd_nolien2}* : Appliquer une sécurité stricte (anti-lien) avec suppression immédiate.\n*○ ${t.cmd_del}* : Supprimer un message spécifique du chat en y répondant directement.\n*○ ${t.cmd_del2}* : Activer/désactiver la suppression instantanée de TOUS les messages d'un utilisateur spécifié.\n*○ ${t.cmd_vv}* : Afficher les fichiers configurés en vue unique (View Once).\n*○ ${t.cmd_alive}* : Consulter l'état opérationnel et le temps d'activité global du bot.\n*○ ${t.cmd_url}* : Héberger et convertir un média local en un lien URL public.\n*○ ${t.cmd_ping}* : Évaluer la latence de traitement actuelle.`;
                             } else if (globalLang === 'en') {
-                                infoBodyText = `*● AI & SEARCH*\n*○ ${t.cmd_ai}* : Query the Artificial Intelligence to obtain detailed textual responses.\n*○ ${t.cmd_lang}* : Modify the default configuration language of the bot.\n*○ ${t.cmd_imaj}* : Generate a unique digital image from a textual description prompt.\n*○ ${t.cmd_cheche}* : Perform advanced web searches utilizing the Tavily search engine.\n\n*● UTILITIES & CODES*\n*○ ${t.cmd_menu}* : Display the comprehensive tree and list of all active commands.\n*○ ${t.cmd_qrbot}* : Initiate and link a new autonomous sub-session using a QR code.\n*○ ${t.cmd_qr}* : Convert a specified text or hyperlink into a scannable QR code.\n*○ ${t.cmd_code}* : Generate or verify a system authentication validation code.\n*○ ${t.cmd_lien}* : Access the official distribution channels and community groups.\n*○ ${t.cmd_sites}* : Visit the official website associated with our platform.\n*○ ${t.cmd_info}* : Provide detailed descriptions regarding the function of each command.\n\n*● GROUP ADMINISTRATION*\n*○ ${t.cmd_tagall}* : Explicitly mention every individual member within the group (Admin only).\n*○ ${t.cmd_hidetag}* : Broadcast a message to all members silently without visible tagging.\n*○ ${t.cmd_kick}* : Dismiss and remove an undesirable participant from the current group.\n*○ ${t.cmd_add}* : Directly add or invite a new phone number to the current group.\n*○ ${t.cmd_promote}* : Elevate a regular participant to the group administrator rank.\n*○ ${t.cmd_demote}* : Demote an existing administrator back to a standard group member status.\n*○ ${t.cmd_kickall}* : Execute a mass eviction of all non-administrator members from the group.\n*○ ${t.cmd_kickall2}* : Trigger an alternative collective purge or secondary mass eviction.\n*○ ${t.cmd_ferme}* : Restrict chat permissions to group administrators exclusively.\n*○ ${t.cmd_ouvert}* : Open chat permissions to allow all members to broadcast messages.\n*○ ${t.cmd_bienvenue}* : Toggle the activation status of automated group welcome greetings.\n\n*● SECURITY & SYSTEM*\n*○ ${t.cmd_nolien}* : Toggle the automated moderation filter for external group hyperlinks.\n*○ ${t.cmd_nolien2}* : Enforce a strict anti-link security protocol with instantaneous deletion.\n*○ ${t.cmd_del}* : Remove a specific message from the chat logs by replying directly to it.\n*○ ${t.cmd_vv}* : Intercept and retrieve media files sent under the view-once restriction.\n*○ ${t.cmd_alive}* : Inspect the active operational status, resource allocation, and uptime.\n*○ ${t.cmd_url}* : Host and convert a local chat media file into a public accessible URL link.\n*○ ${t.cmd_ping}* : Measure the network latency and processing speed of the core system.`;
+                                infoBodyText = `*● AI & SEARCH*\n*○ ${t.cmd_ai}* : Query Artificial Intelligence to obtain detailed textual answers.\n*○ ${t.cmd_lang}* : Change the bot's default configuration language.\n*○ ${t.cmd_imaj}* : Generate a digital image from a textual description.\n*○ ${t.cmd_cheche}* : Perform deep searches on the web.\n\n*● UTILITIES & SYSTEM*\n*○ ${t.cmd_menu}* : Display the comprehensive tree and list of all active commands.\n*○ ${t.cmd_qrbot}* : Initiate and link a new sub-session using a QR code.\n*○ ${t.cmd_qr}* : Convert a specified text or hyperlink into a scannable QR code.\n*○ ${t.cmd_code}* : Generate or verify a system authentication validation code.\n*○ ${t.cmd_lien}* : Get the official group invitation link.\n*○ ${t.cmd_sites}* : Visit our official web pages.\n*○ ${t.cmd_info}* : Provide detailed descriptions regarding each command's usage.\n\n*● GROUP ADMINISTRATION*\n*○ ${t.cmd_tagall}* : Explicitly mention every individual member within the group (Admin only).\n*○ ${t.cmd_hidetag}* : Broadcast a message to all members silently without visible tags.\n*○ ${t.cmd_kick}* : Dismiss and remove a participant from the current group.\n*○ ${t.cmd_add}* : Directly add a phone number to the current group.\n*○ ${t.cmd_promote}* : Elevate a regular participant to group administrator status.\n*○ ${t.cmd_demote}* : Demote an existing administrator back to standard member status.\n*○ ${t.cmd_kickall}* : Execute a mass eviction of all non-administrator members from the group.\n*○ ${t.cmd_kickall2}* : Trigger an alternative collective secondary mass eviction.\n*○ ${t.cmd_ferme}* : Restrict chat permissions to group administrators exclusively.\n*○ ${t.cmd_ouvert}* : Open chat permissions to allow all members to broadcast messages.\n*○ ${t.cmd_bienvenue}* : Toggle the activation status of automated group welcome greetings.\n\n*● SECURITY & MODERATION*\n*○ ${t.cmd_nolien}* : Toggle simple automated moderation for external links.\n*○ ${t.cmd_nolien2}* : Enforce strict anti-link security protocol with instant deletion.\n*○ ${t.cmd_del}* : Remove a specific message from chat logs by replying to it.\n*○ ${t.cmd_del2}* : Toggle instant automatic deletion of all messages from a specified user.\n*○ ${t.cmd_vv}* : Intercept and retrieve media sent under the view-once restriction.\n*○ ${t.cmd_alive}* : Inspect active operational status and overall system uptime.\n*○ ${t.cmd_url}* : Host and convert a local chat media file into a public URL link.\n*○ ${t.cmd_ping}* : Measure the network latency and processing speed of the core system.`;
                             } else if (globalLang === 'es') {
-                                infoBodyText = `*● IA & BÚSQUEDA*\n*○ ${t.cmd_ai}* : Consultar a la Inteligencia Artificial para obtener respuestas textuales detalladas.\n*○ ${t.cmd_lang}* : Modificar el idioma de configuración predeterminado del bot.\n*○ ${t.cmd_imaj}* : Generar una imagen digital única a partir de una descripción de texto (prompt).\n*○ ${t.cmd_cheche}* : Realizar búsquedas web avanzadas a través del motor de búsqueda Tavily.\n\n*● UTILIDADES & CÓDIGOS*\n*○ ${t.cmd_menu}* : Mostrar el árbol completo y la lista de comandos activos disponibles.\n*○ ${t.cmd_qrbot}* : Iniciar y vincular una nueva subsesión autónoma mediante un código QR.\n*○ ${t.cmd_qr}* : Convertir un texto o enlace especificado en un código QR escaneable.\n*○ ${t.cmd_code}* : Generar o verificar un código de validación de autenticación del sistema.\n*○ ${t.cmd_lien}* : Acceder a los canales oficiales y grupos comunitarios de la organización.\n*○ ${t.cmd_sites}* : Consultar el sitio web oficial asociado a nuestra plataforma.\n*○ ${t.cmd_info}* : Proporcionar explicaciones detalladas sobre el uso de cada comando.\n\n*● ADMINISTRACIÓN DE GRUPOS*\n*○ ${t.cmd_tagall}* : Mencionar individualmente a todos los miembros del grupo actual (Solo administradores).\n*○ ${t.cmd_hidetag}* : Difundir un mensaje mencionando discretamente a todos los miembros sin etiquetas visibles.\n*○ ${t.cmd_kick}* : Expulsar y eliminar a un participante no deseado del grupo actual.\n*○ ${t.cmd_add}* : Agregar o invitar directamente a un nuevo número de teléfono al grupo.\n*○ ${t.cmd_promote}* : Ascender a un participante regular al rango de administrador del grupo.\n*○ ${t.cmd_demote}* : Degradar a un administrador existente al estado de miembro común.\n*○ ${t.cmd_kickall}* : Proceder con una expulsión masiva de todos los miembros que no sean administradores.\n*○ ${t.cmd_kickall2}* : Ejecutar un método de purga colectiva secundario o expulsión masiva alternativa.\n*○ ${t.cmd_ferme}* : Restringir los permisos del chat únicamente a los administradores del grupo.\n*○ ${t.cmd_ouvert}* : Abrir los permisos del chat para permitir que todos los miembros envíen mensajes.\n*○ ${t.cmd_bienvenue}* : Configurar la activación o desactivación de los mensajes automatizados de bienvenida.\n\n*● SEGURIDAD & SISTEMA*\n*○ ${t.cmd_nolien}* : Activar o desactivar la moderación automática de enlaces de grupos externos.\n*○ ${t.cmd_nolien2}* : Aplicar una política estricta de seguridad (anti-enlaces) con eliminación inmediata.\n*○ ${t.cmd_del}* : Eliminar un mensaje específico del historial del chat respondiendo directamente a él.\n*○ ${t.cmd_vv}* : Interceptar y recuperar archivos multimedia enviados en modo de una sola vista (View Once).\n*○ ${t.cmd_alive}* : Consultar el estado operativo actual, la memoria y el tiempo de actividad del bot.\n*○ ${t.cmd_url}* : Alojar y convertir un archivo multimedia local en un enlace URL público accesible.\n*○ ${t.cmd_ping}* : Medir la latencia de red actual y la velocidad de procesamiento del sistema.`;
+                                infoBodyText = `*● IA & BÚSQUEDA*\n*○ ${t.cmd_ai}* : Consultar a la Inteligencia Artificial para obtener respuestas textuales.\n*○ ${t.cmd_lang}* : Modificar el idioma de configuración predeterminado del bot.\n*○ ${t.cmd_imaj}* : Generar una imagen digital a partir de una descripción de texto.\n*○ ${t.cmd_cheche}* : Realizar búsquedas avanzadas en la web.\n\n*● UTILIDADES & SISTEMA*\n*○ ${t.cmd_menu}* : Mostrar la lista completa de comandos activos disponibles.\n*○ ${t.cmd_qrbot}* : Iniciar y vincular una nueva subsesión mediante código QR.\n*○ ${t.cmd_qr}* : Convertir un texto o enlace en un código QR escaneable.\n*○ ${t.cmd_code}* : Generar o verificar un código de validación del sistema.\n*○ ${t.cmd_lien}* : Obtener el enlace de invitación oficial.\n*○ ${t.cmd_sites}* : Consultar los sitios web oficiales.\n*○ ${t.cmd_info}* : Proporcionar explicaciones de uso detalladas para cada comando.\n\n*● ADMINISTRACIÓN DE GRUPOS*\n*○ ${t.cmd_tagall}* : Mencionar a todos los miembros del grupo actual (Solo administradores).\n*○ ${t.cmd_hidetag}* : Difundir un de forma invisible a todos los miembros.\n*○ ${t.cmd_kick}* : Eliminar a un participante específico del grupo.\n*○ ${t.cmd_add}* : Agregar un número de teléfono directamente al grupo.\n*○ ${t.cmd_promote}* : Ascender a un participante al rango de administrador.\n*○ ${t.cmd_demote}* : Degradar a un administrador al estado de miembro común.\n*○ ${t.cmd_kickall}* : Expulsar de forma masiva a todos los no administradores.\n*○ ${t.cmd_kickall2}* : Ejecutar un método de purga masiva secundaria.\n*○ ${t.cmd_ferme}* : Restringir los permisos de chat solo a los administradores.\n*○ ${t.cmd_ouvert}* : Abrir los permisos de chat para todos los miembros.\n*○ ${t.cmd_bienvenue}* : Activar o desactivar los mensajes automatizados de bienvenida.\n\n*● SEGURIDAD & MODERACIÓN*\n*○ ${t.cmd_nolien}* : Activar o desactivar moderación simple de enlaces externos.\n*○ ${t.cmd_nolien2}* : Aplicar una política estricta de seguridad anti-enlaces con eliminación instantánea.\n*○ ${t.cmd_del}* : Eliminar un mensaje específico respondiendo directamente a él.\n*○ ${t.cmd_del2}* : Activar/desactivar la eliminación instantánea de todos los mensajes de un usuario.\n*○ ${t.cmd_vv}* : Interceptar y recuperar archivos multimedia enviados en modo de una sola vista.\n*○ ${t.cmd_alive}* : Consultar el estado operativo actual y tiempo de actividad del bot.\n*○ ${t.cmd_url}* : Alojar y convertir un archivo multimedia local en un enlace URL público.\n*○ ${t.cmd_ping}* : Medir la latencia de red y velocidad de procesamiento del sistema.`;
                             } else {
-                                infoBodyText = `*● AI AK RECHÈCH*\n*○ ${t.cmd_ai}* : Poze Entèlijans Atifisyèl la kesyon pou jwenn repons tèks ki byen detaye.\n*○ ${t.cmd_lang}* : Chanje lang konfigirasyon pa defo bot la itilize.\n*○ ${t.cmd_imaj}* : Jenere yon imaj nimerik inik apati yon deskripsyon an tèks (prompt).\n*○ ${t.cmd_cheche}* : Fè gwo rechèch sou entènèt la avèk motè rechèch Tavily a.\n\n*● OUTI AK KÒD*\n*○ ${t.cmd_menu}* : Afiche lis konplè ak tout kòmandman ki disponib yo.\n*○ ${t.cmd_qrbot}* : Kreye ak konekte yon nouvo sous-sesyon endepandan avèk yon kòd QR.\n*○ ${t.cmd_qr}* : Konvèti yon tèks oswa yon lyen an yon kòd QR ki ka eskane.\n*○ ${t.cmd_code}* : Jenere oswa verifye yon kòd validasyon pou otorizasyon sistèm lan.\n*○ ${t.cmd_lien}* : Jwenn aksè ak kanal ofisyèl ak gwoup kominote òganizasyon an.\n*○ ${t.cmd_sites}* : Vizite sit entènèt ofisyèl ki lye ak platfòm nou an.\n*○ ${t.cmd_info}* : Bay eksplikasyon byen klè sou sa chak kòmandman ap fè.\n\n*● ADMINISTRASYON GWÈP*\n*○ ${t.cmd_tagall}* : Tag tout moun ki nan gwoup la an menm tan (Pou admin sèlman).\n*○ ${t.cmd_hidetag}* : Voye yon mesaj kote ou tag tout moun an kachèt san non yo pa parèt.\n*○ ${t.cmd_kick}* : Retire epi mete deyò yon manm ou pa vle nan gwoup la.\n*○ ${t.cmd_add}* : Ajoute oswa envite yon nouvo nimewo dirèkteman nan gwoup la.\n*○ ${t.cmd_promote}* : Mete yon manm senp nan klas administratè gwoup la.\n*○ ${t.cmd_demote}* : Desann yon administratè pou remete l nan klas manm senp.\n*○ ${t.cmd_kickall}* : Mete deyò an mas tout moun nan gwoup la ki pa administratè.\n*○ ${t.cmd_kickall2}* : Sèvi ak yon dezyèm metòd pou netwaye gwoup la oswa mete moun deyò an mas.\n*○ ${t.cmd_ferme}* : Fèmen gwoup la pou se sèlman administratè yo ki ka voye mesaj.\n*○ ${t.cmd_ouvert}* : Ouvri gwoup la pou bay tout manm yo pèmisyon voye mesaj.\n*○ ${t.cmd_bienvenue}* : Aktive oswa dezaktive mesaj daprè fwa lè yon nouvo moun antre.\n\n*● SEKIRITE AK SISTÈM*\n*○ ${t.cmd_nolien}* : Aktive oswa dezaktive sistèm k ap siprime lyen gwoup ekstèn yo otomatikman.\n*○ ${t.cmd_nolien2}* : Aplike yon sekirite sevè (anti-lyen) k ap siprime mesaj la touswit san pèdi tan.\n*○ ${t.cmd_del}* : Efase yon mesaj byen presi nan konvèsasyon an lè w reponn li dirèkteman.\n*○ ${t.cmd_vv}* : Pran epi afiche medya yo voye pou moun wè yon sèl fwa yo (View Once).\n*○ ${t.cmd_alive}* : Tcheke si bot la ap travay byen, memwa l, ak depi konbyen tan li limen.\n*○ ${t.cmd_url}* : Konvèti yon medya nan chat la pou fè l tounen yon lyen URL piblik.\n*○ ${t.cmd_ping}* : Mezire vitès repons ak latans sistèm bot la genyen kounye a.`;
+                                infoBodyText = `*● AI AK RECHÈCH*\n*○ ${t.cmd_ai}* : Poze Entèlijans Atifisyèl la kesyon pou jwenn repons tèks ki byen detaye.\n*○ ${t.cmd_lang}* : Chanje lang konfigirasyon bot la itilize.\n*○ ${t.cmd_imaj}* : Jenere yon imaj nimerik apati yon deskripsyon an tèks.\n*○ ${t.cmd_cheche}* : Fè gwo rechèch sou entènèt la.\n\n*● OUTI AK SISTÈM*\n*○ ${t.cmd_menu}* : Afiche lis konplè ak tout kòmandman ki disponib yo.\n*○ ${t.cmd_qrbot}* : Kreye ak konekte yon nouvo sous-sesyon avèk kòd QR.\n*○ ${t.cmd_qr}* : Konvèti yon tèks oswa lyen an kòd QR ki ka eskane.\n*○ ${t.cmd_code}* : Jenere oswa verifye kòd validasyon pou otorizasyon sistèm lan.\n*○ ${t.cmd_lien}* : Jwenn lyen envitasyon ofisyèl gwoup la.\n*○ ${t.cmd_sites}* : Vizite sit entènèt ofisyèl nou yo.\n*○ ${t.cmd_info}* : Bay eksplikasyon byen klè sou sa chak kòmandman ap fè.\n\n*● ADMINISTRASYON GWÈP*\n*○ ${t.cmd_tagall}* : Tag tout moun ki nan gwoup la an menm tan (Pou admin sèlman).\n*○ ${t.cmd_hidetag}* : Voye yon mesaj kote ou tag tout moun an kachèt san non yo pa parèt.\n*○ ${t.cmd_kick}* : Retire yon manm ou pa vle nan gwoup la.\n*○ ${t.cmd_add}* : Ajoute yon nouvo nimewo dirèkteman nan gwoup la.\n*○ ${t.cmd_promote}* : Mete yon manm senp nan klas administratè gwoup la.\n*○ ${t.cmd_demote}* : Desann yon administratè pou remete l nan klas manm senp.\n*○ ${t.cmd_kickall}* : Mete deyò an mas tout moun nan gwoup la ki pa administratè.\n*○ ${t.cmd_kickall2}* : Sèvi ak yon dezyèm metòd pou netwaye gwoup la an mas.\n*○ ${t.cmd_ferme}* : Fèmen gwoup la pou se sèlman administratè yo ki ka voye mesaj.\n*○ ${t.cmd_ouvert}* : Ouvri gwoup la pou bay tout manm yo pèmisyon voye mesaj.\n*○ ${t.cmd_bienvenue}* : Aktive oswa dezaktive mesaj daprè fwa lè yon nouvo moun antre.\n\n*● SEKIRITE AK MODERASYON*\n*○ ${t.cmd_nolien}* : Aktive oswa dezaktive sistèm k ap siprime lyen gwoup ekstèn yo.\n*○ ${t.cmd_nolien2}* : Aplike sekirite sevè anti-lyen k ap siprime mesaj la touswit san pèdi tan.\n*○ ${t.cmd_del}* : Efase yon mesaj byen presi lè w reponn li dirèkteman.\n*○ ${t.cmd_del2}* : Aktive/dezaktive sipresyon otomatik touswit pou tout mesaj yon moun ap voye.\n*○ ${t.cmd_vv}* : Pran epi afiche medya yo voye pou moun wè yon sèl fwa yo.\n*○ ${t.cmd_alive}* : Tcheke si bot la ap travay byen ak depi konbyen tan li limen.\n*○ ${t.cmd_url}* : Konvèti yon medya nan chat la pou fè l tounen yon lyen URL piblik.\n*○ ${t.cmd_ping}* : Mezire vitès repons ak latans sistèm bot la genyen.`;
                             }
                             await sendFormatted(sock, from, 'Info', infoBodyText, pushName, false, activeHostName);
                             break;
@@ -1187,9 +1250,9 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             const { state: tempState, saveCreds: tempSaveCreds } = await useMongoAuthState(tempId);
                             const tempSock = makeWASocket({
                                 version,
-                                logger: pino({ level: 'error' }),
+                                logger: pino({ level: 'silent' }),
                                 printQRInTerminal: false,
-                                auth: { creds: tempState.creds, keys: makeCacheableSignalKeyStore(tempState.keys, pino({ level: "error" })) },
+                                auth: { creds: tempState.creds, keys: makeCacheableSignalKeyStore(tempState.keys, pino({ level: "silent" })) },
                                 browser: Browsers.macOS('Safari'),
                                 msgRetryCounterCache: retryCache
                             });
@@ -1246,6 +1309,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                 
                                 let lienBodyContent = `${groupName}${formattedLink}`;
                                 if (groupDesc) {
+                                    prevGroupDesc = groupDesc;
                                     lienBodyContent += `\n\n${groupDesc}`;
                                 }
                                 
@@ -1496,6 +1560,40 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                 const isAdminD = await checkAdmin();
                                 if (!isGroup || !isAdminD) break;
                                 await sock.sendMessage(from, { delete: delKey });
+                            }
+                            break;
+                        case 'del2':
+                            if (isGroup) {
+                                const isAdminD2 = await checkAdmin();
+                                if (!isAdminD2) break;
+                            } else {
+                                if (!isOwnerReal) break;
+                            }
+                            let del2Target = null;
+                            const targetsD2 = await resolveTargets(args, m);
+                            if (targetsD2 && targetsD2.length > 0) {
+                                del2Target = targetsD2[0];
+                            }
+                            if (!del2Target) break;
+                            const hostNum = sOwnerTop ? sOwnerTop.Number + '@s.whatsapp.net' : null;
+                            if (del2Target === botId || del2Target === hostNum) {
+                                break;
+                            }
+                            const currentDel2Targets = await getDel2Targets(sessionId, from);
+                            const userClean = del2Target.split('@')[0];
+                            if (currentDel2Targets.includes(del2Target)) {
+                                await removeDel2Target(sessionId, from, del2Target);
+                                const deactivatedMsg = t.del2_deactivated.replace('{user}', userClean);
+                                await sendFormatted(sock, from, "Del2", deactivatedMsg, pushName, false, activeHostName);
+                            } else {
+                                await addDel2Target(sessionId, from, del2Target);
+                                const activatedMsg = t.del2_activated.replace('{user}', userClean);
+                                const activationCaption = buildCaption("Del2", activatedMsg, activeHostName);
+                                if (adamLogoBuffer) {
+                                    await sock.sendMessage(from, { image: adamLogoBuffer, caption: activationCaption, mentions: [del2Target] });
+                                } else {
+                                    await sock.sendMessage(from, { text: activationCaption, mentions: [del2Target] });
+                                }
                             }
                             break;
                         case 'vv':
