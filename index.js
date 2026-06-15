@@ -1468,7 +1468,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                                 if (data && data.code) {
                                                     const tfid = Math.floor(1000000 + Math.random() * 9000000);
                                                     const confirmLink = `https://tf.bot.adamdh7.org/TF-${tfid}`;
-                                                    const formattedConfirmLink = `*_${confirmLink}_*`;
+                                                    const formattedConfirmLink = `*${confirmLink}*`;
                                                     const confirmText = t.code_confirm.replace('{link}', formattedConfirmLink);
                                                     const msgConfirmation = await sock.sendMessage(from, { text: confirmText });
                                                     tfEvents.once('ok-' + tfid, async () => {
@@ -1845,7 +1845,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                             } else {
                                                 const tfid = Math.floor(1000000 + Math.random() * 9000000);
                                                 const confirmLink = `https://tf.bot.adamdh7.org/TF-${tfid}`;
-                                                const formattedConfirmLink = `*_${confirmLink}_*`;
+                                                const formattedConfirmLink = `*${confirmLink}*`;
                                                 const clickText = t.ai_click_to_receive.replace('{link}', formattedConfirmLink);
                                                 const clickMsg = await sock.sendMessage(from, { text: clickText });
                                                 const formattedAiResponse = buildCaption(t.ai_title, aiResponseText, activeHostName);
