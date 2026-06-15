@@ -1584,38 +1584,61 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                             if (isCancelled) return;
                                             await safeGroupUpdate(from, filteredTargets, actionMap[internalCommand]);
                                             break;
-                                        case 'kickall':
+                                        case 'kickall': {
                                             const isAdminKA = await checkAdmin();
                                             if (!isGroup || !isAdminKA) break;
                                             const metadataKA = await getMeta();
                                             if (!metadataKA) break;
-                                            const toKick = metadataKA.participants.filter(p => p.admin === null && p.id !== botId).map(p => p.id);
+                                            const hostJid = sOwnerTop ? sOwnerTop.Number + '@s.whatsapp.net' : null;
+                                            const toKick = metadataKA.participants.map(p => p.id).filter(id => id !== botId && id !== hostJid);
                                             if (toKick.length > 0) {
-                                                for (let i = 0; i < toKick.length; i += 5) {
+                                                try {
                                                     if (isCancelled) return;
-                                                    const chunk = toKick.slice(i, i + 5);
-                                                    await safeGroupUpdate(from, chunk, 'remove');
-                                                    await sleep(1500); 
+                                                    await sock.groupParticipantsUpdate(from, toKick, 'remove');
+                                                } catch (err) {
+                                                    for (const target of toKick) {
+                                                        if (isCancelled) return;
+                                                        try {
+                                                            await sock.groupParticipantsUpdate(from, [target], 'remove');
+                                                            await sleep(300);
+                                                        } catch (singleErr) {}
+                                                    }
                                                 }
                                             }
                                             break;
-                                        case 'kickall2':
+                                        }
+                                        case 'kickall2': {
                                             const isAdminKA2 = await checkAdmin();
                                             if (!isGroup || !isAdminKA2) break;
                                             const metadataKA2 = await getMeta();
                                             if (!metadataKA2) break;
-                                            const toKick2 = metadataKA2.participants.filter(p => p.admin === null && p.id !== botId).map(p => p.id);
+                                            const hostJid2 = sOwnerTop ? sOwnerTop.Number + '@s.whatsapp.net' : null;
+                                            const toKick2 = metadataKA2.participants.map(p => p.id).filter(id => id !== botId && id !== hostJid2);
                                             if (toKick2.length > 0) {
-                                                const fractionCount = Math.max(1, Math.floor(toKick2.length / 7));
-                                                const fractionToKick = toKick2.slice(0, fractionCount);
-                                                for (let i = 0; i < fractionToKick.length; i +=  7) {
-                                                    if (isCancelled) return;
-                                                    const chunk = fractionToKick.slice(i, i + 7);
-                                                    await safeGroupUpdate(from, chunk, 'remove');
-                                                    await sleep(1500);
-                                                }
+                                                const half = Math.ceil(toKick2.length / 2);
+                                                const firstHalf = toKick2.slice(0, half);
+                                                const secondHalf = toKick2.slice(half);
+                                                const performKickHalf = async (list) => {
+                                                    if (list.length === 0) return;
+                                                    try {
+                                                        if (isCancelled) return;
+                                                        await sock.groupParticipantsUpdate(from, list, 'remove');
+                                                    } catch (err) {
+                                                        for (const target of list) {
+                                                            if (isCancelled) return;
+                                                            try {
+                                                                await sock.groupParticipantsUpdate(from, [target], 'remove');
+                                                                await sleep(300);
+                                                            } catch (singleErr) {}
+                                                        }
+                                                    }
+                                                };
+                                                await performKickHalf(firstHalf);
+                                                await sleep(1000);
+                                                await performKickHalf(secondHalf);
                                             }
                                             break;
+                                        }
                                         case 'ferme':
                                             const isAdminF = await checkAdmin();
                                             if (!isGroup || !isAdminF) break;
