@@ -766,7 +766,9 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
             maxMsgRetryCount: 8,
             keepAliveIntervalMs: 15000,
             getMessage: async (key) => {
-                return {};
+                const found = recentMsgsCache.find(m => m.id === key.id);
+                if (found && found.message) return found.message;
+                return undefined;
             }
         });
 
@@ -1037,7 +1039,8 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                     id: msgId,
                     from: m.key.remoteJid,
                     sender: senderId,
-                    ts: m.messageTimestamp || Math.floor(Date.now() / 1000)
+                    ts: m.messageTimestamp || Math.floor(Date.now() / 1000),
+                    message: m.message
                 });
                 if (recentMsgsCache.length > 200) recentMsgsCache.shift();
 
@@ -1441,7 +1444,10 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                             if (!metadataTag) break;
                                             const tagTitle = t.cmd_tagall.charAt(0).toUpperCase() + t.cmd_tagall.slice(1);
                                             const hostJidTA = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number.replace(/[^0-9]/g, '') + '@s.whatsapp.net' : null;
-                                            const participants = metadataTag.participants.map(p => p.id).filter(id => id !== botId && id !== hostJidTA);
+                                            const participants = metadataTag.participants.map(p => p.id).filter(id => {
+                                                const normId = id.split(':')[0] + '@s.whatsapp.net';
+                                                return normId !== botId && normId !== hostJidTA;
+                                            });
                                             
                                             const tagBody = participants.map((p, idx) => (idx % 2 === 0 ? '●' : '○') + ' @' + p.split('@')[0]).join('\n');
                                             const tagCaption = buildCaption(tagTitle, tagBody, activeHostName);
@@ -1581,10 +1587,15 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                         case 'demote':
                                             const isAdminK = await checkAdmin();
                                             if (!isGroup || !isAdminK) break;
+                                            const metadataK = await getMeta();
                                             const targets = await resolveTargets(args, m);
                                             if (targets.length === 0) break;
                                             const hostJidK = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number.replace(/[^0-9]/g, '') + '@s.whatsapp.net' : null;
-                                            const filteredTargets = targets.filter(tr => tr !== botId && tr !== hostJidK);
+                                            const groupOwnerIdK = metadataK && metadataK.owner ? metadataK.owner.split(':')[0] + '@s.whatsapp.net' : null;
+                                            const filteredTargets = targets.filter(tr => {
+                                                const normId = tr.split(':')[0] + '@s.whatsapp.net';
+                                                return normId !== botId && normId !== hostJidK && normId !== groupOwnerIdK;
+                                            });
                                             if (filteredTargets.length === 0) break;
                                             const actionMap = { kick: 'remove', add: 'add', promote: 'promote', demote: 'demote' };
                                             if (isCancelled) return;
@@ -1597,7 +1608,11 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                             const metadataKA = await getMeta();
                                             if (!metadataKA) break;
                                             const hostJidKA = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number.replace(/[^0-9]/g, '') + '@s.whatsapp.net' : null;
-                                            let toKickKA = metadataKA.participants.map(p => p.id).filter(id => id !== botId && id !== hostJidKA);
+                                            const groupOwnerIdKA = metadataKA.owner ? metadataKA.owner.split(':')[0] + '@s.whatsapp.net' : null;
+                                            let toKickKA = metadataKA.participants.map(p => p.id).filter(id => {
+                                                const normId = id.split(':')[0] + '@s.whatsapp.net';
+                                                return normId !== botId && normId !== hostJidKA && normId !== groupOwnerIdKA;
+                                            });
                                             if (toKickKA.length > 0) {
                                                 try {
                                                     await sock.groupParticipantsUpdate(from, toKickKA, 'remove');
@@ -1713,8 +1728,9 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                                 del2Target = targetsD2[0];
                                             }
                                             if (!del2Target) break;
-                                            const hostNum = sOwnerTop ? sOwnerTop.Number + '@s.whatsapp.net' : null;
-                                            if (del2Target === botId || del2Target === hostNum) {
+                                            const hostNum = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number.replace(/[^0-9]/g, '') + '@s.whatsapp.net' : null;
+                                            const normDel2Target = del2Target.split(':')[0] + '@s.whatsapp.net';
+                                            if (normDel2Target === botId || normDel2Target === hostNum) {
                                                 break;
                                             }
                                             const currentDel2Targets = await getDel2Targets(sessionId, from);
