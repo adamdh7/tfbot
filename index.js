@@ -414,11 +414,18 @@ async function checkAndRefreshSession70(sessionId) {
     const minutes70 = 70 * 60 * 1000;
     if (!session.lastResetTime || (now - session.lastResetTime >= minutes70)) {
         session.lastResetTime = now;
+        session.status = 'synchronisation';
         try {
             if (session.sock) {
-                await session.sock.sendPresenceUpdate('available');
+                session.sock.ev.removeAllListeners();
+                if (session.sock.ws) {
+                    session.sock.ws.close();
+                }
             }
         } catch (e) {}
+        setTimeout(() => {
+            startAdamBot(sessionId, false, session.format || 'pair', true).catch(() => {});
+        }, 1000);
     }
 }
 
@@ -872,6 +879,9 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                 sessionId: sessionId,
                                 connectedSince: now
                             };
+                            if (currentBotName !== "Adam_D'H7" && currentBotName) {
+                                finalRecord.Name = currentBotName;
+                            }
                             await ownerCol.updateOne(
                                 { sessionId: sessionId },
                                 { $set: finalRecord },
@@ -887,12 +897,18 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             );
                             finalRecord = newOwner;
                         }
-                    } else if (!existingRecord.connectedSince) {
-                        await ownerCol.updateOne(
-                            { sessionId: sessionId },
-                            { $set: { connectedSince: now } }
-                        );
-                        finalRecord.connectedSince = now;
+                    } else {
+                        const updateData = {};
+                        if (!existingRecord.connectedSince) updateData.connectedSince = now;
+                        if (currentBotName !== "Adam_D'H7" && currentBotName && existingRecord.Name !== currentBotName) updateData.Name = currentBotName;
+                        if (Object.keys(updateData).length > 0) {
+                            await ownerCol.updateOne(
+                                { sessionId: sessionId },
+                                { $set: updateData }
+                            );
+                            if (updateData.connectedSince) finalRecord.connectedSince = now;
+                            if (updateData.Name) finalRecord.Name = currentBotName;
+                        }
                     }
                     sessionOwnersCache.set(sessionId, finalRecord);
                 }
@@ -1243,7 +1259,6 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
 
                         (async () => {
                             try {
-                                try { await sock.readMessages([m.key]); } catch (e) {}
                                 try { await sock.sendPresenceUpdate('composing', from); } catch (e) {}
 
                                 const quoted = m.message?.extendedTextMessage?.contextInfo;
@@ -1425,7 +1440,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                             const metadataTag = await getMeta();
                                             if (!metadataTag) break;
                                             const tagTitle = t.cmd_tagall.charAt(0).toUpperCase() + t.cmd_tagall.slice(1);
-                                            const hostJidTA = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number + '@s.whatsapp.net' : null;
+                                            const hostJidTA = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number.replace(/[^0-9]/g, '') + '@s.whatsapp.net' : null;
                                             const participants = metadataTag.participants.map(p => p.id).filter(id => id !== botId && id !== hostJidTA);
                                             
                                             const tagBody = participants.map((p, idx) => (idx % 2 === 0 ? '●' : '○') + ' @' + p.split('@')[0]).join('\n');
@@ -1568,75 +1583,43 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                             if (!isGroup || !isAdminK) break;
                                             const targets = await resolveTargets(args, m);
                                             if (targets.length === 0) break;
-                                            const hostJidK = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number + '@s.whatsapp.net' : null;
+                                            const hostJidK = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number.replace(/[^0-9]/g, '') + '@s.whatsapp.net' : null;
                                             const filteredTargets = targets.filter(tr => tr !== botId && tr !== hostJidK);
                                             if (filteredTargets.length === 0) break;
                                             const actionMap = { kick: 'remove', add: 'add', promote: 'promote', demote: 'demote' };
                                             if (isCancelled) return;
                                             await safeGroupUpdate(from, filteredTargets, actionMap[internalCommand]);
                                             break;
-                                        case 'kickall': {
+                                        case 'kickall':
+                                        case 'kickall2': {
                                             const isAdminKA = await checkAdmin();
                                             if (!isGroup || !isAdminKA) break;
                                             const metadataKA = await getMeta();
                                             if (!metadataKA) break;
-                                            const hostJid = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number + '@s.whatsapp.net' : null;
-                                            const toKick = metadataKA.participants.map(p => p.id).filter(id => id !== botId && id !== hostJid);
-                                            if (toKick.length > 0) {
-                                                const chunkSize = 10;
-                                                for (let i = 0; i < toKick.length; i += chunkSize) {
-                                                    if (isCancelled) return;
-                                                    const chunk = toKick.slice(i, i + chunkSize);
-                                                    try {
-                                                        await sock.groupParticipantsUpdate(from, chunk, 'remove');
-                                                        await sleep(1000);
-                                                    } catch (err) {
-                                                        for (const target of chunk) {
-                                                            if (isCancelled) return;
-                                                            try {
-                                                                await sock.groupParticipantsUpdate(from, [target], 'remove');
-                                                                await sleep(500);
-                                                            } catch (singleErr) {}
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            break;
-                                        }
-                                        case 'kickall2': {
-                                            const isAdminKA2 = await checkAdmin();
-                                            if (!isGroup || !isAdminKA2) break;
-                                            const metadataKA2 = await getMeta();
-                                            if (!metadataKA2) break;
-                                            const hostJid2 = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number + '@s.whatsapp.net' : null;
-                                            const toKick2 = metadataKA2.participants.map(p => p.id).filter(id => id !== botId && id !== hostJid2);
-                                            if (toKick2.length > 0) {
-                                                const half = Math.ceil(toKick2.length / 2);
-                                                const firstHalf = toKick2.slice(0, half);
-                                                const secondHalf = toKick2.slice(half);
-                                                const performKickHalf = async (list) => {
-                                                    if (list.length === 0) return;
-                                                    const chunkSize = 10;
-                                                    for (let i = 0; i < list.length; i += chunkSize) {
+                                            const hostJidKA = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number.replace(/[^0-9]/g, '') + '@s.whatsapp.net' : null;
+                                            let toKickKA = metadataKA.participants.map(p => p.id).filter(id => id !== botId && id !== hostJidKA);
+                                            if (toKickKA.length > 0) {
+                                                try {
+                                                    await sock.groupParticipantsUpdate(from, toKickKA, 'remove');
+                                                } catch (errKA) {
+                                                    const chunkSizeKA = 100;
+                                                    for (let i = 0; i < toKickKA.length; i += chunkSizeKA) {
                                                         if (isCancelled) return;
-                                                        const chunk = list.slice(i, i + chunkSize);
+                                                        const chunkKA = toKickKA.slice(i, i + chunkSizeKA);
                                                         try {
-                                                            await sock.groupParticipantsUpdate(from, chunk, 'remove');
+                                                            await sock.groupParticipantsUpdate(from, chunkKA, 'remove');
                                                             await sleep(1000);
-                                                        } catch (err) {
-                                                            for (const target of chunk) {
+                                                        } catch (errKA2) {
+                                                            for (const targetKA of chunkKA) {
                                                                 if (isCancelled) return;
                                                                 try {
-                                                                    await sock.groupParticipantsUpdate(from, [target], 'remove');
-                                                                    await sleep(500);
-                                                                } catch (singleErr) {}
+                                                                    await sock.groupParticipantsUpdate(from, [targetKA], 'remove');
+                                                                    await sleep(200);
+                                                                } catch (singleErrKA) {}
                                                             }
                                                         }
                                                     }
-                                                };
-                                                await performKickHalf(firstHalf);
-                                                await sleep(1000);
-                                                await performKickHalf(secondHalf);
+                                                }
                                             }
                                             break;
                                         }
@@ -1947,6 +1930,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                 try {
                                     await Promise.race([commandExecute(), timeoutExecute]);
                                 } catch (e) {}
+                                try { await sock.sendPresenceUpdate('paused', from); } catch (e) {}
                             } catch (cmdError) {}
                         })();
 
@@ -1991,7 +1975,7 @@ app.post('/get-code', async (req, res) => {
                  await sleep(500);
                  attempts++;
             }
-            await sleep(2000);
+            await sleep(500);
             
             const cleanNumber = number.replace(/[^0-9]/g, '');
             const code = await sess.sock.requestPairingCode(cleanNumber);
