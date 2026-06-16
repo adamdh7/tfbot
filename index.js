@@ -168,15 +168,17 @@ async function deleteMongoSession(sessionId) {
   } catch (e) {}
 }
 
-async function wipeSessionCrypto(sessionId) {
+async function wipeSenderCrypto(sessionId, senderJid) {
     try {
+        if (!senderJid) return;
         const collection = db.collection('baileys_auth');
         const sessionKey = `auth-${sessionId}`;
+        const jid = senderJid.split(':')[0] + '@s.whatsapp.net';
         await collection.deleteMany({
-            _id: { $regex: `^${sessionKey}_key_session-` }
+            _id: { $regex: `^${sessionKey}_key_session-${jid}` }
         });
         await collection.deleteMany({
-            _id: { $regex: `^${sessionKey}_key_sender-key` }
+            _id: { $regex: `^${sessionKey}_key_sender-key-.*${jid}` }
         });
     } catch (e) {}
 }
@@ -420,12 +422,12 @@ async function checkSessionLimits() {
     } catch (e) {}
 }
 
-async function checkAndRefreshSession70(sessionId, forceCryptoWipe = false) {
+async function checkAndRefreshSession70(sessionId) {
     const session = activeSessions.get(sessionId);
     if (!session) return;
     const now = Date.now();
     const minutes70 = 70 * 60 * 1000;
-    if (forceCryptoWipe || !session.lastResetTime || (now - session.lastResetTime >= minutes70)) {
+    if (!session.lastResetTime || (now - session.lastResetTime >= minutes70)) {
         session.lastResetTime = now;
         session.status = 'synchronisation';
         try {
@@ -436,11 +438,6 @@ async function checkAndRefreshSession70(sessionId, forceCryptoWipe = false) {
                 }
             }
         } catch (e) {}
-        
-        if (forceCryptoWipe) {
-            await wipeSessionCrypto(sessionId);
-        }
-
         setTimeout(() => {
             startAdamBot(sessionId, false, session.format || 'pair', true).catch(() => {});
         }, 1000);
@@ -724,7 +721,7 @@ const commandMaps = {
     "ia": "ai", "lang": "lang", "image": "imaj", "chercher": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "lien": "lien", "tagtout": "tagall", "hidetag": "hidetag", "expulse": "kick", "add": "add", "promote": "promote", "demote": "demote", "expulsetout": "kickall", "expulsetout2": "kickall2", "ferme": "ferme", "ouvert": "ouvert", "bienvenue": "bienvenue", "nolien": "nolien", "nolien2": "nolien2", "del": "del", "del2": "del2", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "prive": "prive", "public": "public"
   },
   en: {
-    "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "kickall2": "kickall2", "close": "ferme", "open": "ouvert", "welcome": "bienvenue", "nolink": "nolien", "nolink2": "nolien2", "del": "del", "del2": "del2", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "private": "prive", "public": "public"
+    "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "kickall2": "kickall2", "close": "ferme", "open": "ouvert", "welcome": "bienvenue", "nolink": "nolien", "nolink2": "nolink2", "del": "del", "del2": "del2", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "private": "prive", "public": "public"
   },
   es: {
     "ia": "ai", "lang": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "borrartodo2": "kickall2", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "del": "del", "del2": "del2", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "privado": "prive", "publico": "public"
@@ -1047,7 +1044,8 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
             
             for (const m of up.messages) {
                 if (m.messageStubType === 2 || m.messageStubType === 24 || m.messageStubType === 131) {
-                    checkAndRefreshSession70(sessionId, true);
+                    const problemSender = m.key.participant || m.key.remoteJid;
+                    wipeSenderCrypto(sessionId, problemSender).catch(()=>{});
                     continue;
                 }
                 
@@ -1235,7 +1233,8 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             'This may take a while'
                         ];
                         if (ignoreTexts.some(text => body.includes(text))) {
-                            checkAndRefreshSession70(sessionId, true);
+                            const problemSender = m.key.participant || m.key.remoteJid;
+                            wipeSenderCrypto(sessionId, problemSender).catch(()=>{});
                             return;
                         }
 
@@ -1362,7 +1361,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                         case 'info':
                                             let infoBodyText = '';
                                             if (globalLang === 'fr') {
-                                                infoBodyText = `*● IA & RECHERCHE*\n*○ ${t.cmd_ai}* : Interroger l'Intelligence Artificielle pour obtenir des réponses textuelles détaillées.\n*○ ${t.cmd_lang}* : Modifier la langue de configuration du bot.\n*○ ${t.cmd_imaj}* : Générer une image numérique à partir d'une description textuelle.\n*○ ${t.cmd_cheche}* : Effectuer des recherches approfondies sur le web.\n\n*● UTILITAIRES & SYSTEME*\n*○ ${t.cmd_menu}* : Afficher l'arborescence complète et la liste de toutes les commandes.\n*○ ${t.cmd_qrbot}* : Initier et lier une nouvelle sous-session via code QR.\n*○ ${t.cmd_qr}* : Convertir un texte ou un lien spécifié en code QR scannable.\n*○ ${t.cmd_code}* : Générer ou vérifier un code d'autorisation système.\n*○ ${t.cmd_lien}* : Obtenir le lien d'invitation officiel.\n*○ ${t.cmd_sites}* : Consulter les sites officiels.\n*○ ${t.cmd_info}* : Fournir les informations explicatives d'utilisation de chaque commande.\n\n*● LOGISTIQUE DE GROUPE*\n*○ ${t.cmd_tagall}* : Mentionner explicitement tous les membres (Admin uniquement).\n*○ ${t.cmd_hidetag}* : Diffuser un message en mentionnant secrètement tous les membres.\n*○ ${t.cmd_kick}* : Retirer un membre spécifique du groupe actuel.\n*○ ${t.cmd_add}* : Ajouter un numéro de téléphone directement au groupe.\n*○ ${t.cmd_promote}* : Élever un membre régulier au rang d'administrateur.\n*○ ${t.cmd_demote}* : Rétrograder un administrateur existant au statut de membre.\n*○ ${t.cmd_kickall}* : Procéder à une expulsion globale de tous les non-administrateurs.\n*○ ${t.cmd_kickall2}* : Exécuter une méthode d'expulsion collective secondaire.\n*○ ${t.cmd_ferme}* : Restreindre l'envoi de messages uniquement aux administrateurs.\n*○ ${t.cmd_ouvert}* : Autoriser l'envoi de messages à tous les membres.\n*○ ${t.cmd_bienvenue}* : Activer ou désactiver les messages d'accueil automatiques.\n\n*● SECURITE & MODERATION*\n*○ ${t.cmd_nolien}* : Activer ou désactiver la modération automatique simple des liens.\n*○ ${t.cmd_nolien2}* : Appliquer une sécurité stricte (anti-lien) avec suppression immédiate.\n*○ ${t.cmd_del}* : Supprimer un ou plusieurs messages (albums/médias groupés) en y répondant.\n*○ ${t.cmd_del2}* : Activer/désactiver la suppression instantanée de TOUS les messages d'un utilisateur spécifié (Anti-spam absolu).\n*○ ${t.cmd_vv}* : Afficher les fichiers configurés en vue unique (View Once).\n*○ ${t.cmd_alive}* : Consulter l'état opérationnel et le temps d'activité global du bot.\n*○ ${t.cmd_url}* : Héberger et convertir un média local en un lien URL public.\n*○ ${t.cmd_ping}* : Évaluer la latence de traitement actuelle.`;
+                                                infoBodyText = `*● IA & RECHERCHE*\n*○ ${t.cmd_ai}* : Interroger l'Intelligence Artificielle pour obtenir des réponses textuelles détaillées.\n*○ ${t.cmd_lang}* : Modifier la langue de configuration du bot.\n*○ ${t.cmd_imaj}* : Générer une image numérique à partir d'une description textuelle.\n*○ ${t.cmd_cheche}* : Effectuer des recherches approfondies sur le web.\n\n*● UTILITAIRES & SYSTEME*\n*○ ${t.cmd_menu}* : Afficher l'arborescence complète et la liste de toutes commands.\n*○ ${t.cmd_qrbot}* : Initier et lier une nouvelle sous-session via code QR.\n*○ ${t.cmd_qr}* : Convertir un texte ou un lien spécifié en code QR scannable.\n*○ ${t.cmd_code}* : Générer ou vérifier un code d'autorisation système.\n*○ ${t.cmd_lien}* : Obtenir le lien d'invitation officiel.\n*○ ${t.cmd_sites}* : Consulter les sites officiels.\n*○ ${t.cmd_info}* : Fournir les informations explicatives d'utilisation de chaque commande.\n\n*● LOGISTIQUE DE GROUPE*\n*○ ${t.cmd_tagall}* : Mentionner explicitement tous les membres (Admin uniquement).\n*○ ${t.cmd_hidetag}* : Diffuser un message en mentionnant secrètement tous les membres.\n*○ ${t.cmd_kick}* : Retirer un membre spécifique du groupe actuel.\n*○ ${t.cmd_add}* : Ajouter un numéro de téléphone directement au groupe.\n*○ ${t.cmd_promote}* : Élever un membre régulier au rang d'administrateur.\n*○ ${t.cmd_demote}* : Rétrograder un administrateur existant au statut de membre.\n*○ ${t.cmd_kickall}* : Procéder à une expulsion globale de tous les non-administrateurs.\n*○ ${t.cmd_kickall2}* : Exécuter une méthode d'expulsion collective secondaire.\n*○ ${t.cmd_ferme}* : Restreindre l'envoi de messages uniquement aux administrateurs.\n*○ ${t.cmd_ouvert}* : Autoriser l'envoi de messages à tous les membres.\n*○ ${t.cmd_bienvenue}* : Activer ou désactiver les messages d'accueil automatiques.\n\n*● SECURITE & MODERATION*\n*○ ${t.cmd_nolien}* : Activer ou désactiver la modération automatique simple des liens.\n*○ ${t.cmd_nolien2}* : Appliquer une sécurité stricte (anti-lien) avec suppression immédiate.\n*○ ${t.cmd_del}* : Supprimer un ou plusieurs messages (albums/médias groupés) en y répondant.\n*○ ${t.cmd_del2}* : Activer/désactiver la suppression instantanée de TOUS les messages d'un utilisateur spécifié (Anti-spam absolu).\n*○ ${t.cmd_vv}* : Afficher les fichiers configurés en vue unique (View Once).\n*○ ${t.cmd_alive}* : Consulter l'état opérationnel et le temps d'activité global du bot.\n*○ ${t.cmd_url}* : Héberger et convertir un média local en un lien URL public.\n*○ ${t.cmd_ping}* : Évaluer la latence de traitement actuelle.`;
                                             } else if (globalLang === 'en') {
                                                 infoBodyText = `*● AI & SEARCH*\n*○ ${t.cmd_ai}* : Query Artificial Intelligence to obtain detailed textual answers.\n*○ ${t.cmd_lang}* : Change the bot's default configuration language.\n*○ ${t.cmd_imaj}* : Generate a digital image from a textual description.\n*○ ${t.cmd_cheche}* : Perform deep searches on the web.\n\n*● UTILITIES & SYSTEM*\n*○ ${t.cmd_menu}* : Display the comprehensive tree and list of all active commands.\n*○ ${t.cmd_qrbot}* : Initiate and link a new sub-session using a QR code.\n*○ ${t.cmd_qr}* : Convert a specified text or hyperlink into a scannable QR code.\n*○ ${t.cmd_code}* : Generate or verify a system authentication validation code.\n*○ ${t.cmd_lien}* : Get the official group invitation link.\n*○ ${t.cmd_sites}* : Visit our official web pages.\n*○ ${t.cmd_info}* : Provide detailed descriptions regarding each command's usage.\n\n*● GROUP ADMINISTRATION*\n*○ ${t.cmd_tagall}* : Explicitly mention every individual member within the group (Admin only).\n*○ ${t.cmd_hidetag}* : Broadcast a message to all members silently without visible tags.\n*○ ${t.cmd_kick}* : Dismiss and remove a participant from the current group.\n*○ ${t.cmd_add}* : Directly add a phone number to the current group.\n*○ ${t.cmd_promote}* : Elevate a regular participant to group administrator status.\n*○ ${t.cmd_demote}* : Demote an existing administrator back to standard member status.\n*○ ${t.cmd_kickall}* : Execute a mass eviction of all non-administrator members from the group.\n*○ ${t.cmd_kickall2}* : Trigger an alternative collective secondary mass eviction.\n*○ ${t.cmd_ferme}* : Restrict chat permissions to group administrators exclusively.\n*○ ${t.cmd_ouvert}* : Open chat permissions to allow all members to broadcast messages.\n*○ ${t.cmd_bienvenue}* : Toggle the activation status of automated group welcome greetings.\n\n*● SECURITY & MODERATION*\n*○ ${t.cmd_nolien}* : Toggle simple automated moderation for external links.\n*○ ${t.cmd_nolien2}* : Enforce strict anti-link security protocol with instant deletion.\n*○ ${t.cmd_del}* : Remove one or multiple messages (albums/grouped media) by replying to it.\n*○ ${t.cmd_del2}* : Toggle instant automatic deletion of ALL messages from a specified user (Absolute Anti-spam).\n*○ ${t.cmd_vv}* : Intercept and retrieve media sent under the view-once restriction.\n*○ ${t.cmd_alive}* : Inspect active operational status and overall system uptime.\n*○ ${t.cmd_url}* : Host and convert a local chat media file into a public URL link.\n*○ ${t.cmd_ping}* : Measure the network latency and processing speed of the core system.`;
                                             } else if (globalLang === 'es') {
