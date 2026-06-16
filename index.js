@@ -168,6 +168,19 @@ async function deleteMongoSession(sessionId) {
   } catch (e) {}
 }
 
+async function wipeSessionCrypto(sessionId) {
+    try {
+        const collection = db.collection('baileys_auth');
+        const sessionKey = `auth-${sessionId}`;
+        await collection.deleteMany({
+            _id: { $regex: `^${sessionKey}_key_session-` }
+        });
+        await collection.deleteMany({
+            _id: { $regex: `^${sessionKey}_key_sender-key` }
+        });
+    } catch (e) {}
+}
+
 async function renameMongoSession(oldSessionId, newSessionId) {
   try {
     const collection = db.collection('baileys_auth');
@@ -407,12 +420,12 @@ async function checkSessionLimits() {
     } catch (e) {}
 }
 
-async function checkAndRefreshSession70(sessionId) {
+async function checkAndRefreshSession70(sessionId, forceCryptoWipe = false) {
     const session = activeSessions.get(sessionId);
     if (!session) return;
     const now = Date.now();
     const minutes70 = 70 * 60 * 1000;
-    if (!session.lastResetTime || (now - session.lastResetTime >= minutes70)) {
+    if (forceCryptoWipe || !session.lastResetTime || (now - session.lastResetTime >= minutes70)) {
         session.lastResetTime = now;
         session.status = 'synchronisation';
         try {
@@ -423,6 +436,11 @@ async function checkAndRefreshSession70(sessionId) {
                 }
             }
         } catch (e) {}
+        
+        if (forceCryptoWipe) {
+            await wipeSessionCrypto(sessionId);
+        }
+
         setTimeout(() => {
             startAdamBot(sessionId, false, session.format || 'pair', true).catch(() => {});
         }, 1000);
@@ -870,6 +888,12 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 const currentBotName = sock.user ? sock.user.name || "Adam_D'H7" : "Adam_D'H7";
                 if (currentBotNum) {
                     const ownerCol = db.collection('session_owners');
+                    const duplicates = await ownerCol.find({ Number: currentBotNum }).sort({ connectedSince: -1 }).toArray();
+                    if (duplicates.length > 1) {
+                        const toDeleteIds = duplicates.slice(1).map(d => d._id);
+                        await ownerCol.deleteMany({ _id: { $in: toDeleteIds } });
+                    }
+
                     const now = Date.now();
                     const existingRecord = await ownerCol.findOne({ sessionId: sessionId });
                     let finalRecord = existingRecord;
@@ -889,7 +913,9 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                 { $set: finalRecord },
                                 { upsert: true }
                             );
-                            await ownerCol.deleteOne({ _id: matchingBackup._id });
+                            if (matchingBackup.sessionId !== sessionId) {
+                                await ownerCol.deleteOne({ _id: matchingBackup._id });
+                            }
                         } else {
                             const newOwner = { sessionId: sessionId, Number: currentBotNum, Name: currentBotName, connectedSince: now, mode: 'prive', lang: globalLang };
                             await ownerCol.updateOne(
@@ -1020,6 +1046,11 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
             if (up.type !== 'notify') return;
             
             for (const m of up.messages) {
+                if (m.messageStubType === 2 || m.messageStubType === 24 || m.messageStubType === 131) {
+                    checkAndRefreshSession70(sessionId, true);
+                    continue;
+                }
+                
                 if (m.messageStubType) continue;
                 if (!m.message || Object.keys(m.message).length === 0) continue;
                 if (m.message.protocolMessage) continue;
@@ -1203,7 +1234,10 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                             'Ceci pourrait prendre un peu de temps',
                             'This may take a while'
                         ];
-                        if (ignoreTexts.some(text => body.includes(text))) return;
+                        if (ignoreTexts.some(text => body.includes(text))) {
+                            checkAndRefreshSession70(sessionId, true);
+                            return;
+                        }
 
                         userInfo.set(sender, {
                           pseudo: pushName,
@@ -1279,6 +1313,21 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                 const safeSendFormatted = async (...sendArgs) => {
                                     if (isCancelled) return;
                                     return await sendFormatted(...sendArgs);
+                                };
+
+                                const getProtectedJids = (metaGroup) => {
+                                    let protectedArr = [];
+                                    if (botId) protectedArr.push(botId);
+                                    if (sOwnerTop && sOwnerTop.Number) {
+                                        protectedArr.push(sOwnerTop.Number.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
+                                    }
+                                    if (isOwnerReal && sender) {
+                                        protectedArr.push(sender.split(':')[0] + '@s.whatsapp.net');
+                                    }
+                                    if (metaGroup && metaGroup.owner) {
+                                        protectedArr.push(metaGroup.owner.split(':')[0] + '@s.whatsapp.net');
+                                    }
+                                    return protectedArr;
                                 };
 
                                 const commandExecute = async () => {
@@ -1443,10 +1492,10 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                             const metadataTag = await getMeta();
                                             if (!metadataTag) break;
                                             const tagTitle = t.cmd_tagall.charAt(0).toUpperCase() + t.cmd_tagall.slice(1);
-                                            const hostJidTA = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number.replace(/[^0-9]/g, '') + '@s.whatsapp.net' : null;
+                                            const protectedTA = getProtectedJids(metadataTag);
                                             const participants = metadataTag.participants.map(p => p.id).filter(id => {
                                                 const normId = id.split(':')[0] + '@s.whatsapp.net';
-                                                return normId !== botId && normId !== hostJidTA;
+                                                return !protectedTA.includes(normId);
                                             });
                                             
                                             const tagBody = participants.map((p, idx) => (idx % 2 === 0 ? '●' : '○') + ' @' + p.split('@')[0]).join('\n');
@@ -1590,11 +1639,11 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                             const metadataK = await getMeta();
                                             const targets = await resolveTargets(args, m);
                                             if (targets.length === 0) break;
-                                            const hostJidK = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number.replace(/[^0-9]/g, '') + '@s.whatsapp.net' : null;
-                                            const groupOwnerIdK = metadataK && metadataK.owner ? metadataK.owner.split(':')[0] + '@s.whatsapp.net' : null;
+                                            
+                                            const protectedK = getProtectedJids(metadataK);
                                             const filteredTargets = targets.filter(tr => {
                                                 const normId = tr.split(':')[0] + '@s.whatsapp.net';
-                                                return normId !== botId && normId !== hostJidK && normId !== groupOwnerIdK;
+                                                return !protectedK.includes(normId);
                                             });
                                             if (filteredTargets.length === 0) break;
                                             const actionMap = { kick: 'remove', add: 'add', promote: 'promote', demote: 'demote' };
@@ -1607,11 +1656,11 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                             if (!isGroup || !isAdminKA) break;
                                             const metadataKA = await getMeta();
                                             if (!metadataKA) break;
-                                            const hostJidKA = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number.replace(/[^0-9]/g, '') + '@s.whatsapp.net' : null;
-                                            const groupOwnerIdKA = metadataKA.owner ? metadataKA.owner.split(':')[0] + '@s.whatsapp.net' : null;
+                                            
+                                            const protectedKA = getProtectedJids(metadataKA);
                                             let toKickKA = metadataKA.participants.map(p => p.id).filter(id => {
                                                 const normId = id.split(':')[0] + '@s.whatsapp.net';
-                                                return normId !== botId && normId !== hostJidKA && normId !== groupOwnerIdKA;
+                                                return !protectedKA.includes(normId);
                                             });
                                             if (toKickKA.length > 0) {
                                                 try {
@@ -1728,9 +1777,10 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                                 del2Target = targetsD2[0];
                                             }
                                             if (!del2Target) break;
-                                            const hostNum = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number.replace(/[^0-9]/g, '') + '@s.whatsapp.net' : null;
+                                            const metadataD2 = await getMeta();
+                                            const protectedD2 = getProtectedJids(metadataD2);
                                             const normDel2Target = del2Target.split(':')[0] + '@s.whatsapp.net';
-                                            if (normDel2Target === botId || normDel2Target === hostNum) {
+                                            if (protectedD2.includes(normDel2Target)) {
                                                 break;
                                             }
                                             const currentDel2Targets = await getDel2Targets(sessionId, from);
