@@ -415,8 +415,8 @@ async function checkAndRefreshSession70(sessionId) {
     if (!session.lastResetTime || (now - session.lastResetTime >= minutes70)) {
         session.lastResetTime = now;
         try {
-            if (session.sock && session.sock.ws) {
-                session.sock.ws.close();
+            if (session.sock) {
+                await session.sock.sendPresenceUpdate('available');
             }
         } catch (e) {}
     }
@@ -720,11 +720,7 @@ async function sendFormatted(sock, from, type, text, pushName, isAI = false, hos
       await sock.sendMessage(from, { text: fullCaption });
     } else {
       if (adamLogoBuffer) {
-        try {
-            await sock.sendMessage(from, { image: adamLogoBuffer, caption: fullCaption });
-        } catch (err) {
-            await sock.sendMessage(from, { text: fullCaption });
-        }
+        await sock.sendMessage(from, { image: adamLogoBuffer, caption: fullCaption });
       } else {
         await sock.sendMessage(from, { text: fullCaption });
       }
@@ -1027,11 +1023,12 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                     sender: senderId,
                     ts: m.messageTimestamp || Math.floor(Date.now() / 1000)
                 });
+                if (recentMsgsCache.length > 200) recentMsgsCache.shift();
 
                 setImmediate(async () => {
                     try {
                         const timestampNow = Math.floor(Date.now() / 1000);
-                        if (m.messageTimestamp && (timestampNow - m.messageTimestamp > 86400)) return;
+                        if (m.messageTimestamp && (timestampNow - m.messageTimestamp > 120)) return;
 
                         const from = m.key.remoteJid;
                         const isFromMe = m.key.fromMe;
@@ -1234,10 +1231,12 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         
                         if (!internalCommand) return;
 
+                        await checkAndRefreshSession70(sessionId);
+
                         const userQueueKey = `${sessionId}_${sender}`;
                         const nowTime = Date.now();
                         const lastReq = lastRequestTime.get(userQueueKey) || 0;
-                        if (nowTime - lastReq < 300) {
+                        if (nowTime - lastReq < 800) {
                             return; 
                         }
                         lastRequestTime.set(userQueueKey, nowTime);
@@ -1245,6 +1244,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         (async () => {
                             try {
                                 try { await sock.readMessages([m.key]); } catch (e) {}
+                                try { await sock.sendPresenceUpdate('composing', from); } catch (e) {}
 
                                 const quoted = m.message?.extendedTextMessage?.contextInfo;
                                 const quotedMessage = quoted?.quotedMessage;
@@ -1301,7 +1301,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                             } else if (globalLang === 'es') {
                                                 infoBodyText = `*● IA & BÚSQUEDA*\n*○ ${t.cmd_ai}* : Consultar a la Inteligencia Artificial para obtener respuestas textuales.\n*○ ${t.cmd_lang}* : Modificar el idioma de configuración predeterminado del bot.\n*○ ${t.cmd_imaj}* : Generar una imagen digital a partir de una descripción de texto.\n*○ ${t.cmd_cheche}* : Realizar búsquedas avanzadas en la web.\n\n*● UTILIDADES & SISTEMA*\n*○ ${t.cmd_menu}* : Mostrar la lista completa de comandos activos disponibles.\n*○ ${t.cmd_qrbot}* : Iniciar y vincular una nueva subsesión mediante código QR.\n*○ ${t.cmd_qr}* : Convertir un texto o enlace en un código QR escaneable.\n*○ ${t.cmd_code}* : Generar o verificar un código de validación del sistema.\n*○ ${t.cmd_lien}* : Obtener el enlace de invitación oficial.\n*○ ${t.cmd_sites}* : Consultar los sitios web oficiales.\n*○ ${t.cmd_info}* : Proporcionar explicaciones de uso detalladas para cada comando.\n\n*● ADMINISTRACIÓN DE GRUPOS*\n*○ ${t.cmd_tagall}* : Mencionar a todos los miembros del grupo actual (Solo administradores).\n*○ ${t.cmd_hidetag}* : Difundir un de forma invisible a todos los miembros.\n*○ ${t.cmd_kick}* : Eliminar a un participante específico del grupo.\n*○ ${t.cmd_add}* : Agregar un número de teléfono directamente al grupo.\n*○ ${t.cmd_promote}* : Ascender a un participante al rango de administrador.\n*○ ${t.cmd_demote}* : Degradar a un administrador al estado de miembro común.\n*○ ${t.cmd_kickall}* : Expulsar de forma masiva a todos los no administradores.\n*○ ${t.cmd_kickall2}* : Ejecutar un método de purga masiva secundaria.\n*○ ${t.cmd_ferme}* : Restringir los permisos de chat solo a los administradores.\n*○ ${t.cmd_ouvert}* : Abrir los permisos de chat para todos los miembros.\n*○ ${t.cmd_bienvenue}* : Activar o desactivar los mensajes automatizados de bienvenida.\n\n*● SEGURIDAD & MODERACIÓN*\n*○ ${t.cmd_nolien}* : Activar o desactivar moderación simple de enlaces externos.\n*○ ${t.cmd_nolien2}* : Aplicar una política estricta de seguridad anti-enlaces con eliminación instantánea.\n*○ ${t.cmd_del}* : Eliminar uno o varios mensajes (álbumes/multimedia) respondiendo directamente.\n*○ ${t.cmd_del2}* : Activar/desactivar la eliminación instantánea de TODOS los mensajes de un usuario (Anti-spam absoluto).\n*○ ${t.cmd_vv}* : Interceptar y recuperar archivos multimedia enviados en modo de una sola vista.\n*○ ${t.cmd_alive}* : Consultar el estado operativo actual y tiempo de actividad del bot.\n*○ ${t.cmd_url}* : Alojar y convertir un archivo multimedia local en un enlace URL público.\n*○ ${t.cmd_ping}* : Medir la latencia de red y velocidad de procesamiento del sistema.`;
                                             } else {
-                                                infoBodyText = `*● AI AK RECHÈCH*\n*○ ${t.cmd_ai}* : Poze Entèlijans Atifisyèl la kesyon pou jwenn repons tèks ki byen detaye.\n*○ ${t.cmd_lang}* : Chanje lang konfigirasyon bot la itilize.\n*○ ${t.cmd_imaj}* : Jenere yon imaj nimerik apati yon deskripsyon an tèks.\n*○ ${t.cmd_cheche}* : Fè gwo rechèch sou entènèt la.\n\n*● OUTI AK SISTÈM*\n*○ ${t.cmd_menu}* : Afiche lis konplè ak tout kòmandman ki disponib yo.\n*○ ${t.cmd_qrbot}* : Kreye ak konekte yon nouvo sous-sesyon avèk kòd QR.\n*○ ${t.cmd_qr}* : Konvèti yon tèks oswa lyen an kòd QR ki ka eskane.\n*○ ${t.cmd_code}* : Jenere oswa verifye kòd validasyon pou otorizasyon sistèm lan.\n*○ ${t.cmd_lien}* : Jwenn lyen envitasyon ofisyèl gwoup la.\n*○ ${t.cmd_sites}* : Vizite sit entènèt ofisyèl nou yo.\n*○ ${t.cmd_info}* : Bay eksplikasyon byen klè sou sa chak kòmandman ap fè.\n\n*● ADMINISTRASYON GWÈP*\n*○ ${t.cmd_tagall}* : Tag tout moun ki nan gwoup la an menm tan (Pou admin sèlman).\n*○ ${t.cmd_hidetag}* : Voye yon mesaj kote ou tag tout moun an kachèt san non identity yo pa parèt.\n*○ ${t.cmd_kick}* : Retire yon manm ou pa vle nan gwoup la.\n*○ ${t.cmd_add}* : Ajoute yon nouvo nimewo dirèkteman nan gwoup la.\n*○ ${t.cmd_promote}* : Mete yon manm senp nan klas administratè gwoup la.\n*○ ${t.cmd_demote}* : Desann yon administratè pou remete l nan klas manm senp.\n*○ ${t.cmd_kickall}* : Mete deyò an mas tout moun nan gwoup la ki pa administratè.\n*○ ${t.cmd_kickall2}* : Sèvi ak yon dezyèm metòd pou netwaye gwoup la an mas.\n*○ ${t.cmd_ferme}* : Fèmen gwoup la pou se sèlman administratè yo ki ka voye mesaj.\n*○ ${t.cmd_ouvert}* : Ouvri gwoup la pou bay tout manm yo pèmisyon voye mesaj.\n*○ ${t.cmd_bienvenue}* : Aktive oswa dezaktive mesaj daprè fwa lè yon nouvo moun antre.\n\n*● SEKIRITE AK MODERASYON*\n*○ ${t.cmd_nolien}* : Aktive oswa dezaktive sistèm k ap siprime lyen gwoup ekstèn yo.\n*○ ${t.cmd_nolien2}* : Aplike sekirite sevè anti-lyen k ap siprime mesaj la touswit san pèdi tan.\n*○ ${t.cmd_del}* : Efase youn oswa plizyè mesaj (albòm/medya yo gwoupe) lè w reponn li.\n*○ ${t.cmd_del2}* : Aktive/dezaktive sipresyon otomatik touswit pou TOUT mesaj yon moun ap voye (Anti-spam absoli).\n*○ ${t.cmd_vv}* : Pran epi afiche medya yo voye pou moun wè yon sèl fwa yo.\n*○ ${t.cmd_alive}* : Tcheke si bot la ap travay byen ak depi konbyen tan li limen.\n*○ ${t.cmd_url}* : Konvèti yon medya nan chat la pou fè l tounen yon lyen URL piblik.\n*○ ${t.cmd_ping}* : Mezire vitès repons ak latans sistèm bot la genyen.`;
+                                                infoBodyText = `*● AI AK RECHÈCH*\n*○ ${t.cmd_ai}* : Poze Entèlijans Atifisyèl la kesyon pou jwenn repons tèks ki byen detaye.\n*○ ${t.cmd_lang}* : Chanje lang konfigirasyon bot la itilize.\n*○ ${t.cmd_imaj}* : Jenere yon imaj nimerik apati yon deskripsyon an tèks.\n*○ ${t.cmd_cheche}* : Fè gwo rechèch sou entènèt la.\n\n*● OUTI AK SISTÈM*\n*○ ${t.cmd_menu}* : Afiche lis konplè ak tout kòmandman ki disponib yo.\n*○ ${t.cmd_qrbot}* : Kreye ak konekte yon nouvo sous-sesyon avèk kòd QR.\n*○ ${t.cmd_qr}* : Konvèti yon tèks oswa lyen an kòd QR ki ka eskane.\n*○ ${t.cmd_code}* : Jenere oswa verifye kòd validasyon pou otorizasyon sistèm lan.\n*○ ${t.cmd_lien}* : Jwenn lyen envitasyon ofisyèl gwoup la.\n*○ ${t.cmd_sites}* : Vizite sit entènèt ofisyèl nou yo.\n*○ ${t.cmd_info}* : Bay eksplikasyon byen klè sou sa chak kòmandman ap fè.\n\n*● ADMINISTRASYON GWÈP*\n*○ ${t.cmd_tagall}* : Tag tout moun ki nan gwoup la an menm tan (Pou admin sèlman).\n*○ ${t.cmd_hidetag}* : Voye yon mesaj kote ou tag tout moun an kachèt san non yo pa parèt.\n*○ ${t.cmd_kick}* : Retire yon manm ou pa vle nan gwoup la.\n*○ ${t.cmd_add}* : Ajoute yon nouvo nimewo dirèkteman nan gwoup la.\n*○ ${t.cmd_promote}* : Mete yon manm senp nan klas administratè gwoup la.\n*○ ${t.cmd_demote}* : Desann yon administratè pou remete l nan klas manm senp.\n*○ ${t.cmd_kickall}* : Mete deyò an mas tout moun nan gwoup la ki pa administratè.\n*○ ${t.cmd_kickall2}* : Sèvi ak yon dezyèm metòd pou netwaye gwoup la an mas.\n*○ ${t.cmd_ferme}* : Fèmen gwoup la pou se sèlman administratè yo ki ka voye mesaj.\n*○ ${t.cmd_ouvert}* : Ouvri gwoup la pou bay tout manm yo pèmisyon voye mesaj.\n*○ ${t.cmd_bienvenue}* : Aktive oswa dezaktive mesaj daprè fwa lè yon nouvo moun antre.\n\n*● SEKIRITE AK MODERASYON*\n*○ ${t.cmd_nolien}* : Aktive oswa dezaktive sistèm k ap siprime lyen gwoup ekstèn yo.\n*○ ${t.cmd_nolien2}* : Aplike sekirite sevè anti-lyen k ap siprime mesaj la touswit san pèdi tan.\n*○ ${t.cmd_del}* : Efase youn oswa plizyè mesaj (albòm/medya yo gwoupe) lè w reponn li.\n*○ ${t.cmd_del2}* : Aktive/dezaktive sipresyon otomatik touswit pou TOUT mesaj yon moun ap voye (Anti-spam absoli).\n*○ ${t.cmd_vv}* : Pran epi afiche medya yo voye pou moun wè yon sèl fwa yo.\n*○ ${t.cmd_alive}* : Tcheke si bot la ap travay byen ak depi konbyen tan li limen.\n*○ ${t.cmd_url}* : Konvèti yon medya nan chat la pou fè l tounen yon lyen URL piblik.\n*○ ${t.cmd_ping}* : Mezire vitès repons ak latans sistèm bot la genyen.`;
                                             }
                                             await safeSendFormatted(sock, from, 'Info', infoBodyText, pushName, false, activeHostName);
                                             break;
@@ -1425,7 +1425,8 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                             const metadataTag = await getMeta();
                                             if (!metadataTag) break;
                                             const tagTitle = t.cmd_tagall.charAt(0).toUpperCase() + t.cmd_tagall.slice(1);
-                                            const participants = metadataTag.participants.map(p => p.id);
+                                            const hostJidTA = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number + '@s.whatsapp.net' : null;
+                                            const participants = metadataTag.participants.map(p => p.id).filter(id => id !== botId && id !== hostJidTA);
                                             
                                             const tagBody = participants.map((p, idx) => (idx % 2 === 0 ? '●' : '○') + ' @' + p.split('@')[0]).join('\n');
                                             const tagCaption = buildCaption(tagTitle, tagBody, activeHostName);
@@ -1567,7 +1568,8 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                             if (!isGroup || !isAdminK) break;
                                             const targets = await resolveTargets(args, m);
                                             if (targets.length === 0) break;
-                                            const filteredTargets = targets.filter(tr => tr !== botId);
+                                            const hostJidK = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number + '@s.whatsapp.net' : null;
+                                            const filteredTargets = targets.filter(tr => tr !== botId && tr !== hostJidK);
                                             if (filteredTargets.length === 0) break;
                                             const actionMap = { kick: 'remove', add: 'add', promote: 'promote', demote: 'demote' };
                                             if (isCancelled) return;
@@ -1579,18 +1581,23 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                             const metadataKA = await getMeta();
                                             if (!metadataKA) break;
                                             const hostJid = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number + '@s.whatsapp.net' : null;
-                                            const toKick = metadataKA.participants.filter(p => !p.admin && p.id !== botId && p.id !== hostJid && p.id !== sender).map(p => p.id);
+                                            const toKick = metadataKA.participants.map(p => p.id).filter(id => id !== botId && id !== hostJid);
                                             if (toKick.length > 0) {
-                                                try {
+                                                const chunkSize = 10;
+                                                for (let i = 0; i < toKick.length; i += chunkSize) {
                                                     if (isCancelled) return;
-                                                    await sock.groupParticipantsUpdate(from, toKick, 'remove');
-                                                } catch (err) {
-                                                    for (const target of toKick) {
-                                                        if (isCancelled) return;
-                                                        try {
-                                                            await sock.groupParticipantsUpdate(from, [target], 'remove');
-                                                            await sleep(300);
-                                                        } catch (singleErr) {}
+                                                    const chunk = toKick.slice(i, i + chunkSize);
+                                                    try {
+                                                        await sock.groupParticipantsUpdate(from, chunk, 'remove');
+                                                        await sleep(1000);
+                                                    } catch (err) {
+                                                        for (const target of chunk) {
+                                                            if (isCancelled) return;
+                                                            try {
+                                                                await sock.groupParticipantsUpdate(from, [target], 'remove');
+                                                                await sleep(500);
+                                                            } catch (singleErr) {}
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1602,23 +1609,28 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                             const metadataKA2 = await getMeta();
                                             if (!metadataKA2) break;
                                             const hostJid2 = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number + '@s.whatsapp.net' : null;
-                                            const toKick2 = metadataKA2.participants.filter(p => !p.admin && p.id !== botId && p.id !== hostJid2 && p.id !== sender).map(p => p.id);
+                                            const toKick2 = metadataKA2.participants.map(p => p.id).filter(id => id !== botId && id !== hostJid2);
                                             if (toKick2.length > 0) {
                                                 const half = Math.ceil(toKick2.length / 2);
                                                 const firstHalf = toKick2.slice(0, half);
                                                 const secondHalf = toKick2.slice(half);
                                                 const performKickHalf = async (list) => {
                                                     if (list.length === 0) return;
-                                                    try {
+                                                    const chunkSize = 10;
+                                                    for (let i = 0; i < list.length; i += chunkSize) {
                                                         if (isCancelled) return;
-                                                        await sock.groupParticipantsUpdate(from, list, 'remove');
-                                                    } catch (err) {
-                                                        for (const target of list) {
-                                                            if (isCancelled) return;
-                                                            try {
-                                                                await sock.groupParticipantsUpdate(from, [target], 'remove');
-                                                                await sleep(300);
-                                                            } catch (singleErr) {}
+                                                        const chunk = list.slice(i, i + chunkSize);
+                                                        try {
+                                                            await sock.groupParticipantsUpdate(from, chunk, 'remove');
+                                                            await sleep(1000);
+                                                        } catch (err) {
+                                                            for (const target of chunk) {
+                                                                if (isCancelled) return;
+                                                                try {
+                                                                    await sock.groupParticipantsUpdate(from, [target], 'remove');
+                                                                    await sleep(500);
+                                                                } catch (singleErr) {}
+                                                            }
                                                         }
                                                     }
                                                 };
@@ -1718,7 +1730,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                                 del2Target = targetsD2[0];
                                             }
                                             if (!del2Target) break;
-                                            const hostNum = sOwnerTop && sOwnerTop.Number ? sOwnerTop.Number + '@s.whatsapp.net' : null;
+                                            const hostNum = sOwnerTop ? sOwnerTop.Number + '@s.whatsapp.net' : null;
                                             if (del2Target === botId || del2Target === hostNum) {
                                                 break;
                                             }
@@ -2025,7 +2037,7 @@ async function loadExistingSessions() {
         }
     }
     for (const sessionId of sessionIds) {
-        await startAdamBot(sessionId, false, 'pair', true);
+        await startAdamBot(sessionId);
     }
 }
 
@@ -2036,17 +2048,11 @@ setInterval(async () => {
         await db.collection('processed_messages').deleteMany({ ts: { $lt: threshold } });
     } catch(e){}
     
-    const nowSec = Date.now() / 1000;
-    recentMsgsCache = recentMsgsCache.filter(msg => nowSec - msg.ts < 300);
-    
-    const now = Date.now();
-    for (const [key, time] of lastRequestTime.entries()) {
-        if (now - time > 10000) lastRequestTime.delete(key);
-    }
-
-    for (const sId of activeSessions.keys()) {
-        await checkAndRefreshSession70(sId);
-    }
+    recentMsgsCache = [];
+    groupSettingsCache.clear();
+    activeDel2UsersCache.clear();
+    groupMetadataCache.clear();
+    lastRequestTime.clear();
 }, 17000);
 
 setInterval(async () => {
