@@ -649,7 +649,7 @@
         function navigate(view) {
             if (view === 'home') {
                 if (history.state && history.state.view && history.state.view !== 'home') {
-                    history.back();
+                    try { history.back(); } catch (e) {}
                     return;
                 }
                 renderView('home');
@@ -662,7 +662,11 @@
             }
 
             renderView(view);
-            history.pushState({ view }, '', window.location.pathname + window.location.search + '#' + view);
+            try {
+                history.pushState({ view }, '', window.location.pathname + window.location.search + '#' + view);
+            } catch (e) {
+                // Ignore History API block in sandboxed environments
+            }
         }
 
         window.addEventListener('popstate', () => {
@@ -670,7 +674,9 @@
                 saveInfinitePoints();
                 userPoints = INFINITE_POINTS;
                 updateUI();
-                history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
+                try {
+                    history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
+                } catch (e) {}
                 renderView('home');
                 return;
             }
@@ -796,17 +802,24 @@
                 saveInfinitePoints();
                 userPoints = INFINITE_POINTS;
                 initialHash = 'home';
-                history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
+                try {
+                    history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
+                } catch (e) {}
             }
 
             const initialView = initialHash || 'home';
 
-            history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
+            try {
+                history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
+            } catch (e) {}
+            
             renderView('home');
 
             if (initialView !== 'home') {
                 renderView(initialView);
-                history.pushState({ view: initialView }, '', window.location.pathname + window.location.search + '#' + initialView);
+                try {
+                    history.pushState({ view: initialView }, '', window.location.pathname + window.location.search + '#' + initialView);
+                } catch (e) {}
             }
 
             updateUI();
