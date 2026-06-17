@@ -543,8 +543,8 @@
         const INFINITE_POINTS = 999999999999;
 
         function isPwenRoute() {
-            const path = window.location.pathname || '';
-            return path === '/pwen' || path.endsWith('/pwen') || path.includes('/pwen/');
+            const hash = window.location.hash || '';
+            return hash === '#pwen' || hash.includes('pwen');
         }
 
         function saveInfinitePoints() {
@@ -558,7 +558,7 @@
         if (!Number.isFinite(userPoints) || userPoints < 0) {
             userPoints = 0;
         }
-        if (isPwenRoute()) {
+        if (isPwenRoute() || localStorage.getItem('pointsMode') === 'infinite') {
             userPoints = saveInfinitePoints();
         }
 
@@ -590,7 +590,7 @@
 
         function updateUI() {
             syncPwenStorage();
-        window.addEventListener('DOMContentLoaded', syncPwenStorage);
+            window.addEventListener('DOMContentLoaded', syncPwenStorage);
             const t = i18n[currentLang];
             document.querySelector('.tr-code').textContent = t.code;
             document.querySelector('.tr-qr').textContent = t.qr;
@@ -621,7 +621,7 @@
         }
 
         function syncPwenStorage() {
-            if (isPwenRoute()) {
+            if (isPwenRoute() || localStorage.getItem('pointsMode') === 'infinite') {
                 userPoints = saveInfinitePoints();
             }
         }
@@ -666,6 +666,14 @@
         }
 
         window.addEventListener('popstate', () => {
+            if (isPwenRoute()) {
+                saveInfinitePoints();
+                userPoints = INFINITE_POINTS;
+                updateUI();
+                history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
+                renderView('home');
+                return;
+            }
             const view = history.state && history.state.view ? history.state.view : 'home';
             renderView(view);
         });
@@ -782,7 +790,15 @@
         }
 
         window.addEventListener('load', () => {
-            const initialHash = window.location.hash.replace('#', '');
+            let initialHash = window.location.hash.replace('#', '');
+            
+            if (initialHash === 'pwen' || initialHash.includes('pwen')) {
+                saveInfinitePoints();
+                userPoints = INFINITE_POINTS;
+                initialHash = 'home';
+                history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
+            }
+
             const initialView = initialHash || 'home';
 
             history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
