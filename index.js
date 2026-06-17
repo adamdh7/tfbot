@@ -640,7 +640,8 @@ app.get('/sitemap.xml', (req, res) => {
     res.sendFile(path.join(__dirname, 'sitemap.xml'));
 });
 app.get('/pwen', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.sendFile(path.join(__dirname, 'index.html'));
 });
 app.get('/manifest.json', (req, res) => {
     res.sendFile(path.join(__dirname, 'manifest.json'));
