@@ -69,11 +69,18 @@
             flex-direction: column;
             position: relative;
             padding: env(safe-area-inset-top) 24px env(safe-area-inset-bottom) 24px;
+            overflow-y: auto;
+            transition: transform 0.35s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.35s ease;
+        }
+        .app-container.bg-scale {
+            transform: scale(0.92);
+            opacity: 0.4;
+            pointer-events: none;
         }
         .header {
             text-align: center;
-            margin-top: 4vh;
-            margin-bottom: 2vh;
+            margin-top: clamp(2vh, 4vh, 40px);
+            margin-bottom: clamp(1vh, 2vh, 20px);
             position: relative;
         }
         .header-top {
@@ -84,8 +91,8 @@
             margin-bottom: 16px;
         }
         .logo-area {
-            width: 80px;
-            height: 80px;
+            width: clamp(60px, 15vw, 80px);
+            height: clamp(60px, 15vw, 80px);
             border-radius: 20px;
             overflow: hidden;
             cursor: pointer;
@@ -97,22 +104,20 @@
         }
         .menu-icon {
             position: absolute;
-            right: 20px;
+            right: 10px;
             cursor: pointer;
-            background: var(--glass);
-            padding: 10px;
-            border-radius: 50%;
+            background: transparent;
             display: flex;
             align-items: center;
             justify-content: center;
         }
         .menu-icon svg {
-            width: 22px;
-            height: 22px;
+            width: 26px;
+            height: 26px;
             stroke: #ffffff;
         }
         h1 {
-            font-size: 28px;
+            font-size: clamp(22px, 6vw, 28px);
             font-weight: 700;
             color: #ffffff;
         }
@@ -123,7 +128,7 @@
             background: var(--glass);
             padding: 8px 16px;
             border-radius: 20px;
-            font-size: 13px;
+            font-size: clamp(11px, 3.5vw, 13px);
             font-weight: 500;
             color: #ffffff;
             margin-top: 10px;
@@ -135,12 +140,12 @@
             display: flex;
             flex-direction: column;
             justify-content: center;
-            gap: 20px;
+            gap: clamp(12px, 3vh, 20px);
         }
         .input-wrapper {
             background: var(--glass);
             border-radius: 18px;
-            padding: 18px;
+            padding: clamp(14px, 4vw, 18px);
             display: flex;
             align-items: center;
             border: none;
@@ -153,7 +158,7 @@
             background: transparent;
             border: none;
             color: #ffffff;
-            font-size: 18px;
+            font-size: clamp(16px, 4.5vw, 18px);
             width: 100%;
             outline: none;
             font-family: 'Outfit', sans-serif;
@@ -163,15 +168,15 @@
         .action-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 15px;
+            gap: clamp(10px, 3vw, 15px);
             margin-top: 10px;
         }
         .btn {
             background: #ffffff;
             color: #000000;
-            padding: 20px;
+            padding: clamp(15px, 4vw, 20px);
             border-radius: 18px;
-            font-size: 16px;
+            font-size: clamp(14px, 4vw, 16px);
             font-weight: 600;
             cursor: pointer;
             display: flex;
@@ -196,14 +201,14 @@
             background: var(--glass);
             border: none;
             border-radius: 20px;
-            padding: 24px;
+            padding: clamp(16px, 5vw, 24px);
             margin-top: 20px;
             text-align: center;
             display: none;
         }
         .code-box {
             font-family: 'Courier New', monospace;
-            font-size: 32px;
+            font-size: clamp(24px, 8vw, 32px);
             color: #ffffff;
             letter-spacing: 4px;
             margin: 15px 0;
@@ -229,17 +234,20 @@
             animation: spin 0.8s linear infinite;
         }
         #qr-container {
-            background: #ffffff;
-            padding: 8px;
-            border-radius: 8px;
+            background: transparent;
+            padding: 0;
             display: inline-block;
             margin: 0 auto;
         }
+        #qr-container img {
+            width: clamp(160px, 50vw, 220px) !important;
+            height: clamp(160px, 50vw, 220px) !important;
+        }
         .notification {
             position: fixed;
-            top: 40px;
+            bottom: 30px;
             left: 50%;
-            transform: translateX(-50%);
+            transform: translateX(-50%) translateY(30px);
             background: rgba(40, 40, 40, 0.95);
             backdrop-filter: blur(10px);
             -webkit-backdrop-filter: blur(10px);
@@ -250,10 +258,14 @@
             font-weight: 500;
             opacity: 0;
             z-index: 9999;
-            transition: opacity 0.3s ease-in-out;
+            transition: transform 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275), opacity 0.3s ease-in-out;
             pointer-events: none;
             box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
             cursor: pointer;
+        }
+        .notification.show {
+            transform: translateX(-50%) translateY(0);
+            opacity: 1;
         }
         .view-overlay {
             position: fixed;
@@ -263,48 +275,68 @@
             height: 100vh;
             background: #000000;
             z-index: 1000;
-            display: none;
+            display: flex;
             flex-direction: column;
             padding: 40px 24px;
             overflow-y: auto;
+            transform: translateX(100%);
+            visibility: hidden;
+            pointer-events: none;
+            transition: transform 0.35s cubic-bezier(0.25, 1, 0.5, 1), visibility 0.35s;
+        }
+        .view-overlay.active {
+            transform: translateX(0);
+            visibility: visible;
+            pointer-events: auto;
+        }
+        .overlay-close {
+            position: absolute;
+            top: clamp(15px, 4vh, 24px);
+            left: 20px;
+            cursor: pointer;
+            padding: 10px;
+            z-index: 1001;
         }
         .view-overlay h2 {
+            margin-top: 15px;
             margin-bottom: 30px;
             text-align: center;
-            font-size: 24px;
+            font-size: clamp(20px, 6vw, 24px);
         }
         .menu-item {
-            padding: 20px;
+            padding: clamp(16px, 4vw, 20px);
             border: none;
             border-radius: 16px;
             margin-bottom: 12px;
             text-align: center;
-            font-size: 17px;
+            font-size: clamp(15px, 4.5vw, 17px);
             font-weight: 500;
             cursor: pointer;
             background: var(--glass);
+            color: #ffffff;
         }
         .lang-btn {
-            padding: 20px;
+            padding: clamp(16px, 4vw, 20px);
             border: none;
             border-radius: 16px;
             margin-bottom: 12px;
             text-align: center;
-            font-size: 17px;
+            font-size: clamp(15px, 4.5vw, 17px);
             font-weight: 500;
             background: var(--glass);
+            color: #ffffff;
             cursor: pointer;
         }
         .info-container {
             width: 100%;
             text-align: left;
             color: #cccccc;
-            font-size: 15px;
+            font-size: clamp(14px, 4vw, 15px);
             line-height: 1.6;
             margin-bottom: 20px;
         }
         .points-header {
-            font-size: 20px;
+            font-size: clamp(18px, 5vw, 20px);
             text-align: center;
             margin-bottom: 40px;
             display: flex;
@@ -313,13 +345,13 @@
             gap: 10px;
         }
         .btn-clicks {
-            background: #ffffff;
-            color: #000000;
-            padding: 20px;
+            background: var(--glass);
+            color: #ffffff;
+            padding: clamp(16px, 4vw, 20px);
             border-radius: 16px;
             text-align: center;
             font-weight: 600;
-            font-size: 18px;
+            font-size: clamp(16px, 4.5vw, 18px);
             cursor: pointer;
             border: none;
             width: 100%;
@@ -371,6 +403,9 @@
     </div>
 
     <div class="view-overlay" id="view-menu">
+        <div class="overlay-close" onclick="navigate('home')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+        </div>
         <h2 class="tr-menu-title">Menu</h2>
         <button class="menu-item tr-menu-lang" onclick="navigate('langues')">Langues</button>
         <button class="menu-item tr-menu-info" onclick="navigate('info')">Info</button>
@@ -378,6 +413,9 @@
     </div>
 
     <div class="view-overlay" id="view-langues">
+        <div class="overlay-close" onclick="navigate('home')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+        </div>
         <h2 class="tr-lang-title">Langues</h2>
         <button class="lang-btn" onclick="setLang('fr')">Français</button>
         <button class="lang-btn" onclick="setLang('en')">English</button>
@@ -386,24 +424,30 @@
     </div>
 
     <div class="view-overlay" id="view-info">
+        <div class="overlay-close" onclick="navigate('home')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+        </div>
         <h2 class="tr-info-title">Info</h2>
         <div class="info-container" id="info-content"></div>
     </div>
 
     <div class="view-overlay" id="view-points">
+        <div class="overlay-close" onclick="navigate('home')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+        </div>
         <div class="points-header tr-points-header">Tu as 0 points</div>
         <button class="btn-clicks tr-clicks" id="action-clicks" onclick="openAd()">Clicks</button>
     </div>
 
-    <div class="notification" id="notif" onclick="this.style.opacity='0'; this.style.pointerEvents='none';"></div>
+    <div class="notification" id="notif" onclick="this.classList.remove('show'); this.style.pointerEvents='none';"></div>
 
     <script>
         document.addEventListener('touchmove', function(e) {
-            if (e.target.closest('.view-overlay')) return;
+            if (e.target.closest('.view-overlay') || e.target.closest('#view-home')) return;
             e.preventDefault();
         }, { passive: false });
         document.addEventListener('wheel', function(e) {
-            if (e.target.closest('.view-overlay')) return;
+            if (e.target.closest('.view-overlay') || e.target.closest('#view-home')) return;
             e.preventDefault();
         }, { passive: false });
         document.addEventListener('dblclick', function(e) {
@@ -432,7 +476,7 @@
                         <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
                         <span style="font-size: 15px;"><strong>3 points</strong> pour un Code QR</span>
                     </div>
-                    <p style="text-align:justify; margin-bottom:15px;">Pour obtenir vos points, accédez au menu, puis à la section Points, cliquez sur le bouton "Clicks" et restez sur la page affichée pendant au moins 7 secondes. Une interaction active valide l'ajout d'un point.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Pour obtenir vos points, accédez au menu, puis à la section Points, cliquez sur le bouton "Clicks" et restez sur la page affichée pendant au moins 4 secondes. Une interaction active valide l'ajout d'un point.</p>
                     <p style="text-align:justify; margin-bottom:15px;">Une fois connecté, utilisez la commande .menu pour découvrir une vaste gamme d'outils avancés et pratiques.</p>
                 `
             },
@@ -455,7 +499,7 @@
                         <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
                         <span style="font-size: 15px;"><strong>3 points</strong> for a QR Code</span>
                     </div>
-                    <p style="text-align:justify; margin-bottom:15px;">To obtain your points, click on the menu button then points then click on the button you see and stay on the displayed page for at least 7 seconds. An active exploration validates your point.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">To obtain your points, click on the menu button then points then click on the button you see and stay on the displayed page for at least 4 seconds. An active exploration validates your point.</p>
                     <p style="text-align:justify; margin-bottom:15px;">Once connected, type the menu command to discover a multitude of unexpected and practical tools.</p>
                 `
             },
@@ -478,7 +522,7 @@
                         <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
                         <span style="font-size: 15px;"><strong>3 puntos</strong> para un Código QR</span>
                     </div>
-                    <p style="text-align:justify; margin-bottom:15px;">Para obtener tus puntos, haz clic en el botón menú luego puntos luego haz clic en el botón que ves y permanece en la página mostrada durante al menos 7 segundos. Una exploración activa valida tu punto.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Para obtener tus puntos, haz clic en el botón menú luego puntos luego haz clic en el botón que ves y permanece en la página mostrada durante al menos 4 segundos. Una exploración activa valida tu punto.</p>
                     <p style="text-align:justify; margin-bottom:15px;">Una vez conectado, escribe el comando de menú para descubrir una multitud de herramientas inesperadas y prácticas.</p>
                 `
             },
@@ -501,13 +545,13 @@
                         <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
                         <span style="font-size: 15px;"><strong>3 pwen</strong> pou yon Kòd QR</span>
                     </div>
-                    <p style="text-align:justify; margin-bottom:15px;">Pou jwenn pwen ou yo, klike sou bouton meni a, answit pwen, answit klike sou bouton boanc ou wè a epi rete sou paj ki afiche a pandan omwen 7 segonn. Yon eksplorasyon aktif valide pwen ou.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Pou jwenn pwen ou yo, klike sou bouton meni a, answit pwen, answit klike sou bouton boanc ou wè a epi rete sou paj ki afiche a pandan omwen 4 segonn. Yon eksplorasyon aktif valide pwen ou.</p>
                     <p style="text-align:justify; margin-bottom:15px;">Yon fwa konekte, tape kòmand meni a pou dekouvri yon pakèt zouti inatandi ak pratik.</p>
                 `
             }
         };
 
-        const isInfinite = window.location.pathname.endsWith('/ok');
+        const isInfinite = window.location.pathname.endsWith('/pwen');
 
         let currentLang = localStorage.getItem('lang');
         if (!currentLang) {
@@ -562,14 +606,17 @@
         }
 
         function navigate(view) {
-            document.querySelectorAll('.view-overlay').forEach(el => el.style.display = 'none');
-            document.getElementById('view-home').style.display = view === 'home' ? 'flex' : 'none';
-            if (view !== 'home') {
-                const target = document.getElementById('view-' + view);
-                if (target) target.style.display = 'flex';
-                window.location.hash = view;
-            } else {
+            if (view === 'home') {
+                document.querySelectorAll('.view-overlay').forEach(el => el.classList.remove('active'));
+                document.getElementById('view-home').classList.remove('bg-scale');
                 window.history.replaceState(null, null, ' ');
+            } else {
+                document.querySelectorAll('.view-overlay').forEach(el => {
+                    if (el.id === 'view-' + view) el.classList.add('active');
+                    else el.classList.remove('active');
+                });
+                document.getElementById('view-home').classList.add('bg-scale');
+                window.location.hash = view;
             }
         }
 
@@ -581,10 +628,10 @@
 
         function showNotif(msg) {
             ui.notif.textContent = msg;
-            ui.notif.style.opacity = '1';
+            ui.notif.classList.add('show');
             ui.notif.style.pointerEvents = 'auto';
             setTimeout(() => {
-                ui.notif.style.opacity = '0';
+                ui.notif.classList.remove('show');
                 ui.notif.style.pointerEvents = 'none';
             }, 3000);
         }
@@ -677,7 +724,7 @@
                     ui.code.style.display = 'none';
                     ui.qr.style.display = 'inline-block';
                     ui.hint.style.display = 'block';
-                    new QRCode(ui.qr, { text: data.qr, width: 220, height: 220, colorDark: "#000000", colorLight: "#ffffff" });
+                    new QRCode(ui.qr, { text: data.qr, width: 220, height: 220, colorDark: "#ffffff", colorLight: "#000000" });
                     ui.hint.textContent = t.qr_hint;
                 }
 
