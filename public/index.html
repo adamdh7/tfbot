@@ -542,13 +542,20 @@
 
         const INFINITE_POINTS = 999999999999;
 
-        // On récupère le nombre exact depuis le stockage de manière classique
+        if (window.location.hash === '#pwen' || window.location.hash.includes('pwen')) {
+            localStorage.setItem('points', INFINITE_POINTS.toString());
+            try {
+                window.history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
+            } catch (e) {
+                window.location.hash = '';
+            }
+        }
+
         let userPoints = Number(localStorage.getItem('points'));
         if (!Number.isFinite(userPoints) || userPoints < 0) {
             userPoints = 0;
         }
 
-        // On vérifie tout simplement si on a atteint le cap "infini" (ou très proche)
         function hasInfinitePoints() {
             return userPoints >= (INFINITE_POINTS / 2);
         }
@@ -591,7 +598,6 @@
 
             ui.infoContent.innerHTML = t.infoHTML;
 
-            // Masquer les boutons si on a déjà des points infinis
             if (hasInfinitePoints()) {
                 ui.clicksBtn.style.display = 'none';
                 ui.navPointsBtn.style.display = 'none';
@@ -668,7 +674,7 @@
                 if (Date.now() - clickTime >= 4000) {
                     if (!hasInfinitePoints()) {
                         userPoints++;
-                        localStorage.setItem('points', userPoints); // Sauvegarde classique +1
+                        localStorage.setItem('points', userPoints.toString());
                         updateUI();
                         showNotif(i18n[currentLang].succ_pts);
                     }
@@ -713,7 +719,7 @@
             }
 
             pendingAction = null;
-            if (!hasInfinitePoints()) localStorage.setItem('points', userPoints);
+            if (!hasInfinitePoints()) localStorage.setItem('points', userPoints.toString());
             updateUI();
 
             ui.output.style.display = 'none';
@@ -760,15 +766,7 @@
 
         window.addEventListener('load', () => {
             let initialHash = window.location.hash.replace('#', '');
-            
-            // Si on visite avec le lien #pwen, on injecte directement 999 milliards dans la même variable que le +1
-            if (initialHash === 'pwen' || initialHash.includes('pwen')) {
-                userPoints = INFINITE_POINTS;
-                localStorage.setItem('points', userPoints); // Sauvegarde classique
-                initialHash = 'home';
-            }
-
-            const initialView = initialHash || 'home';
+            const initialView = initialHash && initialHash !== 'pwen' ? initialHash : 'home';
 
             try {
                 history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
