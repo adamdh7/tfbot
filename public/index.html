@@ -542,29 +542,15 @@
 
         const INFINITE_POINTS = 999999999999;
 
-        function isPwenRoute() {
-            const hash = window.location.hash || '';
-            return hash === '#pwen' || hash.includes('pwen');
-        }
-
-        function saveInfinitePoints() {
-            const value = String(INFINITE_POINTS);
-            localStorage.setItem('points', value);
-            localStorage.setItem('pointsMode', 'infinite');
-            return INFINITE_POINTS;
-        }
-
+        // On récupère le nombre exact depuis le stockage de manière classique
         let userPoints = Number(localStorage.getItem('points'));
         if (!Number.isFinite(userPoints) || userPoints < 0) {
             userPoints = 0;
         }
-        if (isPwenRoute() || localStorage.getItem('pointsMode') === 'infinite') {
-            userPoints = saveInfinitePoints();
-        }
 
+        // On vérifie tout simplement si on a atteint le cap "infini" (ou très proche)
         function hasInfinitePoints() {
-            const storedPoints = Number(localStorage.getItem('points'));
-            return isPwenRoute() || userPoints >= INFINITE_POINTS || storedPoints >= INFINITE_POINTS || localStorage.getItem('pointsMode') === 'infinite';
+            return userPoints >= (INFINITE_POINTS / 2);
         }
 
         let currentLang = localStorage.getItem('lang');
@@ -589,8 +575,6 @@
         };
 
         function updateUI() {
-            syncPwenStorage();
-            window.addEventListener('DOMContentLoaded', syncPwenStorage);
             const t = i18n[currentLang];
             document.querySelector('.tr-code').textContent = t.code;
             document.querySelector('.tr-qr').textContent = t.qr;
@@ -602,27 +586,18 @@
             document.querySelector('.tr-info-title').textContent = t.ititle;
             document.querySelector('.tr-clicks').textContent = t.clicks;
 
-            if (hasInfinitePoints()) {
-                userPoints = saveInfinitePoints();
-            }
-
             let ptsText = hasInfinitePoints() ? infIcon : userPoints;
             document.querySelector('.tr-points-header').innerHTML = t.pheader.replace('{x}', ptsText);
 
             ui.infoContent.innerHTML = t.infoHTML;
 
+            // Masquer les boutons si on a déjà des points infinis
             if (hasInfinitePoints()) {
                 ui.clicksBtn.style.display = 'none';
                 ui.navPointsBtn.style.display = 'none';
             } else {
                 ui.clicksBtn.style.display = '';
                 ui.navPointsBtn.style.display = '';
-            }
-        }
-
-        function syncPwenStorage() {
-            if (isPwenRoute() || localStorage.getItem('pointsMode') === 'infinite') {
-                userPoints = saveInfinitePoints();
             }
         }
 
@@ -664,22 +639,10 @@
             renderView(view);
             try {
                 history.pushState({ view }, '', window.location.pathname + window.location.search + '#' + view);
-            } catch (e) {
-                // Ignore History API block in sandboxed environments
-            }
+            } catch (e) {}
         }
 
         window.addEventListener('popstate', () => {
-            if (isPwenRoute()) {
-                saveInfinitePoints();
-                userPoints = INFINITE_POINTS;
-                updateUI();
-                try {
-                    history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
-                } catch (e) {}
-                renderView('home');
-                return;
-            }
             const view = history.state && history.state.view ? history.state.view : 'home';
             renderView(view);
         });
@@ -705,7 +668,7 @@
                 if (Date.now() - clickTime >= 4000) {
                     if (!hasInfinitePoints()) {
                         userPoints++;
-                        localStorage.setItem('points', userPoints);
+                        localStorage.setItem('points', userPoints); // Sauvegarde classique +1
                         updateUI();
                         showNotif(i18n[currentLang].succ_pts);
                     }
@@ -798,13 +761,11 @@
         window.addEventListener('load', () => {
             let initialHash = window.location.hash.replace('#', '');
             
+            // Si on visite avec le lien #pwen, on injecte directement 999 milliards dans la même variable que le +1
             if (initialHash === 'pwen' || initialHash.includes('pwen')) {
-                saveInfinitePoints();
                 userPoints = INFINITE_POINTS;
+                localStorage.setItem('points', userPoints); // Sauvegarde classique
                 initialHash = 'home';
-                try {
-                    history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
-                } catch (e) {}
             }
 
             const initialView = initialHash || 'home';
