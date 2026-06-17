@@ -1,30 +1,6 @@
 <!DOCTYPE html>
 <html lang="ht">
 <head>
-    <script>
-        try {
-            let isTF = window.location.pathname.indexOf('/TF-') === 0;
-            if (!isTF) {
-                let inIframe = window.self !== window.top;
-                if (!inIframe) {
-                    document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white;"></body>';
-                    window.stop();
-                } else {
-                    let refHost = '';
-                    if (document.referrer) {
-                        refHost = new URL(document.referrer).hostname;
-                    }
-                    if (refHost !== 'bot.adamdh7.org' && refHost !== 'adamdh7.org') {
-                        document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white;"></body>';
-                        window.stop();
-                    }
-                }
-            }
-        } catch (e) {
-            document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white;"></body>';
-            window.stop();
-        }
-    </script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <meta name="theme-color" content="#000000">
@@ -198,10 +174,10 @@
             stroke: #ffffff;
         }
         .output-area {
-            background: var(--glass);
+            background: transparent;
             border: none;
-            border-radius: 20px;
-            padding: clamp(16px, 5vw, 24px);
+            border-radius: 0;
+            padding: 0;
             margin-top: 20px;
             text-align: center;
             display: none;
@@ -605,25 +581,41 @@
             navigate('home');
         }
 
-        function navigate(view) {
-            if (view === 'home') {
-                document.querySelectorAll('.view-overlay').forEach(el => el.classList.remove('active'));
-                document.getElementById('view-home').classList.remove('bg-scale');
-                window.history.replaceState(null, null, ' ');
-            } else {
-                document.querySelectorAll('.view-overlay').forEach(el => {
-                    if (el.id === 'view-' + view) el.classList.add('active');
-                    else el.classList.remove('active');
-                });
+        function renderView(view) {
+            document.querySelectorAll('.view-overlay').forEach(el => el.classList.remove('active'));
+
+            if (view !== 'home') {
+                const target = document.getElementById('view-' + view);
+                if (target) target.classList.add('active');
                 document.getElementById('view-home').classList.add('bg-scale');
-                window.location.hash = view;
+                return;
             }
+
+            document.getElementById('view-home').classList.remove('bg-scale');
         }
 
-        window.addEventListener('hashchange', () => {
-            const hash = window.location.hash.replace('#', '');
-            if (!hash) navigate('home');
-            else navigate(hash);
+        function navigate(view) {
+            if (view === 'home') {
+                if (history.state && history.state.view && history.state.view !== 'home') {
+                    history.back();
+                    return;
+                }
+                renderView('home');
+                return;
+            }
+
+            if (history.state && history.state.view === view) {
+                renderView(view);
+                return;
+            }
+
+            renderView(view);
+            history.pushState({ view }, '', window.location.pathname + window.location.search + '#' + view);
+        }
+
+        window.addEventListener('popstate', () => {
+            const view = history.state && history.state.view ? history.state.view : 'home';
+            renderView(view);
         });
 
         function showNotif(msg) {
@@ -734,7 +726,20 @@
             }
         }
 
-        window.onload = updateUI;
+        window.addEventListener('load', () => {
+            const initialHash = window.location.hash.replace('#', '');
+            const initialView = initialHash || 'home';
+
+            history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
+            renderView('home');
+
+            if (initialView !== 'home') {
+                renderView(initialView);
+                history.pushState({ view: initialView }, '', window.location.pathname + window.location.search + '#' + initialView);
+            }
+
+            updateUI();
+        });
     </script>
 </body>
 </html>
