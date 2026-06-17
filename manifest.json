@@ -1,5 +1,5 @@
 {
-  "id": "https://adamdh7.org/",
+  "id": "org.adamdh7",
   "lang": "ht",
   "dir": "ltr",
   "name": "Bot",
@@ -16,13 +16,13 @@
   "prefer_related_applications": false,
   "icons": [
     {
-      "src": "https://adamdh7.org/adamdh7.png",
+      "src": "https://adamdh7.org/asset/nwa.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "https://adamdh7.org/adamdh7.png",
+      "src": "https://adamdh7.org/asset/nwa.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"
