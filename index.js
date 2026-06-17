@@ -639,7 +639,7 @@ app.use(async (req, res, next) => {
 app.get('/sitemap.xml', (req, res) => {
     res.sendFile(path.join(__dirname, 'sitemap.xml'));
 });
-app.get('/pwen', (req, res) => {
+app.get('*', (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.sendFile(path.join(__dirname, 'index.html'));
 });
