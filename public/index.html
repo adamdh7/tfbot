@@ -541,18 +541,30 @@
         };
 
         const INFINITE_POINTS = 999999999999;
+
+        function isPwenRoute() {
+            const path = window.location.pathname || '';
+            return path === '/pwen' || path.endsWith('/pwen') || path.includes('/pwen/');
+        }
+
+        function saveInfinitePoints() {
+            const value = String(INFINITE_POINTS);
+            localStorage.setItem('points', value);
+            localStorage.setItem('pointsMode', 'infinite');
+            return INFINITE_POINTS;
+        }
+
         let userPoints = Number(localStorage.getItem('points'));
-        if (!Number.isFinite(userPoints)) {
+        if (!Number.isFinite(userPoints) || userPoints < 0) {
             userPoints = 0;
         }
-        if (window.location.pathname.endsWith('/pwen')) {
-            userPoints = INFINITE_POINTS;
-            localStorage.setItem('points', String(INFINITE_POINTS));
+        if (isPwenRoute()) {
+            userPoints = saveInfinitePoints();
         }
 
         function hasInfinitePoints() {
             const storedPoints = Number(localStorage.getItem('points'));
-            return window.location.pathname.endsWith('/pwen') || userPoints >= INFINITE_POINTS || storedPoints >= INFINITE_POINTS;
+            return isPwenRoute() || userPoints >= INFINITE_POINTS || storedPoints >= INFINITE_POINTS || localStorage.getItem('pointsMode') === 'infinite';
         }
 
         let currentLang = localStorage.getItem('lang');
@@ -577,6 +589,8 @@
         };
 
         function updateUI() {
+            syncPwenStorage();
+        window.addEventListener('DOMContentLoaded', syncPwenStorage);
             const t = i18n[currentLang];
             document.querySelector('.tr-code').textContent = t.code;
             document.querySelector('.tr-qr').textContent = t.qr;
@@ -589,8 +603,7 @@
             document.querySelector('.tr-clicks').textContent = t.clicks;
 
             if (hasInfinitePoints()) {
-                userPoints = INFINITE_POINTS;
-                localStorage.setItem('points', String(INFINITE_POINTS));
+                userPoints = saveInfinitePoints();
             }
 
             let ptsText = hasInfinitePoints() ? infIcon : userPoints;
@@ -604,6 +617,12 @@
             } else {
                 ui.clicksBtn.style.display = '';
                 ui.navPointsBtn.style.display = '';
+            }
+        }
+
+        function syncPwenStorage() {
+            if (isPwenRoute()) {
+                userPoints = saveInfinitePoints();
             }
         }
 
