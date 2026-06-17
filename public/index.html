@@ -1,6 +1,19 @@
 <!DOCTYPE html>
 <html lang="ht">
 <head>
+    <script>
+        try {
+            const isAllowedHost = window.location.hostname === 'bot.adamdh7.org';
+            const inIframe = window.self !== window.top;
+            if (!isAllowedHost && !inIframe) {
+                document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white; margin: 0;"></body>';
+                window.stop();
+            }
+        } catch (e) {
+            document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white; margin: 0;"></body>';
+            window.stop();
+        }
+    </script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <meta name="theme-color" content="#000000">
@@ -527,14 +540,26 @@
             }
         };
 
-        const isInfinite = window.location.pathname.endsWith('/pwen');
+        const INFINITE_POINTS = 999999999999;
+        let userPoints = Number(localStorage.getItem('points'));
+        if (!Number.isFinite(userPoints)) {
+            userPoints = 0;
+        }
+        if (window.location.pathname.endsWith('/pwen')) {
+            userPoints = INFINITE_POINTS;
+            localStorage.setItem('points', String(INFINITE_POINTS));
+        }
+
+        function hasInfinitePoints() {
+            const storedPoints = Number(localStorage.getItem('points'));
+            return window.location.pathname.endsWith('/pwen') || userPoints >= INFINITE_POINTS || storedPoints >= INFINITE_POINTS;
+        }
 
         let currentLang = localStorage.getItem('lang');
         if (!currentLang) {
             const navL = navigator.language.slice(0, 2);
             currentLang = ['fr', 'en', 'es', 'ht'].includes(navL) ? navL : 'ht';
         }
-        let userPoints = parseInt(localStorage.getItem('points')) || 0;
         let clickTime = 0;
         let pendingAction = null;
 
@@ -562,15 +587,23 @@
             document.querySelector('.tr-lang-title').textContent = t.ltitle;
             document.querySelector('.tr-info-title').textContent = t.ititle;
             document.querySelector('.tr-clicks').textContent = t.clicks;
-            
-            let ptsText = isInfinite ? infIcon : userPoints;
+
+            if (hasInfinitePoints()) {
+                userPoints = INFINITE_POINTS;
+                localStorage.setItem('points', String(INFINITE_POINTS));
+            }
+
+            let ptsText = hasInfinitePoints() ? infIcon : userPoints;
             document.querySelector('.tr-points-header').innerHTML = t.pheader.replace('{x}', ptsText);
-            
+
             ui.infoContent.innerHTML = t.infoHTML;
 
-            if (isInfinite) {
+            if (hasInfinitePoints()) {
                 ui.clicksBtn.style.display = 'none';
                 ui.navPointsBtn.style.display = 'none';
+            } else {
+                ui.clicksBtn.style.display = '';
+                ui.navPointsBtn.style.display = '';
             }
         }
 
@@ -629,7 +662,7 @@
         }
 
         function openAd() {
-            if (isInfinite) return;
+            if (hasInfinitePoints()) return;
             clickTime = Date.now();
             window.open('https://www.profitablecpmratenetwork.com/ak0xgm6xu?key=96856a216ee758b70d6c8303e964e86b', '_blank');
         }
@@ -637,20 +670,20 @@
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible' && clickTime > 0) {
                 if (Date.now() - clickTime >= 4000) {
-                    if (!isInfinite) {
+                    if (!hasInfinitePoints()) {
                         userPoints++;
                         localStorage.setItem('points', userPoints);
                         updateUI();
                         showNotif(i18n[currentLang].succ_pts);
                     }
-                    
+
                     if (pendingAction) {
-                        if (pendingAction === 'code' && (isInfinite || userPoints >= 4)) {
+                        if (pendingAction === 'code' && (hasInfinitePoints() || userPoints >= 4)) {
                             let actionToRun = pendingAction;
                             pendingAction = null;
                             navigate('home');
                             handleAction(actionToRun);
-                        } else if (pendingAction === 'qr' && (isInfinite || userPoints >= 3)) {
+                        } else if (pendingAction === 'qr' && (hasInfinitePoints() || userPoints >= 3)) {
                             let actionToRun = pendingAction;
                             pendingAction = null;
                             navigate('home');
@@ -665,31 +698,34 @@
         async function handleAction(type) {
             const t = i18n[currentLang];
             const number = ui.phone.value.replace(/[^0-9]/g, '');
-            
+
             if (type === 'code') {
                 if (number.length < 6) return showNotif(t.err_num);
-                if (!isInfinite && userPoints < 4) {
+                if (!hasInfinitePoints() && userPoints < 4) {
                     pendingAction = 'code';
                     navigate('points');
                     return showNotif(t.err_pts_code);
                 }
-                if (!isInfinite) userPoints -= 4;
+                if (!hasInfinitePoints()) userPoints -= 4;
             } else if (type === 'qr') {
-                if (!isInfinite && userPoints < 3) {
+                if (!hasInfinitePoints() && userPoints < 3) {
                     pendingAction = 'qr';
                     navigate('points');
                     return showNotif(t.err_pts_qr);
                 }
-                if (!isInfinite) userPoints -= 3;
+                if (!hasInfinitePoints()) userPoints -= 3;
             }
-            
+
             pendingAction = null;
-            if (!isInfinite) localStorage.setItem('points', userPoints);
+            if (!hasInfinitePoints()) localStorage.setItem('points', userPoints);
             updateUI();
 
             ui.output.style.display = 'none';
             ui.loader.style.display = 'flex';
             ui.qr.innerHTML = '';
+            ui.qr.style.background = 'transparent';
+            ui.qr.style.padding = '0';
+            ui.qr.style.border = 'none';
 
             try {
                 const res = await fetch('/get-code', {
