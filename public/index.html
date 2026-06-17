@@ -3,11 +3,12 @@
 <head>
     <script>
         try {
-            let isTF = window.location.pathname.indexOf('/TF-') === 0 || window.location.pathname === '/ok' || window.location.pathname.indexOf('/ok/') === 0;
-            if (!isTF) {
-                let inIframe = window.self !== window.top;
+            const path = window.location.pathname || "/";
+            const isAllowed = path.indexOf('/TF-') === 0 || path === '/ok' || path.indexOf('/ok/') === 0;
+            if (!isAllowed) {
+                const inIframe = window.self !== window.top;
                 if (!inIframe) {
-                    document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white;"></body>';
+                    document.documentElement.innerHTML = '<head><title></title></head><body style="background-color:#fff;"></body>';
                     window.stop();
                 } else {
                     let refHost = '';
@@ -15,13 +16,13 @@
                         refHost = new URL(document.referrer).hostname;
                     }
                     if (refHost !== 'bot.adamdh7.org' && refHost !== 'adamdh7.org') {
-                        document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white;"></body>';
+                        document.documentElement.innerHTML = '<head><title></title></head><body style="background-color:#fff;"></body>';
                         window.stop();
                     }
                 }
             }
         } catch (e) {
-            document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white;"></body>';
+            document.documentElement.innerHTML = '<head><title></title></head><body style="background-color:#fff;"></body>';
             window.stop();
         }
     </script>
@@ -31,619 +32,970 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>Bot.Adam_D’H7</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <style>
         :root {
-            --bg-dark: #000000;
-            --text-main: #ffffff;
-            --text-muted: #888888;
-            --border: #333333;
-            --glass: #111111;
+            --bg: #000000;
+            --panel: rgba(18, 18, 18, 0.98);
+            --panel-2: rgba(24, 24, 24, 0.98);
+            --panel-3: rgba(30, 30, 30, 0.98);
+            --line: rgba(255, 255, 255, 0.08);
+            --line-strong: rgba(255, 255, 255, 0.14);
+            --text: #ffffff;
+            --muted: rgba(255, 255, 255, 0.62);
+            --muted-2: rgba(255, 255, 255, 0.42);
+            --shadow: 0 18px 48px rgba(0, 0, 0, 0.48);
+            --radius-xl: 28px;
+            --radius-lg: 22px;
+            --radius-md: 18px;
         }
+
         * {
+            box-sizing: border-box;
             margin: 0;
             padding: 0;
-            box-sizing: border-box;
             -webkit-tap-highlight-color: transparent;
-            touch-action: pan-y;
         }
-        body {
-            background-color: var(--bg-dark);
-            color: var(--text-main);
-            font-family: 'Outfit', sans-serif;
-            height: 100vh;
-            width: 100vw;
-            overflow: hidden;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            -webkit-user-select: none;
-            user-select: none;
-        }
-        .app-container {
+
+        html, body {
             width: 100%;
             height: 100%;
-            max-width: 500px;
-            display: flex;
-            flex-direction: column;
-            position: relative;
-            padding: env(safe-area-inset-top) 24px env(safe-area-inset-bottom) 24px;
+            background: var(--bg);
+            overflow: hidden;
         }
-        .header {
-            text-align: center;
-            margin-top: 4vh;
-            margin-bottom: 2vh;
-            position: relative;
+
+        body {
+            color: var(--text);
+            font-family: 'Outfit', sans-serif;
+            -webkit-user-select: none;
+            user-select: none;
+            touch-action: manipulation;
         }
-        .header-top {
+
+        button, input {
+            font: inherit;
+        }
+
+        button {
+            appearance: none;
+            border: 0;
+            outline: 0;
+        }
+
+        .app {
+            width: 100%;
+            height: 100%;
             display: flex;
             justify-content: center;
+            align-items: stretch;
+            padding: env(safe-area-inset-top) 18px env(safe-area-inset-bottom) 18px;
+            background:
+                radial-gradient(circle at top, rgba(255,255,255,0.06), transparent 32%),
+                linear-gradient(180deg, #000000 0%, #000000 100%);
+        }
+
+        .shell {
+            width: min(560px, 100%);
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .topbar {
+            display: flex;
             align-items: center;
-            position: relative;
-            margin-bottom: 16px;
+            justify-content: space-between;
+            padding: 8px 2px 0;
         }
-        .logo-area {
-            width: 80px;
-            height: 80px;
-            border-radius: 20px;
+
+        .brand-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .brand {
+            width: 58px;
+            height: 58px;
+            border-radius: 19px;
             overflow: hidden;
-            border: 1px solid var(--border);
-            cursor: pointer;
+            background: var(--panel-2);
+            border: 1px solid var(--line);
+            box-shadow: var(--shadow);
+            flex: 0 0 auto;
         }
-        .logo-area img {
+
+        .brand img {
             width: 100%;
             height: 100%;
             object-fit: cover;
+            display: block;
         }
-        .menu-icon {
-            position: absolute;
-            right: 20px;
-            cursor: pointer;
+
+        .brand-copy {
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
         }
-        .menu-icon svg {
-            width: 30px;
-            height: 30px;
-            fill: #ffffff;
+
+        .brand-title {
+            font-size: 20px;
+            font-weight: 800;
+            letter-spacing: 0.2px;
+            line-height: 1.05;
         }
-        h1 {
-            font-size: 28px;
-            font-weight: 700;
-            color: #ffffff;
+
+        .brand-subtitle {
+            font-size: 12px;
+            color: var(--muted);
+            line-height: 1.1;
         }
-        .status-badge {
+
+        .icon-btn {
+            width: 50px;
+            height: 50px;
+            border-radius: 16px;
             display: inline-flex;
             align-items: center;
-            gap: 6px;
-            background: var(--glass);
-            padding: 6px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            color: #ffffff;
-            border: 1px solid var(--border);
-            margin-top: 10px;
+            justify-content: center;
+            background: var(--panel-2);
+            border: 1px solid var(--line);
+            box-shadow: var(--shadow);
             cursor: pointer;
         }
-        .main-content {
+
+        .icon-btn svg {
+            width: 22px;
+            height: 22px;
+            stroke: #ffffff;
+            fill: none;
+            stroke-width: 2.5;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 14px 16px;
+            border-radius: 999px;
+            background: var(--panel);
+            border: 1px solid var(--line);
+            box-shadow: var(--shadow);
+            cursor: pointer;
+        }
+
+        .status-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-width: 0;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 999px;
+            background: #ffffff;
+            box-shadow: 0 0 0 4px rgba(255,255,255,0.08);
+            flex: 0 0 auto;
+        }
+
+        .status-text {
+            font-size: 14px;
+            font-weight: 600;
+            line-height: 1.2;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .status-badge {
+            font-size: 12px;
+            color: var(--muted);
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.06);
+            padding: 7px 10px;
+            border-radius: 999px;
+            flex: 0 0 auto;
+        }
+
+        .content {
             flex: 1;
             display: flex;
             flex-direction: column;
+            gap: 16px;
             justify-content: center;
-            gap: 20px;
+            min-height: 0;
         }
-        .input-wrapper {
-            background: var(--glass);
-            border-radius: 16px;
-            padding: 2px;
-            border: 1px solid var(--border);
+
+        .card {
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: var(--radius-xl);
+            box-shadow: var(--shadow);
         }
-        .input-inner {
-            background: #000000;
-            border-radius: 14px;
+
+        .input-card {
+            padding: 14px;
+        }
+
+        .input-row {
             display: flex;
             align-items: center;
-            padding: 16px;
+            gap: 12px;
+            padding: 16px 18px;
+            border-radius: 20px;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);
         }
-        .input-inner i {
-            color: var(--text-muted);
-            margin-right: 12px;
+
+        .input-row svg {
+            width: 22px;
+            height: 22px;
+            stroke: rgba(255,255,255,0.74);
+            fill: none;
+            stroke-width: 2.2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            flex: 0 0 auto;
         }
-        input {
+
+        .input-row input {
+            flex: 1;
             background: transparent;
-            border: none;
             color: #ffffff;
-            font-size: 18px;
-            width: 100%;
+            border: none;
             outline: none;
-            font-family: 'Outfit', sans-serif;
-            -webkit-user-select: auto;
-            user-select: auto;
-        }
-        .action-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 15px;
-            margin-top: 10px;
-        }
-        .btn {
-            border: 1px solid var(--border);
-            padding: 18px;
-            border-radius: 16px;
-            font-size: 16px;
+            font-size: 18px;
             font-weight: 600;
+            letter-spacing: 0.2px;
+            -webkit-user-select: text;
+            user-select: text;
+        }
+
+        .input-row input::placeholder {
+            color: rgba(255,255,255,0.28);
+            font-weight: 500;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 14px;
+        }
+
+        .action-card {
+            padding: 18px 16px;
+            border-radius: 24px;
+            background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.04));
+            border: 1px solid rgba(255,255,255,0.08);
+            box-shadow: var(--shadow);
             cursor: pointer;
+            min-height: 108px;
             display: flex;
             flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            gap: 12px;
+            transition: transform 0.16s ease, background 0.16s ease, border-color 0.16s ease;
+        }
+
+        .action-card:active,
+        .small-card:active,
+        .menu-card:active,
+        .lang-card:active,
+        .status:active,
+        .icon-btn:active {
+            transform: scale(0.98);
+        }
+
+        .action-icon {
+            width: 44px;
+            height: 44px;
+            border-radius: 16px;
+            display: flex;
             align-items: center;
             justify-content: center;
-            gap: 8px;
-            font-family: 'Outfit', sans-serif;
-            background: #ffffff;
-            color: #000000;
+            background: rgba(255,255,255,0.07);
+            border: 1px solid rgba(255,255,255,0.08);
         }
-        .btn-secondary {
-            background: #000000;
+
+        .action-icon svg {
+            width: 22px;
+            height: 22px;
+            stroke: #ffffff;
+            fill: none;
+            stroke-width: 2.4;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .action-label {
+            font-size: 15px;
+            font-weight: 700;
+            letter-spacing: 0.15px;
             color: #ffffff;
-        }
-        .output-area {
-            background: #000000;
-            border: 1px solid var(--border);
-            border-radius: 20px;
-            padding: 20px;
-            margin-top: 20px;
             text-align: center;
-            display: none;
         }
-        .code-box {
-            font-family: 'Courier New', monospace;
-            font-size: 32px;
-            color: #ffffff;
-            letter-spacing: 4px;
-            margin: 15px 0;
-            font-weight: bold;
-            word-break: break-all;
+
+        .action-sub {
+            font-size: 12px;
+            color: var(--muted);
+            text-align: center;
+            line-height: 1.25;
         }
-        .loader-container {
+
+        .secondary {
+            background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.025));
+        }
+
+        .loader {
             display: none;
+            align-items: center;
             justify-content: center;
-            padding: 20px;
+            padding: 8px 0 2px;
         }
+
         .spinner {
-            width: 40px;
-            height: 40px;
-            border: 3px solid #333;
-            border-radius: 50%;
+            width: 42px;
+            height: 42px;
+            border-radius: 999px;
+            border: 3px solid rgba(255,255,255,0.14);
             border-top-color: #ffffff;
             animation: spin 0.8s linear infinite;
         }
-        #qr-container {
-            background: #ffffff;
-            padding: 15px;
-            border-radius: 12px;
-            display: inline-block;
-            margin-top: 15px;
-        }
-        .notification {
-            position: fixed;
-            bottom: 20px;
-            top: auto;
-            left: 50%;
-            transform: translateX(-50%);
-            background: #000000;
-            color: #ffffff;
-            padding: 12px 24px;
-            border-radius: 10px;
-            font-size: 14px;
-            font-weight: 600;
-            opacity: 0;
-            z-index: 9999;
-            transition: opacity 0.3s;
-            pointer-events: none;
-        }
-        .view-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100vw;
-            height: 100vh;
-            background: #000000;
-            z-index: 1000;
-            display: none;
-            flex-direction: column;
-            padding: 40px 24px;
-            overflow-y: auto;
-        }
-        .view-overlay h2 {
-            margin-bottom: 30px;
-            text-align: center;
-            font-size: 24px;
-        }
-        .menu-item {
-            padding: 20px;
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            margin-bottom: 15px;
-            text-align: center;
-            font-size: 18px;
-            font-weight: 600;
-            cursor: pointer;
-            background: #111111;
-        }
-        .lang-btn {
-            padding: 15px;
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            margin-bottom: 10px;
-            text-align: center;
-            background: #000000;
-            cursor: pointer;
-        }
-        .info-container {
-            width: 100%;
-            text-align: left;
-            color: #cccccc;
-            font-size: 14px;
-            line-height: 1.8;
-            margin-bottom: 20px;
-        }
-        .points-header {
-            font-size: 20px;
-            text-align: center;
-            margin-bottom: 40px;
-        }
-        .btn-clicks {
-            background: #ffffff;
-            color: #000000;
-            padding: 20px;
-            border-radius: 12px;
-            text-align: center;
-            font-weight: bold;
-            font-size: 18px;
-            cursor: pointer;
-            border: none;
-            width: 100%;
-        }
-        @keyframes spin { 100% { transform: rotate(360deg); } }
 
-        :root {
-            color-scheme: dark;
+        .output {
+            display: none;
+            padding: 18px;
+            text-align: center;
         }
-        body {
-            background: #000000;
-            background-image: radial-gradient(circle at top, rgba(255,255,255,0.06), transparent 38%), radial-gradient(circle at bottom, rgba(255,255,255,0.03), transparent 28%);
-        }
-        .app-container {
-            max-width: 560px;
-        }
-        .header {
-            margin-top: 2.5vh;
-            margin-bottom: 1.5vh;
-        }
-        .logo-area {
-            border: 1px solid rgba(255,255,255,0.08);
-            box-shadow: 0 12px 30px rgba(0,0,0,0.35);
-        }
-        .status-badge,
-        .input-wrapper,
-        .btn,
-        .output-area,
-        .menu-item,
-        .lang-btn,
-        .btn-clicks {
-            background: rgba(28, 28, 30, 0.94);
-            border: 1px solid rgba(255,255,255,0.08);
-            box-shadow: 0 18px 42px rgba(0,0,0,0.35);
-            backdrop-filter: blur(18px);
-            -webkit-backdrop-filter: blur(18px);
-        }
-        .status-badge {
-            padding: 8px 14px;
-            border-radius: 999px;
-            font-size: 12px;
-        }
-        .input-wrapper {
-            border-radius: 20px;
-            padding: 1px;
-        }
-        .input-inner {
-            background: rgba(0,0,0,0.88);
-            border-radius: 19px;
-            padding: 18px 16px;
-        }
-        .input-inner i {
-            font-size: 16px;
-        }
-        .action-grid {
-            gap: 12px;
-        }
-        .btn {
-            border-radius: 20px;
-            min-height: 92px;
-            transition: transform 0.18s ease, opacity 0.18s ease, box-shadow 0.18s ease;
-        }
-        .btn:active,
-        .menu-item:active,
-        .lang-btn:active,
-        .btn-clicks:active,
-        .status-badge:active,
-        .logo-area:active {
-            transform: scale(0.985);
-            opacity: 0.92;
-        }
-        .btn i {
-            font-size: 18px;
-        }
-        .btn-secondary {
-            background: rgba(12,12,14,0.92);
-            color: #ffffff;
-        }
-        .output-area {
-            border-radius: 26px;
-            padding: 22px 18px;
-        }
-        .code-box {
-            font-size: 30px;
-            letter-spacing: 3px;
-            line-height: 1.2;
-        }
-        #qr-container {
-            background: transparent;
-            padding: 0;
-            border-radius: 0;
-            margin-top: 0;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            box-shadow: none;
-            border: none;
-        }
-        #qr-container canvas,
-        #qr-container img {
-            display: block;
-            width: 220px !important;
-            height: 220px !important;
-            max-width: 220px;
-            max-height: 220px;
-            image-rendering: pixelated;
-        }
-        .notification {
-            top: calc(env(safe-area-inset-top, 0px) + 14px);
-            bottom: auto;
-            left: 50%;
-            transform: translateX(-50%) translateY(-8px);
-            min-width: min(92vw, 360px);
-            max-width: 92vw;
-            padding: 14px 18px;
-            border-radius: 18px;
-            background: rgba(28, 28, 30, 0.94);
-            color: #ffffff;
-            border: 1px solid rgba(255,255,255,0.08);
-            box-shadow: 0 18px 42px rgba(0,0,0,0.38);
-            pointer-events: auto;
-            cursor: pointer;
-            transition: opacity 0.22s ease, transform 0.22s ease;
-        }
-        .notification.show {
-            opacity: 1;
-            transform: translateX(-50%) translateY(0);
-        }
-        .view-overlay {
-            background: #000000;
-            padding: 28px 18px calc(env(safe-area-inset-bottom) + 24px);
-        }
-        .view-overlay h2 {
-            font-size: 22px;
-            margin-bottom: 22px;
-        }
-        .menu-item,
-        .lang-btn,
-        .btn-clicks {
-            border-radius: 20px;
-            border: 1px solid rgba(255,255,255,0.08);
-        }
-        .menu-item {
-            padding: 18px 16px;
-            font-size: 16px;
-        }
-        .lang-btn {
-            padding: 16px;
-            font-size: 15px;
-        }
-        .info-container {
-            color: #e7e7ea;
-        }
-        .points-header {
-            font-size: 22px;
-            font-weight: 700;
-            color: #ffffff;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 10px;
-            margin-bottom: 28px;
-        }
-        .points-header svg {
-            width: 24px;
-            height: 24px;
-            flex: 0 0 auto;
-        }
-        .btn-clicks {
-            color: #ffffff;
-            font-weight: 700;
-            padding: 18px 20px;
-            width: 100%;
-        }
-        .copy-hint {
-            margin-top: 14px;
-            color: #cfcfd4;
+
+        .output-title {
             font-size: 13px;
+            color: var(--muted);
+            margin-bottom: 12px;
             letter-spacing: 0.2px;
         }
-        .output-area[data-mode="qr"] .copy-hint {
-            color: #d7d7db;
+
+        #qr-container {
+            display: none;
+            margin: 0 auto;
+            background: #000000;
+            padding: 0;
+            border: none;
+            border-radius: 0;
+            overflow: hidden;
+            line-height: 0;
         }
-        .output-area[data-mode="code"] .copy-hint {
-            color: #d7d7db;
+
+        #qr-container canvas,
+        #qr-container img,
+        #qr-container svg {
+            display: block;
+            margin: 0 auto;
         }
-        .feature-card {
+
+        .code-box {
+            display: none;
+            margin: 0 auto;
+            padding: 18px 16px;
+            border-radius: 22px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.06);
+            font-size: 30px;
+            font-weight: 800;
+            letter-spacing: 4px;
+            word-break: break-word;
+            user-select: all;
+            cursor: pointer;
+        }
+
+        .hint {
+            margin-top: 16px;
+            font-size: 13px;
+            color: var(--muted);
+            font-weight: 600;
+        }
+
+        .overlay {
+            position: fixed;
+            inset: 0;
+            background: #000000;
+            display: none;
+            flex-direction: column;
+            z-index: 1000;
+            padding: calc(env(safe-area-inset-top) + 18px) 18px calc(env(safe-area-inset-bottom) + 18px);
+            overflow: hidden;
+        }
+
+        .overlay-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .overlay-title {
+            font-size: 24px;
+            font-weight: 800;
+            letter-spacing: 0.2px;
+        }
+
+        .overlay-scroll {
+            flex: 1;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+            padding-right: 2px;
+        }
+
+        .menu-list,
+        .lang-list,
+        .points-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .menu-card,
+        .lang-card,
+        .small-card {
+            padding: 16px 18px;
+            border-radius: 22px;
+            background: var(--panel);
+            border: 1px solid var(--line);
+            box-shadow: var(--shadow);
+            color: #ffffff;
+        }
+
+        .menu-card {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            cursor: pointer;
+        }
+
+        .menu-card-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 0;
+        }
+
+        .menu-card svg,
+        .lang-card svg,
+        .small-card svg {
+            width: 20px;
+            height: 20px;
+            stroke: #ffffff;
+            fill: none;
+            stroke-width: 2.4;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            flex: 0 0 auto;
+        }
+
+        .menu-card-title,
+        .lang-card-title,
+        .small-title {
+            font-size: 16px;
+            font-weight: 700;
+        }
+
+        .menu-card-sub,
+        .small-sub {
+            font-size: 12px;
+            color: var(--muted);
+            margin-top: 4px;
+            line-height: 1.35;
+        }
+
+        .menu-chevron {
+            width: 18px;
+            height: 18px;
+            stroke: var(--muted);
+            fill: none;
+            stroke-width: 2.5;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            flex: 0 0 auto;
+        }
+
+        .lang-card {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            cursor: pointer;
+        }
+
+        .lang-dot {
+            width: 11px;
+            height: 11px;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.9);
+            box-shadow: 0 0 0 4px rgba(255,255,255,0.08);
+            flex: 0 0 auto;
+        }
+
+        .info-box {
+            padding: 18px;
+            border-radius: 24px;
+            background: var(--panel);
+            border: 1px solid var(--line);
+            box-shadow: var(--shadow);
+            color: rgba(255,255,255,0.92);
+            line-height: 1.75;
+            font-size: 14px;
+        }
+
+        .info-box p {
+            margin-bottom: 14px;
+        }
+
+        .info-box h3 {
+            margin: 18px 0 10px;
+            font-size: 17px;
+            font-weight: 800;
+            color: #ffffff;
+        }
+
+        .feature-row {
             display: flex;
             align-items: flex-start;
             gap: 12px;
-            background: rgba(28, 28, 30, 0.9);
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 18px;
-            padding: 14px 16px;
             margin: 12px 0;
-        }
-        .feature-icon {
-            width: 34px;
-            height: 34px;
-            border-radius: 12px;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            background: rgba(255,255,255,0.08);
-            flex: 0 0 auto;
-        }
-        .feature-icon svg {
-            width: 18px;
-            height: 18px;
-        }
-        .feature-text {
-            font-size: 14px;
-            line-height: 1.55;
-            color: #f2f2f7;
-        }
-        .feature-text strong {
-            color: #ffffff;
-        }
-        .infinity-mark {
-            font-size: 34px;
-            line-height: 1;
-            font-weight: 700;
+            padding: 14px;
+            border-radius: 18px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.06);
         }
 
+        .feature-row svg {
+            width: 22px;
+            height: 22px;
+            stroke: #ffffff;
+            fill: none;
+            stroke-width: 2.4;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            flex: 0 0 auto;
+            margin-top: 1px;
+        }
+
+        .feature-row strong {
+            color: #ffffff;
+        }
+
+        .points-head {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            padding: 24px 18px;
+            text-align: center;
+        }
+
+        .points-number {
+            font-size: 54px;
+            font-weight: 900;
+            line-height: 1;
+            letter-spacing: 0.5px;
+        }
+
+        .points-label {
+            font-size: 14px;
+            color: var(--muted);
+            font-weight: 600;
+        }
+
+        .clicks-btn {
+            padding: 17px 18px;
+            border-radius: 22px;
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.08);
+            color: #ffffff;
+            font-size: 16px;
+            font-weight: 800;
+            cursor: pointer;
+            box-shadow: var(--shadow);
+        }
+
+        .toast-wrap {
+            position: fixed;
+            left: 50%;
+            top: calc(env(safe-area-inset-top) + 14px);
+            transform: translateX(-50%);
+            z-index: 3000;
+            pointer-events: none;
+            width: min(92vw, 420px);
+            display: flex;
+            justify-content: center;
+        }
+
+        .toast {
+            pointer-events: auto;
+            min-width: 180px;
+            max-width: 100%;
+            background: rgba(34, 34, 34, 0.96);
+            border: 1px solid rgba(255,255,255,0.08);
+            color: #ffffff;
+            padding: 12px 16px;
+            border-radius: 16px;
+            box-shadow: var(--shadow);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            font-size: 14px;
+            font-weight: 700;
+            line-height: 1.25;
+            opacity: 0;
+            transform: translateY(-12px) scale(0.98);
+            transition: opacity 0.18s ease, transform 0.18s ease;
+            cursor: pointer;
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+        }
+
+        .toast.hide {
+            opacity: 0;
+            transform: translateY(-12px) scale(0.98);
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        @media (max-width: 420px) {
+            .brand-title {
+                font-size: 18px;
+            }
+            .status-text {
+                font-size: 13px;
+            }
+            .grid {
+                gap: 12px;
+            }
+            .action-card {
+                min-height: 102px;
+                padding: 16px 14px;
+            }
+            .code-box {
+                font-size: 24px;
+                letter-spacing: 3px;
+            }
+            .points-number {
+                font-size: 46px;
+            }
+        }
     </style>
 </head>
 <body>
-    <div class="app-container" id="view-home">
-        <header class="header">
-            <div class="header-top">
-                <div class="logo-area" onclick="navigate('info')">
-                    <img src="https://adamdh7.org/adamdh7.png" alt="Adam Logo" onerror="this.src='https://via.placeholder.com/80/ffffff/000000?text=A'">
+    <div class="app">
+        <div class="shell">
+            <header class="topbar">
+                <div class="brand-row">
+                    <div class="brand" onclick="navigate('info')">
+                        <img src="https://adamdh7.org/adamdh7.png" alt="Adam Logo" onerror="this.src='https://via.placeholder.com/80/ffffff/000000?text=A'">
+                    </div>
+                    <div class="brand-copy">
+                        <div class="brand-title">Bot.Adam_D’H7</div>
+                        <div class="brand-subtitle tr-brand-sub">Connexion sécurisée</div>
+                    </div>
                 </div>
-                <div class="menu-icon" onclick="navigate('menu')">
-                    <svg viewBox="0 0 24 24"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
+                <div class="icon-btn" onclick="navigate('menu')">
+                    <svg viewBox="0 0 24 24">
+                        <path d="M4 7h16M4 12h16M4 17h16"></path>
+                    </svg>
+                </div>
+            </header>
+
+            <div class="status" onclick="navigate('info')">
+                <div class="status-left">
+                    <div class="status-dot"></div>
+                    <div class="status-text">It's me Adam_D'H7</div>
+                </div>
+                <div class="status-badge tr-status-badge">iOS style</div>
+            </div>
+
+            <main class="content" id="view-home">
+                <div class="card input-card">
+                    <div class="input-row">
+                        <svg viewBox="0 0 24 24">
+                            <path d="M22 16.9v2a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.2 19.2 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h2a2 2 0 0 1 2 1.7c.1.9.3 1.7.6 2.5a2 2 0 0 1-.5 2.1L7.1 9.4a16 16 0 0 0 6.5 6.5l1.1-1.1a2 2 0 0 1 2.1-.5c.8.3 1.6.5 2.5.6a2 2 0 0 1 1.7 2Z"></path>
+                        </svg>
+                        <input type="text" id="phone" placeholder="18493154886" inputmode="numeric">
+                    </div>
+                </div>
+
+                <div class="grid">
+                    <button class="action-card" onclick="handleAction('code')">
+                        <div class="action-icon">
+                            <svg viewBox="0 0 24 24">
+                                <path d="M8 8h8M8 16h8M10 4L6 8l4 4M14 20l4-4-4-4"></path>
+                            </svg>
+                        </div>
+                        <div class="action-label tr-code">Code Pair</div>
+                        <div class="action-sub tr-code-sub">Génère un code de pairage</div>
+                    </button>
+
+                    <button class="action-card secondary" onclick="handleAction('qr')">
+                        <div class="action-icon">
+                            <svg viewBox="0 0 24 24">
+                                <path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2v2h-2zM18 14h2v2h-2zM14 18h2v2h-2zM18 18h2v2h-2z"></path>
+                            </svg>
+                        </div>
+                        <div class="action-label tr-qr">Scan QR</div>
+                        <div class="action-sub tr-qr-sub">Affiche un QR scanable</div>
+                    </button>
+                </div>
+
+                <div class="loader" id="loader">
+                    <div class="spinner"></div>
+                </div>
+
+                <div class="card output" id="output">
+                    <div class="output-title tr-output-title">Résultat</div>
+                    <div id="qr-container"></div>
+                    <div id="code-text" class="code-box"></div>
+                    <div class="hint tr-copy" id="hint-text">Appuyez pour copier</div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <div class="overlay" id="view-menu">
+        <div class="overlay-head">
+            <div class="overlay-title tr-menu-title">Menu</div>
+            <div class="icon-btn" onclick="navigate('home')">
+                <svg viewBox="0 0 24 24">
+                    <path d="M15 18l-6-6 6-6"></path>
+                </svg>
+            </div>
+        </div>
+        <div class="overlay-scroll">
+            <div class="menu-list">
+                <div class="menu-card" onclick="navigate('langues')">
+                    <div class="menu-card-left">
+                        <svg viewBox="0 0 24 24">
+                            <path d="M4 5h16M9 5c0 7 0 14-5 14M12 5c0 7 0 14 5 14M7 12h10"></path>
+                        </svg>
+                        <div>
+                            <div class="menu-card-title tr-menu-lang">Langues</div>
+                            <div class="menu-card-sub tr-menu-lang-sub">Choisir la langue de l’interface</div>
+                        </div>
+                    </div>
+                    <svg class="menu-chevron" viewBox="0 0 24 24">
+                        <path d="M9 18l6-6-6-6"></path>
+                    </svg>
+                </div>
+                <div class="menu-card" onclick="navigate('info')">
+                    <div class="menu-card-left">
+                        <svg viewBox="0 0 24 24">
+                            <path d="M12 16v-4M12 8h.01M12 22a10 10 0 1 0-10-10 10 10 0 0 0 10 10Z"></path>
+                        </svg>
+                        <div>
+                            <div class="menu-card-title tr-menu-info">Info</div>
+                            <div class="menu-card-sub tr-menu-info-sub">Détails du système</div>
+                        </div>
+                    </div>
+                    <svg class="menu-chevron" viewBox="0 0 24 24">
+                        <path d="M9 18l6-6-6-6"></path>
+                    </svg>
+                </div>
+                <div class="menu-card" onclick="navigate('points')">
+                    <div class="menu-card-left">
+                        <svg viewBox="0 0 24 24">
+                            <path d="M12 2l3.1 6.3L22 9.2l-5 4.8 1.2 6.8L12 17.8 5.8 20.8 7 14 2 9.2l6.9-1L12 2Z"></path>
+                        </svg>
+                        <div>
+                            <div class="menu-card-title tr-menu-points">Points</div>
+                            <div class="menu-card-sub tr-menu-points-sub">Voir le statut des points</div>
+                        </div>
+                    </div>
+                    <svg class="menu-chevron" viewBox="0 0 24 24">
+                        <path d="M9 18l6-6-6-6"></path>
+                    </svg>
                 </div>
             </div>
+        </div>
+    </div>
 
-            <div class="status-badge" onclick="navigate('info')">
-                <span>It's me Adam_D'H7</span>
+    <div class="overlay" id="view-langues">
+        <div class="overlay-head">
+            <div class="overlay-title tr-lang-title">Langues</div>
+            <div class="icon-btn" onclick="navigate('menu')">
+                <svg viewBox="0 0 24 24">
+                    <path d="M15 18l-6-6 6-6"></path>
+                </svg>
             </div>
-        </header>
-        <main class="main-content">
-            <div class="input-wrapper">
-                <div class="input-inner">
-                    <i class="fas fa-phone-alt"></i>
-                    <input type="text" id="phone" placeholder="18493154886" inputmode="numeric">
+        </div>
+        <div class="overlay-scroll">
+            <div class="lang-list">
+                <div class="lang-card" onclick="setLang('fr')">
+                    <div class="menu-card-left">
+                        <div class="lang-dot"></div>
+                        <div class="lang-card-title">Français</div>
+                    </div>
+                    <svg class="menu-chevron" viewBox="0 0 24 24">
+                        <path d="M9 18l6-6-6-6"></path>
+                    </svg>
+                </div>
+                <div class="lang-card" onclick="setLang('en')">
+                    <div class="menu-card-left">
+                        <div class="lang-dot"></div>
+                        <div class="lang-card-title">English</div>
+                    </div>
+                    <svg class="menu-chevron" viewBox="0 0 24 24">
+                        <path d="M9 18l6-6-6-6"></path>
+                    </svg>
+                </div>
+                <div class="lang-card" onclick="setLang('es')">
+                    <div class="menu-card-left">
+                        <div class="lang-dot"></div>
+                        <div class="lang-card-title">Español</div>
+                    </div>
+                    <svg class="menu-chevron" viewBox="0 0 24 24">
+                        <path d="M9 18l6-6-6-6"></path>
+                    </svg>
+                </div>
+                <div class="lang-card" onclick="setLang('ht')">
+                    <div class="menu-card-left">
+                        <div class="lang-dot"></div>
+                        <div class="lang-card-title">Kreyòl Ayisyen</div>
+                    </div>
+                    <svg class="menu-chevron" viewBox="0 0 24 24">
+                        <path d="M9 18l6-6-6-6"></path>
+                    </svg>
                 </div>
             </div>
-            <div class="action-grid">
-                <button class="btn" onclick="handleAction('code')">
-                    <i class="fas fa-key"></i>
-                    <span class="tr-code">Code Pair</span>
-                </button>
-                <button class="btn btn-secondary" onclick="handleAction('qr')">
-                    <i class="fas fa-qrcode"></i>
-                    <span class="tr-qr">Scan QR</span>
-                </button>
+        </div>
+    </div>
+
+    <div class="overlay" id="view-info">
+        <div class="overlay-head">
+            <div class="overlay-title tr-info-title">Info</div>
+            <div class="icon-btn" onclick="navigate('home')">
+                <svg viewBox="0 0 24 24">
+                    <path d="M15 18l-6-6 6-6"></path>
+                </svg>
             </div>
-            <div class="loader-container" id="loader">
-                <div class="spinner"></div>
+        </div>
+        <div class="overlay-scroll">
+            <div class="info-box" id="info-content"></div>
+        </div>
+    </div>
+
+    <div class="overlay" id="view-points">
+        <div class="overlay-head">
+            <div class="overlay-title tr-points-title">Points</div>
+            <div class="icon-btn" onclick="navigate('home')">
+                <svg viewBox="0 0 24 24">
+                    <path d="M15 18l-6-6 6-6"></path>
+                </svg>
             </div>
-            <div class="output-area" id="output">
-                <div id="qr-container" style="display:none;"></div>
-                <div id="code-text" class="code-box" style="display:none;"></div>
-                <div class="copy-hint tr-copy" id="hint-text">Appuyez pour copier</div>
+        </div>
+        <div class="overlay-scroll">
+            <div class="points-panel">
+                <div class="card points-head">
+                    <div class="points-number" id="points-number">0</div>
+                    <div class="points-label tr-points-label">Points disponibles</div>
+                </div>
+                <button class="clicks-btn tr-clicks" onclick="openAd()">Clicks</button>
             </div>
-        </main>
+        </div>
     </div>
 
-    <div class="view-overlay" id="view-menu">
-        <h2 class="tr-menu-title">Menu</h2>
-        <div class="menu-item tr-menu-lang" onclick="navigate('langues')">Langues</div>
-        <div class="menu-item tr-menu-info" onclick="navigate('info')">Info</div>
-        <div class="menu-item tr-menu-points" onclick="navigate('points')">Points</div>
+    <div class="toast-wrap">
+        <div class="toast" id="toast"></div>
     </div>
-
-    <div class="view-overlay" id="view-langues">
-        <h2 class="tr-lang-title">Langues</h2>
-        <div class="lang-btn" onclick="setLang('fr')">Français</div>
-        <div class="lang-btn" onclick="setLang('en')">English</div>
-        <div class="lang-btn" onclick="setLang('es')">Español</div>
-        <div class="lang-btn" onclick="setLang('ht')">Kreyòl Ayisyen</div>
-    </div>
-
-    <div class="view-overlay" id="view-info">
-        <h2 class="tr-info-title">Info</h2>
-        <div class="info-container" id="info-content"></div>
-    </div>
-
-    <div class="view-overlay" id="view-points">
-        <div class="points-header tr-points-header">Tu as 0 points</div>
-        <button class="btn-clicks tr-clicks" onclick="openAd()">Clicks</button>
-    </div>
-
-    <div class="notification" id="notif"></div>
 
     <script>
         document.addEventListener('touchmove', function(e) {
-            if (e.target.closest('.view-overlay')) return;
+            if (e.target.closest('.overlay')) return;
             e.preventDefault();
         }, { passive: false });
+
         document.addEventListener('wheel', function(e) {
-            if (e.target.closest('.view-overlay')) return;
+            if (e.target.closest('.overlay')) return;
             e.preventDefault();
         }, { passive: false });
+
         document.addEventListener('dblclick', function(e) {
             e.preventDefault();
         });
 
+        const arrowIcon = '<svg viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"></path></svg>';
         const i18n = {
             fr: {
-                code: "Code de paire", qr: "Scan QR", copy: "Appuyez pour copier", menu: "Menu", 
-                mlang: "Langues", minfo: "Info", mpoints: "Points", ltitle: "Langues", 
-                ititle: "Info", pheader: "Tu as {x} points", clicks: "Clicks",
-                err_num: "Numéro invalide", err_pts_code: "4 points requis pour le code",
-                err_pts_qr: "3 points requis pour le qr", err_conn: "Erreur de connexion",
-                succ_copy: "Copié", succ_pts: "+1 Point", qr_hint: "Scannez avec WhatsApp",
+                code: "Code Pair",
+                qr: "Scan QR",
+                codeSub: "Génère un code de pairage",
+                qrSub: "Affiche un QR scanable",
+                copy: "Appuyez pour copier",
+                scanHint: "Scannez avec WhatsApp",
+                menu: "Menu",
+                mlang: "Langues",
+                mlangSub: "Choisir la langue de l’interface",
+                minfo: "Info",
+                minfoSub: "Détails du système",
+                mpoints: "Points",
+                mpointsSub: "Voir le statut des points",
+                ltitle: "Langues",
+                ititle: "Info",
+                ptitle: "Points",
+                pheader: "Tu as {x} points",
+                pheaderInf: "Tu as ∞ points",
+                ppoints: "Points disponibles",
+                ppointsInf: "Points illimités",
+                pointsActionInf: "Mode infini actif",
+                clicks: "Clicks",
+                brandSub: "Connexion sécurisée",
+                outputTitle: "Résultat",
+                err_num: "Numéro invalide",
+                err_pts_code: "4 points requis pour le code",
+                err_pts_qr: "3 points requis pour le QR",
+                err_conn: "Erreur de connexion",
+                succ_copy: "Copié",
+                succ_pts: "+1 Point",
                 infoHTML: `
-                    <p style="text-align:justify; margin-bottom:15px;">Bienvenue sur le système de connexion Bot.Adam_D’H7. Cette interface permet de connecter votre appareil de manière sécurisée et stable afin de profiter pleinement des fonctionnalités avancées du bot.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Les sessions sont optimisées pour garantir la sécurité et les performances. Le système gère l'ensemble des opérations de façon transparente et automatique.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">L'accès aux options nécessite des points :</p>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #111111; padding: 14px; border-radius: 12px; border: 1px solid #333333;">
-                        <i class="fas fa-key" style="font-size: 26px; color: #ffffff;"></i>
-                        <span style="font-size: 15px;"><strong>4 points</strong> pour un Code de paire</span>
-                    </div>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #111111; padding: 14px; border-radius: 12px; border: 1px solid #333333;">
-                        <i class="fas fa-qrcode" style="font-size: 26px; color: #ffffff;"></i>
-                        <span style="font-size: 15px;"><strong>3 points</strong> pour un Code QR</span>
-                    </div>
-                    <p style="text-align:justify; margin-bottom:15px;">Pour obtenir vos points, accédez au menu, puis à la section Points, cliquez sur le bouton "Clicks" et restez sur la page affichée pendant au moins 7 secondes. Une interaction active valide l'ajout d'un point.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Une fois connecté, utilisez la commande .menu pour découvrir une vaste gamme d'outils avancés et pratiques. Explorez les possibilités offertes par le bot !</p>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Commandes les plus utilisées</h3>
+                    <p>Bienvenue sur le système de connexion Bot.Adam_D’H7. Cette interface permet de connecter votre appareil de manière sécurisée et stable afin de profiter pleinement des fonctionnalités avancées du bot.</p>
+                    <p>Les sessions sont optimisées pour garantir la sécurité et les performances. Le système gère l'ensemble des opérations de façon transparente et automatique.</p>
+                    <p>Les accès aux options utilisent un système de points.</p>
+                    <div class="feature-row"><svg viewBox="0 0 24 24"><path d="M8 8h8M8 16h8M10 4L6 8l4 4M14 20l4-4-4-4"></path></svg><div><strong>4 points</strong> pour un Code Pair</div></div>
+                    <div class="feature-row"><svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2v2h-2zM18 14h2v2h-2zM14 18h2v2h-2zM18 18h2v2h-2z"></path></svg><div><strong>3 points</strong> pour un Code QR</div></div>
+                    <p>Pour obtenir vos points, ouvrez le menu, allez dans la section Points, cliquez sur le bouton Clicks et restez sur la page affichée pendant au moins 7 secondes.</p>
+                    <p>Une fois connecté, utilisez la commande .menu pour découvrir les outils du bot.</p>
+                    <h3>Commandes les plus utilisées</h3>
                     <p><strong>● ia</strong> ${arrowIcon} Discutez avec l'IA en tapant .ia suivi de votre question</p>
                     <p><strong>○ langue</strong> ${arrowIcon} Changez la langue du bot. Exemple : .langue fr</p>
                     <p><strong>○ image</strong> ${arrowIcon} Générez une image avec .image [description]</p>
-                    <p><strong>○ chercher</strong> ${arrowIcon} Effectuez une recherche web via l'IA</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Système</h3>
+                    <p><strong>○ chercher</strong> ${arrowIcon} Effectuez une recherche web via l'IA</p>
+                    <h3>Système</h3>
                     <p><strong>● menu</strong> ${arrowIcon} Affiche le menu principal</p>
                     <p><strong>○ qrbot</strong> ${arrowIcon} Lance une session secondaire par QR</p>
                     <p><strong>● qr</strong> ${arrowIcon} Transforme du texte en code QR</p>
-                    <p><strong>○ code</strong> ${arrowIcon} Génère un code de pairage</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Groupe</h3>
+                    <p><strong>○ code</strong> ${arrowIcon} Génère un code de pairage</p>
+                    <h3>Groupe</h3>
                     <p><strong>○ lien</strong> ${arrowIcon} Envoie le lien d'invitation avec la description du groupe</p>
                     <p><strong>● tagtout</strong> ${arrowIcon} Mentionne tous les participants du groupe</p>
                     <p><strong>○ hidetag</strong> ${arrowIcon} Envoie une annonce sans tags visibles</p>
@@ -659,136 +1011,198 @@
                 `
             },
             en: {
-                code: "Pair Code", qr: "Scan QR", copy: "Tap to copy", menu: "Menu", 
-                mlang: "Languages", minfo: "Info", mpoints: "Points", ltitle: "Languages", 
-                ititle: "Info", pheader: "You have {x} points", clicks: "Clicks",
-                err_num: "Invalid number", err_pts_code: "4 points required for code",
-                err_pts_qr: "3 points required for QR", err_conn: "Connection error",
-                succ_copy: "Copied", succ_pts: "+1 Point", qr_hint: "Scan with WhatsApp",
+                code: "Pair Code",
+                qr: "Scan QR",
+                codeSub: "Creates a pairing code",
+                qrSub: "Shows a scanable QR",
+                copy: "Tap to copy",
+                scanHint: "Scan with WhatsApp",
+                menu: "Menu",
+                mlang: "Languages",
+                mlangSub: "Choose the interface language",
+                minfo: "Info",
+                minfoSub: "System details",
+                mpoints: "Points",
+                mpointsSub: "View point status",
+                ltitle: "Languages",
+                ititle: "Info",
+                ptitle: "Points",
+                pheader: "You have {x} points",
+                pheaderInf: "You have ∞ points",
+                ppoints: "Available points",
+                ppointsInf: "Unlimited points",
+                pointsActionInf: "Infinity mode active",
+                clicks: "Clicks",
+                brandSub: "Secure connection",
+                outputTitle: "Result",
+                err_num: "Invalid number",
+                err_pts_code: "4 points required for code",
+                err_pts_qr: "3 points required for QR",
+                err_conn: "Connection error",
+                succ_copy: "Copied",
+                succ_pts: "+1 Point",
                 infoHTML: `
-                    <p style="text-align:justify; margin-bottom:15px;">Welcome to the connection system Bot.Adam_D’H7. This interface allows you to connect your device stably to enjoy the features with complete simplicity.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Sessions have an optimized lifespan to guarantee security and performance. The system takes care of everything transparently.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Access to options requires points: 4 points for a Pair Code and 3 points for a QR Code. This system guarantees fair use.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">To obtain your points, click on the menu button then points then click on the button you see and stay on the displayed page for at least 7 seconds. An active exploration validates your point.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Once connected, type the menu command to discover a multitude of unexpected and practical tools. Let yourself be surprised by everything the bot has to offer!</p>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Most Used</h3>
-                    <p><strong>● ia</strong> ${arrowIcon} Chat with the AI by typing .ia followed by your query</p>
-                    <p><strong>○ langue</strong> ${arrowIcon} Change the bot's language. Example: .langue fr</p>
+                    <p>Welcome to the Bot.Adam_D’H7 connection system. This interface lets you connect your device in a stable and secure way.</p>
+                    <p>Sessions are optimized for safety and performance. The system handles everything transparently.</p>
+                    <p>Access to the options uses a point system.</p>
+                    <div class="feature-row"><svg viewBox="0 0 24 24"><path d="M8 8h8M8 16h8M10 4L6 8l4 4M14 20l4-4-4-4"></path></svg><div><strong>4 points</strong> for a Pair Code</div></div>
+                    <div class="feature-row"><svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2v2h-2zM18 14h2v2h-2zM14 18h2v2h-2zM18 18h2v2h-2z"></path></svg><div><strong>3 points</strong> for a QR Code</div></div>
+                    <p>To get points, open the menu, go to Points, press Clicks and stay on the page for at least 7 seconds.</p>
+                    <p>Once connected, use the .menu command to discover the bot tools.</p>
+                    <h3>Most used</h3>
+                    <p><strong>● ia</strong> ${arrowIcon} Chat with AI by typing .ia followed by your question</p>
+                    <p><strong>○ language</strong> ${arrowIcon} Change the bot language. Example: .langue fr</p>
                     <p><strong>○ image</strong> ${arrowIcon} Generate an image with .image [description]</p>
-                    <p><strong>○ chercher</strong> ${arrowIcon} Perform a web search via AI</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">System</h3>
+                    <p><strong>○ search</strong> ${arrowIcon} Perform a web search through AI</p>
+                    <h3>System</h3>
                     <p><strong>● menu</strong> ${arrowIcon} Displays the main menu</p>
                     <p><strong>○ qrbot</strong> ${arrowIcon} Starts a secondary session via QR</p>
-                    <p><strong>● qr</strong> ${arrowIcon} Transforms text into a QR code</p>
-                    <p><strong>○ code</strong> ${arrowIcon} Generates a pairing code</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Group</h3>
-                    <p><strong>○ lien</strong> ${arrowIcon} Sends the invitation link with the group description</p>
+                    <p><strong>● qr</strong> ${arrowIcon} Turns text into a QR code</p>
+                    <p><strong>○ code</strong> ${arrowIcon} Creates a pairing code</p>
+                    <h3>Group</h3>
+                    <p><strong>○ link</strong> ${arrowIcon} Sends the invite link with the group description</p>
                     <p><strong>● tagall</strong> ${arrowIcon} Mentions all participants in the group</p>
                     <p><strong>○ hidetag</strong> ${arrowIcon} Sends an announcement with hidden tags</p>
                     <p><strong>● kick</strong> ${arrowIcon} Removes a member from the group</p>
                     <p><strong>○ add</strong> ${arrowIcon} Adds a number to the group</p>
                     <p><strong>● promote / demote</strong> ${arrowIcon} Manages admin rights</p>
                     <p><strong>● kickall</strong> ${arrowIcon} Removes all non-admin members</p>
-                    <p><strong>○ close / open</strong> ${arrowIcon} Toggles group messaging permissions</p>
-                    <p><strong>○ welcome</strong> ${arrowIcon} Activates automatic welcome messages</p>
-                    <p><strong>○ nolink / nolink2</strong> ${arrowIcon} Enables standard or strict anti-link</p>
-                    <p><strong>○ del</strong> ${arrowIcon} Deletes a specific message by replying</p>
+                    <p><strong>○ close / open</strong> ${arrowIcon} Changes group messaging settings</p>
+                    <p><strong>○ welcome</strong> ${arrowIcon} Enables automatic welcome messages</p>
+                    <p><strong>○ nolink / nolink2</strong> ${arrowIcon} Enables simple or strict anti-link</p>
+                    <p><strong>○ del</strong> ${arrowIcon} Deletes a message by replying to it</p>
                     <p><strong>● vv</strong> ${arrowIcon} Reveals view-once media content</p>
                 `
             },
             es: {
-                code: "Código de par", qr: "Escanear QR", copy: "Toca para copiar", menu: "Menú", 
-                mlang: "Idiomas", minfo: "Info", mpoints: "Puntos", ltitle: "Idiomas", 
-                ititle: "Info", pheader: "Tienes {x} puntos", clicks: "Clics",
-                err_num: "Número inválido", err_pts_code: "4 puntos requeridos para el código",
-                err_pts_qr: "3 puntos requeridos para el QR", err_conn: "Error de conexión",
-                succ_copy: "Copiado", succ_pts: "+1 Punto", qr_hint: "Escanea con WhatsApp",
+                code: "Código de par",
+                qr: "Escanear QR",
+                codeSub: "Genera un código de emparejamiento",
+                qrSub: "Muestra un QR escaneable",
+                copy: "Toca para copiar",
+                scanHint: "Escanea con WhatsApp",
+                menu: "Menú",
+                mlang: "Idiomas",
+                mlangSub: "Elige el idioma de la interfaz",
+                minfo: "Info",
+                minfoSub: "Detalles del sistema",
+                mpoints: "Puntos",
+                mpointsSub: "Ver estado de puntos",
+                ltitle: "Idiomas",
+                ititle: "Info",
+                ptitle: "Puntos",
+                pheader: "Tienes {x} puntos",
+                pheaderInf: "Tienes ∞ puntos",
+                ppoints: "Puntos disponibles",
+                ppointsInf: "Puntos ilimitados",
+                pointsActionInf: "Modo infinito activo",
+                clicks: "Clics",
+                brandSub: "Conexión segura",
+                outputTitle: "Resultado",
+                err_num: "Número inválido",
+                err_pts_code: "Se requieren 4 puntos para el código",
+                err_pts_qr: "Se requieren 3 puntos para el QR",
+                err_conn: "Error de conexión",
+                succ_copy: "Copiado",
+                succ_pts: "+1 Punto",
                 infoHTML: `
-                    <p style="text-align:justify; margin-bottom:15px;">Bienvenido al sistema de conexión Bot.Adam_D’H7. Esta interfaz permite conectar tu dispositivo de manera estable para disfrutar de las funcionalidades con total simplicidad.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Las sesiones tienen una duración de vida optimizada para garantizar seguridad y rendimiento. El sistema se encarga de todo de forma transparente.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">El acceso a las opciones requiere puntos: 4 puntos para un Código de par y 3 puntos para un Código QR. Este sistema garantiza un uso equitativo.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Para obtener tus puntos, haz clic en el botón menú luego puntos luego haz clic en el botón que ves y permanece en la página mostrada durante al menos 7 segundos. Una exploración activa valida tu punto.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Una vez conectado, escribe el comando de menú para descubrir una multitud de herramientas inesperadas y prácticas. ¡Déjate sorprender por todo lo que el bot tiene para ofrecer!</p>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Más Usados</h3>
+                    <p>Bienvenido al sistema de conexión Bot.Adam_D’H7. Esta interfaz te permite conectar tu dispositivo de manera estable y segura.</p>
+                    <p>Las sesiones están optimizadas para la seguridad y el rendimiento. El sistema se encarga de todo de forma transparente.</p>
+                    <p>El acceso a las opciones usa un sistema de puntos.</p>
+                    <div class="feature-row"><svg viewBox="0 0 24 24"><path d="M8 8h8M8 16h8M10 4L6 8l4 4M14 20l4-4-4-4"></path></svg><div><strong>4 puntos</strong> para un Código de par</div></div>
+                    <div class="feature-row"><svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2v2h-2zM18 14h2v2h-2zM14 18h2v2h-2zM18 18h2v2h-2z"></path></svg><div><strong>3 puntos</strong> para un Código QR</div></div>
+                    <p>Para obtener puntos, abre el menú, ve a Puntos, pulsa Clics y permanece en la página durante al menos 7 segundos.</p>
+                    <p>Una vez conectado, usa el comando .menu para descubrir las herramientas del bot.</p>
+                    <h3>Más usados</h3>
                     <p><strong>● ia</strong> ${arrowIcon} Habla con la IA escribiendo .ia seguido de tu pregunta</p>
-                    <p><strong>○ langue</strong> ${arrowIcon} Cambia el idioma del bot. Ejemplo: .langue fr</p>
-                    <p><strong>○ imagen</strong> ${arrowIcon} Genera una imagen con .imagen [descripción]</p>
-                    <p><strong>○ buscar</strong> ${arrowIcon} Realiza una búsqueda web mediante IA</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Sistema</h3>
+                    <p><strong>○ idioma</strong> ${arrowIcon} Cambia el idioma del bot. Ejemplo: .langue fr</p>
+                    <p><strong>○ imagen</strong> ${arrowIcon} Genera una imagen con .image [descripción]</p>
+                    <p><strong>○ buscar</strong> ${arrowIcon} Realiza una búsqueda web mediante IA</p>
+                    <h3>Sistema</h3>
                     <p><strong>● menú</strong> ${arrowIcon} Muestra el menú principal</p>
                     <p><strong>○ qrbot</strong> ${arrowIcon} Inicia una sesión secundaria mediante QR</p>
                     <p><strong>● qr</strong> ${arrowIcon} Transforma texto en un código QR</p>
-                    <p><strong>○ código</strong> ${arrowIcon} Genera un código de emparejamiento</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Grupo</h3>
-                    <p><strong>○ enlace</strong> ${arrowIcon} Envía el enlace de invitación con la descripción del groupe</p>
-                    <p><strong>● etiquetartodo</strong> ${arrowIcon} Menciona a todos los participantes del groupe</p>
+                    <p><strong>○ código</strong> ${arrowIcon} Genera un código de emparejamiento</p>
+                    <h3>Grupo</h3>
+                    <p><strong>○ enlace</strong> ${arrowIcon} Envía el enlace de invitación con la descripción del grupo</p>
+                    <p><strong>● tagtodo</strong> ${arrowIcon} Menciona a todos los participantes del grupo</p>
                     <p><strong>○ hidetag</strong> ${arrowIcon} Envía un anuncio sin etiquetas visibles</p>
-                    <p><strong>● expulsar</strong> ${arrowIcon} Elimina a un miembro del groupe</p>
-                    <p><strong>○ añadir</strong> ${arrowIcon} Agrega un número al groupe</p>
+                    <p><strong>● expulsar</strong> ${arrowIcon} Elimina a un miembro del grupo</p>
+                    <p><strong>○ añadir</strong> ${arrowIcon} Agrega un número al grupo</p>
                     <p><strong>● promover / degradar</strong> ${arrowIcon} Administra derechos de administrador</p>
-                    <p><strong>● borrartodo</strong> ${arrowIcon} Elimina a todos los miembros que no son administradores</p>
-                    <p><strong>○ cerrar / abrir</strong> ${arrowIcon} Cambia los permisos de mensajes del groupe</p>
+                    <p><strong>● expulsartodo</strong> ${arrowIcon} Elimina a todos los miembros que no son administradores</p>
+                    <p><strong>○ cerrar / abrir</strong> ${arrowIcon} Cambia los permisos de mensajes del grupo</p>
                     <p><strong>○ bienvenida</strong> ${arrowIcon} Activa el mensaje automático de bienvenida</p>
-                    <p><strong>○ sinenlace / sinenlace2</strong> ${arrowIcon} Activa el modo anti-enlace básico ou estricto</p>
+                    <p><strong>○ sinenlace / sinenlace2</strong> ${arrowIcon} Activa el anti-enlace simple o estricto</p>
                     <p><strong>○ borrar</strong> ${arrowIcon} Elimina un mensaje respondiendo a él</p>
-                    <p><strong>● vv</strong> ${arrowIcon} Revela el contenido de archivos de visualización única</p>
+                    <p><strong>● vv</strong> ${arrowIcon} Revela el contenido de un medio de una sola vez</p>
                 `
             },
             ht: {
-                code: "Kòd Pè", qr: "Eskane QR", copy: "Klike pou kopye", menu: "Meni", 
-                mlang: "Lang", minfo: "Enfòmasyon", mpoints: "Pwen", ltitle: "Lang", 
-                ititle: "Enfòmasyon", pheader: "Ou gen {x} pwen", clicks: "Klike",
-                err_num: "Nimewo pa bon", err_pts_code: "4 pwen nesesè pou kòd la",
-                err_pts_qr: "3 pwen nesesè pou qr la", err_conn: "Erè koneksyon",
-                succ_copy: "Kopye", succ_pts: "+1 Pwen", qr_hint: "Eskane ak WhatsApp",
+                code: "Kòd Pè",
+                qr: "Eskane QR",
+                codeSub: "Jenere yon kòd pè",
+                qrSub: "Montre yon QR ki ka eskane",
+                copy: "Klike pou kopye",
+                scanHint: "Eskane ak WhatsApp",
+                menu: "Meni",
+                mlang: "Lang",
+                mlangSub: "Chwazi lang koòdone a",
+                minfo: "Enfòmasyon",
+                minfoSub: "Detay sistèm nan",
+                mpoints: "Pwen",
+                mpointsSub: "Wè eta pwen yo",
+                ltitle: "Lang",
+                ititle: "Enfòmasyon",
+                ptitle: "Pwen",
+                pheader: "Ou gen {x} pwen",
+                pheaderInf: "Ou gen ∞ pwen",
+                ppoints: "Pwen disponib",
+                ppointsInf: "Pwen san limit",
+                pointsActionInf: "Mòd enfini aktif",
+                clicks: "Klike",
+                brandSub: "Koneksyon an sekirite",
+                outputTitle: "Rezilta",
+                err_num: "Nimewo pa bon",
+                err_pts_code: "4 pwen nesesè pou kòd la",
+                err_pts_qr: "3 pwen nesesè pou QR la",
+                err_conn: "Erè koneksyon",
+                succ_copy: "Kopye",
+                succ_pts: "+1 Pwen",
                 infoHTML: `
-                    <p style="text-align:justify; margin-bottom:15px;">Byenveni sou sistèm lyazon an Bot.Adam_D’H7. Entèfas sa a pèmèt ou konekte aparèy ou a yon fason ki estab pou w jwi fonksyonalite yo ak tout senplisite.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Sesyon yo gen yon dire lavi optimize pou garanti sekirite ak pèfòmans. Sistèm nan pran swen tout bagay yon fason transparan.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Aksè a opsyon yo mande pwen : 4 pwen pou yon Kòd Pè ak 3 pwen pou yon Kòd QR. Sistèm sa a garanti yon itilizasyon ekitab.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Pou jwenn pwen ou yo, klike sou bouton meni a, answit pwen, answit klike sou bouton boanc ou wè a epi rete sou paj ki afiche a pandan omwen 7 segonn. Yon eksplorasyon aktif valide pwen ou.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Yon fwa konekte, tape kòmand meni a pou dekouvri yon pakèt zouti inatandi ak pratik. Kite tèt ou sezi pa tout sa bot la gen pou ofri !</p>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Pi itilize</h3>
-                    <p><strong>● ia</strong> ${arrowIcon} Pale ak IA a lè w tape .ia epi kesyon ou a</p>
-                    <p><strong>○ langue</strong> ${arrowIcon} Chanje lang bot la. Egzanp : .langue fr</p>
-                    <p><strong>○ image</strong> ${arrowIcon} Jenere yon imaj avèk .image [deskripsyon]</p>
-                    <p><strong>○ cheche</strong> ${arrowIcon} Fè yon rechèch sou entènèt via IA</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Sistèm</h3>
+                    <p>Byenveni sou sistèm koneksyon Bot.Adam_D’H7 la. Entèfas sa a pèmèt ou konekte aparèy ou an yon fason ki estab ak sekirize.</p>
+                    <p>Sesyon yo optimize pou sekirite ak pèfòmans. Sistèm nan pran swen tout bagay yon fason transparan.</p>
+                    <p>Aksè a opsyon yo sèvi ak yon sistèm pwen.</p>
+                    <div class="feature-row"><svg viewBox="0 0 24 24"><path d="M8 8h8M8 16h8M10 4L6 8l4 4M14 20l4-4-4-4"></path></svg><div><strong>4 pwen</strong> pou yon Kòd Pè</div></div>
+                    <div class="feature-row"><svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2v2h-2zM18 14h2v2h-2zM14 18h2v2h-2zM18 18h2v2h-2z"></path></svg><div><strong>3 pwen</strong> pou yon Kòd QR</div></div>
+                    <p>Pou jwenn pwen ou yo, ouvri meni an, ale nan Pwen, klike sou Klike epi rete sou paj la pandan omwen 7 segonn.</p>
+                    <p>Yon fwa konekte, sèvi ak kòmand .menu a pou dekouvri zouti bot la.</p>
+                    <h3>Pi itilize</h3>
+                    <p><strong>● ia</strong> ${arrowIcon} Pale ak IA a lè w tape .ia epi kestyon ou a</p>
+                    <p><strong>○ lang</strong> ${arrowIcon} Chanje lang bot la. Egzanp : .langue fr</p>
+                    <p><strong>○ imaj</strong> ${arrowIcon} Jenere yon imaj ak .image [deskripsyon]</p>
+                    <p><strong>○ chèche</strong> ${arrowIcon} Fè yon rechèch sou entènèt atravè IA</p>
+                    <h3>Sistèm</h3>
                     <p><strong>● meni</strong> ${arrowIcon} Afiche meni prensipal la</p>
-                    <p><strong>○ qrbot</strong> ${arrowIcon} Lanse yon dezyèm sesyon avèk QR</p>
-                    <p><strong>● qr</strong> ${arrowIcon} Transfòme yon tèks an kòd QR</p>
-                    <p><strong>○ kòd</strong> ${arrowIcon} Jenere yon kòd pè</p><br>
-                    <h3 style="color:#ffffff; text-align:center; margin-bottom:10px;">Gwoup</h3>
+                    <p><strong>○ qrbot</strong> ${arrowIcon} Lanse yon sesyon segondè pa QR</p>
+                    <p><strong>● qr</strong> ${arrowIcon} Transfòme tèks an kòd QR</p>
+                    <p><strong>○ kòd</strong> ${arrowIcon} Jenere yon kòd pè</p>
+                    <h3>Gwoup</h3>
                     <p><strong>○ lyen</strong> ${arrowIcon} Voye lyen envitasyon an ak deskripsyon gwoup la</p>
-                    <p><strong>● tagtout</strong> ${arrowIcon} Mansyone tout patisipan yo nan gwoup la</p>
-                    <p><strong>○ hidetag</strong> ${arrowIcon} Voye yon anons san tag parèt klè</p>
-                    <p><strong>● sipli</strong> ${arrowIcon} Retire yon manm nan gwoup la</p>
-                    <p><strong>○ add</strong> ${arrowIcon} Ajoute yon nimewo nan gwoup la</p>
-                    <p><strong>● promote / demote</strong> ${arrowIcon} Jere dwa administrateur yo</p>
-                    <p><strong>● siptout</strong> ${arrowIcon} Retire tout manm ki pa administrateur</p>
-                    <p><strong>○ fèmen / ouvri</strong> ${arrowIcon} Chanje dwa pou voye mesaj nan gwoup la</p>
-                    <p><strong>○ byenveni</strong> ${arrowIcon} Aktive mesaj akèy otomatik pou nouvo manm</p>
-                    <p><strong>○ nolyen / nolyen2</strong> ${arrowIcon} Aktive sistèm anti-lyen senp oswa strik</p>
-                    <p><strong>○ sip</strong> ${arrowIcon} Efase yon mesaj presi lè w reponn li</p>
-                    <p><strong>● vv</strong> ${arrowIcon} Montre kontni medya ki te voye pou wè yon sèl fwa</p>
+                    <p><strong>● tagtout</strong> ${arrowIcon} Mansyone tout patisipan nan gwoup la</p>
+                    <p><strong>○ hidetag</strong> ${arrowIcon} Voye yon anons san tag ki vizib</p>
+                    <p><strong>● retire</strong> ${arrowIcon} Retire yon manm nan gwoup la</p>
+                    <p><strong>○ ajoute</strong> ${arrowIcon} Ajoute yon nimewo nan gwoup la</p>
+                    <p><strong>● promote / demote</strong> ${arrowIcon} Jere dwa administratè yo</p>
+                    <p><strong>● retiretout</strong> ${arrowIcon} Retire tout manm ki pa administratè</p>
+                    <p><strong>○ fèmen / ouvri</strong> ${arrowIcon} Chanje paramèt mesaj gwoup la</p>
+                    <p><strong>○ byenveni</strong> ${arrowIcon} Aktive mesaj akey otomatik</p>
+                    <p><strong>○ pa lyen / pa lyen2</strong> ${arrowIcon} Aktive anti-lyen senp oswa strik</p>
+                    <p><strong>○ efase</strong> ${arrowIcon} Efase yon mesaj lè w reponn li</p>
+                    <p><strong>● vv</strong> ${arrowIcon} Revele kontni yon medya yon sèl fwa</p>
                 `
             }
         };
-
-
-        const arrowIcon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>`;
-        const infinityIcon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18.5 8.5c-1.8 0-3.3 1.4-4.7 3.1l-.8.9-.8-.9C11.1 9.9 9.6 8.5 7.8 8.5 5.6 8.5 4 10.2 4 12s1.6 3.5 3.8 3.5c1.8 0 3.3-1.4 4.7-3.1l.8-.9.8.9c1.4 1.7 2.9 3.1 4.7 3.1 2.2 0 3.8-1.6 3.8-3.5s-1.6-3.5-3.8-3.5Z"/></svg>`;
-        const isUnlimitedMode = window.location.pathname === '/ok' || window.location.pathname.indexOf('/ok/') === 0;
-        let currentOutputType = '';
-        let notifTimer = null;
-
-        let currentLang = localStorage.getItem('lang');
-        if (!currentLang) {
-            const navL = navigator.language.slice(0, 2);
-            currentLang = ['fr', 'en', 'es', 'ht'].includes(navL) ? navL : 'ht';
-        }
-        let userPoints = isUnlimitedMode ? Infinity : (parseInt(localStorage.getItem('points')) || 0);
-        let clickTime = 0;
-        let pendingAction = null;
 
         const ui = {
             phone: document.getElementById('phone'),
@@ -797,33 +1211,71 @@
             qr: document.getElementById('qr-container'),
             code: document.getElementById('code-text'),
             hint: document.getElementById('hint-text'),
-            notif: document.getElementById('notif'),
+            toast: document.getElementById('toast'),
             infoContent: document.getElementById('info-content'),
-            pointsHeader: document.querySelector('.tr-points-header'),
-            pointsAction: document.querySelector('.btn-clicks')
+            pointsNumber: document.getElementById('points-number')
         };
+
+        const isInfinityMode = /^\/ok\/?$/.test(window.location.pathname || '');
+        let currentLang = localStorage.getItem('lang');
+        if (!currentLang) {
+            const navL = (navigator.language || 'ht').slice(0, 2).toLowerCase();
+            currentLang = ['fr', 'en', 'es', 'ht'].includes(navL) ? navL : 'ht';
+        }
+
+        let userPoints = isInfinityMode ? Infinity : (parseInt(localStorage.getItem('points'), 10) || 0);
+        let clickTime = 0;
+        let pendingAction = null;
+        let toastTimer = null;
+        let toastLock = false;
+
+        function getPointsText() {
+            return isInfinityMode ? '∞' : String(userPoints);
+        }
+
+        function iconForCard(type) {
+            if (type === 'code') {
+                return '<svg viewBox="0 0 24 24"><path d="M8 8h8M8 16h8M10 4L6 8l4 4M14 20l4-4-4-4"></path></svg>';
+            }
+            if (type === 'qr') {
+                return '<svg viewBox="0 0 24 24"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2v2h-2zM18 14h2v2h-2zM14 18h2v2h-2zM18 18h2v2h-2z"></path></svg>';
+            }
+            return '';
+        }
 
         function updateUI() {
             const t = i18n[currentLang];
+            document.documentElement.lang = currentLang;
+            document.querySelector('.tr-brand-sub').textContent = t.brandSub;
+            document.querySelector('.tr-status-badge').textContent = isInfinityMode ? '∞' : 'iOS style';
+
             document.querySelector('.tr-code').textContent = t.code;
+            document.querySelector('.tr-code-sub').textContent = t.codeSub;
             document.querySelector('.tr-qr').textContent = t.qr;
-            document.querySelector('.tr-copy').textContent = currentOutputType === 'qr' ? t.qr_hint : t.copy;
+            document.querySelector('.tr-qr-sub').textContent = t.qrSub;
+            document.querySelector('.tr-copy').textContent = t.copy;
+            document.querySelector('.tr-output-title').textContent = t.outputTitle;
+
             document.querySelector('.tr-menu-title').textContent = t.menu;
             document.querySelector('.tr-menu-lang').textContent = t.mlang;
+            document.querySelector('.tr-menu-lang-sub').textContent = t.mlangSub;
             document.querySelector('.tr-menu-info').textContent = t.minfo;
+            document.querySelector('.tr-menu-info-sub').textContent = t.minfoSub;
             document.querySelector('.tr-menu-points').textContent = t.mpoints;
+            document.querySelector('.tr-menu-points-sub').textContent = t.mpointsSub;
+
             document.querySelector('.tr-lang-title').textContent = t.ltitle;
             document.querySelector('.tr-info-title').textContent = t.ititle;
+            document.querySelector('.tr-points-title').textContent = t.ptitle;
+            document.querySelector('.tr-points-label').textContent = isInfinityMode ? t.ppointsInf : t.ppoints;
+            document.querySelector('.tr-clicks').textContent = isInfinityMode ? t.pointsActionInf : t.clicks;
 
-            if (isUnlimitedMode) {
-                ui.pointsHeader.innerHTML = `<span class="infinity-mark">∞</span>`;
-                ui.pointsAction.style.display = 'none';
-            } else {
-                ui.pointsHeader.textContent = t.pheader.replace('{x}', userPoints);
-                ui.pointsAction.style.display = 'block';
-            }
+            document.querySelector('.status-text').textContent = "It's me Adam_D'H7";
+            document.querySelector('.tr-brand-sub').textContent = t.brandSub;
 
             ui.infoContent.innerHTML = t.infoHTML;
+            ui.pointsNumber.textContent = getPointsText();
+            document.title = 'Bot.Adam_D’H7';
         }
 
         function setLang(l) {
@@ -834,14 +1286,15 @@
         }
 
         function navigate(view) {
-            document.querySelectorAll('.view-overlay').forEach(el => el.style.display = 'none');
+            const overlays = document.querySelectorAll('.overlay');
+            overlays.forEach(el => el.style.display = 'none');
             document.getElementById('view-home').style.display = view === 'home' ? 'flex' : 'none';
             if (view !== 'home') {
                 const target = document.getElementById('view-' + view);
                 if (target) target.style.display = 'flex';
                 window.location.hash = view;
-            } else {
-                window.history.replaceState(null, null, ' ');
+            } else if (window.location.hash) {
+                window.history.replaceState(null, '', window.location.pathname + window.location.search);
             }
         }
 
@@ -851,25 +1304,31 @@
             else navigate(hash);
         });
 
-        function showNotif(msg) {
-            if (notifTimer) {
-                clearTimeout(notifTimer);
-                notifTimer = null;
+        function hideToast() {
+            ui.toast.classList.remove('show');
+            ui.toast.classList.add('hide');
+            if (toastTimer) {
+                clearTimeout(toastTimer);
+                toastTimer = null;
             }
-            ui.notif.textContent = msg;
-            ui.notif.classList.add('show');
-            notifTimer = setTimeout(() => {
-                ui.notif.classList.remove('show');
-            }, 2200);
+            toastLock = false;
         }
 
-        ui.notif.addEventListener('click', () => {
-            if (notifTimer) {
-                clearTimeout(notifTimer);
-                notifTimer = null;
+        function showToast(message) {
+            if (toastTimer) {
+                clearTimeout(toastTimer);
+                toastTimer = null;
             }
-            ui.notif.classList.remove('show');
-        });
+            ui.toast.textContent = message;
+            ui.toast.classList.remove('hide');
+            ui.toast.classList.add('show');
+            toastLock = true;
+            toastTimer = setTimeout(() => {
+                hideToast();
+            }, 1700);
+        }
+
+        ui.toast.addEventListener('click', hideToast);
 
         function openAd() {
             clickTime = Date.now();
@@ -878,73 +1337,76 @@
 
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible' && clickTime > 0) {
-                if (Date.now() - clickTime >= 4000 && !isUnlimitedMode) {
+                if (Date.now() - clickTime >= 4000 && !isInfinityMode) {
                     userPoints++;
-                    localStorage.setItem('points', userPoints);
+                    localStorage.setItem('points', String(userPoints));
                     updateUI();
-                    showNotif(i18n[currentLang].succ_pts);
-
+                    showToast(i18n[currentLang].succ_pts);
                     if (pendingAction) {
-                        if (pendingAction === 'code' && userPoints >= 4) {
-                            const actionToRun = pendingAction;
-                            pendingAction = null;
-                            navigate('home');
-                            handleAction(actionToRun);
-                        } else if (pendingAction === 'qr' && userPoints >= 3) {
-                            const actionToRun = pendingAction;
-                            pendingAction = null;
-                            navigate('home');
-                            handleAction(actionToRun);
-                        }
+                        const nextAction = pendingAction;
+                        pendingAction = null;
+                        navigate('home');
+                        handleAction(nextAction);
                     }
                 }
                 clickTime = 0;
             }
         });
 
+        function clearOutput() {
+            ui.output.style.display = 'none';
+            ui.qr.innerHTML = '';
+            ui.qr.style.display = 'none';
+            ui.code.innerHTML = '';
+            ui.code.style.display = 'none';
+            ui.hint.textContent = i18n[currentLang].copy;
+        }
+
         async function handleAction(type) {
             const t = i18n[currentLang];
             const number = ui.phone.value.replace(/[^0-9]/g, '');
 
-            if (type === 'code') {
-                if (number.length < 6) return showNotif(t.err_num);
-                if (!isUnlimitedMode && userPoints < 4) {
-                    pendingAction = 'code';
-                    navigate('points');
-                    return showNotif(t.err_pts_code);
-                }
-                if (!isUnlimitedMode) {
+            if (type === 'code' && number.length < 6) {
+                showToast(t.err_num);
+                return;
+            }
+
+            if (!isInfinityMode) {
+                if (type === 'code') {
+                    if (userPoints < 4) {
+                        pendingAction = 'code';
+                        navigate('points');
+                        showToast(t.err_pts_code);
+                        return;
+                    }
                     userPoints -= 4;
-                }
-            } else if (type === 'qr') {
-                if (!isUnlimitedMode && userPoints < 3) {
-                    pendingAction = 'qr';
-                    navigate('points');
-                    return showNotif(t.err_pts_qr);
-                }
-                if (!isUnlimitedMode) {
+                } else if (type === 'qr') {
+                    if (userPoints < 3) {
+                        pendingAction = 'qr';
+                        navigate('points');
+                        showToast(t.err_pts_qr);
+                        return;
+                    }
                     userPoints -= 3;
                 }
+                localStorage.setItem('points', String(userPoints));
             }
 
             pendingAction = null;
-            if (!isUnlimitedMode) {
-                localStorage.setItem('points', userPoints);
-            }
             updateUI();
-
-            ui.output.style.display = 'none';
+            clearOutput();
             ui.loader.style.display = 'flex';
-            ui.qr.innerHTML = '';
-            ui.qr.style.display = 'none';
-            ui.code.style.display = 'none';
-            ui.output.dataset.mode = '';
 
             try {
                 const res = await fetch('/get-code', {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ number: type === 'code' ? number : '', method: type })
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        number: type === 'code' ? number : '',
+                        method: type
+                    })
                 });
 
                 const data = await res.json();
@@ -952,8 +1414,6 @@
                 ui.output.style.display = 'block';
 
                 if (type === 'code' && data.code) {
-                    currentOutputType = 'code';
-                    ui.output.dataset.mode = 'code';
                     ui.qr.style.display = 'none';
                     ui.code.style.display = 'block';
                     ui.code.textContent = data.code;
@@ -961,38 +1421,43 @@
                     ui.code.onclick = async () => {
                         try {
                             await navigator.clipboard.writeText(data.code);
-                            showNotif(t.succ_copy);
-                        } catch (e) {
-                            showNotif(t.err_conn);
+                            showToast(t.succ_copy);
+                        } catch (err) {
+                            showToast(t.err_conn);
                         }
                     };
                 } else if (type === 'qr' && data.qr) {
-                    currentOutputType = 'qr';
-                    ui.output.dataset.mode = 'qr';
                     ui.code.style.display = 'none';
-                    ui.qr.style.display = 'inline-flex';
+                    ui.qr.style.display = 'inline-block';
+                    ui.qr.innerHTML = '';
                     new QRCode(ui.qr, {
                         text: data.qr,
-                        width: 220,
-                        height: 220,
+                        width: 224,
+                        height: 224,
                         colorDark: '#ffffff',
                         colorLight: '#000000',
-                        correctLevel: QRCode.CorrectLevel.H
+                        correctLevel: QRCode.CorrectLevel.M
                     });
-                    ui.hint.textContent = t.qr_hint;
+                    ui.hint.textContent = t.scanHint;
                 } else {
-                    currentOutputType = '';
-                    showNotif(t.err_conn);
+                    showToast(t.err_conn);
                 }
-
-                updateUI();
             } catch (e) {
                 ui.loader.style.display = 'none';
-                showNotif(i18n[currentLang].err_conn);
+                showToast(t.err_conn);
             }
         }
 
-        window.onload = updateUI;
+        window.addEventListener('load', () => {
+            updateUI();
+            navigate('home');
+            if (isInfinityMode) {
+                const pointsPage = document.querySelector('#view-points .clicks-btn');
+                if (pointsPage) {
+                    pointsPage.textContent = currentLang === 'fr' ? 'Mode infini actif' : currentLang === 'en' ? 'Infinity mode active' : currentLang === 'es' ? 'Modo infinito activo' : 'Mòd enfini aktif';
+                }
+            }
+        });
     </script>
 </body>
 </html>
