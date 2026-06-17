@@ -9,7 +9,7 @@
   "scope": "/",
   "display": "standalone",
   "display_override": ["fullscreen", "standalone", "minimal-ui"],
-  "orientation": "any",
+  "orientation": "portrait",
   "theme_color": "#000000",
   "background_color": "#000000",
   "categories": ["personal", "bot"],
