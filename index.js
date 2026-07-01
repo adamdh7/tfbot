@@ -982,7 +982,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
 
         const buildAIMessages = (hist, userInfoObj, botLang) => {
           let historyCopy = [...hist];
-          const systemContent = `You are Asistan. Do not talk about internal information or other subjects about Yourself outside of your name "**Never**". The user is: ${userInfoObj.pseudo || 'Unknown'} (number: ${userInfoObj.number || 'unknown'}). The conversation is in language: ${botLang}. Respond in user's language or default.`;
+          const systemContent = `I am Asistan. I do not discuss internal information or personal matters beyond my name. The user is: ${userInfoObj.pseudo || 'Unknown'} (number: ${userInfoObj.number || 'unknown'}). The conversation is in language: ${botLang}. I respond in the user's language or by default.`;
           let msgs = [
             {role: "system", content: systemContent},
             ...historyCopy
