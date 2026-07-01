@@ -433,7 +433,7 @@ app.all('/get-qr', async (req, res) => {
     }
 });
 
-const links_common = "*Bot.Adam_D'H7* : https://bot.adamdh7.org\n*Bref* : https://bref.adamdh7.org\n*Tout* : https://tout.adamdh7.org\n*Chaine* : https://whatsapp.com/channel/0029Vb6WLps7oQhWrUlyPQ2m\n*Canal* : https://t.me/dh7adam , t.me/tfporno\n*Pages* : https://m.facebook.com/dh7adam , https://m.facebook.com/tfpxrnx";
+const links_common = "*Bot.Adam D'H7* : https://bot.adamdh7.org\n*Bref* : https://bref.adamdh7.org\n*Tout* : https://tout.adamdh7.org\n*Chaine* : https://whatsapp.com/channel/0029Vb6WLps7oQhWrUlyPQ2m\n*Canal* : https://t.me/dh7adam , t.me/tfporno\n*Pages* : https://m.facebook.com/dh7adam , https://m.facebook.com/tfpxrnx";
 
 const translations = {
   fr: {
@@ -464,7 +464,10 @@ const translations = {
     disconnect_sys_title: "Déconnexion Système",
     disconnect_sys_msg: "Vous avez été déconnecté. Une suppression totale des données et sessions a été initiée via le système.",
     del2_activated: "La modération stricte a été activée pour @{user}. Tous les messages de cet utilisateur seront supprimés de manière instantanée.",
-    del2_deactivated: "La modération stricte a été désactivée pour @{user}."
+    del2_deactivated: "La modération stricte a été désactivée pour @{user}.",
+    pending_msg: "En attente de chargement",
+    msg_unloaded: "Message non chargé",
+    take_time: "Ceci pourrait prendre un peu de temps"
   },
   en: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "search",
@@ -494,7 +497,10 @@ const translations = {
     disconnect_sys_title: "System Disconnection",
     disconnect_sys_msg: "You have been disconnected. A total deletion of data and sessions has been initiated via the system.",
     del2_activated: "Strict moderation has been activated for @{user}. All incoming messages from this user will be deleted immediately.",
-    del2_deactivated: "Strict moderation has been deactivated for @{user}."
+    del2_deactivated: "Strict moderation has been deactivated for @{user}.",
+    pending_msg: "Waiting for this message",
+    msg_unloaded: "Message not loaded",
+    take_time: "This may take a while"
   },
   es: {
     cmd_ai: "ia", cmd_lang: "lang", cmd_imaj: "imagen", cmd_cheche: "buscar",
@@ -508,7 +514,7 @@ const translations = {
     menu_title: "Menú", lang_changed: "El idioma del bot es ahora {lang}.", languages_available: "Idiomas disponibles: fr en es ht",
     imaj_prompt: "Envía un prompt después de imagen para generar una imagen.", imaj_generated: "*{prompt}*", imaj_error: "Error al generar imagen - Inténtalo de nuevo.", search_title: "Búsqueda", search_error: "Error de búsqueda",
     lang_title: "Idioma", ai_title: "Mensaje", imaj_title: "Imagen", image_generated_title: "Imagen Generada",
-    ai_click_to_receive: "Haz clic aquí para recevoir la respuesta de la IA:\n*{link}*",
+    ai_click_to_receive: "Haz clic aquí para recibir la respuesta de la IA:\n*{link}*",
     imaj_click_to_receive: "Haz clic aquí para recibir tu imagen:\n*{link}*",
     code_confirm: "Por favor autoriza el envío del código haciendo clic aquí:\n*{link}*",
     qrbot_created: "Nueva Sesión Creada",
@@ -524,7 +530,10 @@ const translations = {
     disconnect_sys_title: "Desconexión del Sistema",
     disconnect_sys_msg: "Ha sido desconectado. Se ha iniciado una eliminación total de datos y sesiones a través del sistema.",
     del2_activated: "Se ha activado la moderación estricta para @{user}. Todos los mensajes entrantes de este usuario serán eliminados de inmediato.",
-    del2_deactivated: "Se ha desactivado la moderación estricta para @{user}."
+    del2_deactivated: "Se ha desactivado la moderación estricta para @{user}.",
+    pending_msg: "Esperando este mensaje",
+    msg_unloaded: "Mensaje no cargado",
+    take_time: "Esto puede tomar un tiempo"
   },
   ht: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "imaj", cmd_cheche: "cheche",
@@ -554,12 +563,15 @@ const translations = {
     disconnect_sys_title: "Dekoneksyon Sistèm",
     disconnect_sys_msg: "Ou te dekonekte. Yon efasman total done ak sesyon yo te inisye atravè sistèm nan.",
     del2_activated: "Modération estrik aktive pou @{user}. Tout mesaj moun sa a voye ap siprime touswit.",
-    del2_deactivated: "Modération estrik dezaktive pou @{user}."
+    del2_deactivated: "Modération estrik dezaktive pou @{user}.",
+    pending_msg: "Ap tann mesaj sa a",
+    msg_unloaded: "Mesaj pa chaje",
+    take_time: "Sa ka pran yon ti tan"
   }
 };
 
 function buildCaption(type, text, hostName) {
-    return `*○ ${type}*\n\n*Adam_D'H7*\nUtilisateur : "${hostName}"\nPropriétaire : Adam_D'H7\n\n${text}\n\n> *Adam_D'H7*`;
+    return `*○ ${type}*\n\n*Adam D'H7*\nUtilisateur : "${hostName}"\nPropriétaire : Adam D'H7\n\n${text}\n\n> *Adam D'H7*`;
 }
 
 const logoPath = path.join(__dirname, 'adamdh7.png');
@@ -615,7 +627,7 @@ app.get('/manifest.json', (req, res) => {
 app.get('/sw.js', (req, res) => {
     res.sendFile(path.join(__dirname, 'sw.js'));
 });
-app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s me Adam_DH7"));
+app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s me Adam D'H7"));
 app.get('/ok', (req, res) => res.send('ok'));
 app.get('/TF-:id', (req, res) => {
     tfEvents.emit('ok-' + req.params.id);
@@ -637,7 +649,7 @@ app.get('/list2', (req, res) => {
                         const doc = await ownerCol.findOne({ sessionId: sId });
                         const lang = (doc && doc.lang && translations[doc.lang]) ? doc.lang : 'en';
                         const t = translations[lang];
-                        const hostName = doc && doc.Name ? doc.Name : "Adam_D'H7";
+                        const hostName = doc && doc.Name ? doc.Name : "Adam D'H7";
                         const caption = buildCaption(t.disconnect_sys_title, t.disconnect_sys_msg, hostName);
                         if (adamLogoBuffer) {
                             await queuedSendMessage(session.sock, session.number + '@s.whatsapp.net', { image: adamLogoBuffer, caption: caption });
@@ -705,7 +717,7 @@ app.get('/list', async (req, res) => {
           ID: s.id,
           Sessions: s.status || 'connecte',
           Numero: s.number || 'N/A',
-          Name: ownerDoc ? (ownerDoc.Name || "Adam_D'H7") : "Adam_D'H7",
+          Name: ownerDoc ? (ownerDoc.Name || "Adam D'H7") : "Adam D'H7",
           Format: s.format || 'pair',
           Mode: ownerDoc ? (ownerDoc.mode || 'prive') : 'prive',
           Alive: aliveStr
@@ -729,11 +741,17 @@ app.get('/list', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    const referer = req.get('Referer') || '';
+    const secFetch = req.get('Sec-Fetch-Dest') || '';
+    if (secFetch === 'iframe' && referer.startsWith('https://bot.adamdh7.org')) {
+        res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    } else {
+        res.send('<html><head><title>Access Denied</title></head><body style="background-color:#000;"></body></html>');
+    }
 });
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-const Adam_DH7 = "Adam_D'H7";
+const Adam_DH7 = "Adam D'H7";
 
 async function callCloudflareAI(model, messages, maxTokens = 3000) {
   try {
@@ -889,7 +907,7 @@ function normalizeText(str) {
     return str ? str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase() : "";
 }
 
-async function sendFormatted(sock, from, type, text, pushName, isAI = false, hostName = "Adam_D'H7") {
+async function sendFormatted(sock, from, type, text, pushName, isAI = false, hostName = "Adam D'H7") {
   const fullCaption = buildCaption(type, text, hostName);
   try {
     if (isAI) {
@@ -922,6 +940,13 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
         const { state, saveCreds } = await useMongoAuthState(sessionId, expectExisting);
         const { version } = await fetchLatestBaileysVersion();
 
+        let globalLang = 'en';
+        try {
+            const ownerColInitial = db.collection('session_owners');
+            const initialOwnerDoc = await ownerColInitial.findOne({ sessionId: sessionId });
+            if (initialOwnerDoc && initialOwnerDoc.lang) globalLang = initialOwnerDoc.lang;
+        } catch (e) {}
+
         const sock = makeWASocket({
             version,
             logger: pino({ level: 'silent' }),
@@ -938,7 +963,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
             getMessage: async (key) => {
                 const found = recentMsgsCache.find(m => m.id === key.id);
                 if (found && found.message) return found.message;
-                return { conversation: 'En attente de chargement' }; 
+                return { conversation: '.' };
             }
         });
 
@@ -952,15 +977,6 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
 
         const chatHistories = new Map();
         const pendingAIResponses = new Map();
-        
-        let globalLang = 'en';
-        const ownerColInitial = db.collection('session_owners');
-        const initialOwnerDoc = await ownerColInitial.findOne({ sessionId: sessionId });
-        if (initialOwnerDoc && initialOwnerDoc.lang) {
-            globalLang = initialOwnerDoc.lang;
-        } else {
-            globalLang = 'en';
-        }
 
         const userInfo = new Map();
 
@@ -1002,7 +1018,8 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
             lastRefresh: Date.now(),
             lastResetTime: existingSessionRecord ? (existingSessionRecord.lastResetTime || Date.now()) : Date.now(),
             sock: sock,
-            qrString: null
+            qrString: null,
+            disconnectTime: null
         });
 
         sock.ev.on('creds.update', saveCreds);
@@ -1037,8 +1054,21 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                     .catch(() => {});
                 
                 const currentBotNum = sock.user ? sock.user.id.split(':')[0] : null;
-                const currentBotName = sock.user ? sock.user.name || "Adam_D'H7" : "Adam_D'H7";
+                const currentBotName = sock.user ? sock.user.name || "Adam D'H7" : "Adam D'H7";
                 if (currentBotNum) {
+                    for (const [oId, oSess] of activeSessions.entries()) {
+                        if (oId !== sessionId && oSess.number === currentBotNum) {
+                            try {
+                                if (oSess.sock) {
+                                    oSess.sock.logout();
+                                    if (oSess.sock.ws) oSess.sock.ws.close();
+                                }
+                            } catch(e){}
+                            activeSessions.delete(oId);
+                            await deleteMongoSession(oId);
+                        }
+                    }
+
                     const ownerCol = db.collection('session_owners');
                     const duplicates = await ownerCol.find({ Number: currentBotNum }).sort({ connectedSince: -1 }).toArray();
                     if (duplicates.length > 1) {
@@ -1057,7 +1087,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                 sessionId: sessionId,
                                 connectedSince: now
                             };
-                            if (currentBotName !== "Adam_D'H7" && currentBotName) {
+                            if (currentBotName !== "Adam D'H7" && currentBotName) {
                                 finalRecord.Name = currentBotName;
                             }
                             await ownerCol.updateOne(
@@ -1080,7 +1110,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                     } else {
                         const updateData = {};
                         if (!existingRecord.connectedSince) updateData.connectedSince = now;
-                        if (currentBotName !== "Adam_D'H7" && currentBotName && existingRecord.Name !== currentBotName) updateData.Name = currentBotName;
+                        if (currentBotName !== "Adam D'H7" && currentBotName && existingRecord.Name !== currentBotName) updateData.Name = currentBotName;
                         if (Object.keys(updateData).length > 0) {
                             await ownerCol.updateOne(
                                 { sessionId: sessionId },
@@ -1099,12 +1129,16 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                     currentSession.status = 'connecte';
                     currentSession.format = format;
                     currentSession.sock = sock;
+                    currentSession.disconnectTime = null;
                 }
             }
             if (connection === 'close') {
                 sessionData.active = false;
                 const currentSession = activeSessions.get(sessionId);
-                if (currentSession) currentSession.status = 'deconnecte';
+                if (currentSession) {
+                    currentSession.status = 'deconnecte';
+                    currentSession.disconnectTime = Date.now();
+                }
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 
                 try {
@@ -1196,7 +1230,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         sessionOwnerDoc = await ownerCol.findOne({ sessionId: sessionId });
                         if (sessionOwnerDoc) sessionOwnersCache.set(sessionId, sessionOwnerDoc);
                     }
-                    const hostNameToDisplay = sessionOwnerDoc ? sessionOwnerDoc.Name || "Adam_D'H7" : "Adam_D'H7";
+                    const hostNameToDisplay = sessionOwnerDoc ? sessionOwnerDoc.Name || "Adam D'H7" : "Adam D'H7";
 
                     const usernamesText = allParts.map(user => `@${user.split('@')[0]}`).join(', ');
                     const welcomeText = buildCaption(welcomeTitle, `*${welcomeTo} ${gSubject}*\n${usernamesText}`, hostNameToDisplay);
@@ -1229,9 +1263,11 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 
                 if (processedLocalCache.has(msgId)) return;
                 processedLocalCache.add(msgId);
-                if (processedLocalCache.size > 2000) {
+                if (processedLocalCache.size > 1000) {
                     const arr = Array.from(processedLocalCache);
-                    processedLocalCache.delete(arr[0]);
+                    for(let i = 0; i < 200; i++) {
+                        processedLocalCache.delete(arr[i]);
+                    }
                 }
 
                 const senderId = m.key.participant || m.key.remoteJid;
@@ -1267,7 +1303,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         }
 
                         let isOwnerReal = false;
-                        let activeHostName = sOwnerTop ? (sOwnerTop.Name || "Adam_D'H7") : "Adam_D'H7";
+                        let activeHostName = sOwnerTop ? (sOwnerTop.Name || "Adam D'H7") : "Adam D'H7";
                         const sNum = sender ? sender.split('@')[0].replace(/[^0-9]/g, '') : '';
                         const sName = pushName;
 
@@ -1391,12 +1427,23 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         if (!allowed) return;
                         if (!body) return;
                         
+                        const tIgnore = translations[globalLang] || translations.ht;
                         const ignoreTexts = [
-                            'Message non chargé', 
-                            'Waiting for this message', 
-                            'En attente de ce message', 
-                            'Ceci pourrait prendre un peu de temps',
-                            'This may take a while'
+                            tIgnore.pending_msg,
+                            tIgnore.msg_unloaded,
+                            tIgnore.take_time,
+                            "Message non chargé",
+                            "Waiting for this message",
+                            "En attente de ce message",
+                            "Ceci pourrait prendre un peu de temps",
+                            "This may take a while",
+                            "Esperando este mensaje",
+                            "Mensaje no cargado",
+                            "Esto puede tomar un tiempo",
+                            "Ap tann mesaj sa a",
+                            "Mesaj pa chaje",
+                            "Sa ka pran yon ti tan",
+                            "En attente de chargement"
                         ];
                         if (ignoreTexts.some(text => body.includes(text))) {
                             const problemSender = m.key.participant || m.key.remoteJid;
@@ -1449,16 +1496,23 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         
                         if (!internalCommand) return;
 
-                        const userQueueKey = `${sessionId}_${sender}`;
+                        const userQueueKey = `${sessionId}_${sender}_${internalCommand}`;
                         const nowTime = Date.now();
                         const lastReq = lastRequestTime.get(userQueueKey) || 0;
-                        if (nowTime - lastReq < 800) {
+                        if (nowTime - lastReq < 2500) {
                             return; 
                         }
                         lastRequestTime.set(userQueueKey, nowTime);
 
                         (async () => {
                             try {
+                                let isTyping = true;
+                                const typingInterval = setInterval(async () => {
+                                    if (isTyping) {
+                                        try { await sock.sendPresenceUpdate('composing', from); } catch (e) {}
+                                    }
+                                }, 8000);
+
                                 try { await sock.sendPresenceUpdate('composing', from); } catch (e) {}
 
                                 const quoted = m.message?.extendedTextMessage?.contextInfo;
@@ -1630,8 +1684,21 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                             }
                                             await queuedSendMessage(sock, from, tagOpts);
                                             break;
-                                        case 'kick':
                                         case 'add':
+                                            const isAdminKAdd = await checkAdmin();
+                                            if (!isGroup || !isAdminKAdd) break;
+                                            const targetsAdd = await resolveTargets(args, m);
+                                            if (targetsAdd.length === 0) break;
+                                            const filteredTargetsAdd = targetsAdd.filter(tr => tr !== botId);
+                                            if (filteredTargetsAdd.length === 0) break;
+                                            for (const target of filteredTargetsAdd) {
+                                                try {
+                                                    await safeGroupUpdate(from, [target], 'add');
+                                                    await new Promise(resolve => setTimeout(resolve, 2500));
+                                                } catch (e) {}
+                                            }
+                                            break;
+                                        case 'kick':
                                         case 'promote':
                                         case 'demote':
                                             const isAdminK = await checkAdmin();
@@ -1640,7 +1707,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                             if (targets.length === 0) break;
                                             const filteredTargets = targets.filter(tr => tr !== botId);
                                             if (filteredTargets.length === 0) break;
-                                            const actionMap = { kick: 'remove', add: 'add', promote: 'promote', demote: 'demote' };
+                                            const actionMap = { kick: 'remove', promote: 'promote', demote: 'demote' };
                                             await safeGroupUpdate(from, filteredTargets, actionMap[internalCommand]);
                                             break;
                                         case 'kickall':
@@ -2025,6 +2092,8 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                 try {
                                     await Promise.race([commandExecute(), timeoutExecute]);
                                 } catch (e) {}
+                                isTyping = false;
+                                clearInterval(typingInterval);
                                 try { await sock.sendPresenceUpdate('paused', from); } catch (e) {}
                             } catch (cmdError) {}
                         })();
@@ -2066,6 +2135,18 @@ async function loadExistingSessions() {
 
 setInterval(async () => {
     if (!db) return;
+    const now = Date.now();
+    for (const [sId, sess] of activeSessions.entries()) {
+        if (sess.status === 'deconnecte') {
+            if (!sess.disconnectTime) sess.disconnectTime = now;
+            else if (now - sess.disconnectTime > 600000) {
+                activeSessions.delete(sId);
+                await deleteMongoSession(sId);
+            }
+        } else {
+            sess.disconnectTime = null;
+        }
+    }
     try {
         const threshold = Date.now() - 60000;
         await db.collection('processed_messages').deleteMany({ ts: { $lt: threshold } });
