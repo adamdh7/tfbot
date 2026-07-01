@@ -321,35 +321,6 @@ app.use((req, res, next) => {
     next();
 });
 
-function waitForPairingTrigger(sock, timeoutMs = 45000) {
-    return new Promise((resolve, reject) => {
-        let done = false;
-        const timer = setTimeout(() => {
-            if (done) return;
-            done = true;
-            sock.ev.off('connection.update', handler);
-            reject(new Error('Timeout'));
-        }, timeoutMs);
-        const handler = (u) => {
-            if (u?.connection === 'connecting' || u?.qr) {
-                if (done) return;
-                done = true;
-                clearTimeout(timer);
-                sock.ev.off('connection.update', handler);
-                resolve(true);
-            }
-            if (u?.connection === 'close') {
-                if (done) return;
-                done = true;
-                clearTimeout(timer);
-                sock.ev.off('connection.update', handler);
-                reject(new Error('ConnectionClosed'));
-            }
-        };
-        sock.ev.on('connection.update', handler);
-    });
-}
-
 async function createCodeSession(sId, format = 'pair', expectExisting = false) {
     const sess = await startAdamBot(sId, true, format, expectExisting);
     return sess;
@@ -391,8 +362,7 @@ app.all('/get-code', async (req, res) => {
             return res.json({ ok: true, qr, qrDataUrl, sessionId: sId });
         }
 
-        await waitForPairingTrigger(sess.sock, 45000);
-        await sleep(500);
+        await sleep(2500);
         const codeRaw = await sess.sock.requestPairingCode(number);
         const code = String(codeRaw || '').match(/.{1,4}/g)?.join('-') || String(codeRaw || '');
         return res.json({ ok: true, code, sessionId: sId, number });
@@ -588,54 +558,6 @@ function buildCaption(type, text, hostName) {
 const logoPath = path.join(__dirname, 'adamdh7.png');
 let adamLogoBuffer = fs.existsSync(logoPath) ? fs.readFileSync(logoPath) : null;
 
-async function checkSessionLimits() {
-    if (!db) return;
-    try {
-        const now = Date.now();
-        const limit1h = 1 * 60 * 60 * 1000;
-        for (const [id, s] of activeSessions.entries()) {
-            if (!s.lastRefresh || (now - s.lastRefresh >= limit1h)) {
-                s.lastRefresh = now;
-                if (s.sock) {
-                    try {
-                        await s.sock.sendPresenceUpdate('available');
-                    } catch (e) {}
-                }
-            }
-        }
-    } catch (e) {}
-}
-
-async function checkAndRefreshSession70(sessionId) {
-    const session = activeSessions.get(sessionId);
-    if (!session) return;
-    const now = Date.now();
-    const minutes70 = 70 * 60 * 1000;
-    if (!session.lastResetTime || (now - session.lastResetTime >= minutes70)) {
-        session.lastResetTime = now;
-        session.status = 'synchronisation';
-        try {
-            if (session.sock) {
-                session.sock.ev.removeAllListeners();
-                if (session.sock.ws) {
-                    session.sock.ws.close();
-                }
-            }
-        } catch (e) {}
-        setTimeout(() => {
-            startAdamBot(sessionId, false, session.format || 'pair', true).catch(() => {});
-        }, 1000);
-    }
-}
-
-app.use(async (req, res, next) => {
-    await checkSessionLimits();
-    for (const sId of activeSessions.keys()) {
-        await checkAndRefreshSession70(sId);
-    }
-    next();
-});
-
 app.get('/sitemap.xml', (req, res) => {
     res.sendFile(path.join(__dirname, 'sitemap.xml'));
 });
@@ -787,6 +709,29 @@ async function callCloudflareAI(model, messages, maxTokens = 3000) {
   } catch (e) {
     return "Erreur lors de l'appel à l'IA.";
   }
+}
+
+async function callCloudflareImage(prompt) {
+    try {
+        const accountId = "c754bf19fa1b21106a6885e3be79274e";
+        const token = "cfut_PxZCBwgwkUnnh38zccPPUSy4K5E6zYDc9xiUwcqc05395e5a";
+        const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/stabilityai/stable-diffusion-xl-base-1.0`;
+        const res = await fetch(url, {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${token}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                prompt: prompt
+            })
+        });
+        if (!res.ok) throw new Error("Image API error");
+        const arrayBuffer = await res.arrayBuffer();
+        return Buffer.from(arrayBuffer);
+    } catch (e) {
+        throw e;
+    }
 }
 
 async function tavilySearch(query) {
@@ -957,7 +902,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
             logger: pino({ level: 'silent' }),
             printQRInTerminal: false,
             auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })) },
-            browser: Browsers.macOS('Google Chrome'),
+            browser: Browsers.ubuntu('Chrome'),
             markOnlineOnConnect: true,
             generateHighQualityLinkPreview: true,
             msgRetryCounterCache: retryCache,
@@ -967,7 +912,7 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
             getMessage: async (key) => {
                 const found = recentMsgsCache.find(m => m.id === key.id);
                 if (found && found.message) return found.message;
-                return undefined;
+                return { conversation: 'Message non disponible' };
             }
         });
 
@@ -1254,6 +1199,11 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                 if (m.key && m.key.remoteJid === 'status@broadcast') continue;
 
                 const msgId = m.key.id;
+                
+                try {
+                    await sock.readMessages([m.key]);
+                } catch (e) {}
+
                 if (processedLocalCache.has(msgId)) return;
                 processedLocalCache.add(msgId);
                 if (processedLocalCache.size > 2000) {
@@ -1481,8 +1431,6 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                         
                         if (!internalCommand) return;
 
-                        await checkAndRefreshSession70(sessionId);
-
                         const userQueueKey = `${sessionId}_${sender}`;
                         const nowTime = Date.now();
                         const lastReq = lastRequestTime.get(userQueueKey) || 0;
@@ -1512,23 +1460,49 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                     return await sendFormatted(...sendArgs);
                                 };
 
-                                const getProtectedJids = (metaGroup) => {
-                                    let protectedArr = [];
-                                    if (botId) protectedArr.push(botId);
-                                    if (sOwnerTop && sOwnerTop.Number) {
-                                        protectedArr.push(sOwnerTop.Number.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
-                                    }
-                                    if (isOwnerReal && sender) {
-                                        protectedArr.push(sender.split(':')[0] + '@s.whatsapp.net');
-                                    }
-                                    if (metaGroup && metaGroup.owner) {
-                                        protectedArr.push(metaGroup.owner.split(':')[0] + '@s.whatsapp.net');
-                                    }
-                                    return protectedArr;
-                                };
-
                                 const commandExecute = async () => {
                                     switch (internalCommand) {
+                                        case 'ai':
+                                            if (!args) {
+                                                await safeSendFormatted(sock, from, t.ai_title || "IA", "Veuillez poser une question.", pushName, false, activeHostName);
+                                                break;
+                                            }
+                                            try {
+                                                const msgs = buildAIMessages([{role: "user", content: args}], userInfo.get(sender) || {}, globalLang);
+                                                const aiResp = await callCloudflareAI("@cf/meta/llama-3-8b-instruct", msgs);
+                                                await safeSendFormatted(sock, from, t.ai_title || "IA", aiResp, pushName, true, activeHostName);
+                                            } catch (e) {
+                                                await safeSendFormatted(sock, from, t.ai_title || "IA", "Erreur réseau de l'IA.", pushName, false, activeHostName);
+                                            }
+                                            break;
+
+                                        case 'imaj':
+                                            if (!args) {
+                                                await safeSendFormatted(sock, from, t.imaj_title || "Image", t.imaj_prompt || "Texte manquant.", pushName, false, activeHostName);
+                                                break;
+                                            }
+                                            try {
+                                                const imgBuffer = await callCloudflareImage(args);
+                                                await queuedSendMessage(sock, from, { image: imgBuffer, caption: buildCaption(t.imaj_title || "Image", args, activeHostName) });
+                                            } catch (e) {
+                                                await safeSendFormatted(sock, from, t.imaj_title || "Image", t.imaj_error || "Erreur de génération.", pushName, false, activeHostName);
+                                            }
+                                            break;
+
+                                        case 'alive':
+                                            const aliveDur = sOwnerTop && sOwnerTop.connectedSince ? getUptimeString(Date.now() - sOwnerTop.connectedSince) : "0s";
+                                            await safeSendFormatted(sock, from, t.alive_title || "Alive", `Bot actif depuis : ${aliveDur}`, pushName, false, activeHostName);
+                                            break;
+
+                                        case 'ping':
+                                            await safeSendFormatted(sock, from, "Ping", "Pong ! Système 100% opérationnel.", pushName, false, activeHostName);
+                                            break;
+
+                                        case 'url':
+                                            if (!args) break;
+                                            await safeSendFormatted(sock, from, "URL", `Lien généré : https://${args.replace(/ /g, '')}`, pushName, false, activeHostName);
+                                            break;
+
                                         case 'prive':
                                             if (!isOwnerReal) break;
                                             if (sOwnerTop.mode === 'prive') {
@@ -1559,8 +1533,9 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
                                         case 'info':
                                             let infoBodyText = '';
                                             if (globalLang === 'fr') {
-                                                infoBodyText = `*● IA & RECHERCHE*\n*○ ${t.cmd_ai}* : Interroger l'Intelligence Artificielle pour obtenir des réponses textuelles détaillées.\n*○ ${t.cmd_lang}* : Modifier la langue de configuration du bot.\n*○ ${t.cmd_imaj}* : Générer une image numérique à partir d'une description textuelle.\n*○ ${t.cmd_cheche}* : Effectuer des recherches approfondies sur le web.\n\n*● UTILITAIRES & SYSTEME*\n*○ ${t.cmd_menu}* : Afficher l'arborescence complète et la liste de toutes commands.\n*○ ${t.cmd_qrbot}* : Initier et lier une nouvelle sous-session via code QR.\n*○ ${t.cmd_qr}* : Convertir un texte ou un lien spécifié en code QR scannable.\n*○ ${t.cmd_code}* : Générer ou vérifier un code d'autorisation système.\n*○ ${t.cmd_lien}* : Obtenir le lien d'invitation officiel.\n*○ ${t.cmd_sites}* : Consulter les sites officiels.\n*○ ${t.cmd_info}* : Fournir les informations explicatives d'utilisation de chaque commande.\n\n*● LOGISTIQUE DE GROUPE*\n*○ ${t.cmd_tagall}* : Mentionner explicitement tous les membres (Admin uniquement).\n*○ ${t.cmd_hidetag}* : Diffuser un message en mentionnant secrètement tous les membres.\n*○ ${t.cmd_kick}* : Retirer un membre spécifique du groupe actuel.\n*○ ${t.cmd_add}* : Ajouter un numéro de téléphone directement au groupe.\n*○ ${t.cmd_promote}* : Élever un membre régulier au rang d'administrateur.\n*○ ${t.cmd_demote}* : Rétrograder un administrateur existant au statut de membre.\n*○ ${t.cmd_kickall}* : Procéder à une expulsion globale de tous les non-administrateurs.\n*○ ${t.cmd_kickall2}* : Exécuter une méthode d'expulsion collective secondaire.\n*○ ${t.cmd_ferme}* : Restreindre l'envoi de messages uniquement aux administrateurs.\n*○ ${t.cmd_ouvert}* : Autoriser l'envoi de messages à`;
+                                                infoBodyText = `*● IA & RECHERCHE*\n*○ ${t.cmd_ai}* : Interroger l'Intelligence Artificielle pour obtenir des réponses textuelles détaillées.\n*○ ${t.cmd_lang}* : Modifier la langue de configuration du bot.\n*○ ${t.cmd_imaj}* : Générer une image numérique à partir d'une description textuelle.\n*○ ${t.cmd_cheche}* : Effectuer des recherches approfondies sur le web.\n\n*● UTILITAIRES & SYSTEME*\n*○ ${t.cmd_menu}* : Afficher l'arborescence complète et la liste de toutes commands.\n*○ ${t.cmd_qrbot}* : Initier et lier une nouvelle sous-session via code QR.\n*○ ${t.cmd_qr}* : Convertir un texte ou un lien spécifié en code QR scannable.\n*○ ${t.cmd_code}* : Générer ou vérifier un code d'autorisation système.\n*○ ${t.cmd_lien}* : Obtenir le lien d'invitation officiel.\n*○ ${t.cmd_sites}* : Consulter les sites officiels.\n*○ ${t.cmd_info}* : Fournir les informations explicatives d'utilisation de chaque commande.\n\n*● LOGISTIQUE DE GROUPE*\n*○ ${t.cmd_tagall}* : Mentionner explicitement tous les membres (Admin uniquement).\n*○ ${t.cmd_hidetag}* : Diffuser un message en mentionnant secrètement tous les membres.\n*○ ${t.cmd_kick}* : Retirer un membre spécifique du groupe actuel.\n*○ ${t.cmd_add}* : Ajouter un numéro de téléphone directement au groupe.\n*○ ${t.cmd_promote}* : Élever un membre régulier au rang d'administrateur.\n*○ ${t.cmd_demote}* : Rétrograder un administrateur existant au statut de membre.\n*○ ${t.cmd_kickall}* : Procéder à une expulsion globale de tous les non-administrateurs.\n*○ ${t.cmd_kickall2}* : Exécuter une méthode d'expulsion collective secondaire.\n*○ ${t.cmd_ferme}* : Restreindre l'envoi de messages uniquement aux administrateurs.\n*○ ${t.cmd_ouvert}* : Autoriser l'envoi de messages à tous.`;
                                             }
+                                            await safeSendFormatted(sock, from, "Info", infoBodyText, pushName, false, activeHostName);
                                             break;
                                         case 'code':
                                             if (!isOwnerReal) break;
