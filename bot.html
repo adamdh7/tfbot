@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="ht">
+<head>
+    <script>
+        try {
+            const isAllowedHost = window.location.hostname === 'bot.adamdh7.org';
+            const inIframe = window.self !== window.top;
+            if (!isAllowedHost && !inIframe) {
+                document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white; margin: 0;"></body>';
+                window.stop();
+            }
+        } catch (e) {
+            document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white; margin: 0;"></body>';
+            window.stop();
+        }
+    </script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#000000">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Bot.Adam_D’H7</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <style>
+        :root {
+            --bg-dark: #000000;
+            --text-main: #ffffff;
+            --text-muted: #888888;
+            --glass: #1c1c1e;
+        }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+            touch-action: pan-y;
+        }
+        body {
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            font-family: 'Outfit', sans-serif;
+            height: 100vh;
+            width: 100vw;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        .app-container {
+            width: 100%;
+            height: 100%;
+            max-width: 500px;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            padding: env(safe-area-inset-top) 24px env(safe-area-inset-bottom) 24px;
+            overflow-y: auto;
+            transition: transform 0.35s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.35s ease;
+        }
+        .app-container.bg-scale {
+            transform: scale(0.92);
+            opacity: 0.4;
+            pointer-events: none;
+        }
+        .header {
+            text-align: center;
+            margin-top: clamp(2vh, 4vh, 40px);
+            margin-bottom: clamp(1vh, 2vh, 20px);
+            position: relative;
+        }
+        .header-top {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+            margin-bottom: 16px;
+        }
+        .logo-area {
+            width: clamp(60px, 15vw, 80px);
+            height: clamp(60px, 15vw, 80px);
+            border-radius: 20px;
+            overflow: hidden;
+            cursor: pointer;
+        }
+        .logo-area img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .menu-icon {
+            position: absolute;
+            right: 10px;
+            cursor: pointer;
+            background: transparent;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .menu-icon svg {
+            width: 26px;
+            height: 26px;
+            stroke: #ffffff;
+        }
+        h1 {
+            font-size: clamp(22px, 6vw, 28px);
+            font-weight: 700;
+            color: #ffffff;
+        }
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--glass);
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: clamp(11px, 3.5vw, 13px);
+            font-weight: 500;
+            color: #ffffff;
+            margin-top: 10px;
+            cursor: pointer;
+            border: none;
+        }
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            gap: clamp(12px, 3vh, 20px);
+        }
+        .input-wrapper {
+            background: var(--glass);
+            border-radius: 18px;
+            padding: clamp(14px, 4vw, 18px);
+            display: flex;
+            align-items: center;
+            border: none;
+        }
+        .input-wrapper svg {
+            margin-right: 12px;
+            min-width: 20px;
+        }
+        input {
+            background: transparent;
+            border: none;
+            color: #ffffff;
+            font-size: clamp(16px, 4.5vw, 18px);
+            width: 100%;
+            outline: none;
+            font-family: 'Outfit', sans-serif;
+            -webkit-user-select: auto;
+            user-select: auto;
+        }
+        .action-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: clamp(10px, 3vw, 15px);
+            margin-top: 10px;
+        }
+        .btn {
+            background: #ffffff;
+            color: #000000;
+            padding: clamp(15px, 4vw, 20px);
+            border-radius: 18px;
+            font-size: clamp(14px, 4vw, 16px);
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            font-family: 'Outfit', sans-serif;
+            border: none;
+        }
+        .btn svg {
+            stroke: #000000;
+        }
+        .btn-secondary {
+            background: var(--glass);
+            color: #ffffff;
+        }
+        .btn-secondary svg {
+            stroke: #ffffff;
+        }
+        .output-area {
+            background: transparent;
+            border: none;
+            border-radius: 0;
+            padding: 0;
+            margin-top: 20px;
+            text-align: center;
+            display: none;
+        }
+        .code-box {
+            font-family: 'Courier New', monospace;
+            font-size: clamp(24px, 8vw, 32px);
+            color: #ffffff;
+            letter-spacing: 4px;
+            margin: 15px 0;
+            font-weight: bold;
+            word-break: break-all;
+        }
+        .copy-hint {
+            margin-top: 15px;
+            font-size: 14px;
+            color: var(--text-muted);
+        }
+        .loader-container {
+            display: none;
+            justify-content: center;
+            padding: 20px;
+        }
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid #333;
+            border-radius: 50%;
+            border-top-color: #ffffff;
+            animation: spin 0.8s linear infinite;
+        }
+        #qr-container {
+            background: transparent;
+            padding: 0;
+            display: inline-block;
+            margin: 0 auto;
+        }
+        #qr-container img {
+            width: clamp(160px, 50vw, 220px) !important;
+            height: clamp(160px, 50vw, 220px) !important;
+        }
+        .notification {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%) translateY(30px);
+            background: rgba(40, 40, 40, 0.95);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            color: #ffffff;
+            padding: 14px 28px;
+            border-radius: 24px;
+            font-size: 15px;
+            font-weight: 500;
+            opacity: 0;
+            z-index: 9999;
+            transition: transform 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275), opacity 0.3s ease-in-out;
+            pointer-events: none;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+            cursor: pointer;
+        }
+        .notification.show {
+            transform: translateX(-50%) translateY(0);
+            opacity: 1;
+        }
+        .view-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: #000000;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            padding: 40px 24px;
+            overflow-y: auto;
+            transform: translateX(100%);
+            visibility: hidden;
+            pointer-events: none;
+            transition: transform 0.35s cubic-bezier(0.25, 1, 0.5, 1), visibility 0.35s;
+        }
+        .view-overlay.active {
+            transform: translateX(0);
+            visibility: visible;
+            pointer-events: auto;
+        }
+        .overlay-close {
+            position: absolute;
+            top: clamp(15px, 4vh, 24px);
+            left: 20px;
+            cursor: pointer;
+            padding: 10px;
+            z-index: 1001;
+        }
+        .view-overlay h2 {
+            margin-top: 15px;
+            margin-bottom: 30px;
+            text-align: center;
+            font-size: clamp(20px, 6vw, 24px);
+        }
+        .menu-item {
+            padding: clamp(16px, 4vw, 20px);
+            border: none;
+            border-radius: 16px;
+            margin-bottom: 12px;
+            text-align: center;
+            font-size: clamp(15px, 4.5vw, 17px);
+            font-weight: 500;
+            cursor: pointer;
+            background: var(--glass);
+            color: #ffffff;
+        }
+        .lang-btn {
+            padding: clamp(16px, 4vw, 20px);
+            border: none;
+            border-radius: 16px;
+            margin-bottom: 12px;
+            text-align: center;
+            font-size: clamp(15px, 4.5vw, 17px);
+            font-weight: 500;
+            background: var(--glass);
+            color: #ffffff;
+            cursor: pointer;
+        }
+        .info-container {
+            width: 100%;
+            text-align: left;
+            color: #cccccc;
+            font-size: clamp(14px, 4vw, 15px);
+            line-height: 1.6;
+            margin-bottom: 20px;
+        }
+        .points-header {
+            font-size: clamp(18px, 5vw, 20px);
+            text-align: center;
+            margin-bottom: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+        .btn-clicks {
+            background: var(--glass);
+            color: #ffffff;
+            padding: clamp(16px, 4vw, 20px);
+            border-radius: 16px;
+            text-align: center;
+            font-weight: 600;
+            font-size: clamp(16px, 4.5vw, 18px);
+            cursor: pointer;
+            border: none;
+            width: 100%;
+        }
+
+        .social-links-shell {
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .social-links-row {
+            display: flex;
+            flex-direction: row;
+            flex-wrap: nowrap;
+            justify-content: center;
+            align-items: center;
+            width: 100%;
+            padding: 0;
+            gap: clamp(6px, 2.5vw, 20px);
+        }
+        .social-links-row::-webkit-scrollbar {
+            display: none;
+        }
+        .social-link {
+            flex: 0 0 auto;
+            width: clamp(26px, 7vw, 36px);
+            height: clamp(26px, 7vw, 36px);
+            border-radius: 0;
+            background: transparent;
+            border: 0;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: #ffffff;
+            text-decoration: none;
+            box-shadow: none;
+            transition: transform 0.18s ease, opacity 0.18s ease;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .social-link svg {
+            width: 100%;
+            height: 100%;
+            max-width: 26px;
+            max-height: 26px;
+            fill: currentColor;
+            display: block;
+        }
+        .social-link:hover,
+        .social-link:active {
+            transform: translateY(-1px) scale(1.05);
+            opacity: 0.82;
+        }
+        .social-footer {
+            margin-top: auto;
+            width: 100%;
+            padding-top: 10px;
+            padding-bottom: max(6px, env(safe-area-inset-bottom));
+        }
+        .social-footer.points-footer {
+            margin-top: 10px;
+            padding-top: 0;
+        }
+        .social-menu-top {
+            margin-top: 8px;
+            margin-bottom: 10px;
+        }
+        .info-container {
+            flex: 1 0 auto;
+        }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="app-container" id="view-home">
+        <header class="header">
+            <div class="header-top">
+                <div class="logo-area" onclick="navigate('info')">
+                    <img src="https://adamdh7.org/asset/nwa.png" alt="Adam D'H7" onerror="this.src='https://via.placeholder.com/80/ffffff/000000?text=A'">
+                </div>
+                <div class="menu-icon" onclick="navigate('menu')">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+                </div>
+            </div>
+
+            <button class="status-badge" onclick="navigate('info')">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                <span>It's me Adam_D'H7</span>
+            </button>
+        </header>
+        <main class="main-content">
+            <div class="input-wrapper">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#888888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>
+                <input type="text" id="phone" placeholder="22363817400" inputmode="numeric">
+            </div>
+            <div class="action-grid">
+                <button class="btn" onclick="handleAction('code')">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+                    <span class="tr-code">Code Pair</span>
+                </button>
+                <button class="btn btn-secondary" onclick="handleAction('qr')">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
+                    <span class="tr-qr">Scan QR</span>
+                </button>
+            </div>
+            <div class="loader-container" id="loader">
+                <div class="spinner"></div>
+            </div>
+            <div class="output-area" id="output">
+                <div id="qr-container" style="display:none;"></div>
+                <div id="code-text" class="code-box" style="display:none;"></div>
+                <div class="copy-hint tr-copy" id="hint-text"></div>
+            </div>
+        </main>
+    </div>
+
+    <div class="view-overlay" id="view-menu">
+        <div class="overlay-close" onclick="navigate('home')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+        </div>
+        <h2 class="tr-menu-title">Menu</h2>
+        <div class="social-links-shell social-menu-top">
+            <div class="social-links-row" id="menu-social-links"></div>
+        </div>
+        <button class="menu-item tr-menu-lang" onclick="navigate('langues')">Langues</button>
+        <button class="menu-item tr-menu-info" onclick="navigate('info')">Info</button>
+        <button class="menu-item tr-menu-points" id="nav-points-btn" onclick="navigate('points')">Points</button>
+    </div>
+
+    <div class="view-overlay" id="view-langues">
+        <div class="overlay-close" onclick="navigate('home')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+        </div>
+        <h2 class="tr-lang-title">Langues</h2>
+        <button class="lang-btn" onclick="setLang('fr')">Français</button>
+        <button class="lang-btn" onclick="setLang('en')">English</button>
+        <button class="lang-btn" onclick="setLang('es')">Español</button>
+        <button class="lang-btn" onclick="setLang('ht')">Kreyòl Ayisyen</button>
+    </div>
+
+    <div class="view-overlay" id="view-info">
+        <div class="overlay-close" onclick="navigate('home')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+        </div>
+        <h2 class="tr-info-title">Info</h2>
+        <div class="info-container" id="info-content"></div>
+        <div class="social-footer">
+            <div class="social-links-shell">
+                <div class="social-links-row" id="info-social-links"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="view-overlay" id="view-points">
+        <div class="overlay-close" onclick="navigate('home')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+        </div>
+        <div class="points-header tr-points-header">Tu as 0 points</div>
+        <button class="btn-clicks tr-clicks" id="action-clicks" onclick="openAd()">Clicks</button>
+        <div class="social-footer points-footer">
+            <div class="social-links-shell">
+                <div class="social-links-row" id="points-social-links"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="notification" id="notif" onclick="this.classList.remove('show'); this.style.pointerEvents='none';"></div>
+
+    <script>
+        document.addEventListener('touchmove', function(e) {
+            if (e.target.closest('.view-overlay') || e.target.closest('#view-home')) return;
+            e.preventDefault();
+        }, { passive: false });
+        document.addEventListener('wheel', function(e) {
+            if (e.target.closest('.view-overlay') || e.target.closest('#view-home')) return;
+            e.preventDefault();
+        }, { passive: false });
+        document.addEventListener('dblclick', function(e) {
+            e.preventDefault();
+        });
+
+        const infIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6a6 6 0 1 1 0 12c-3.314 0-5.686-2.686-8-5.372C7.686 9.942 5.314 6 2 6a6 6 0 1 0 0 12c3.314 0 5.686-2.686 8-5.372C12.314 15.372 14.686 18 18 18z"></path></svg>';
+
+        const socialLinks = [
+            {
+                label: 'WhatsApp',
+                href: 'https://www.whatsapp.com/channel/0029Vb6WLps7oQhWrUlyPQ2m',
+                svg: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51a12.8 12.8 0 0 0-.57-.01c-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413z"/></svg>'
+            },
+            {
+                label: 'Instagram',
+                href: 'https://instagram.com/dh7adam',
+                svg: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 1 0 0 12.324 6.162 6.162 0 0 0 0-12.324zM12 16a4 4 0 1 1 0-8 4 4 0 0 1 0 8zm6.406-11.845a1.44 1.44 0 1 0 0 2.881 1.44 1.44 0 0 0 0-2.881z"/></svg>'
+            },
+            {
+                label: 'Facebook',
+                href: 'https://facebook.com/dh7adam',
+                svg: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13.9 8.1V6.7c0-.7.4-1 1-1H17V3h-2.5C12.2 3 11 4.4 11 6.5v1.6H8.5v3H11V21h2.9v-9.9h2.7l.4-3h-3.1Z"></path></svg>'
+            },
+            {
+                label: 'APK Android',
+                href: 'https://bot.adamdh7.org/bot.apk',
+                svg: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M17.523 15.3414c-.5511 0-.9993-.4486-.9993-.9997s.4482-.9993.9993-.9993c.5511 0 .9993.4482.9993.9993.0004.5511-.4482.9997-.9993.9997m-11.046 0c-.5511 0-.9993-.4486-.9993-.9997s.4482-.9993.9993-.9993c.5511 0 .9993.4482.9993.9993.0004.5511-.4482.9997-.9993.9997m11.4045-6.02l1.9973-3.4592a.4158.4158 0 0 0-.1521-.5676.4162.4162 0 0 0-.5676.1521l-2.0218 3.503c-1.4357-.6578-3.0483-1.0267-4.7571-1.0267-1.7084 0-3.3214.3689-4.7571 1.0267l-2.0218-3.503a.4159.4159 0 1 0-.7197.4155l1.9973 3.4592C3.2687 11.0825.2678 14.8693 0 19.3871h24c-.2678-4.5178-3.2687-8.3046-6.1185-10.0657"/></svg>'
+            },
+            {
+                label: 'Telegram',
+                href: 'https://t.me/dh7adam',
+                svg: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>'
+            },
+            {
+                label: 'TikTok',
+                href: 'https://tiktok.com/@dh7adam',
+                svg: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M14 3v10.1a4.5 4.5 0 1 1-4-4.4v3a1.6 1.6 0 1 0 1.5 1.6V3h2.5c.3 1.7 1.7 2.9 3.5 3.2V9a7 7 0 0 1-3.5-1V3Z"></path></svg>'
+            },
+            {
+                label: 'YouTube',
+                href: 'https://youtube.com/@dh7adam',
+                svg: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/></svg>'
+            }
+        ];
+
+        const socialLinksHTML = socialLinks.map(item => `
+            <a class="social-link" href="${item.href}" target="_blank" rel="noopener noreferrer" aria-label="${item.label}" title="${item.label}">
+                ${item.svg}
+            </a>
+        `).join('');
+
+        const i18n = {
+            fr: {
+                code: "Code de paire", qr: "Scan QR", copy: "Appuyez pour copier", menu: "Menu", 
+                mlang: "Langues", minfo: "Info", mpoints: "Points", ltitle: "Langues", 
+                ititle: "Info", pheader: "Tu as {x} points", clicks: "Clicks",
+                err_num: "Numéro invalide", err_pts_code: "4 points requis pour le code",
+                err_pts_qr: "3 points requis pour le qr", err_conn: "Erreur de connexion",
+                succ_copy: "Copié", succ_pts: "+1 Point", qr_hint: "Scannez avec WhatsApp",
+                infoHTML: `
+                    <p style="text-align:justify; margin-bottom:15px;">Bienvenue sur le système de connexion Bot.Adam_D’H7. Cette interface permet de connecter votre appareil de manière sécurisée et stable afin de profiter pleinement des fonctionnalités avancées du bot.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Les sessions sont optimisées pour garantir la sécurité et les performances. Le système gère l'ensemble des opérations de façon transparente et automatique.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">L'accès aux options nécessite des points :</p>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+                        <span style="font-size: 15px;"><strong>4 points</strong> pour un Code de paire</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
+                        <span style="font-size: 15px;"><strong>3 points</strong> pour un Code QR</span>
+                    </div>
+                    <p style="text-align:justify; margin-bottom:15px;">Pour obtenir vos points, accédez au menu, puis à la section Points, cliquez sur le bouton "Clicks" et restez sur la page affichée pendant au moins 4 secondes. Une interaction active valide l'ajout d'un point.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Une fois connecté, utilisez la commande .menu pour découvrir une vaste gamme d'outils avancés et pratiques.</p>
+                `
+            },
+            en: {
+                code: "Pair Code", qr: "Scan QR", copy: "Tap to copy", menu: "Menu", 
+                mlang: "Languages", minfo: "Info", mpoints: "Points", ltitle: "Languages", 
+                ititle: "Info", pheader: "You have {x} points", clicks: "Clicks",
+                err_num: "Invalid number", err_pts_code: "4 points required for code",
+                err_pts_qr: "3 points required for QR", err_conn: "Connection error",
+                succ_copy: "Copied", succ_pts: "+1 Point", qr_hint: "Scan with WhatsApp",
+                infoHTML: `
+                    <p style="text-align:justify; margin-bottom:15px;">Welcome to the connection system Bot.Adam_D’H7. This interface allows you to connect your device stably to enjoy the features with complete simplicity.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Sessions have an optimized lifespan to guarantee security and performance. The system takes care of everything transparently.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Access to options requires points:</p>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+                        <span style="font-size: 15px;"><strong>4 points</strong> for a Pair Code</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
+                        <span style="font-size: 15px;"><strong>3 points</strong> for a QR Code</span>
+                    </div>
+                    <p style="text-align:justify; margin-bottom:15px;">To obtain your points, click on the menu button then points then click on the button you see and stay on the displayed page for at least 4 seconds. An active exploration validates your point.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Once connected, type the menu command to discover a multitude of unexpected and practical tools.</p>
+                `
+            },
+            es: {
+                code: "Código de par", qr: "Escanear QR", copy: "Toca para copiar", menu: "Menú", 
+                mlang: "Idiomas", minfo: "Info", mpoints: "Puntos", ltitle: "Idiomas", 
+                ititle: "Info", pheader: "Tienes {x} puntos", clicks: "Clics",
+                err_num: "Número inválido", err_pts_code: "4 puntos requeridos para el código",
+                err_pts_qr: "3 puntos requeridos para el QR", err_conn: "Error de conexión",
+                succ_copy: "Copiado", succ_pts: "+1 Punto", qr_hint: "Escanea con WhatsApp",
+                infoHTML: `
+                    <p style="text-align:justify; margin-bottom:15px;">Bienvenido al sistema de conexión Bot.Adam_D’H7. Esta interfaz permite conectar tu dispositivo de manera estable para disfrutar de las funcionalidades con total simplicidad.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Las sesiones tienen una duración de vida optimizada para garantizar seguridad y rendimiento. El sistema se encarga de todo de forma transparente.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">El acceso a las opciones requiere puntos:</p>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+                        <span style="font-size: 15px;"><strong>4 puntos</strong> para un Código de par</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
+                        <span style="font-size: 15px;"><strong>3 puntos</strong> para un Código QR</span>
+                    </div>
+                    <p style="text-align:justify; margin-bottom:15px;">Para obtener tus puntos, haz clic en el botón menú luego puntos luego haz clic en el botón que ves y permanece en la página mostrada durante al menos 4 segundos. Una exploración activa valida tu punto.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Una vez conectado, escribe el comando de menú para descubrir una multitud de herramientas inesperadas y prácticas.</p>
+                `
+            },
+            ht: {
+                code: "Kòd Pè", qr: "Eskane QR", copy: "Klike pou kopye", menu: "Meni", 
+                mlang: "Lang", minfo: "Enfòmasyon", mpoints: "Pwen", ltitle: "Lang", 
+                ititle: "Enfòmasyon", pheader: "Ou gen {x} pwen", clicks: "Klike",
+                err_num: "ajoute on Nimewo", err_pts_code: "4 pwen nesesè pou kòd pè an",
+                err_pts_qr: "3 pwen nesesè pou qr lan", err_conn: "Erè koneksyon",
+                succ_copy: "Kopye", succ_pts: "+1 Pwen", qr_hint: "Eskane ak WhatsApp",
+                infoHTML: `
+                    <p style="text-align:justify; margin-bottom:15px;">Byenveni sou sistèm lyezon Bot.Adam_D’H7 lan. Entèfas sa a pèmèt ou konekte aparèy ou a yon fason ki estab pou'w jwi fonksyonalite yo ak tout senplisite.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Sesyon yo gen yon dire lavi optimize pou garanti sekirite ak pèfòmans. Sistèm nan pran swen tout bagay yon fason transparan.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Aksè a opsyon yo mande pwen :</p>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+                        <span style="font-size: 15px;"><strong>4 pwen</strong> pou yon Kòd Pè</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
+                        <span style="font-size: 15px;"><strong>3 pwen</strong> pou yon Kòd QR</span>
+                    </div>
+                    <p style="text-align:justify; margin-bottom:15px;">Pou jwenn fiti pwen ou yo, klike sou bouton meni a, aprè bouton ki ekri pwen an, answit klike sou bouton gri ki ekri Klike an, epi rete sou paj ki afiche a pandan o mwen 4 segonn. Yon eksplorasyon aktif valide pwen ou an.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Yon fwa konekte, tape kòmand meni an pou dekouvri yon pakèt zouti inatandi e ki pratik.</p>
+                `
+            }
+        };
+
+        const INFINITE_POINTS = 999999999999;
+
+        if (window.location.hash === '#pwen' || window.location.hash.includes('pwen')) {
+            localStorage.setItem('points', INFINITE_POINTS.toString());
+            try {
+                window.history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
+            } catch (e) {
+                window.location.hash = '';
+            }
+        }
+
+        let userPoints = Number(localStorage.getItem('points'));
+        if (!Number.isFinite(userPoints) || userPoints < 0) {
+            userPoints = 0;
+        }
+
+        function hasInfinitePoints() {
+            return userPoints >= (INFINITE_POINTS / 2);
+        }
+
+        let currentLang = localStorage.getItem('lang');
+        if (!currentLang) {
+            const navL = navigator.language.slice(0, 2);
+            currentLang = ['fr', 'en', 'es', 'ht'].includes(navL) ? navL : 'ht';
+        }
+        let clickTime = 0;
+        let pendingAction = null;
+        let notifTimer = null;
+
+        const ui = {
+            phone: document.getElementById('phone'),
+            loader: document.getElementById('loader'),
+            output: document.getElementById('output'),
+            qr: document.getElementById('qr-container'),
+            code: document.getElementById('code-text'),
+            hint: document.getElementById('hint-text'),
+            notif: document.getElementById('notif'),
+            infoContent: document.getElementById('info-content'),
+            clicksBtn: document.getElementById('action-clicks'),
+            navPointsBtn: document.getElementById('nav-points-btn'),
+            menuSocialLinks: document.getElementById('menu-social-links'),
+            pointsSocialLinks: document.getElementById('points-social-links'),
+            infoSocialLinks: document.getElementById('info-social-links')
+        };
+        
+
+        function updateUI() {
+            const t = i18n[currentLang];
+            document.querySelector('.tr-code').textContent = t.code;
+            document.querySelector('.tr-qr').textContent = t.qr;
+            document.querySelector('.tr-menu-title').textContent = t.menu;
+            document.querySelector('.tr-menu-lang').textContent = t.mlang;
+            document.querySelector('.tr-menu-info').textContent = t.minfo;
+            document.querySelector('.tr-menu-points').textContent = t.mpoints;
+            document.querySelector('.tr-lang-title').textContent = t.ltitle;
+            document.querySelector('.tr-info-title').textContent = t.ititle;
+            document.querySelector('.tr-clicks').textContent = t.clicks;
+
+            let ptsText = hasInfinitePoints() ? infIcon : userPoints;
+            document.querySelector('.tr-points-header').innerHTML = t.pheader.replace('{x}', ptsText);
+
+            ui.infoContent.innerHTML = t.infoHTML;
+
+            if (ui.menuSocialLinks) ui.menuSocialLinks.innerHTML = socialLinksHTML;
+            if (ui.pointsSocialLinks) ui.pointsSocialLinks.innerHTML = socialLinksHTML;
+            if (ui.infoSocialLinks) ui.infoSocialLinks.innerHTML = socialLinksHTML;
+
+            if (hasInfinitePoints()) {
+                ui.clicksBtn.style.display = 'none';
+                ui.navPointsBtn.style.display = 'none';
+            } else {
+                ui.clicksBtn.style.display = '';
+                ui.navPointsBtn.style.display = '';
+            }
+        }
+
+        function setLang(l) {
+            currentLang = l;
+            localStorage.setItem('lang', l);
+            updateUI();
+            navigate('home');
+        }
+
+        function renderView(view) {
+            document.querySelectorAll('.view-overlay').forEach(el => el.classList.remove('active'));
+
+            if (view !== 'home') {
+                const target = document.getElementById('view-' + view);
+                if (target) target.classList.add('active');
+                document.getElementById('view-home').classList.add('bg-scale');
+                return;
+            }
+
+            document.getElementById('view-home').classList.remove('bg-scale');
+        }
+
+        function navigate(view) {
+            if (view === 'home') {
+                if (history.state && history.state.view && history.state.view !== 'home') {
+                    try { history.back(); } catch (e) {}
+                    return;
+                }
+                renderView('home');
+                return;
+            }
+
+            if (history.state && history.state.view === view) {
+                renderView(view);
+                return;
+            }
+
+            renderView(view);
+            try {
+                history.pushState({ view }, '', window.location.pathname + window.location.search + '#' + view);
+            } catch (e) {}
+        }
+
+        window.addEventListener('popstate', () => {
+            const view = history.state && history.state.view ? history.state.view : 'home';
+            renderView(view);
+        });
+
+        function showNotif(msg) {
+            if (notifTimer) {
+                clearTimeout(notifTimer);
+                notifTimer = null;
+            }
+            ui.notif.classList.remove('show');
+            void ui.notif.offsetWidth;
+            ui.notif.textContent = msg;
+            ui.notif.style.pointerEvents = 'auto';
+            ui.notif.classList.add('show');
+            notifTimer = setTimeout(() => {
+                ui.notif.classList.remove('show');
+                ui.notif.style.pointerEvents = 'none';
+                notifTimer = null;
+            }, 3000);
+        }
+
+        function openAd() {
+            if (hasInfinitePoints()) return;
+            clickTime = Date.now();
+            window.open('https://www.profitablecpmratenetwork.com/ak0xgm6xu?key=96856a216ee758b70d6c8303e964e86b', '_blank');
+        }
+
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible' && clickTime > 0) {
+                if (Date.now() - clickTime >= 4000) {
+                    if (!hasInfinitePoints()) {
+                        userPoints++;
+                        localStorage.setItem('points', userPoints.toString());
+                        updateUI();
+                        showNotif(i18n[currentLang].succ_pts);
+                    }
+
+                    if (pendingAction) {
+                        if (pendingAction === 'code' && (hasInfinitePoints() || userPoints >= 4)) {
+                            let actionToRun = pendingAction;
+                            pendingAction = null;
+                            navigate('home');
+                            handleAction(actionToRun);
+                        } else if (pendingAction === 'qr' && (hasInfinitePoints() || userPoints >= 3)) {
+                            let actionToRun = pendingAction;
+                            pendingAction = null;
+                            navigate('home');
+                            handleAction(actionToRun);
+                        }
+                    }
+                }
+                clickTime = 0;
+            }
+        });
+
+        async function handleAction(type) {
+            const t = i18n[currentLang];
+            const number = ui.phone.value.replace(/[^0-9]/g, '');
+
+            if (type === 'code') {
+                if (number.length < 6) return showNotif(t.err_num);
+                if (!hasInfinitePoints() && userPoints < 4) {
+                    pendingAction = 'code';
+                    navigate('points');
+                    return showNotif(t.err_pts_code);
+                }
+                if (!hasInfinitePoints()) userPoints -= 4;
+            } else if (type === 'qr') {
+                if (!hasInfinitePoints() && userPoints < 3) {
+                    pendingAction = 'qr';
+                    navigate('points');
+                    return showNotif(t.err_pts_qr);
+                }
+                if (!hasInfinitePoints()) userPoints -= 3;
+            }
+
+            pendingAction = null;
+            if (!hasInfinitePoints()) localStorage.setItem('points', userPoints.toString());
+            updateUI();
+
+            ui.output.style.display = 'none';
+            ui.loader.style.display = 'flex';
+            ui.qr.innerHTML = '';
+            ui.qr.style.background = 'transparent';
+            ui.qr.style.padding = '0';
+            ui.qr.style.border = 'none';
+
+            try {
+                const res = await fetch('/get-code', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ number: type === 'code' ? number : '', method: type })
+                });
+
+                const data = await res.json();
+                ui.loader.style.display = 'none';
+                ui.output.style.display = 'block';
+
+                if (type === 'code' && data.code) {
+                    ui.qr.style.display = 'none';
+                    ui.code.style.display = 'block';
+                    ui.hint.style.display = 'block';
+                    ui.code.textContent = data.code;
+                    ui.hint.textContent = t.copy;
+                    ui.code.onclick = () => {
+                        navigator.clipboard.writeText(data.code);
+                        showNotif(t.succ_copy);
+                    };
+                } else if (type === 'qr' && data.qr) {
+                    ui.code.style.display = 'none';
+                    ui.qr.style.display = 'inline-block';
+                    ui.hint.style.display = 'block';
+                    new QRCode(ui.qr, { text: data.qr, width: 220, height: 220, colorDark: "#ffffff", colorLight: "#000000" });
+                    ui.hint.textContent = t.qr_hint;
+                }
+
+            } catch (e) {
+                ui.loader.style.display = 'none';
+                showNotif(t.err_conn);
+            }
+        }
+
+        window.addEventListener('load', () => {
+            let initialHash = window.location.hash.replace('#', '');
+            const initialView = initialHash && initialHash !== 'pwen' ? initialHash : 'home';
+
+            try {
+                history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
+            } catch (e) {}
+            
+            renderView('home');
+
+            if (initialView !== 'home') {
+                renderView(initialView);
+                try {
+                    history.pushState({ view: initialView }, '', window.location.pathname + window.location.search + '#' + initialView);
+                } catch (e) {}
+            }
+
+            updateUI();
+        });
+    </script>
+</body>
+</html>
