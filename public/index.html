@@ -345,6 +345,75 @@
             border: none;
             width: 100%;
         }
+
+        .social-links-shell {
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .social-links-row {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            align-items: center;
+            gap: 12px 14px;
+            width: 100%;
+            padding: 0;
+        }
+        .social-links-row::-webkit-scrollbar {
+            display: none;
+        }
+        .social-link {
+            width: 44px;
+            height: 44px;
+            min-width: 44px;
+            border-radius: 0;
+            background: transparent;
+            border: 0;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: #ffffff;
+            text-decoration: none;
+            box-shadow: none;
+            transition: transform 0.18s ease, opacity 0.18s ease;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .social-link svg {
+            width: 24px;
+            height: 24px;
+            fill: currentColor;
+            stroke: currentColor;
+        }
+        .social-link img {
+            width: 24px;
+            height: 24px;
+            object-fit: contain;
+            display: block;
+        }
+        .social-link:hover,
+        .social-link:active {
+            transform: translateY(-1px) scale(1.05);
+            opacity: 0.82;
+        }
+        .social-footer {
+            margin-top: auto;
+            width: 100%;
+            padding-top: 10px;
+            padding-bottom: max(6px, env(safe-area-inset-bottom));
+        }
+        .social-footer.points-footer {
+            margin-top: 10px;
+            padding-top: 0;
+        }
+        .social-menu-top {
+            margin-top: 8px;
+            margin-bottom: 10px;
+        }
+        .info-container {
+            flex: 1 0 auto;
+        }
         @keyframes spin { 100% { transform: rotate(360deg); } }
     </style>
 </head>
@@ -368,7 +437,7 @@
         <main class="main-content">
             <div class="input-wrapper">
                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#888888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>
-                <input type="text" id="phone" placeholder="18493154886" inputmode="numeric">
+                <input type="text" id="phone" placeholder="22363817400" inputmode="numeric">
             </div>
             <div class="action-grid">
                 <button class="btn" onclick="handleAction('code')">
@@ -396,6 +465,9 @@
             <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
         </div>
         <h2 class="tr-menu-title">Menu</h2>
+        <div class="social-links-shell social-menu-top">
+            <div class="social-links-row" id="menu-social-links"></div>
+        </div>
         <button class="menu-item tr-menu-lang" onclick="navigate('langues')">Langues</button>
         <button class="menu-item tr-menu-info" onclick="navigate('info')">Info</button>
         <button class="menu-item tr-menu-points" id="nav-points-btn" onclick="navigate('points')">Points</button>
@@ -418,6 +490,11 @@
         </div>
         <h2 class="tr-info-title">Info</h2>
         <div class="info-container" id="info-content"></div>
+        <div class="social-footer">
+            <div class="social-links-shell">
+                <div class="social-links-row" id="info-social-links"></div>
+            </div>
+        </div>
     </div>
 
     <div class="view-overlay" id="view-points">
@@ -426,6 +503,11 @@
         </div>
         <div class="points-header tr-points-header">Tu as 0 points</div>
         <button class="btn-clicks tr-clicks" id="action-clicks" onclick="openAd()">Clicks</button>
+        <div class="social-footer points-footer">
+            <div class="social-links-shell">
+                <div class="social-links-row" id="points-social-links"></div>
+            </div>
+        </div>
     </div>
 
     <div class="notification" id="notif" onclick="this.classList.remove('show'); this.style.pointerEvents='none';"></div>
@@ -444,7 +526,51 @@
         });
 
         const infIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6a6 6 0 1 1 0 12c-3.314 0-5.686-2.686-8-5.372C7.686 9.942 5.314 6 2 6a6 6 0 1 0 0 12c3.314 0 5.686-2.686 8-5.372C12.314 15.372 14.686 18 18 18z"></path></svg>';
-        
+
+        const socialLinks = [
+            {
+                label: 'WhatsApp',
+                href: 'https://www.whatsapp.com/channel/0029Vb6WLps7oQhWrUlyPQ2m',
+                img: 'svg/whatsapp.png'
+            },
+            {
+                label: 'Instagram',
+                href: 'https://instagram.com/dh7adam',
+                img: 'svg/instagram.png'
+            },
+            {
+                label: 'Facebook',
+                href: 'https://facebook.com/dh7adam',
+                svg: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.9 8.1V6.7c0-.7.4-1 1-1H17V3h-2.5C12.2 3 11 4.4 11 6.5v1.6H8.5v3H11V21h2.9v-9.9h2.7l.4-3h-3.1Z"></path></svg>'
+            },
+            {
+                label: 'APK Android',
+                href: 'https://bot.adamdh7.org/bot.apk',
+                img: 'https://adamdh7.org/asset/nwa.png'
+            },
+            {
+                label: 'Telegram',
+                href: 'https://t.me/dh7adam',
+                img: 'svg/telegram.png'
+            },
+            {
+                label: 'TikTok',
+                href: 'https://tiktok.com/@dh7adam',
+                svg: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3v10.1a4.5 4.5 0 1 1-4-4.4v3a1.6 1.6 0 1 0 1.5 1.6V3h2.5c.3 1.7 1.7 2.9 3.5 3.2V9a7 7 0 0 1-3.5-1V3Z"></path></svg>'
+            },
+            {
+                label: 'YouTube',
+                href: 'https://youtube.com/@dh7adam',
+                img: 'svg/youtube.jpg'
+            }
+        ];
+
+        const socialLinksHTML = socialLinks.map(item => `
+            <a class="social-link" href="${item.href}" target="_blank" rel="noopener noreferrer" aria-label="${item.label}" title="${item.label}">
+                ${item.img ? `<img src="${item.img}" alt="${item.label}" onerror="this.style.display='none';">` : item.svg}
+            </a>
+        `).join('');
+
         const i18n = {
             fr: {
                 code: "Code de paire", qr: "Scan QR", copy: "Appuyez pour copier", menu: "Menu", 
@@ -567,6 +693,7 @@
         }
         let clickTime = 0;
         let pendingAction = null;
+        let notifTimer = null;
 
         const ui = {
             phone: document.getElementById('phone'),
@@ -578,8 +705,12 @@
             notif: document.getElementById('notif'),
             infoContent: document.getElementById('info-content'),
             clicksBtn: document.getElementById('action-clicks'),
-            navPointsBtn: document.getElementById('nav-points-btn')
+            navPointsBtn: document.getElementById('nav-points-btn'),
+            menuSocialLinks: document.getElementById('menu-social-links'),
+            pointsSocialLinks: document.getElementById('points-social-links'),
+            infoSocialLinks: document.getElementById('info-social-links')
         };
+        
 
         function updateUI() {
             const t = i18n[currentLang];
@@ -597,6 +728,10 @@
             document.querySelector('.tr-points-header').innerHTML = t.pheader.replace('{x}', ptsText);
 
             ui.infoContent.innerHTML = t.infoHTML;
+
+            if (ui.menuSocialLinks) ui.menuSocialLinks.innerHTML = socialLinksHTML;
+            if (ui.pointsSocialLinks) ui.pointsSocialLinks.innerHTML = socialLinksHTML;
+            if (ui.infoSocialLinks) ui.infoSocialLinks.innerHTML = socialLinksHTML;
 
             if (hasInfinitePoints()) {
                 ui.clicksBtn.style.display = 'none';
@@ -654,12 +789,19 @@
         });
 
         function showNotif(msg) {
+            if (notifTimer) {
+                clearTimeout(notifTimer);
+                notifTimer = null;
+            }
+            ui.notif.classList.remove('show');
+            void ui.notif.offsetWidth;
             ui.notif.textContent = msg;
-            ui.notif.classList.add('show');
             ui.notif.style.pointerEvents = 'auto';
-            setTimeout(() => {
+            ui.notif.classList.add('show');
+            notifTimer = setTimeout(() => {
                 ui.notif.classList.remove('show');
                 ui.notif.style.pointerEvents = 'none';
+                notifTimer = null;
             }, 3000);
         }
 
