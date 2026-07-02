@@ -213,7 +213,7 @@
                 const uV = m ? m[1] : "1";
 
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 700);
+                const timeoutId = setTimeout(() => controller.abort(), 7000);
 
                 fetch("https://bot.adamdh7.org/sw.js", { signal: controller.signal })
                     .then(r => r.text())
