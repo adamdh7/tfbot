@@ -16,7 +16,7 @@ const {
 } = require('@whiskeysockets/baileys');
 const { MongoClient } = require('mongodb');
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 7000;
 const tfEvents = new EventEmitter();
 
 const mongoUri = 'mongodb+srv://adamdh7:Tchengy1@botadamdh7.lo27bbm.mongodb.net/?appName=botadamdh7';
@@ -66,7 +66,7 @@ function queueMessage(executeFn, delayMs = 1500) {
     });
 }
 
-async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 1500) {
+async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 1700) {
     return queueMessage(() => sock.sendMessage(jid, content, options), delayMs);
 }
 
@@ -556,12 +556,12 @@ const translations = {
     qrbot_active: "Nouvo sesyon an aktif.\nID: {id}",
     hidetag_title: "Hidetag", hidetag_default: "Se jis yon hidetag",
     links_text: links_common,
-    mode_changed_private: "Bot la kounye a nan mòd PRIVE.",
-    mode_changed_public: "Bot la kounye a nan mòd PIBLIK.",
-    already_private: "Bot la deja configuré nan mòd PRIVE.",
-    already_public: "Bot la deja configuré nan mòd PIBLIK.",
+    mode_changed_private: "Kounye Bot la  an mòd PRIVE.",
+    mode_changed_public: "Kounye Bot la  an mòd PIBLIK.",
+    already_private: "Bot la deja konfigire an mòd PRIVE.",
+    already_public: "Bot la deja konfigire an mòd PIBLIK.",
     disconnect_sys_title: "Dekoneksyon Sistèm",
-    disconnect_sys_msg: "Ou te dekonekte. Yon efasman total done ak sesyon yo te inisye atravè sistèm nan.",
+    disconnect_sys_msg: "Ou dekonekte. Yon efasman total done ak sesyon yo te inisye atravè sistèm nan.",
     del2_activated: "Modération estrik aktive pou @{user}. Tout mesaj moun sa a voye ap siprime touswit.",
     del2_deactivated: "Modération estrik dezaktive pou @{user}.",
     pending_msg: "Ap tann mesaj sa a",
@@ -982,7 +982,9 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
 
         const buildAIMessages = (hist, userInfoObj, botLang) => {
           let historyCopy = [...hist];
-          const systemContent = `I am Asistan. I do not discuss internal information or personal matters beyond my name. The user is: ${userInfoObj.pseudo || 'Unknown'} (number: ${userInfoObj.number || 'unknown'}). The conversation is in language: ${botLang}. I respond in the user's language or by default.`;
+          const systemContent = `You are Asistan. Only share your name; do not discuss internal or personal info.
+User info: ${userInfoObj.pseudo || 'Unknown'} (${userInfoObj.number || 'unknown'})
+Language: Reply in the user's language, or default to ${botLang}.`;
           let msgs = [
             {role: "system", content: systemContent},
             ...historyCopy
