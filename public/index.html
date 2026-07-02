@@ -354,20 +354,20 @@
         }
         .social-links-row {
             display: flex;
-            flex-wrap: wrap;
-            justify-content: center;
+            flex-wrap: nowrap;
+            justify-content: space-between;
             align-items: center;
-            gap: 12px 14px;
             width: 100%;
             padding: 0;
+            gap: clamp(2px, 1vw, 12px);
         }
         .social-links-row::-webkit-scrollbar {
             display: none;
         }
         .social-link {
-            width: 44px;
-            height: 44px;
-            min-width: 44px;
+            flex: 1 1 auto;
+            max-width: 44px;
+            aspect-ratio: 1 / 1;
             border-radius: 0;
             background: transparent;
             border: 0;
@@ -380,17 +380,14 @@
             transition: transform 0.18s ease, opacity 0.18s ease;
             -webkit-tap-highlight-color: transparent;
         }
+        .social-link svg, .social-link img {
+            width: clamp(20px, 6.5vw, 26px);
+            height: clamp(20px, 6.5vw, 26px);
+            object-fit: contain;
+        }
         .social-link svg {
-            width: 24px;
-            height: 24px;
             fill: currentColor;
             stroke: currentColor;
-        }
-        .social-link img {
-            width: 24px;
-            height: 24px;
-            object-fit: contain;
-            display: block;
         }
         .social-link:hover,
         .social-link:active {
@@ -531,12 +528,12 @@
             {
                 label: 'WhatsApp',
                 href: 'https://www.whatsapp.com/channel/0029Vb6WLps7oQhWrUlyPQ2m',
-                img: 'svg/whatsapp.png'
+                img: '<img src="https://bot.adamdh7.org/svg/whatsapp.png" alt="WhatsApp">'
             },
             {
                 label: 'Instagram',
                 href: 'https://instagram.com/dh7adam',
-                img: 'svg/instagram.png'
+                img: '<img src="https://bot.adamdh7.org/svg/instagram.png" alt="Instagram">'
             },
             {
                 label: 'Facebook',
@@ -546,12 +543,12 @@
             {
                 label: 'APK Android',
                 href: 'https://bot.adamdh7.org/bot.apk',
-                img: 'https://adamdh7.org/asset/nwa.png'
+                img: '<img src="https://adamdh7.org/asset/nwa.png" alt="APK Android">'
             },
             {
                 label: 'Telegram',
                 href: 'https://t.me/dh7adam',
-                img: 'svg/telegram.png'
+                img: '<img src="https://bot.adamdh7.org/svg/telegram.png" alt="Telegram">'
             },
             {
                 label: 'TikTok',
@@ -561,13 +558,13 @@
             {
                 label: 'YouTube',
                 href: 'https://youtube.com/@dh7adam',
-                img: 'svg/youtube.jpg'
+                img: '<img src="https://bot.adamdh7.org/svg/youtube.jpg" alt="YouTube">'
             }
         ];
 
         const socialLinksHTML = socialLinks.map(item => `
             <a class="social-link" href="${item.href}" target="_blank" rel="noopener noreferrer" aria-label="${item.label}" title="${item.label}">
-                ${item.img ? `<img src="${item.img}" alt="${item.label}" onerror="this.style.display='none';">` : item.svg}
+                ${item.img ? item.img : item.svg}
             </a>
         `).join('');
 
