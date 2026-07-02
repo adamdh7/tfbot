@@ -652,10 +652,53 @@ app.get('/list', async (req, res) => {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { background: #000000; color: #FFFFFF; font-family: monospace; margin: 0; padding: 20px; white-space: pre-wrap; word-wrap: break-word; }
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans&family=Noto+Color+Emoji&family=Noto+Sans+Symbols&family=Noto+Sans+Symbols+2&family=Noto+Sans+Math&display=swap');
+
+        html, body { 
+            margin: 0; 
+            padding: 0; 
+            background: #000000; 
+            color: #FFFFFF; 
+            min-height: 100%;
+        }
+
+        #output {
+            font-family: "Noto Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, "Noto Color Emoji", "Noto Sans Symbols", "Noto Sans Symbols 2", "Noto Sans Math", "Arial Unicode MS", sans-serif;
+            white-space: pre-wrap; 
+            word-break: break-all;
+            font-size: 13px;
+            line-height: 1.1;
+            padding: 0;
+            margin: 0;
+        }
     </style>
 </head>
-<body>${JSON.stringify(sessionsList, null, 2)}</body>
+<body>
+
+    <script id="raw-data" type="application/json">${JSON.stringify(sessionsList)}</script>
+    <div id="output"></div>
+
+    <script>
+        try {
+            const rawJsonText = document.getElementById('raw-data').textContent;
+            const parsedData = JSON.parse(rawJsonText);
+            const formattedJson = JSON.stringify(parsedData, null, 1);
+            
+            function echapperBrut(texte) {
+                return texte
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;")
+                    .replace(/'/g, "&#039;");
+            }
+            
+            document.getElementById('output').innerHTML = echapperBrut(formattedJson);
+        } catch (e) {
+            document.getElementById('output').textContent = "Erreur";
+        }
+    </script>
+</body>
 </html>`;
       res.send(html);
   } catch (e) {
