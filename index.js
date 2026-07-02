@@ -143,11 +143,7 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
       for (const [key, value] of Object.entries(data)) {
         const dbId = `${sessionKey}_key_${key}`;
         if (value === null || value === undefined) {
-          bulkOps.push({
-            deleteOne: {
-              filter: { _id: dbId }
-            }
-          });
+          bulkOps.push({ deleteOne: { filter: { _id: dbId } } });
         } else {
           bulkOps.push({
             updateOne: {
@@ -184,13 +180,7 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
       );
     } catch (e) {}
   };
-  return {
-    state: {
-      creds,
-      keys: keyStore
-    },
-    saveCreds
-  };
+  return { state: { creds, keys: keyStore }, saveCreds };
 }
 
 async function deleteMongoSession(sessionId) {
@@ -210,12 +200,8 @@ async function wipeSenderCrypto(sessionId, senderJid) {
         const collection = db.collection('baileys_auth');
         const sessionKey = `auth-${sessionId}`;
         const jid = senderJid.split(':')[0] + '@s.whatsapp.net';
-        await collection.deleteMany({
-            _id: { $regex: `^${sessionKey}_key_session-${jid}` }
-        });
-        await collection.deleteMany({
-            _id: { $regex: `^${sessionKey}_key_sender-key-.*${jid}` }
-        });
+        await collection.deleteMany({ _id: { $regex: `^${sessionKey}_key_session-${jid}` } });
+        await collection.deleteMany({ _id: { $regex: `^${sessionKey}_key_sender-key-.*${jid}` } });
     } catch (e) {}
 }
 
@@ -235,18 +221,14 @@ async function renameMongoSession(oldSessionId, newSessionId) {
 
 async function getGroupSetting(sessionId, gjid, key) {
     const cacheKey = `${sessionId}_${gjid}_${key}`;
-    if (groupSettingsCache.has(cacheKey)) {
-        return groupSettingsCache.get(cacheKey);
-    }
+    if (groupSettingsCache.has(cacheKey)) return groupSettingsCache.get(cacheKey);
     try {
         const col = db.collection('group_settings');
         const doc = await col.findOne({ sessionId, gjid });
         const val = doc ? doc[key] : null;
         groupSettingsCache.set(cacheKey, val);
         return val;
-    } catch (e) {
-        return null;
-    }
+    } catch (e) { return null; }
 }
 
 async function setGroupSetting(sessionId, gjid, key, value) {
@@ -260,18 +242,14 @@ async function setGroupSetting(sessionId, gjid, key, value) {
 
 async function getDel2Targets(sessionId, gjid) {
     const cacheKey = `${sessionId}_${gjid}`;
-    if (activeDel2UsersCache.has(cacheKey)) {
-        return activeDel2UsersCache.get(cacheKey);
-    }
+    if (activeDel2UsersCache.has(cacheKey)) return activeDel2UsersCache.get(cacheKey);
     try {
         const col = db.collection('group_del2');
         const docs = await col.find({ sessionId, gjid }).toArray();
         const list = docs.map(d => d.targetJid);
         activeDel2UsersCache.set(cacheKey, list);
         return list;
-    } catch (e) {
-        return [];
-    }
+    } catch (e) { return []; }
 }
 
 async function addDel2Target(sessionId, gjid, targetJid) {
@@ -299,14 +277,8 @@ async function removeDel2Target(sessionId, gjid, targetJid) {
     } catch (e) {}
 }
 
-process.on('unhandledRejection', (err) => {
-    const msg = String(err?.message || err || '');
-    if (msg.includes('Bad MAC') || msg.includes('Failed to decrypt message') || msg.includes('No matching sessions')) return;
-});
-process.on('uncaughtException', (err) => {
-    const msg = String(err?.message || err || '');
-    if (msg.includes('Bad MAC') || msg.includes('Failed to decrypt message') || msg.includes('No matching sessions')) return;
-});
+process.on('unhandledRejection', () => {});
+process.on('uncaughtException', () => {});
 
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
@@ -315,9 +287,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-    if (req.method === 'OPTIONS') {
-        return res.sendStatus(204);
-    }
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
     next();
 });
 
@@ -332,9 +302,7 @@ app.all('/get-code', async (req, res) => {
     const method = String(body?.method || 'code').toLowerCase();
     const autoExpire = body?.autoExpire === true || body?.autoExpire === 'true' || body?.autoExpire === 1 || body?.autoExpire === '1';
     
-    if (method === 'code' && !number) {
-        return res.status(400).json({ ok: false, error: 'invalid_number' });
-    }
+    if (method === 'code' && !number) return res.status(400).json({ ok: false, error: 'invalid_number' });
 
     const sId = `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     let sess = null;
@@ -342,7 +310,6 @@ app.all('/get-code', async (req, res) => {
 
     try {
         sess = await createCodeSession(sId, method === 'qr' ? 'qr' : 'pair', false);
-
         cleanupTimer = setTimeout(async () => {
             const checkSess = activeSessions.get(sId);
             if (checkSess && checkSess.status !== 'connecte') {
@@ -362,21 +329,13 @@ app.all('/get-code', async (req, res) => {
             const qrDataUrl = await QRCode.toDataURL(qr);
             return res.json({ ok: true, qr, qrDataUrl, sessionId: sId });
         }
-
         const codeRaw = await new Promise((resolve, reject) => {
             setTimeout(async () => {
-                try {
-                    const c = await sess.sock.requestPairingCode(number);
-                    resolve(c);
-                } catch(e) {
-                    reject(e);
-                }
+                try { resolve(await sess.sock.requestPairingCode(number)); } catch(e) { reject(e); }
             }, 4500); 
         });
-
         const code = String(codeRaw || '').match(/.{1,4}/g)?.join('-') || String(codeRaw || '');
         return res.json({ ok: true, code, sessionId: sId, number });
-
     } catch (e) {
         try {
             if (cleanupTimer) clearTimeout(cleanupTimer);
@@ -389,47 +348,6 @@ app.all('/get-code', async (req, res) => {
         activeSessions.delete(sId);
         try { await deleteMongoSession(sId); } catch (err) {}
         return res.status(500).json({ ok: false, error: String(e?.message || e || 'pair_error') });
-    }
-});
-
-app.all('/get-qr', async (req, res) => {
-    const body = req.method === 'GET' ? req.query : req.body;
-    const sId = String(body?.sessionId || `session_qr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-    let sess = null;
-    let cleanupTimer = null;
-
-    try {
-        sess = await createCodeSession(sId, 'qr', false);
-
-        cleanupTimer = setTimeout(async () => {
-            const checkSess = activeSessions.get(sId);
-            if (checkSess && checkSess.status !== 'connecte') {
-                try {
-                    if (checkSess.sock) {
-                        try { checkSess.sock.logout(); } catch (e) {}
-                        try { if (checkSess.sock.ws) checkSess.sock.ws.close(); } catch (e) {}
-                    }
-                } catch (e) {}
-                activeSessions.delete(sId);
-                await deleteMongoSession(sId);
-            }
-        }, 180000);
-
-        const qr = await waitForQr(sess.sock, 45000);
-        const qrDataUrl = await QRCode.toDataURL(qr);
-        return res.json({ ok: true, qr, qrDataUrl, sessionId: sId });
-    } catch (e) {
-        try {
-            if (cleanupTimer) clearTimeout(cleanupTimer);
-            const checkSess = activeSessions.get(sId);
-            if (checkSess && checkSess.sock) {
-                try { checkSess.sock.logout(); } catch (err) {}
-                try { if (checkSess.sock.ws) checkSess.sock.ws.close(); } catch (err) {}
-            }
-        } catch (err) {}
-        activeSessions.delete(sId);
-        try { await deleteMongoSession(sId); } catch (err) {}
-        return res.status(500).json({ ok: false, error: String(e?.message || e || 'qr_error') });
     }
 });
 
@@ -467,7 +385,10 @@ const translations = {
     del2_deactivated: "La modération stricte a été désactivée pour @{user}.",
     pending_msg: "En attente de chargement",
     msg_unloaded: "Message non chargé",
-    take_time: "Ceci pourrait prendre un peu de temps"
+    take_time: "Ceci pourrait prendre un peu de temps",
+    quota_error: "Erreur de quota ou limite atteinte. Veuillez réessayer plus tard.",
+    ai_error: "Erreur lors de la communication avec l'IA.",
+    info_text: "*● IA & RECHERCHE*\n*○ ia* : Interroger l'Intelligence Artificielle pour des réponses textuelles.\n*○ lang* : Modifier la langue.\n*○ image* : Générer une image numérique.\n*○ chercher* : Effectuer des recherches web.\n\n*● UTILITAIRES & SYSTEME*\n*○ menu* : Afficher l'arborescence.\n*○ qrbot* : Initier une sous-session via code QR.\n*○ qr* : Convertir texte/lien en code QR.\n*○ code* : Générer code d'autorisation.\n*○ lien* : Obtenir lien officiel.\n*○ sit* : Consulter les sites.\n*○ info* : Informations explicatives.\n\n*● LOGISTIQUE DE GROUPE*\n*○ tagtout* : Mentionner tous les membres.\n*○ hidetag* : Diffuser un message secrètement.\n*○ expulse* : Retirer un membre.\n*○ add* : Ajouter un numéro.\n*○ promote* : Élever membre au rang admin.\n*○ demote* : Rétrograder un admin.\n*○ expulsetout* : Expulsion globale.\n*○ ferme* : Restreindre l'envoi de messages.\n*○ ouvert* : Autoriser l'envoi de messages."
   },
   en: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "search",
@@ -500,7 +421,10 @@ const translations = {
     del2_deactivated: "Strict moderation has been deactivated for @{user}.",
     pending_msg: "Waiting for this message",
     msg_unloaded: "Message not loaded",
-    take_time: "This may take a while"
+    take_time: "This may take a while",
+    quota_error: "Quota error or limit reached. Please try again later.",
+    ai_error: "Error communicating with the AI.",
+    info_text: "*● AI & SEARCH*\n*○ ai* : Query AI for detailed text responses.\n*○ lang* : Modify configuration language.\n*○ image* : Generate a digital image.\n*○ search* : Perform web searches.\n\n*● UTILITIES & SYSTEM*\n*○ menu* : View full menu.\n*○ qrbot* : Initiate session via QR code.\n*○ qr* : Convert text/link to QR code.\n*○ code* : Generate code.\n*○ link* : Obtain official link.\n*○ sit* : Consult official sites.\n*○ info* : Information.\n\n*● GROUP LOGISTICS*\n*○ tagall* : Mention all members.\n*○ hidetag* : Broadcast secret mention.\n*○ kick* : Remove a member.\n*○ add* : Add phone number.\n*○ promote* : Elevate member to admin.\n*○ demote* : Demote admin.\n*○ kickall* : Global expulsion.\n*○ close* : Restrict messages.\n*○ open* : Allow messages."
   },
   es: {
     cmd_ai: "ia", cmd_lang: "lang", cmd_imaj: "imagen", cmd_cheche: "buscar",
@@ -533,7 +457,10 @@ const translations = {
     del2_deactivated: "Se ha desactivado la moderación estricta para @{user}.",
     pending_msg: "Esperando este mensaje",
     msg_unloaded: "Mensaje no cargado",
-    take_time: "Esto puede tomar un tiempo"
+    take_time: "Esto puede tomar un tiempo",
+    quota_error: "Error de cuota o límite alcanzado. Por favor, inténtelo de nuevo más tarde.",
+    ai_error: "Error al comunicarse con la IA.",
+    info_text: "*● IA & BÚSQUEDA*\n*○ ia* : Consultar la IA para respuestas.\n*○ lang* : Modificar idioma.\n*○ imagen* : Generar imagen digital.\n*○ buscar* : Búsquedas web.\n\n*● UTILIDADES Y SISTEMA*\n*○ menú* : Ver menú completo.\n*○ qrbot* : Iniciar sesión vía código QR.\n*○ qr* : Convertir texto/enlace a código QR.\n*○ código* : Generar código.\n*○ enlace* : Obtener enlace oficial.\n*○ sit* : Consultar sitios oficiales.\n*○ info* : Información.\n\n*● LOGÍSTICA DE GRUPO*\n*○ etiquetartodo* : Mencionar a todos.\n*○ hidetag* : Mencionar en secreto.\n*○ expulsar* : Eliminar miembro.\n*○ añadir* : Añadir número.\n*○ promover* : Promover a admin.\n*○ degradar* : Degradar admin.\n*○ borrartodo* : Expulsión global.\n*○ cerrar* : Restringir mensajes.\n*○ abrir* : Permitir mensajes."
   },
   ht: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "imaj", cmd_cheche: "cheche",
@@ -556,8 +483,8 @@ const translations = {
     qrbot_active: "Nouvo sesyon an aktif.\nID: {id}",
     hidetag_title: "Hidetag", hidetag_default: "Se jis yon hidetag",
     links_text: links_common,
-    mode_changed_private: "Kounye Bot la  an mòd PRIVE.",
-    mode_changed_public: "Kounye Bot la  an mòd PIBLIK.",
+    mode_changed_private: "Kounye Bot la an mòd PRIVE.",
+    mode_changed_public: "Kounye Bot la an mòd PIBLIK.",
     already_private: "Bot la deja konfigire an mòd PRIVE.",
     already_public: "Bot la deja konfigire an mòd PIBLIK.",
     disconnect_sys_title: "Dekoneksyon Sistèm",
@@ -566,12 +493,20 @@ const translations = {
     del2_deactivated: "Modération estrik dezaktive pou @{user}.",
     pending_msg: "Ap tann mesaj sa a",
     msg_unloaded: "Mesaj pa chaje",
-    take_time: "Sa ka pran yon ti tan"
+    take_time: "Sa ka pran yon ti tan",
+    quota_error: "Erè kouta oswa limit atenn. Tanpri eseye ankò pita.",
+    ai_error: "Erè pandan kominikasyon avèk IA.",
+    info_text: "*● IA & RECHÈCH*\n*○ ai* : Poze IA kesyon pou jwenn repons text.\n*○ lang* : Modifye lang kreyòl la.\n*○ imaj* : Jenere imaj nimerik.\n*○ cheche* : Fè rechèch sou entènèt.\n\n*● ITILITE AK SISTÈM*\n*○ meni* : Wè tout kòmand yo.\n*○ qrbot* : Inisye sesyon avèk QR.\n*○ qr* : Konvèti tèks oswa lyen nan kòd QR.\n*○ kòd* : Jenere kòd otorizasyon.\n*○ lyen* : Jwenn lyen ofisyèl.\n*○ sit* : Konsilte sit ofisyèl yo.\n*○ info* : Enfòmasyon.\n\n*● LOJISTIK GWOUP*\n*○ tout* : Mansyone tout moun.\n*○ hidetag* : Voye mesaj an sekrè.\n*○ kick* : Retire yon manm.\n*○ add* : Ajoute nimewo.\n*○ promote* : Mete yon moun admin.\n*○ demote* : Desann yon admin.\n*○ siptout* : Mete tout moun deyò.\n*○ fèmen* : Restrenn voye mesaj.\n*○ ouvri* : Pèmèt tout mesaj."
   }
 };
 
 function buildCaption(type, text, hostName) {
-    return `*○ ${type}*\n\n*Adam D'H7*\nUtilisateur : "${hostName}"\nPropriétaire : Adam D'H7\n\n${text}\n\n> *Adam D'H7*`;
+    let cap = `*○ ${type}*\n\n*Adam D'H7*\nUtilisateur : "${hostName}"\nPropriétaire : Adam D'H7\n`;
+    if (text && text.trim() !== '') {
+        cap += `\n${text.trim()}\n`;
+    }
+    cap += `\n> *Adam D'H7*`;
+    return cap;
 }
 
 const logoPath = path.join(__dirname, 'adamdh7.png');
@@ -586,9 +521,7 @@ async function checkSessionLimits() {
             if (!s.lastRefresh || (now - s.lastRefresh >= limit1h)) {
                 s.lastRefresh = now;
                 if (s.sock) {
-                    try {
-                        await s.sock.sendPresenceUpdate('available');
-                    } catch (e) {}
+                    try { await s.sock.sendPresenceUpdate('available'); } catch (e) {}
                 }
             }
         }
@@ -603,9 +536,7 @@ async function checkAndRefreshSession70(sessionId) {
     if (!session.lastResetTime || (now - session.lastResetTime >= minutes70)) {
         session.lastResetTime = now;
         try {
-            if (session.sock) {
-                session.sock.end(new Error('Refresh 70m')); 
-            }
+            if (session.sock) session.sock.end(new Error('Refresh 70m')); 
         } catch (e) {}
     }
 }
@@ -618,15 +549,9 @@ app.use(async (req, res, next) => {
     next();
 });
 
-app.get('/sitemap.xml', (req, res) => {
-    res.sendFile(path.join(__dirname, 'sitemap.xml'));
-});
-app.get('/manifest.json', (req, res) => {
-    res.sendFile(path.join(__dirname, 'manifest.json'));
-});
-app.get('/sw.js', (req, res) => {
-    res.sendFile(path.join(__dirname, 'sw.js'));
-});
+app.get('/sitemap.xml', (req, res) => res.sendFile(path.join(__dirname, 'sitemap.xml')));
+app.get('/manifest.json', (req, res) => res.sendFile(path.join(__dirname, 'manifest.json')));
+app.get('/sw.js', (req, res) => res.sendFile(path.join(__dirname, 'sw.js')));
 app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s me Adam D'H7"));
 app.get('/ok', (req, res) => res.send('ok'));
 app.get('/TF-:id', (req, res) => {
@@ -635,9 +560,7 @@ app.get('/TF-:id', (req, res) => {
 });
 
 app.get('/list2', (req, res) => {
-    if (isPurging) {
-        return res.type('text/plain').send('SUPPRESSION DEJA EN COURS.');
-    }
+    if (isPurging) return res.type('text/plain').send('SUPPRESSION DEJA EN COURS.');
     isPurging = true;
     res.type('text/plain').send('SUPPRESSION EN COURS. LES SESSIONS ET DONNEES SERONT EFFACEES SOUS PEU.');
     (async () => {
@@ -751,53 +674,43 @@ app.get('/', (req, res) => {
 });
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-const Adam_DH7 = "Adam D'H7";
 
 async function callCloudflareAI(model, messages, maxTokens = 3000) {
-  try {
-    const accountId = "c754bf19fa1b21106a6885e3be79274e";
-    const token = "cfut_PxZCBwgwkUnnh38zccPPUSy4K5E6zYDc9xiUwcqc05395e5a";
-    const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        messages: messages,
-        max_tokens: maxTokens
-      })
-    });
-    if (!res.ok) throw new Error("AI error");
-    const data = await res.json();
-    return data.result && data.result.response ? data.result.response : "Désolé, erreur de réponse.";
-  } catch (e) {
-    return "Erreur lors de l'appel à l'IA.";
-  }
+  const accountId = "c754bf19fa1b21106a6885e3be79274e";
+  const token = "cfut_PxZCBwgwkUnnh38zccPPUSy4K5E6zYDc9xiUwcqc05395e5a";
+  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      messages: messages,
+      max_tokens: maxTokens
+    })
+  });
+  if (!res.ok) throw new Error("quota_error");
+  const data = await res.json();
+  if (!data.result || !data.result.response) throw new Error("ai_error");
+  return data.result.response;
 }
 
 async function tavilySearch(query) {
-  try {
-    const res = await fetch("https://api.tavily.com/search", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        api_key: "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",
-        query: query,
-        search_depth: "basic",
-        include_images: true,
-        include_answer: true,
-        max_results: 5
-      })
-    });
-    if (!res.ok) throw new Error();
-    return await res.json();
-  } catch (e) {
-    return {answer: "Erreur de recherche Tavily."};
-  }
+  const res = await fetch("https://api.tavily.com/search", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      api_key: "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",
+      query: query,
+      search_depth: "basic",
+      include_images: true,
+      include_answer: true,
+      max_results: 5
+    })
+  });
+  if (!res.ok) throw new Error("search_error");
+  return await res.json();
 }
 
 function formatUptime(seconds, t) {
@@ -838,32 +751,6 @@ function unwrapMessageContent(message) {
 function extractBody(m) {
     const msg = unwrapMessageContent(m?.message);
     return msg.conversation || msg.extendedTextMessage?.text || msg.imageMessage?.caption || msg.videoMessage?.caption || msg.documentMessage?.caption || msg.buttonsResponseMessage?.selectedButtonId || msg.listResponseMessage?.singleSelectReply?.selectedRowId || '';
-}
-
-function waitForConnectionOpen(sock, timeoutMs = 45000) {
-    return new Promise((resolve, reject) => {
-        if (sock?.user?.id) {
-            resolve(true);
-            return;
-        }
-        let done = false;
-        const timer = setTimeout(() => {
-            if (done) return;
-            done = true;
-            sock.ev.off('connection.update', handler);
-            reject(new Error('Timeout'));
-        }, timeoutMs);
-        const handler = (u) => {
-            if (u?.connection === 'open') {
-                if (done) return;
-                done = true;
-                clearTimeout(timer);
-                sock.ev.off('connection.update', handler);
-                resolve(true);
-            }
-        };
-        sock.ev.on('connection.update', handler);
-    });
 }
 
 function waitForQr(sock, timeoutMs = 45000) {
@@ -977,30 +864,29 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
 
         const chatHistories = new Map();
         const pendingAIResponses = new Map();
-
         const userInfo = new Map();
 
         const buildAIMessages = (hist, userInfoObj, botLang) => {
+          const t = translations[botLang] || translations.ht;
           let historyCopy = [...hist];
-          const systemContent = `You are Asistan. Only share your name; do not discuss internal or personal info.
-User info: ${userInfoObj.pseudo || 'Unknown'} (${userInfoObj.number || 'unknown'})
-Language: Reply in the user's language, or default to ${botLang}.`;
+          const systemContent = `You are Asistan. User info: ${userInfoObj.pseudo} (${userInfoObj.number}). Language: Reply in ${botLang}.`;
           let msgs = [
             {role: "system", content: systemContent},
             ...historyCopy
           ];
-          const jsonStr = JSON.stringify(msgs);
-          while (jsonStr.length > 17000 && historyCopy.length > 1) {
+          let jsonStr = JSON.stringify(msgs);
+          while (jsonStr.length > 7000 && historyCopy.length > 1) {
             historyCopy.shift();
             msgs = [
               {role: "system", content: systemContent},
               ...historyCopy
             ];
+            jsonStr = JSON.stringify(msgs);
           }
-          if (JSON.stringify(msgs).length > 17000 && historyCopy.length > 0) {
+          if (jsonStr.length > 7000 && historyCopy.length > 0) {
             const last = {...historyCopy[historyCopy.length - 1]};
-            if (last.content && last.content.length > 14000) {
-              last.content = last.content.substring(0, 14000) + ` ... [tronqué]`;
+            if (last.content && last.content.length > 5000) {
+              last.content = last.content.substring(0, 5000) + ` ...`;
             }
             msgs = [
               {role: "system", content: systemContent},
@@ -1049,8 +935,9 @@ Language: Reply in the user's language, or default to ${botLang}.`;
                 
                 sock.groupFetchAllParticipating()
                     .then((groups) => {
+                        const nowTS = Date.now();
                         for (const jid in groups) {
-                            groupMetadataCache.set(jid, groups[jid]);
+                            groupMetadataCache.set(jid, { data: groups[jid], ts: nowTS });
                         }
                     })
                     .catch(() => {});
@@ -1215,13 +1102,13 @@ Language: Reply in the user's language, or default to ${botLang}.`;
                     const welcomeTitle = tWelcome.welcome_title || "Bienvenue";
                     const welcomeTo = tWelcome.welcome_to || "Welcome to";
                     let gSubject = "le groupe";
-                    if (groupMetadataCache.has(gjid)) {
-                        gSubject = groupMetadataCache.get(gjid).subject || gSubject;
+                    const cachedMeta = groupMetadataCache.get(gjid);
+                    if (cachedMeta && cachedMeta.data) {
+                        gSubject = cachedMeta.data.subject || gSubject;
                     } else {
                         try {
                             const gmeta = await sock.groupMetadata(gjid);
-                            groupMetadataCache.set(gjid, gmeta);
-                            setTimeout(() => groupMetadataCache.delete(gjid), 7000);
+                            groupMetadataCache.set(gjid, { data: gmeta, ts: Date.now() });
                             gSubject = gmeta.subject;
                         } catch (e) {}
                     }
@@ -1341,11 +1228,13 @@ Language: Reply in the user's language, or default to ${botLang}.`;
 
                         const getMeta = async () => {
                             try {
-                                if (groupMetadataCache.has(from)) return groupMetadataCache.get(from);
+                                const nowTsLocal = Date.now();
+                                const cached = groupMetadataCache.get(from);
+                                if (cached && (nowTsLocal - cached.ts < 240000)) return cached.data;
                                 if (isGroup && !from.endsWith('@s.whatsapp.net')) {
                                     const meta = await sock.groupMetadata(from).catch(() => null);
                                     if (meta) {
-                                        groupMetadataCache.set(from, meta);
+                                        groupMetadataCache.set(from, { data: meta, ts: nowTsLocal });
                                         return meta;
                                     }
                                 }
@@ -1433,19 +1322,7 @@ Language: Reply in the user's language, or default to ${botLang}.`;
                         const ignoreTexts = [
                             tIgnore.pending_msg,
                             tIgnore.msg_unloaded,
-                            tIgnore.take_time,
-                            "Message non chargé",
-                            "Waiting for this message",
-                            "En attente de ce message",
-                            "Ceci pourrait prendre un peu de temps",
-                            "This may take a while",
-                            "Esperando este mensaje",
-                            "Mensaje no cargado",
-                            "Esto puede tomar un tiempo",
-                            "Ap tann mesaj sa a",
-                            "Mesaj pa chaje",
-                            "Sa ka pran yon ti tan",
-                            "En attente de chargement"
+                            tIgnore.take_time
                         ];
                         if (ignoreTexts.some(text => body.includes(text))) {
                             const problemSender = m.key.participant || m.key.remoteJid;
@@ -1564,11 +1441,7 @@ Language: Reply in the user's language, or default to ${botLang}.`;
                                             await safeSendFormatted(sock, from, t.menu_title, menuBodyText, pushName, false, activeHostName);
                                             break;
                                         case 'info':
-                                            let infoBodyText = '';
-                                            if (globalLang === 'fr') {
-                                                infoBodyText = `*● IA & RECHERCHE*\n*○ ${t.cmd_ai}* : Interroger l'Intelligence Artificielle pour obtenir des réponses textuelles détaillées.\n*○ ${t.cmd_lang}* : Modifier la langue de configuration du bot.\n*○ ${t.cmd_imaj}* : Générer une image numérique à partir d'une description textuelle.\n*○ ${t.cmd_cheche}* : Effectuer des recherches approfondies sur le web.\n\n*● UTILITAIRES & SYSTEME*\n*○ ${t.cmd_menu}* : Afficher l'arborescence complète et la liste de toutes commands.\n*○ ${t.cmd_qrbot}* : Initier et lier une nouvelle sous-session via code QR.\n*○ ${t.cmd_qr}* : Convertir un texte ou un lien spécifié en code QR scannable.\n*○ ${t.cmd_code}* : Générer ou vérifier un code d'autorisation système.\n*○ ${t.cmd_lien}* : Obtenir le lien d'invitation officiel.\n*○ ${t.cmd_sites}* : Consulter les sites officiels.\n*○ ${t.cmd_info}* : Fournir les informations explicatives d'utilisation de chaque commande.\n\n*● LOGISTIQUE DE GROUPE*\n*○ ${t.cmd_tagall}* : Mentionner explicitement tous les membres (Admin uniquement).\n*○ ${t.cmd_hidetag}* : Diffuser un message en mentionnant secrètement tous les membres.\n*○ ${t.cmd_kick}* : Retirer un membre spécifique du groupe actuel.\n*○ ${t.cmd_add}* : Ajouter un numéro de téléphone directement au groupe.\n*○ ${t.cmd_promote}* : Élever un membre régulier au rang d'administrateur.\n*○ ${t.cmd_demote}* : Rétrograder un administrateur existant au statut de membre.\n*○ ${t.cmd_kickall}* : Procéder à une expulsion globale de tous les non-administrateurs.\n*○ ${t.cmd_kickall2}* : Exécuter une méthode d'expulsion collective secondaire.\n*○ ${t.cmd_ferme}* : Restreindre l'envoi de messages uniquement aux administrateurs.\n*○ ${t.cmd_ouvert}* : Autoriser l'envoi de messages à tous.`;
-                                            }
-                                            await safeSendFormatted(sock, from, "Information", infoBodyText || "Info", pushName, false, activeHostName);
+                                            await safeSendFormatted(sock, from, "Information", t.info_text, pushName, false, activeHostName);
                                             break;
                                         case 'alive':
                                             let uptimeStr = "0s";
@@ -1648,10 +1521,14 @@ Language: Reply in the user's language, or default to ${botLang}.`;
                                                 const metadataLien = await getMeta();
                                                 const c = await sock.groupInviteCode(from);
                                                 const link = `https://chat.whatsapp.com/${c}`;
-                                                const groupName = metadataLien && metadataLien.subject ? `*${metadataLien.subject}*\n` : '';
-                                                const groupDesc = metadataLien && metadataLien.desc ? metadataLien.desc.toString().trim() + '\n\n' : '';
+                                                
+                                                let lienTextForm = '';
+                                                if (metadataLien && metadataLien.subject) lienTextForm += `*${metadataLien.subject}*\n`;
+                                                lienTextForm += `*_${link}_*`;
+                                                if (metadataLien && metadataLien.desc) lienTextForm += `\n\n${metadataLien.desc.toString().trim()}`;
+
                                                 const lienCapTitle = t.cmd_lien.charAt(0).toUpperCase() + t.cmd_lien.slice(1);
-                                                const lienCaption = buildCaption(lienCapTitle, `${groupName}*${link}*\n\n${groupDesc}`, activeHostName);
+                                                const lienCaption = buildCaption(lienCapTitle, lienTextForm, activeHostName);
                                                 const lienOpts = { caption: lienCaption };
                                                 try {
                                                     const ppUrl = await sock.profilePictureUrl(from, 'image');
@@ -1863,45 +1740,49 @@ Language: Reply in the user's language, or default to ${botLang}.`;
                                             const userMsgCount = history.filter(h => h.role === 'user').length;
                                             const needsAd = (userMsgCount % 4 === 0);
                                             let messagesForAI = buildAIMessages(history, userInfoObj, globalLang);
-                                            const aiResponseText = await callCloudflareAI("@cf/meta/llama-3.3-70b-instruct-fp8-fast", messagesForAI, 3000);
-                                            if (!needsAd) {
-                                                history.push({role: "assistant", content: aiResponseText});
-                                                if (history.length > 7) history = history.slice(-7);
-                                                chatHistories.set(from, history);
-                                                await safeSendFormatted(sock, from, t.ai_title, aiResponseText, pushName, false, activeHostName);
-                                            } else {
-                                                const tfid = Math.floor(1000000 + Math.random() * 9000000);
-                                                const confirmLink = `https://tf.bot.adamdh7.org/TF-${tfid}`;
-                                                const clickText = t.ai_click_to_receive.replace('{link}', confirmLink);
-                                                const clickMsg = await queuedSendMessage(sock, from, { text: clickText });
-                                                const formattedAiResponse = buildCaption(t.ai_title, aiResponseText, activeHostName);
-                                                const timeoutId = setTimeout(async () => {
-                                                    try {
-                                                        await queuedSendMessage(sock, from, { delete: clickMsg.key }, {}, 200);
-                                                    } catch (e) {}
-                                                    pendingAIResponses.delete(tfid);
-                                                }, 7000);
-                                                pendingAIResponses.set(tfid, {
-                                                    from: from,
-                                                    aiResponseText: aiResponseText,
-                                                    formattedResponse: formattedAiResponse,
-                                                    clickMsgKey: clickMsg.key,
-                                                    timeoutId: timeoutId
-                                                });
-                                                tfEvents.once('ok-' + tfid, async () => {
-                                                    const pending = pendingAIResponses.get(tfid);
-                                                    if (!pending) return;
-                                                    clearTimeout(pending.timeoutId);
-                                                    try {
-                                                        await queuedSendMessage(sock, pending.from, { delete: pending.clickMsgKey }, {}, 200);
-                                                    } catch (e) {}
-                                                    await queuedSendMessage(sock, pending.from, { text: pending.formattedResponse });
-                                                    let hist = chatHistories.get(pending.from) || [];
-                                                    hist.push({role: "assistant", content: pending.aiResponseText});
-                                                    if (hist.length > 7) hist = hist.slice(-7);
-                                                    chatHistories.set(pending.from, hist);
-                                                    pendingAIResponses.delete(tfid);
-                                                });
+                                            
+                                            try {
+                                                const aiResponseText = await callCloudflareAI("@cf/meta/llama-3.3-70b-instruct-fp8-fast", messagesForAI, 3000);
+                                                if (!needsAd) {
+                                                    history.push({role: "assistant", content: aiResponseText});
+                                                    if (history.length > 7) history = history.slice(-7);
+                                                    chatHistories.set(from, history);
+                                                    await safeSendFormatted(sock, from, t.ai_title, aiResponseText, pushName, false, activeHostName);
+                                                } else {
+                                                    const tfid = Math.floor(1000000 + Math.random() * 9000000);
+                                                    const confirmLink = `https://tf.bot.adamdh7.org/TF-${tfid}`;
+                                                    const clickText = t.ai_click_to_receive.replace('{link}', confirmLink);
+                                                    const clickMsg = await queuedSendMessage(sock, from, { text: clickText });
+                                                    const formattedAiResponse = buildCaption(t.ai_title, aiResponseText, activeHostName);
+                                                    const timeoutId = setTimeout(async () => {
+                                                        try {
+                                                            await queuedSendMessage(sock, from, { delete: clickMsg.key }, {}, 200);
+                                                        } catch (e) {}
+                                                        pendingAIResponses.delete(tfid);
+                                                    }, 7000);
+                                                    pendingAIResponses.set(tfid, {
+                                                        from: from,
+                                                        aiResponseText: aiResponseText,
+                                                        formattedResponse: formattedAiResponse,
+                                                        clickMsgKey: clickMsg.key,
+                                                        timeoutId: timeoutId
+                                                    });
+                                                    tfEvents.once('ok-' + tfid, async () => {
+                                                        const pending = pendingAIResponses.get(tfid);
+                                                        if (!pending) return;
+                                                        clearTimeout(pending.timeoutId);
+                                                        try { await queuedSendMessage(sock, pending.from, { delete: pending.clickMsgKey }, {}, 200); } catch (e) {}
+                                                        await queuedSendMessage(sock, pending.from, { text: pending.formattedResponse });
+                                                        let hist = chatHistories.get(pending.from) || [];
+                                                        hist.push({role: "assistant", content: pending.aiResponseText});
+                                                        if (hist.length > 7) hist = hist.slice(-7);
+                                                        chatHistories.set(pending.from, hist);
+                                                        pendingAIResponses.delete(tfid);
+                                                    });
+                                                }
+                                            } catch (e) {
+                                                const errMsg = e.message === "quota_error" ? t.quota_error : t.ai_error;
+                                                await safeSendFormatted(sock, from, t.ai_title, errMsg, pushName, false, activeHostName);
                                             }
                                             break;
                                         case 'lang':
@@ -2068,20 +1949,34 @@ Language: Reply in the user's language, or default to ${botLang}.`;
                                             try {
                                                 const searchData = await tavilySearch(args);
                                                 if (isCancelled) return;
-                                                let responseText = searchData.answer || "Pas de résultat trouvé.";
+                                                
+                                                let searchResultText = searchData.answer || "";
                                                 if (searchData.results) {
-                                                  responseText += "\n\nSources:\n" + searchData.results.slice(0,3).map(r => `- *_${r.url}_*`).join("\n");
+                                                  searchResultText += "\n" + searchData.results.map(r => `${r.title}: ${r.content}`).join("\n");
                                                 }
-                                                await safeSendFormatted(sock, from, t.search_title, responseText, pushName, false, activeHostName);
-                                                if (searchData.images && searchData.images.length > 0) {
-                                                  for (let i = 0; i < Math.min(2, searchData.images.length); i++) {
-                                                    try {
-                                                        await queuedSendMessage(sock, from, { image: { url: searchData.images[i] }, caption: buildCaption(t.search_title, "Image de recherche", activeHostName) });
-                                                    } catch (errImg) {}
-                                                  }
+                                                if(searchResultText.length > 4000) searchResultText = searchResultText.substring(0, 4000) + "...";
+
+                                                let historyS = chatHistories.get(from) || [];
+                                                let historyText = historyS.map(h => `${h.role}: ${h.content}`).join("\n");
+                                                if (historyText.length > 3000) historyText = historyText.substring(historyText.length - 3000);
+
+                                                const sysPrompt = `You are Asistan. Answer the user's question strictly in ${globalLang} based on the provided search data. Search Data: ${searchResultText}\n\nRecent context: ${historyText}`;
+                                                
+                                                const messagesForSearchAI = [
+                                                    { role: "system", content: sysPrompt },
+                                                    { role: "user", content: args }
+                                                ];
+
+                                                const searchAIResponse = await callCloudflareAI("@cf/meta/llama-3.3-70b-instruct-fp8-fast", messagesForSearchAI, 3000);
+                                                
+                                                let finalSearchResponse = searchAIResponse;
+                                                if (searchData.results) {
+                                                    finalSearchResponse += "\n\nSources:\n" + searchData.results.slice(0,3).map(r => `- *_${r.url}_*`).join("\n");
                                                 }
+                                                await safeSendFormatted(sock, from, t.search_title, finalSearchResponse, pushName, false, activeHostName);
                                             } catch (e) {
-                                                await safeSendFormatted(sock, from, t.search_title, t.search_error, pushName, false, activeHostName);
+                                                const searchErrMsg = e.message === "quota_error" ? t.quota_error : t.search_error;
+                                                await safeSendFormatted(sock, from, t.search_title, searchErrMsg, pushName, false, activeHostName);
                                             }
                                             break;
                                         case 'sites':
@@ -2154,6 +2049,21 @@ setInterval(async () => {
         await db.collection('processed_messages').deleteMany({ ts: { $lt: threshold } });
     } catch(e){}
 }, 30000);
+
+setInterval(async () => {
+    if (!db) return;
+    for (const [sId, sess] of activeSessions.entries()) {
+        if (sess.status === 'connecte' && sess.sock) {
+            try {
+                const groups = await sess.sock.groupFetchAllParticipating();
+                const nowTS = Date.now();
+                for (const jid in groups) {
+                    groupMetadataCache.set(jid, { data: groups[jid], ts: nowTS });
+                }
+            } catch(e){}
+        }
+    }
+}, 240000);
 
 async function main() {
     await connectMongo();
