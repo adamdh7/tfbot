@@ -890,10 +890,10 @@ async function startAdamBot(sessionId, autoExpire = false, format = 'pair', expe
             maxMsgRetryCount: 10,
             syncFullHistory: false,
             keepAliveIntervalMs: 15000,
-            getMessage: async (key) => {
+                        getMessage: async (key) => {
                 const found = recentMsgsCache.find(m => m.id === key.id);
                 if (found && found.message) return found.message;
-                return { conversation: '.' };
+                return undefined;
             }
         });
 
