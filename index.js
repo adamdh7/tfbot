@@ -726,6 +726,10 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     const requestPath = String(req.path || '/').replace(/\/+$/, '') || '/';
+    if (requestPath === '/get-code') {
+        if (!isAllowedFrontendCodeRequest(req)) return res.status(403).set('Cache-Control', 'no-store').json({ ok: false, error: 'frontend_origin_denied' });
+        return next();
+    }
     if (requestPath === '/list') return next();
     if (requestPath === '/') {
         if (isAllowedEmbeddedHomeRequest(req)) return next();
@@ -747,8 +751,9 @@ async function createCodeSession(sId, format = 'pair', expectExisting = false) {
     return sess;
 }
 
-app.all('/get-code', async (req, res) => {
-    const body = req.method === 'GET' ? req.query : req.body;
+app.post('/get-code', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, private, max-age=0');
+    const body = req.body || {};
     const number = normalizePhoneNumber(body?.number || body?.phone || body?.jid || body?.msisdn || '');
     const method = String(body?.method || 'code').toLowerCase();
     const autoExpire = body?.autoExpire === true || body?.autoExpire === 'true' || body?.autoExpire === 1 || body?.autoExpire === '1';
@@ -777,8 +782,18 @@ app.all('/get-code', async (req, res) => {
 
         if (method === 'qr') {
             const qr = await waitForQr(sess.sock, 45000);
-            const qrDataUrl = await QRCode.toDataURL(qr);
-            return res.json({ ok: true, qr, qrDataUrl, sessionId: sId });
+            const qrDataUrl = await QRCode.toDataURL(qr, { width: 220, margin: 2, color: { dark: '#000000', light: '#ffffff' } });
+            let qrUrl = '';
+            let qrUploadError = '';
+            try {
+                const qrBuffer = await QRCode.toBuffer(qr, { type: 'png', width: 220, margin: 2, color: { dark: '#000000', light: '#ffffff' } });
+                const uploadedQr = await uploadToBref(qrBuffer, `tfbot-qr-${sId}.png`, 'image/png');
+                qrUrl = uploadedQr.url;
+            } catch (uploadError) {
+                qrUploadError = String(uploadError?.message || uploadError || 'qr_upload_failed').slice(0, 180);
+                console.warn('[get-code-qr-upload-failed]', { sessionId: sId, error: qrUploadError });
+            }
+            return res.json({ ok: true, qr, qrDataUrl, qrUrl, qrUploadError: qrUploadError || undefined, sessionId: sId });
         }
         const codeRaw = await new Promise((resolve, reject) => {
             setTimeout(async () => {
@@ -1134,6 +1149,32 @@ function isEmbeddedStaticAssetRequest(req) {
     } catch (error) {
         return false;
     }
+}
+
+function isAllowedFrontendCodeRequest(req) {
+    if (req.method !== 'POST') return false;
+    let expectedOrigin = '';
+    let requestOrigin = '';
+    try {
+        if (!TF_BOT_BASE_URL) return false;
+        expectedOrigin = new URL(TF_BOT_BASE_URL).origin;
+        requestOrigin = new URL(String(req.get('Origin') || '')).origin;
+    } catch (error) {
+        return false;
+    }
+    if (!expectedOrigin || requestOrigin !== expectedOrigin) return false;
+    const refererValue = String(req.get('Referer') || '').trim();
+    if (refererValue) {
+        try {
+            if (new URL(refererValue).origin !== expectedOrigin) return false;
+        } catch (error) {
+            return false;
+        }
+    }
+    const fetchSite = String(req.get('Sec-Fetch-Site') || '').toLowerCase();
+    if (fetchSite && fetchSite !== 'same-origin') return false;
+    const contentType = String(req.get('Content-Type') || '').toLowerCase();
+    return contentType.includes('application/json');
 }
 
 function signTFConfirmation(id) {
