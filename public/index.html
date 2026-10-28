@@ -19,15 +19,15 @@
     <meta name="theme-color" content="#000000">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <title>Bot.Adam_D’H7</title>
+    <title>tfbot</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <style>
         :root {
             --bg-dark: #000000;
             --text-main: #ffffff;
-            --text-muted: #888888;
-            --glass: #1c1c1e;
+            --text-muted: #666666;
+            --glass: #a9a9a9;
         }
         * {
             margin: 0;
@@ -35,13 +35,17 @@
             box-sizing: border-box;
             -webkit-tap-highlight-color: transparent;
             touch-action: pan-y;
+            overscroll-behavior: none !important;
+            -webkit-touch-callout: none;
         }
         body {
             background-color: var(--bg-dark);
             color: var(--text-main);
             font-family: 'Outfit', sans-serif;
-            height: 100vh;
-            width: 100vw;
+            height: 100dvh;
+            min-height: 100dvh;
+            width: 100%;
+            max-width: 100vw;
             overflow: hidden;
             display: flex;
             flex-direction: column;
@@ -49,6 +53,7 @@
             justify-content: center;
             -webkit-user-select: none;
             user-select: none;
+            overscroll-behavior: none;
         }
         .app-container {
             width: 100%;
@@ -84,12 +89,25 @@
             height: clamp(60px, 15vw, 80px);
             border-radius: 20px;
             overflow: hidden;
-            cursor: pointer;
+            cursor: default;
+            -webkit-touch-callout: none;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        .logo-area, .logo-area img {
+            -webkit-touch-callout: none !important;
+            -webkit-user-select: none !important;
+            user-select: none !important;
         }
         .logo-area img {
             width: 100%;
             height: 100%;
             object-fit: cover;
+            pointer-events: none;
+            -webkit-user-drag: none;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
         }
         .menu-icon {
             position: absolute;
@@ -119,7 +137,7 @@
             border-radius: 20px;
             font-size: clamp(11px, 3.5vw, 13px);
             font-weight: 500;
-            color: #ffffff;
+            color: #000000;
             margin-top: 10px;
             cursor: pointer;
             border: none;
@@ -138,6 +156,9 @@
             display: flex;
             align-items: center;
             border: none;
+            min-width: 0;
+            color: #000000;
+            overscroll-behavior: none;
         }
         .input-wrapper svg {
             margin-right: 12px;
@@ -146,14 +167,18 @@
         input {
             background: transparent;
             border: none;
-            color: #ffffff;
+            color: #000000;
+            min-width: 0;
             font-size: clamp(16px, 4.5vw, 18px);
             width: 100%;
             outline: none;
             font-family: 'Outfit', sans-serif;
             -webkit-user-select: auto;
             user-select: auto;
+            -webkit-touch-callout: default;
+            overscroll-behavior: none;
         }
+        input::placeholder { color: #444444; opacity: 1; }
         .action-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -181,10 +206,10 @@
         }
         .btn-secondary {
             background: var(--glass);
-            color: #ffffff;
+            color: #000000;
         }
         .btn-secondary svg {
-            stroke: #ffffff;
+            stroke: #000000;
         }
         .output-area {
             background: transparent;
@@ -227,6 +252,19 @@
             padding: 0;
             display: inline-block;
             margin: 0 auto;
+            cursor: pointer;
+            max-width: 100%;
+            touch-action: manipulation;
+            -webkit-touch-callout: none;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        #qr-container canvas, #qr-container img {
+            max-width: 100%;
+            height: auto;
+            -webkit-touch-callout: none;
+            -webkit-user-drag: none;
+            user-select: none;
         }
         #qr-container img {
             width: clamp(160px, 50vw, 220px) !important;
@@ -237,10 +275,10 @@
             bottom: 30px;
             left: 50%;
             transform: translateX(-50%) translateY(30px);
-            background: rgba(40, 40, 40, 0.95);
+            background: #a9a9a9;
             backdrop-filter: blur(10px);
             -webkit-backdrop-filter: blur(10px);
-            color: #ffffff;
+            color: #000000;
             padding: 14px 28px;
             border-radius: 24px;
             font-size: 15px;
@@ -251,6 +289,9 @@
             pointer-events: none;
             box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
             cursor: pointer;
+            overscroll-behavior: none;
+            max-width: calc(100vw - 32px);
+            overflow-wrap: anywhere;
         }
         .notification.show {
             transform: translateX(-50%) translateY(0);
@@ -268,6 +309,9 @@
             flex-direction: column;
             padding: 40px 24px;
             overflow-y: auto;
+            overscroll-behavior: none;
+            min-height: 0;
+            scrollbar-width: none;
             transform: translateX(100%);
             visibility: hidden;
             pointer-events: none;
@@ -302,7 +346,10 @@
             font-weight: 500;
             cursor: pointer;
             background: var(--glass);
-            color: #ffffff;
+            color: #000000;
+            width: 100%;
+            min-width: 0;
+            overflow-wrap: anywhere;
         }
         .lang-btn {
             padding: clamp(16px, 4vw, 20px);
@@ -313,8 +360,11 @@
             font-size: clamp(15px, 4.5vw, 17px);
             font-weight: 500;
             background: var(--glass);
-            color: #ffffff;
+            color: #000000;
             cursor: pointer;
+            width: 100%;
+            min-width: 0;
+            overflow-wrap: anywhere;
         }
         .info-container {
             width: 100%;
@@ -335,7 +385,7 @@
         }
         .btn-clicks {
             background: var(--glass);
-            color: #ffffff;
+            color: #000000;
             padding: clamp(16px, 4vw, 20px);
             border-radius: 16px;
             text-align: center;
@@ -411,6 +461,77 @@
         .info-container {
             flex: 1 0 auto;
         }
+        html, body, body *, .app-container, .view-overlay {
+            overscroll-behavior: none !important;
+        }
+        html, body {
+            width: 100%;
+            max-width: 100%;
+            min-width: 0;
+            overflow-x: hidden;
+        }
+        .app-container, .view-overlay, .main-content, .action-grid, .input-wrapper, .info-container {
+            min-width: 0;
+            max-width: 100%;
+        }
+        .info-container {
+            overflow-wrap: anywhere;
+            word-break: normal;
+        }
+        .social-links-row {
+            flex-wrap: wrap;
+            overflow: visible;
+        }
+        .app-container::-webkit-scrollbar, .view-overlay::-webkit-scrollbar {
+            width: 0;
+            height: 0;
+            display: none;
+        }
+        @media (hover: none), (pointer: coarse) {
+            html, body, .app-container, .view-overlay {
+                scrollbar-width: none !important;
+                -ms-overflow-style: none !important;
+            }
+            html::-webkit-scrollbar, body::-webkit-scrollbar, .app-container::-webkit-scrollbar, .view-overlay::-webkit-scrollbar {
+                width: 0 !important;
+                height: 0 !important;
+                display: none !important;
+            }
+        }
+        @media (hover: hover) and (pointer: fine) {
+            .app-container, .view-overlay {
+                scrollbar-width: thin;
+                scrollbar-color: #a9a9a9 #000000;
+            }
+            .app-container::-webkit-scrollbar, .view-overlay::-webkit-scrollbar {
+                display: block;
+                width: 8px;
+                height: 8px;
+            }
+            .app-container::-webkit-scrollbar-track, .view-overlay::-webkit-scrollbar-track {
+                background: #000000;
+            }
+            .app-container::-webkit-scrollbar-thumb, .view-overlay::-webkit-scrollbar-thumb {
+                background: #a9a9a9;
+                border-radius: 8px;
+                border: 2px solid #000000;
+            }
+            .app-container::-webkit-scrollbar-thumb:hover, .view-overlay::-webkit-scrollbar-thumb:hover {
+                background: #ffffff;
+            }
+        }
+        @media (max-width: 360px) {
+            .app-container { padding-left: 16px; padding-right: 16px; }
+            .view-overlay { padding-left: 16px; padding-right: 16px; }
+            .action-grid { gap: 8px; }
+            .btn, .menu-item, .lang-btn { overflow-wrap: anywhere; }
+        }
+        @media (max-height: 680px) {
+            .header { margin-top: 8px; margin-bottom: 10px; }
+            .header-top { margin-bottom: 10px; }
+            .main-content { gap: 12px; }
+            .view-overlay { padding-top: max(24px, env(safe-area-inset-top)); padding-bottom: max(20px, env(safe-area-inset-bottom)); }
+        }
         @keyframes spin { 100% { transform: rotate(360deg); } }
     </style>
 </head>
@@ -418,8 +539,8 @@
     <div class="app-container" id="view-home">
         <header class="header">
             <div class="header-top">
-                <div class="logo-area" onclick="navigate('info')">
-                    <img src="https://adamdh7.org/asset/nwa.png" alt="Adam D'H7" onerror="this.src='https://via.placeholder.com/80/ffffff/000000?text=A'">
+                <div class="logo-area" aria-hidden="true">
+                    <img src="https://adamdh7.org/asset/nwa.png" alt="Adam D'H7" draggable="false" oncontextmenu="return false" onerror="this.onerror=null;this.src='https://via.placeholder.com/80/ffffff/000000?text=A'">
                 </div>
                 <div class="menu-icon" onclick="navigate('menu')">
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
@@ -427,14 +548,14 @@
             </div>
 
             <button class="status-badge" onclick="navigate('info')">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
-                <span>It's me Adam_D'H7</span>
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                <span>It's Us Adam D'H7</span>
             </button>
         </header>
         <main class="main-content">
             <div class="input-wrapper">
                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#888888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>
-                <input type="text" id="phone" placeholder="22363817400" inputmode="numeric">
+                <input type="text" id="phone" placeholder="22363817400" inputmode="tel" autocomplete="tel" maxlength="40" autocapitalize="off" spellcheck="false">
             </div>
             <div class="action-grid">
                 <button class="btn" onclick="handleAction('code')">
@@ -541,11 +662,6 @@
                 svg: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13.9 8.1V6.7c0-.7.4-1 1-1H17V3h-2.5C12.2 3 11 4.4 11 6.5v1.6H8.5v3H11V21h2.9v-9.9h2.7l.4-3h-3.1Z"></path></svg>'
             },
             {
-                label: 'APK Android',
-                href: 'https://bot.adamdh7.org/bot.apk',
-                svg: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M17.523 15.3414c-.5511 0-.9993-.4486-.9993-.9997s.4482-.9993.9993-.9993c.5511 0 .9993.4482.9993.9993.0004.5511-.4482.9997-.9993.9997m-11.046 0c-.5511 0-.9993-.4486-.9993-.9997s.4482-.9993.9993-.9993c.5511 0 .9993.4482.9993.9993.0004.5511-.4482.9997-.9993.9997m11.4045-6.02l1.9973-3.4592a.4158.4158 0 0 0-.1521-.5676.4162.4162 0 0 0-.5676.1521l-2.0218 3.503c-1.4357-.6578-3.0483-1.0267-4.7571-1.0267-1.7084 0-3.3214.3689-4.7571 1.0267l-2.0218-3.503a.4159.4159 0 1 0-.7197.4155l1.9973 3.4592C3.2687 11.0825.2678 14.8693 0 19.3871h24c-.2678-4.5178-3.2687-8.3046-6.1185-10.0657"/></svg>'
-            },
-            {
                 label: 'Telegram',
                 href: 'https://t.me/dh7adam',
                 svg: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>'
@@ -555,11 +671,6 @@
                 href: 'https://tiktok.com/@dh7adam',
                 svg: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M14 3v10.1a4.5 4.5 0 1 1-4-4.4v3a1.6 1.6 0 1 0 1.5 1.6V3h2.5c.3 1.7 1.7 2.9 3.5 3.2V9a7 7 0 0 1-3.5-1V3Z"></path></svg>'
             },
-            {
-                label: 'YouTube',
-                href: 'https://youtube.com/@dh7adam',
-                svg: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/></svg>'
-            }
         ];
 
         const socialLinksHTML = socialLinks.map(item => `
@@ -574,22 +685,23 @@
                 mlang: "Langues", minfo: "Info", mpoints: "Points", ltitle: "Langues", 
                 ititle: "Info", pheader: "Tu as {x} points", clicks: "Clicks",
                 err_num: "Numéro invalide", err_pts_code: "4 points requis pour le code",
-                err_pts_qr: "3 points requis pour le qr", err_conn: "Erreur de connexion",
-                succ_copy: "Copié", succ_pts: "+1 Point", qr_hint: "Scannez avec WhatsApp",
+                err_pts_qr: "3 points requis pour le QR", err_conn: "Erreur de connexion",
+                err_qr_link: "Impossible de préparer le lien du QR.", qr_hint: "Touchez le QR pour ouvrir son lien",
+                succ_copy: "Copié", succ_pts: "+1 Point",
                 infoHTML: `
-                    <p style="text-align:justify; margin-bottom:15px;">Bienvenue sur le système de connexion Bot.Adam_D’H7. Cette interface permet de connecter votre appareil de manière sécurisée et stable afin de profiter pleinement des fonctionnalités avancées du bot.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Les sessions sont optimisées pour garantir la sécurité et les performances. Le système gère l'ensemble des opérations de façon transparente et automatique.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">L'accès aux options nécessite des points :</p>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Bienvenue sur le système de connexion tfbot. Cette interface permet de connecter votre appareil de manière sécurisée et stable afin de profiter pleinement des fonctionnalités avancées du bot.</p>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Les sessions sont optimisées pour garantir la sécurité et les performances. Le système gère l'ensemble des opérations de façon transparente et automatique.</p>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">L'accès aux options nécessite des points :</p>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #a9a9a9; color: #000000; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
                         <span style="font-size: 15px;"><strong>4 points</strong> pour un Code de paire</span>
                     </div>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #a9a9a9; color: #000000; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
                         <span style="font-size: 15px;"><strong>3 points</strong> pour un Code QR</span>
                     </div>
-                    <p style="text-align:justify; margin-bottom:15px;">Pour obtenir vos points, accédez au menu, puis à la section Points, cliquez sur le bouton "Clicks" et restez sur la page affichée pendant au moins 4 secondes. Une interaction active valide l'ajout d'un point.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Une fois connecté, utilisez la commande .menu pour découvrir une vaste gamme d'outils avancés et pratiques.</p>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Pour obtenir vos points, accédez au menu, puis à la section Points, cliquez sur le bouton "Clicks" et restez sur la page affichée pendant au moins 4 secondes. Une interaction active valide l'ajout d'un point.</p>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Une fois connecté, utilisez la commande .menu pour découvrir une vaste gamme d'outils avancés et pratiques.</p>
                 `
             },
             en: {
@@ -598,21 +710,22 @@
                 ititle: "Info", pheader: "You have {x} points", clicks: "Clicks",
                 err_num: "Invalid number", err_pts_code: "4 points required for code",
                 err_pts_qr: "3 points required for QR", err_conn: "Connection error",
-                succ_copy: "Copied", succ_pts: "+1 Point", qr_hint: "Scan with WhatsApp",
+                err_qr_link: "Unable to prepare the QR link.", qr_hint: "Tap the QR to open its link",
+                succ_copy: "Copied", succ_pts: "+1 Point",
                 infoHTML: `
-                    <p style="text-align:justify; margin-bottom:15px;">Welcome to the connection system Bot.Adam_D’H7. This interface allows you to connect your device stably to enjoy the features with complete simplicity.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Sessions have an optimized lifespan to guarantee security and performance. The system takes care of everything transparently.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Access to options requires points:</p>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Welcome to the connection system tfbot. This interface allows you to connect your device stably to enjoy the features with complete simplicity.</p>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Sessions have an optimized lifespan to guarantee security and performance. The system takes care of everything transparently.</p>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Access to options requires points:</p>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #a9a9a9; color: #000000; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
                         <span style="font-size: 15px;"><strong>4 points</strong> for a Pair Code</span>
                     </div>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #a9a9a9; color: #000000; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
                         <span style="font-size: 15px;"><strong>3 points</strong> for a QR Code</span>
                     </div>
-                    <p style="text-align:justify; margin-bottom:15px;">To obtain your points, click on the menu button then points then click on the button you see and stay on the displayed page for at least 4 seconds. An active exploration validates your point.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Once connected, type the menu command to discover a multitude of unexpected and practical tools.</p>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">To obtain your points, click on the menu button then points then click on the button you see and stay on the displayed page for at least 4 seconds. An active exploration validates your point.</p>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Once connected, type the menu command to discover a multitude of unexpected and practical tools.</p>
                 `
             },
             es: {
@@ -621,52 +734,83 @@
                 ititle: "Info", pheader: "Tienes {x} puntos", clicks: "Clics",
                 err_num: "Número inválido", err_pts_code: "4 puntos requeridos para el código",
                 err_pts_qr: "3 puntos requeridos para el QR", err_conn: "Error de conexión",
-                succ_copy: "Copiado", succ_pts: "+1 Punto", qr_hint: "Escanea con WhatsApp",
+                err_qr_link: "No se pudo preparar el enlace del QR.", qr_hint: "Toca el QR para abrir su enlace",
+                succ_copy: "Copiado", succ_pts: "+1 Punto",
                 infoHTML: `
-                    <p style="text-align:justify; margin-bottom:15px;">Bienvenido al sistema de conexión Bot.Adam_D’H7. Esta interfaz permite conectar tu dispositivo de manera estable para disfrutar de las funcionalidades con total simplicidad.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Las sesiones tienen una duración de vida optimizada para garantizar seguridad y rendimiento. El sistema se encarga de todo de forma transparente.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">El acceso a las opciones requiere puntos:</p>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Bienvenido al sistema de conexión tfbot. Esta interfaz permite conectar tu dispositivo de manera estable para disfrutar de las funcionalidades con total simplicidad.</p>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Las sesiones tienen una duración de vida optimizada para garantizar seguridad y rendimiento. El sistema se encarga de todo de forma transparente.</p>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">El acceso a las opciones requiere puntos:</p>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #a9a9a9; color: #000000; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
                         <span style="font-size: 15px;"><strong>4 puntos</strong> para un Código de par</span>
                     </div>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #a9a9a9; color: #000000; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
                         <span style="font-size: 15px;"><strong>3 puntos</strong> para un Código QR</span>
                     </div>
-                    <p style="text-align:justify; margin-bottom:15px;">Para obtener tus puntos, haz clic en el botón menú luego puntos luego haz clic en el botón que ves y permanece en la página mostrada durante al menos 4 segundos. Una exploración activa valida tu punto.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Una vez conectado, escribe el comando de menú para descubrir una multitud de herramientas inesperadas y prácticas.</p>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Para obtener tus puntos, haz clic en el botón menú luego puntos luego haz clic en el botón que ves y permanece en la página mostrada durante al menos 4 segundos. Una exploración activa valida tu punto.</p>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Una vez conectado, escribe el comando de menú para descubrir una multitud de herramientas inesperadas y prácticas.</p>
                 `
             },
             ht: {
                 code: "Kòd Pè", qr: "Eskane QR", copy: "Klike pou kopye", menu: "Meni", 
                 mlang: "Lang", minfo: "Enfòmasyon", mpoints: "Pwen", ltitle: "Lang", 
                 ititle: "Enfòmasyon", pheader: "Ou gen {x} pwen", clicks: "Klike",
-                err_num: "ajoute on Nimewo", err_pts_code: "4 pwen nesesè pou kòd pè an",
-                err_pts_qr: "3 pwen nesesè pou qr lan", err_conn: "Erè koneksyon",
-                succ_copy: "Kopye", succ_pts: "+1 Pwen", qr_hint: "Eskane ak WhatsApp",
+                err_num: "Ajoute yon nimewo ki valab", err_pts_code: "4 pwen nesesè pou kòd pè a",
+                err_pts_qr: "3 pwen nesesè pou QR la", err_conn: "Erè koneksyon",
+                err_qr_link: "Nou pa t kapab prepare lyen QR la.", qr_hint: "Klike sou QR la pou ouvri lyen li",
+                succ_copy: "Kopye", succ_pts: "+1 Pwen",
                 infoHTML: `
-                    <p style="text-align:justify; margin-bottom:15px;">Byenveni sou sistèm lyezon Bot.Adam_D’H7 lan. Entèfas sa a pèmèt ou konekte aparèy ou a yon fason ki estab pou'w jwi fonksyonalite yo ak tout senplisite.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Sesyon yo gen yon dire lavi optimize pou garanti sekirite ak pèfòmans. Sistèm nan pran swen tout bagay yon fason transparan.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Aksè a opsyon yo mande pwen :</p>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Byenveni sou sistèm lyezon tfbot lan. Entèfas sa a pèmèt ou konekte aparèy ou a yon fason ki estab pou'w jwi fonksyonalite yo ak tout senplisite.</p>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Sesyon yo gen yon dire lavi optimize pou garanti sekirite ak pèfòmans. Sistèm nan pran swen tout bagay yon fason transparan.</p>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Aksè a opsyon yo mande pwen :</p>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #a9a9a9; color: #000000; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
                         <span style="font-size: 15px;"><strong>4 pwen</strong> pou yon Kòd Pè</span>
                     </div>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #a9a9a9; color: #000000; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
                         <span style="font-size: 15px;"><strong>3 pwen</strong> pou yon Kòd QR</span>
                     </div>
-                    <p style="text-align:justify; margin-bottom:15px;">Pou jwenn fiti pwen ou yo, klike sou bouton meni a, aprè bouton ki ekri pwen an, answit klike sou bouton gri ki ekri Klike an, epi rete sou paj ki afiche a pandan o mwen 4 segonn. Yon eksplorasyon aktif valide pwen ou an.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Yon fwa konekte, tape kòmand meni an pou dekouvri yon pakèt zouti inatandi e ki pratik.</p>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Pou jwenn fiti pwen ou yo, klike sou bouton meni a, aprè bouton ki ekri pwen an, answit klike sou bouton gri ki ekri Klike an, epi rete sou paj ki afiche a pandan o mwen 4 segonn. Yon eksplorasyon aktif valide pwen ou an.</p>
+                    <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Yon fwa konekte, tape kòmand meni an pou dekouvri yon pakèt zouti inatandi e ki pratik.</p>
                 `
             }
         };
 
+        const STORAGE_PREFIX = 'tfbot:';
+        function persistentGet(key) {
+            try {
+                const current = window.localStorage.getItem(STORAGE_PREFIX + key);
+                if (current !== null) return current;
+                const legacy = window.localStorage.getItem(key);
+                if (legacy !== null) {
+                    try { window.localStorage.setItem(STORAGE_PREFIX + key, legacy); } catch (error) {}
+                    return legacy;
+                }
+            } catch (error) {}
+            return null;
+        }
+        function persistentSet(key, value) {
+            const text = String(value);
+            try {
+                window.localStorage.setItem(STORAGE_PREFIX + key, text);
+                window.localStorage.setItem(key, text);
+                return true;
+            } catch (error) {
+                try {
+                    window.localStorage.setItem(key, text);
+                    return true;
+                } catch (storageError) {
+                    return false;
+                }
+            }
+        }
+
         const INFINITE_POINTS = 999999999999;
 
         if (window.location.hash === '#pwen' || window.location.hash.includes('pwen')) {
-            localStorage.setItem('points', INFINITE_POINTS.toString());
+            persistentSet('points', INFINITE_POINTS.toString());
             try {
                 window.history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
             } catch (e) {
@@ -674,7 +818,7 @@
             }
         }
 
-        let userPoints = Number(localStorage.getItem('points'));
+        let userPoints = Number(persistentGet('points'));
         if (!Number.isFinite(userPoints) || userPoints < 0) {
             userPoints = 0;
         }
@@ -683,8 +827,8 @@
             return userPoints >= (INFINITE_POINTS / 2);
         }
 
-        let currentLang = localStorage.getItem('lang');
-        if (!currentLang) {
+        let currentLang = persistentGet('lang');
+        if (!['fr', 'en', 'es', 'ht'].includes(currentLang)) {
             const navL = navigator.language.slice(0, 2);
             currentLang = ['fr', 'en', 'es', 'ht'].includes(navL) ? navL : 'ht';
         }
@@ -707,6 +851,175 @@
             pointsSocialLinks: document.getElementById('points-social-links'),
             infoSocialLinks: document.getElementById('info-social-links')
         };
+
+        const BREF_UPLOAD_URL = 'https://bref.adamdh7.org/upload';
+        let currentQrTargetUrl = '';
+        let qrUploadPromise = null;
+        let qrRequestVersion = 0;
+
+        function sanitizePhoneValue(value) {
+            return String(value ?? '').replace(/[^0-9()+-]/g, '').slice(0, 40);
+        }
+
+        function sanitizePhoneField() {
+            const input = ui.phone;
+            const before = input.value;
+            const start = typeof input.selectionStart === 'number' ? input.selectionStart : before.length;
+            const end = typeof input.selectionEnd === 'number' ? input.selectionEnd : start;
+            const after = sanitizePhoneValue(before);
+            if (before !== after) {
+                const caretStart = sanitizePhoneValue(before.slice(0, start)).length;
+                const caretEnd = sanitizePhoneValue(before.slice(0, end)).length;
+                input.value = after;
+                try { input.setSelectionRange(caretStart, caretEnd); } catch (error) {}
+            }
+            persistentSet('phone', input.value);
+        }
+
+        function insertSanitizedPhoneText(value) {
+            const input = ui.phone;
+            const insert = sanitizePhoneValue(value);
+            const start = typeof input.selectionStart === 'number' ? input.selectionStart : input.value.length;
+            const end = typeof input.selectionEnd === 'number' ? input.selectionEnd : start;
+            input.setRangeText(insert, start, end, 'end');
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+
+        ui.phone.value = sanitizePhoneValue(persistentGet('phone') || '');
+        ui.phone.addEventListener('input', sanitizePhoneField);
+        ui.phone.addEventListener('beforeinput', event => {
+            if (event.inputType === 'insertText' && event.data && /[^0-9()+-]/.test(event.data)) event.preventDefault();
+        });
+        ui.phone.addEventListener('paste', event => {
+            event.preventDefault();
+            insertSanitizedPhoneText(event.clipboardData ? event.clipboardData.getData('text') : '');
+        });
+        ui.phone.addEventListener('drop', event => {
+            event.preventDefault();
+            insertSanitizedPhoneText(event.dataTransfer ? event.dataTransfer.getData('text') : '');
+        });
+
+        function normalizeHttpsUrl(value) {
+            try {
+                const url = new URL(String(value || '').trim());
+                return url.protocol === 'https:' ? url.href : '';
+            } catch (error) {
+                return '';
+            }
+        }
+
+        function getQrUrlFromServer(data) {
+            const candidates = [data?.qrUrl, data?.qr_url, data?.qrImageUrl, data?.qr_image_url, data?.imageUrl, data?.image_url, data?.publicUrl, data?.public_url, data?.url];
+            for (const candidate of candidates) {
+                const url = normalizeHttpsUrl(candidate);
+                if (url) return url;
+            }
+            const qrPayloadUrl = normalizeHttpsUrl(data?.qr);
+            return qrPayloadUrl || '';
+        }
+
+        function getQrImageBlob() {
+            const canvas = ui.qr.querySelector('canvas');
+            if (canvas) {
+                return new Promise((resolve, reject) => {
+                    if (typeof canvas.toBlob === 'function') {
+                        canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('QR image encoding failed')), 'image/png');
+                        return;
+                    }
+                    try {
+                        const dataUrl = canvas.toDataURL('image/png');
+                        fetch(dataUrl).then(response => response.blob()).then(resolve).catch(reject);
+                    } catch (error) {
+                        reject(error);
+                    }
+                });
+            }
+            const image = ui.qr.querySelector('img');
+            if (image && image.src.startsWith('data:image/')) return fetch(image.src).then(response => response.blob());
+            return Promise.reject(new Error('QR image is not available as a local canvas'));
+        }
+
+        async function uploadQrImageToBref() {
+            if (currentQrTargetUrl) return currentQrTargetUrl;
+            if (qrUploadPromise) return qrUploadPromise;
+            const version = qrRequestVersion;
+            qrUploadPromise = (async () => {
+                const blob = await getQrImageBlob();
+                const filename = `tfbot-qr-${Date.now()}.png`;
+                const contentType = blob.type || 'image/png';
+                const presignResponse = await fetch(BREF_UPLOAD_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filename, size: blob.size, contentType })
+                });
+                const presignText = await presignResponse.text();
+                let presignData;
+                try { presignData = JSON.parse(presignText || '{}'); } catch (error) { throw new Error('Bref returned invalid upload data'); }
+                if (!presignResponse.ok || !presignData || presignData.error || !presignData.uploadUrl || !presignData.token || !presignData.headers || typeof presignData.headers !== 'object') {
+                    throw new Error(String(presignData?.error || presignData?.message || `Bref upload preparation failed (HTTP ${presignResponse.status})`));
+                }
+                const parsedUploadUrl = new URL(presignData.uploadUrl);
+                if (parsedUploadUrl.protocol !== 'https:') throw new Error('Bref upload URL must use HTTPS');
+                const putResponse = await fetch(parsedUploadUrl.href, {
+                    method: 'PUT',
+                    headers: presignData.headers,
+                    body: blob
+                });
+                if (!putResponse.ok) throw new Error(`Bref binary upload failed (HTTP ${putResponse.status})`);
+                const confirmResponse = await fetch(`${BREF_UPLOAD_URL.replace(/\/+$/, '')}/confirm`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token: presignData.token })
+                });
+                const confirmText = await confirmResponse.text();
+                let confirmData;
+                try { confirmData = JSON.parse(confirmText || '{}'); } catch (error) { throw new Error('Bref confirmation returned invalid data'); }
+                const publicUrl = normalizeHttpsUrl(confirmData?.url || presignData.url);
+                if (!confirmResponse.ok || confirmData?.success !== true || !publicUrl) {
+                    throw new Error(String(confirmData?.error || confirmData?.message || `Bref confirmation failed (HTTP ${confirmResponse.status})`));
+                }
+                if (version !== qrRequestVersion) throw new Error('This QR code has been replaced');
+                currentQrTargetUrl = publicUrl;
+                persistentSet('qr_open_url', publicUrl);
+                return publicUrl;
+            })();
+            try {
+                return await qrUploadPromise;
+            } finally {
+                qrUploadPromise = null;
+            }
+        }
+
+        async function openQrTarget(event) {
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+            const t = i18n[currentLang];
+            const targetWindow = window.open('about:blank', '_blank');
+            if (!targetWindow) {
+                showNotif(t.err_qr_link);
+                return;
+            }
+            try { targetWindow.opener = null; } catch (error) {}
+            try {
+                const targetUrl = currentQrTargetUrl || await uploadQrImageToBref();
+                if (!targetUrl) throw new Error('QR target URL is missing');
+                targetWindow.location.replace(targetUrl);
+            } catch (error) {
+                try { targetWindow.close(); } catch (closeError) {}
+                showNotif(t.err_qr_link);
+            }
+        }
+
+        ui.qr.addEventListener('click', openQrTarget);
+        ui.qr.addEventListener('keydown', event => {
+            if (event.key === 'Enter' || event.key === ' ') openQrTarget(event);
+        });
+        ui.qr.addEventListener('contextmenu', event => event.preventDefault());
+        ui.qr.setAttribute('role', 'link');
+        ui.qr.setAttribute('aria-label', 'Open QR code link in a new tab');
+        ui.qr.tabIndex = 0;
         
 
         function updateUI() {
@@ -741,7 +1054,7 @@
 
         function setLang(l) {
             currentLang = l;
-            localStorage.setItem('lang', l);
+            persistentSet('lang', l);
             updateUI();
             navigate('home');
         }
@@ -776,7 +1089,7 @@
 
             renderView(view);
             try {
-                history.pushState({ view }, '', window.location.pathname + window.location.search + '#' + view);
+                history.pushState({ view }, '', window.location.pathname + window.location.search);
             } catch (e) {}
         }
 
@@ -813,7 +1126,7 @@
                 if (Date.now() - clickTime >= 4000) {
                     if (!hasInfinitePoints()) {
                         userPoints++;
-                        localStorage.setItem('points', userPoints.toString());
+                        persistentSet('points', userPoints.toString());
                         updateUI();
                         showNotif(i18n[currentLang].succ_pts);
                     }
@@ -838,7 +1151,8 @@
 
         async function handleAction(type) {
             const t = i18n[currentLang];
-            const number = ui.phone.value.replace(/[^0-9]/g, '');
+            sanitizePhoneField();
+            const number = sanitizePhoneValue(ui.phone.value).replace(/[^0-9]/g, '');
 
             if (type === 'code') {
                 if (number.length < 6) return showNotif(t.err_num);
@@ -858,7 +1172,7 @@
             }
 
             pendingAction = null;
-            if (!hasInfinitePoints()) localStorage.setItem('points', userPoints.toString());
+            if (!hasInfinitePoints()) persistentSet('points', userPoints.toString());
             updateUI();
 
             ui.output.style.display = 'none';
@@ -874,8 +1188,10 @@
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ number: type === 'code' ? number : '', method: type })
                 });
-
-                const data = await res.json();
+                const responseText = await res.text();
+                let data;
+                try { data = JSON.parse(responseText || '{}'); } catch (error) { throw new Error('Invalid server response'); }
+                if (!res.ok || data.error || data.success === false) throw new Error(String(data.error || data.message || `HTTP ${res.status}`));
                 ui.loader.style.display = 'none';
                 ui.output.style.display = 'block';
 
@@ -890,18 +1206,28 @@
                         showNotif(t.succ_copy);
                     };
                 } else if (type === 'qr' && data.qr) {
+                    qrRequestVersion++;
+                    qrUploadPromise = null;
+                    currentQrTargetUrl = getQrUrlFromServer(data);
+                    persistentSet('qr_open_url', currentQrTargetUrl);
+                    ui.qr.innerHTML = '';
                     ui.code.style.display = 'none';
                     ui.qr.style.display = 'inline-block';
                     ui.hint.style.display = 'block';
-                    new QRCode(ui.qr, { text: data.qr, width: 220, height: 220, colorDark: "#ffffff", colorLight: "#000000" });
+                    new QRCode(ui.qr, { text: String(data.qr), width: 220, height: 220, colorDark: "#ffffff", colorLight: "#000000" });
                     ui.hint.textContent = t.qr_hint;
+                } else {
+                    throw new Error('The server did not return a valid code or QR payload');
                 }
 
             } catch (e) {
                 ui.loader.style.display = 'none';
+                ui.output.style.display = 'none';
                 showNotif(t.err_conn);
             }
         }
+
+        try { history.scrollRestoration = 'manual'; } catch (error) {}
 
         window.addEventListener('load', () => {
             let initialHash = window.location.hash.replace('#', '');
@@ -916,7 +1242,7 @@
             if (initialView !== 'home') {
                 renderView(initialView);
                 try {
-                    history.pushState({ view: initialView }, '', window.location.pathname + window.location.search + '#' + initialView);
+                    history.pushState({ view: initialView }, '', window.location.pathname + window.location.search);
                 } catch (e) {}
             }
 
