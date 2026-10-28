@@ -200,6 +200,10 @@ const reconnectTimers = new Map();
 const sessionStartPromises = new Map();
 const sessionRuntimeLockTimers = new Map();
 const sessionLockRetryTimers = new Map();
+const accountRuntimeLockTimers = new Map();
+const sessionAccountRuntimeLocks = new Map();
+let serverShuttingDown = false;
+let httpServer = null;
 const processInstanceId = `${process.env.RENDER_INSTANCE_ID || process.env.HOSTNAME || 'render'}-${process.pid}-${typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : crypto.randomBytes(12).toString('hex')}`;
 const SESSION_RUNTIME_LOCK_LEASE_MS = Math.max(45000, Number(process.env.SESSION_RUNTIME_LOCK_LEASE_MS || 90000));
 const SESSION_RUNTIME_LOCK_RENEW_MS = Math.max(10000, Math.min(SESSION_RUNTIME_LOCK_LEASE_MS / 3, Number(process.env.SESSION_RUNTIME_LOCK_RENEW_MS || 20000)));
@@ -891,6 +895,91 @@ async function acquireSessionRuntimeLock(sessionId) {
     }
 }
 
+async function releaseAccountRuntimeLock(sessionId) {
+    const timer = accountRuntimeLockTimers.get(sessionId);
+    if (timer) clearInterval(timer);
+    accountRuntimeLockTimers.delete(sessionId);
+    const accountPhone = sessionAccountRuntimeLocks.get(sessionId);
+    sessionAccountRuntimeLocks.delete(sessionId);
+    if (!db || !accountPhone) return;
+    try {
+        await db.collection('session_account_runtime_locks').deleteOne({ _id: accountPhone, owner: processInstanceId, sessionId });
+        console.info('[session-account-runtime-lock-released]', { sessionId, accountPhone });
+    } catch (error) {
+        console.warn('[session-account-runtime-lock-release-failed]', { sessionId, accountPhone, error: error?.message || String(error) });
+    }
+}
+
+async function acquireAccountRuntimeLock(sessionId, phoneValue) {
+    const accountPhone = normalizePhoneNumber(phoneValue);
+    if (!accountPhone) return { acquired: true, accountPhone: null, reason: 'account_phone_unavailable' };
+    if (!db) throw new Error('mongo_not_connected');
+    const now = new Date();
+    let result;
+    try {
+        result = await db.collection('session_account_runtime_locks').updateOne(
+            { _id: accountPhone, $or: [{ owner: processInstanceId, sessionId }, { leaseUntil: { $lte: now } }, { leaseUntil: { $exists: false } }] },
+            { $set: { owner: processInstanceId, sessionId, leaseUntil: new Date(Date.now() + SESSION_RUNTIME_LOCK_LEASE_MS), updatedAt: now } },
+            { upsert: true }
+        );
+    } catch (error) {
+        if (error?.code !== 11000) throw error;
+        const holder = await db.collection('session_account_runtime_locks').findOne({ _id: accountPhone }, { projection: { owner: 1, sessionId: 1, leaseUntil: 1 } }).catch(() => null);
+        return { acquired: false, accountPhone, holderSessionId: holder?.sessionId || null, holderOwner: holder?.owner || null, leaseUntil: holder?.leaseUntil || null };
+    }
+    if (result.matchedCount !== 1 && result.upsertedCount !== 1) {
+        const holder = await db.collection('session_account_runtime_locks').findOne({ _id: accountPhone }, { projection: { owner: 1, sessionId: 1, leaseUntil: 1 } }).catch(() => null);
+        return { acquired: false, accountPhone, holderSessionId: holder?.sessionId || null, holderOwner: holder?.owner || null, leaseUntil: holder?.leaseUntil || null };
+    }
+    sessionAccountRuntimeLocks.set(sessionId, accountPhone);
+    if (!accountRuntimeLockTimers.has(sessionId)) {
+        let failures = 0;
+        let heartbeatRunning = false;
+        let timer;
+        const stopSocketForLockLoss = async (reason, error = null) => {
+            if (accountRuntimeLockTimers.get(sessionId) !== timer) return;
+            clearInterval(timer);
+            accountRuntimeLockTimers.delete(sessionId);
+            console.error('[session-account-runtime-lock-lost]', { sessionId, accountPhone, reason, error: error?.message || null, action: 'socket_closed_to_prevent_same_account_concurrency' });
+            const active = activeSessions.get(sessionId);
+            if (active?.sock) {
+                active.status = 'account_runtime_lock_lost';
+                active.disconnectTime = Date.now();
+                try { active.sock.ev.removeAllListeners(); } catch (e) {}
+                try { if (active.sock.ws) active.sock.ws.close(); } catch (e) {}
+                active.sock = null;
+            }
+            activeSessions.delete(sessionId);
+            await releaseSessionRuntimeLock(sessionId);
+        };
+        timer = setInterval(async () => {
+            if (heartbeatRunning || serverShuttingDown) return;
+            heartbeatRunning = true;
+            try {
+                const heartbeat = await db.collection('session_account_runtime_locks').updateOne(
+                    { _id: accountPhone, owner: processInstanceId, sessionId },
+                    { $set: { leaseUntil: new Date(Date.now() + SESSION_RUNTIME_LOCK_LEASE_MS), updatedAt: new Date() } }
+                );
+                if (heartbeat.matchedCount === 1) {
+                    failures = 0;
+                    return;
+                }
+                await stopSocketForLockLoss('lock_owned_by_another_runtime');
+            } catch (error) {
+                failures++;
+                console.warn('[session-account-runtime-lock-heartbeat-failed]', { sessionId, accountPhone, failures, error: error?.message || String(error) });
+                if (failures >= 3) await stopSocketForLockLoss('heartbeat_unverified', error);
+            } finally {
+                heartbeatRunning = false;
+            }
+        }, SESSION_RUNTIME_LOCK_RENEW_MS);
+        if (typeof timer.unref === 'function') timer.unref();
+        accountRuntimeLockTimers.set(sessionId, timer);
+    }
+    console.info('[session-account-runtime-lock-acquired]', { sessionId, accountPhone, processInstanceId, leaseMs: SESSION_RUNTIME_LOCK_LEASE_MS });
+    return { acquired: true, accountPhone, reason: 'account_lock_acquired' };
+}
+
 async function releaseSessionRuntimeLock(sessionId) {
     const timer = sessionRuntimeLockTimers.get(sessionId);
     if (timer) clearInterval(timer);
@@ -898,6 +987,7 @@ async function releaseSessionRuntimeLock(sessionId) {
     const retryTimer = sessionLockRetryTimers.get(sessionId);
     if (retryTimer) clearTimeout(retryTimer);
     sessionLockRetryTimers.delete(sessionId);
+    await releaseAccountRuntimeLock(sessionId);
     if (!db) return;
     try {
         await db.collection('session_runtime_locks').deleteOne({ _id: sessionId, owner: processInstanceId });
@@ -907,7 +997,7 @@ async function releaseSessionRuntimeLock(sessionId) {
 }
 
 function scheduleSessionLockRetry(sessionId, autoExpire, format) {
-    if (sessionLockRetryTimers.has(sessionId)) return;
+    if (serverShuttingDown || sessionLockRetryTimers.has(sessionId)) return;
     const delay = Math.min(60000, SESSION_RUNTIME_LOCK_RENEW_MS + 5000) + Math.floor(Math.random() * 3000);
     const timer = setTimeout(async () => {
         sessionLockRetryTimers.delete(sessionId);
@@ -2283,6 +2373,7 @@ async function generateCloudflareImage(prompt) {
     throw new Error(lastError?.message ? String(lastError.message).slice(0, 900) : 'image_error');
 }
 function scheduleSessionReconnect(sessionId, autoExpire, format) {
+    if (serverShuttingDown) return;
     const session = activeSessions.get(sessionId);
     if (!session || reconnectTimers.has(sessionId)) return;
     if (session.status === 'connecte' && session.sock?.ws?.readyState === 1) return;
@@ -2840,6 +2931,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         reconnectTimers.delete(sessionId);
         await cleanupSocket(sessionId);
         const { state, saveCreds } = await useMongoAuthState(sessionId, expectExisting);
+        const credentialPhone = normalizePhoneNumber(String(state.creds?.me?.id || '').split('@')[0].split(':')[0]);
+        if (credentialPhone) {
+            const accountLockResult = await acquireAccountRuntimeLock(sessionId, credentialPhone);
+            if (!accountLockResult.acquired) {
+                await releaseSessionRuntimeLock(sessionId);
+                if (accountLockResult.holderSessionId === sessionId) throw new Error('account_runtime_lock_owned_elsewhere');
+                throw new Error(`duplicate_account_runtime_lock_owned_elsewhere:${accountLockResult.holderSessionId || 'unknown'}`);
+            }
+        }
         const { version } = await fetchLatestBaileysVersion();
 
         let globalLang = 'en';
@@ -3108,8 +3208,22 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             if (connection === 'open') {
                 const openingSession = activeSessions.get(sessionId);
                 if (!openingSession || openingSession.sock !== sock || openingSession.status === 'opening' || openingSession.status === 'connecte') return;
+                const openedAccountPhone = normalizePhoneNumber(String(sock.user?.id || '').split('@')[0].split(':')[0]);
+                if (openedAccountPhone && !sessionAccountRuntimeLocks.has(sessionId)) {
+                    const openedAccountLock = await acquireAccountRuntimeLock(sessionId, openedAccountPhone);
+                    if (!openedAccountLock.acquired) {
+                        console.error('[session-account-duplicate-blocked]', { sessionId, connectedAccountJid: sock.user?.id || null, accountPhone: openedAccountPhone, holderSessionId: openedAccountLock.holderSessionId, holderOwner: openedAccountLock.holderOwner, leaseUntil: openedAccountLock.leaseUntil || null, action: 'close_duplicate_socket' });
+                        openingSession.status = 'duplicate_account';
+                        openingSession.disconnectTime = Date.now();
+                        openingSession.sock = null;
+                        try { sock.ev.removeAllListeners(); } catch (e) {}
+                        try { if (sock.ws) sock.ws.close(); } catch (e) {}
+                        await releaseSessionRuntimeLock(sessionId);
+                        return;
+                    }
+                }
                 openingSession.status = 'opening';
-                console.info('[whatsapp] connection open', { sessionId, number: sock.user ? sock.user.id.split(':')[0] : null });
+                console.info('[whatsapp] connection open', { sessionId, number: sock.user ? sock.user.id.split(':')[0] : null, accountRuntimeLockHeld: !!sessionAccountRuntimeLocks.get(sessionId) });
                 const botId = sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id;
                 sessionData.ownerJid = botId;
                 sessionData.active = true;
@@ -5396,6 +5510,25 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             else throw err;
             return;
         }
+        if (err?.message === 'account_runtime_lock_owned_elsewhere') {
+            console.info('[session-start-skipped]', { sessionId, reason: 'another process holds the account runtime lock for this WhatsApp number' });
+            await releaseSessionRuntimeLock(sessionId);
+            if (expectExisting) scheduleSessionLockRetry(sessionId, autoExpire, format);
+            else throw err;
+            return;
+        }
+        if (String(err?.message || '').startsWith('duplicate_account_runtime_lock_owned_elsewhere:')) {
+            const holderSessionId = String(err.message).split(':').slice(1).join(':') || null;
+            const duplicateSession = activeSessions.get(sessionId);
+            if (duplicateSession) {
+                duplicateSession.status = 'duplicate_account';
+                duplicateSession.disconnectTime = Date.now();
+                duplicateSession.sock = null;
+            }
+            await releaseSessionRuntimeLock(sessionId);
+            console.warn('[session-start-skipped]', { sessionId, reason: 'another session already owns this WhatsApp account', holderSessionId, action: 'prevent_duplicate_socket_and_signal_state' });
+            return;
+        }
         console.error('[session-start]', sessionId, err?.message || err);
         let currentSession = activeSessions.get(sessionId);
         if (!expectExisting && !currentSession?.sock) await releaseSessionRuntimeLock(sessionId);
@@ -5527,9 +5660,47 @@ setInterval(async () => {
     }
 }, 240000);
 
+async function shutdownServer(signal) {
+    if (serverShuttingDown) return;
+    serverShuttingDown = true;
+    console.info('[server-shutdown-started]', { signal, processInstanceId, activeSessionCount: activeSessions.size });
+    for (const timer of reconnectTimers.values()) clearTimeout(timer);
+    reconnectTimers.clear();
+    for (const timer of sessionLockRetryTimers.values()) clearTimeout(timer);
+    sessionLockRetryTimers.clear();
+    for (const [sessionId, session] of activeSessions.entries()) {
+        if (session?.sock) {
+            try { session.sock.ev.removeAllListeners(); } catch (e) {}
+            try { if (session.sock.ws) session.sock.ws.close(); } catch (e) {}
+            session.sock = null;
+        }
+        if (session) {
+            session.status = 'deconnecte';
+            session.disconnectTime = Date.now();
+        }
+    }
+    const lockSessionIds = new Set([...sessionRuntimeLockTimers.keys(), ...sessionAccountRuntimeLocks.keys()]);
+    for (const sessionId of lockSessionIds) await releaseSessionRuntimeLock(sessionId);
+    if (db) {
+        try { await db.collection('session_runtime_locks').deleteMany({ owner: processInstanceId }); } catch (error) { console.warn('[server-shutdown-session-lock-cleanup-failed]', error?.message || String(error)); }
+        try { await db.collection('session_account_runtime_locks').deleteMany({ owner: processInstanceId }); } catch (error) { console.warn('[server-shutdown-account-lock-cleanup-failed]', error?.message || String(error)); }
+    }
+    if (httpServer) await new Promise(resolve => {
+        try { httpServer.close(() => resolve()); } catch (e) { resolve(); }
+    });
+    try { if (mongoClient) await mongoClient.close(); } catch (error) { console.warn('[server-shutdown-mongo-close-failed]', error?.message || String(error)); }
+    console.info('[server-shutdown-completed]', { signal, processInstanceId });
+}
+
+for (const signal of ['SIGTERM', 'SIGINT']) {
+    process.on(signal, () => {
+        shutdownServer(signal).catch(error => console.error('[server-shutdown-failed]', { signal, error: error?.message || String(error) })).finally(() => process.exit(0));
+    });
+}
+
 async function main() {
     await connectMongo();
-    app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
+    httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
     try {
         await loadExistingSessions();
     } catch (error) {
