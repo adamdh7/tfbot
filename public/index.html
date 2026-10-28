@@ -145,10 +145,11 @@
         .status-badge {
             display: inline-flex;
             align-items: center;
+            justify-content: center;
             gap: 6px;
-            background: var(--glass);
-            padding: 8px 16px;
-            border-radius: 20px;
+            background: transparent;
+            padding: 8px 0;
+            border-radius: 0;
             font-size: clamp(11px, 3.5vw, 13px);
             font-weight: 500;
             color: #ffffff;
@@ -167,12 +168,13 @@
             padding-bottom: 12px;
         }
         .input-wrapper {
-            background: var(--glass);
-            border-radius: 18px;
-            padding: clamp(14px, 4vw, 18px);
+            background: transparent;
+            border-radius: 0;
+            padding: clamp(14px, 4vw, 18px) 0;
             display: flex;
             align-items: center;
-            border: none;
+            border: 0;
+            border-bottom: 1px solid #282828;
         }
         .input-wrapper svg {
             margin-right: 12px;
@@ -196,10 +198,10 @@
             margin-top: 10px;
         }
         .btn {
-            background: #ffffff;
-            color: #000000;
+            background: transparent;
+            color: #ffffff;
             padding: clamp(15px, 4vw, 20px);
-            border-radius: 18px;
+            border-radius: 0;
             font-size: clamp(14px, 4vw, 16px);
             font-weight: 600;
             cursor: pointer;
@@ -212,10 +214,10 @@
             border: none;
         }
         .btn svg {
-            stroke: #000000;
+            stroke: #ffffff;
         }
         .btn-secondary {
-            background: var(--glass);
+            background: transparent;
             color: #ffffff;
         }
         .btn-secondary svg {
@@ -332,26 +334,28 @@
             font-size: clamp(20px, 6vw, 24px);
         }
         .menu-item {
-            padding: clamp(16px, 4vw, 20px);
+            padding: clamp(16px, 4vw, 20px) 8px;
             border: none;
-            border-radius: 16px;
-            margin-bottom: 12px;
+            border-bottom: 1px solid #282828;
+            border-radius: 0;
+            margin-bottom: 8px;
             text-align: center;
             font-size: clamp(15px, 4.5vw, 17px);
             font-weight: 500;
             cursor: pointer;
-            background: var(--glass);
+            background: transparent;
             color: #ffffff;
         }
         .lang-btn {
-            padding: clamp(16px, 4vw, 20px);
+            padding: clamp(16px, 4vw, 20px) 8px;
             border: none;
-            border-radius: 16px;
-            margin-bottom: 12px;
+            border-bottom: 1px solid #282828;
+            border-radius: 0;
+            margin-bottom: 8px;
             text-align: center;
             font-size: clamp(15px, 4.5vw, 17px);
             font-weight: 500;
-            background: var(--glass);
+            background: transparent;
             color: #ffffff;
             cursor: pointer;
         }
@@ -375,15 +379,18 @@
             gap: 10px;
         }
         .btn-clicks {
-            background: var(--glass);
+            background: transparent;
             color: #ffffff;
-            padding: clamp(16px, 4vw, 20px);
-            border-radius: 16px;
+            padding: clamp(16px, 4vw, 20px) 8px;
+            border-radius: 0;
+            border-bottom: 1px solid #282828;
             text-align: center;
             font-weight: 600;
             font-size: clamp(16px, 4.5vw, 18px);
             cursor: pointer;
-            border: none;
+            border-top: 0;
+            border-left: 0;
+            border-right: 0;
             width: 100%;
         }
 
@@ -460,16 +467,50 @@
             color: #d1d1d6;
             line-height: 1.75;
         }
-        .info-container > div {
+        .info-container > .info-copy {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
             margin: 0 !important;
-            background: #151517 !important;
-            border-radius: 16px;
-            padding: 16px !important;
-            gap: 14px !important;
+            padding: 0 !important;
+            background: transparent !important;
+            border-radius: 0;
+            color: #d1d1d6;
         }
-        .info-container > div span {
-            font-size: clamp(14px, 3.8vw, 16px) !important;
+        .info-copy h3 {
+            margin: 6px 0 0;
+            color: #ffffff;
+            font-size: clamp(16px, 4.5vw, 18px);
+            line-height: 1.4;
+            font-weight: 700;
+        }
+        .info-copy .info-card {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin: 0;
+            padding: 0;
+            background: transparent;
+            border: 0;
+            border-radius: 0;
+            color: #ffffff;
+        }
+        .info-copy .info-card svg {
+            flex: 0 0 26px;
+            width: 26px;
+            height: 26px;
+            color: #ffffff;
+        }
+        .info-copy .info-card span {
+            font-size: clamp(14px, 3.8vw, 16px);
             line-height: 1.5;
+        }
+        .info-copy code {
+            background: transparent;
+            color: #ffffff;
+            padding: 0;
+            font: inherit;
+            font-weight: 700;
         }
         #qr-open-link {
             display: none;
@@ -736,7 +777,7 @@
                 err_pts_qr: "3 points requis pour le qr", err_conn: "Connexion au serveur impossible", err_timeout: "Le serveur met trop de temps à répondre", err_auth: "Accès refusé par le serveur", err_server: "Le serveur n’a pas pu terminer la demande", err_qr: "Le QR code n’a pas pu être créé",
                 succ_copy: "Copié", succ_pts: "+1 Point", qr_hint: "Scannez avec WhatsApp",
                 infoHTML: `<div class="info-copy">
-                    <p><strong>Bot</strong> <em>(tfbot)</em> est un service de D’H7 | Tergene conçu pour faciliter la connexion et le déploiement de bots.</p>
+                    <p><strong>Bot</strong> <em>(tfbot)</em> est une interface web qui permet de connecter un appareil à WhatsApp grâce à un code de paire ou un QR code.</p>
                     <p>Cette interface permet de générer un <strong>code de paire</strong> ou un <strong>QR code</strong> afin de relier un appareil à WhatsApp. Suivez les instructions affichées et gardez votre session sécurisée.</p>
                     <h3>Accès aux fonctionnalités</h3>
                     <p>Les options utilisent des points :</p>
@@ -754,7 +795,7 @@
                 err_pts_qr: "3 points required for QR", err_conn: "Cannot reach the server", err_timeout: "The server took too long to respond", err_auth: "The server denied access", err_server: "The server could not complete the request", err_qr: "The QR code could not be created",
                 succ_copy: "Copied", succ_pts: "+1 Point", qr_hint: "Scan with WhatsApp",
                 infoHTML: `<div class="info-copy">
-                    <p><strong>Bot</strong> <em>(tfbot)</em> is a D’H7 | Tergene service designed to make connecting and deploying bots easier.</p>
+                    <p><strong>Bot</strong> <em>(tfbot)</em> is a web interface for connecting a device to WhatsApp with a pairing code or QR code.</p>
                     <p>Use this interface to generate a <strong>pairing code</strong> or a <strong>QR code</strong> to link a device with WhatsApp. Follow the on-screen instructions and keep your session secure.</p>
                     <h3>Access to features</h3>
                     <p>Using these options requires points:</p>
@@ -772,7 +813,7 @@
                 err_pts_qr: "3 puntos requeridos para el QR", err_conn: "No se puede conectar con el servidor", err_timeout: "El servidor tardó demasiado en responder", err_auth: "El servidor denegó el acceso", err_server: "El servidor no pudo completar la solicitud", err_qr: "No se pudo crear el código QR",
                 succ_copy: "Copiado", succ_pts: "+1 Punto", qr_hint: "Escanea con WhatsApp",
                 infoHTML: `<div class="info-copy">
-                    <p><strong>Bot</strong> <em>(tfbot)</em> es un servicio de D’H7 | Tergene diseñado para facilitar la conexión y el despliegue de bots.</p>
+                    <p><strong>Bot</strong> <em>(tfbot)</em> es una interfaz web que permite conectar un dispositivo a WhatsApp mediante un código de vinculación o un código QR.</p>
                     <p>Utiliza esta interfaz para generar un <strong>código de vinculación</strong> o un <strong>código QR</strong> y conectar un dispositivo con WhatsApp. Sigue las instrucciones y protege tu sesión.</p>
                     <h3>Acceso a las funciones</h3>
                     <p>Estas opciones requieren puntos:</p>
@@ -790,7 +831,7 @@
                 err_pts_qr: "3 pwen nesesè pou qr lan", err_conn: "Pa ka konekte ak sèvè a", err_timeout: "Sèvè a pran twòp tan pou reponn", err_auth: "Sèvè a refize aksè a", err_server: "Sèvè a pa t kapab fini demann lan", err_qr: "Li pa t posib pou kreye kòd QR la",
                 succ_copy: "Kopye", succ_pts: "+1 Pwen", qr_hint: "Eskane ak WhatsApp",
                 infoHTML: `<div class="info-copy">
-                    <p><strong>Bot</strong> <em>(tfbot)</em> se yon sèvis D’H7 | Tergene ki fèt pou rann koneksyon ak deplwaman bot yo pi fasil.</p>
+                    <p><strong>Bot</strong> <em>(tfbot)</em> se yon entèfas entènèt ki pèmèt konekte yon aparèy ak WhatsApp avèk yon kòd pè oswa yon kòd QR.</p>
                     <p>Sèvi ak entèfas sa a pou kreye yon <strong>kòd pè</strong> oswa yon <strong>kòd QR</strong> pou konekte yon aparèy ak WhatsApp. Swiv enstriksyon yo epi pwoteje sesyon ou.</p>
                     <h3>Aksè ak fonksyon yo</h3>
                     <p>Opsyon sa yo mande pwen:</p>
