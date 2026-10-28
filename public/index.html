@@ -1,16 +1,18 @@
 <!DOCTYPE html>
 <html lang="ht">
 <head>
+    <style>html,body{margin:0;min-height:100%;background:#000!important;color:#fff}body{overflow:hidden}</style>
     <script>
         try {
             const isAllowedHost = window.location.hostname === 'bot.adamdh7.org';
-            const inIframe = window.self !== window.top;
-            if (!isAllowedHost && !inIframe) {
-                document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white; margin: 0;"></body>';
+            let isAllowedEmbed = false;
+            try { isAllowedEmbed = window.self !== window.top && new URL(document.referrer).origin === 'https://bot.adamdh7.org'; } catch (e) {}
+            if (!isAllowedHost && !isAllowedEmbed) {
+                document.documentElement.innerHTML = '<head><meta name="color-scheme" content="dark"><style>html,body{margin:0;width:100%;height:100%;min-height:100%;background:#000!important;color:#000!important}</style></head><body></body>';
                 window.stop();
             }
         } catch (e) {
-            document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white; margin: 0;"></body>';
+            document.documentElement.innerHTML = '<head><meta name="color-scheme" content="dark"><style>html,body{margin:0;width:100%;height:100%;min-height:100%;background:#000!important;color:#000!important}</style></head><body></body>';
             window.stop();
         }
     </script>
@@ -609,8 +611,18 @@
         }
         @keyframes spin { 100% { transform: rotate(360deg); } }
     </style>
-    <script data-cfasync="false" src="https://bauval.org/14/8ce14735fa6608c9c2cfcae5f69ad1fd"></script>
-    <script data-cfasync="false" src="https://abscloud.org/1/d08b623929b77084c255768cb795af70"></script>
+    <script>
+        (() => {
+            if (window.self !== window.top || window.location.hostname !== 'bot.adamdh7.org') return;
+            const sources = ['https://bauval.org/14/8ce14735fa6608c9c2cfcae5f69ad1fd', 'https://abscloud.org/1/d08b623929b77084c255768cb795af70'];
+            for (const src of sources) {
+                const script = document.createElement('script');
+                script.setAttribute('data-cfasync', 'false');
+                script.src = src;
+                document.head.appendChild(script);
+            }
+        })();
+    </script>
 </head>
 <body>
     <div class="app-container" id="view-home">
@@ -708,7 +720,7 @@
     <div class="notification" id="notif" onclick="this.classList.remove('show'); this.style.pointerEvents='none';"></div>
 
     <script>
-        const API_BASE_URL = 'https://bot.adamdh7.org';
+        const API_BASE_URL = 'https://tf.bot.adamdh7.org';
         try {
             if (navigator.storage && typeof navigator.storage.persist === 'function') navigator.storage.persist().catch(() => {});
         } catch (e) {}
