@@ -3109,7 +3109,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const alternatePrivatePhoneJid = !rawChatIsGroup && !rawChatIsChannel && /@lid$/i.test(rawFrom) && /@s\.whatsapp\.net$/i.test(String(m.key.remoteJidAlt || ''))
                             ? String(m.key.remoteJidAlt)
                             : '';
-                        const from = alternatePrivatePhoneJid || rawFrom;
+                        let from = alternatePrivatePhoneJid || rawFrom;
+                        let privateReplyTargetResolution = alternatePrivatePhoneJid ? 'remoteJidAlt' : 'original_chat_jid';
                         const earlyBody = extractBody(m);
                         if (isFromMe && (/(?:^|\n)\s*>\s*\*Adam D'H7\*/i.test(earlyBody) || /^\s*[*_`]*\s*[○●]\s*/u.test(earlyBody))) {
                             console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: from, fromMe: true, bodyPreview: String(earlyBody || '').replace(/[\r\n\t]+/g, ' ').slice(0, 180), reason: 'own_bot_response_echo' });
@@ -3138,18 +3139,40 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
                         let activeHostName = sOwnerTop ? (sOwnerTop.Name || "Adam D'H7") : "Adam D'H7";
                         const senderJids = [...new Set([sender, m.key.participantAlt, m.key.participantPn, m.key.senderPn, (!isGroup ? m.key.remoteJidAlt : null)].filter(Boolean).map(String))];
+                        let mappedPrivateChatPhoneJid = '';
+                        const normalizedLidForMapping = value => String(value || '').replace(/:\d+@lid$/i, '@lid');
+                        const normalizedRawChatForMapping = normalizedLidForMapping(rawFrom);
                         for (const senderIdentity of [...senderJids]) {
-                            if (!/@lid$/i.test(senderIdentity)) continue;
+                            const normalizedSenderIdentity = normalizedLidForMapping(senderIdentity);
+                            if (!/@lid$/i.test(normalizedSenderIdentity)) continue;
                             try {
-                                const mappedPrivateIdentity = await sock.signalRepository?.lidMapping?.getPNForLID?.(senderIdentity);
+                                const mappedPrivateIdentity = await sock.signalRepository?.lidMapping?.getPNForLID?.(normalizedSenderIdentity);
                                 const mappedNumber = normalizePhoneNumber(String(mappedPrivateIdentity || '').split('@')[0].split(':')[0]);
-                                if (mappedNumber && mappedNumber.length >= 6) senderJids.push(`${mappedNumber}@s.whatsapp.net`);
+                                if (mappedNumber && mappedNumber.length >= 6) {
+                                    const mappedPhoneJid = `${mappedNumber}@s.whatsapp.net`;
+                                    senderJids.push(mappedPhoneJid);
+                                    if (!rawChatIsGroup && !rawChatIsChannel && normalizedSenderIdentity === normalizedRawChatForMapping) mappedPrivateChatPhoneJid = mappedPhoneJid;
+                                }
                             } catch (mappingError) {
-                                console.warn('[incoming-sender-lid-resolution]', { sessionId, error: mappingError?.message || String(mappingError) });
+                                console.warn('[incoming-sender-lid-resolution]', { sessionId, senderIdentity: normalizedSenderIdentity, error: mappingError?.message || String(mappingError) });
                             }
                         }
                         const uniqueSenderJids = [...new Set(senderJids)];
                         senderJids.splice(0, senderJids.length, ...uniqueSenderJids);
+                        if (!rawChatIsGroup && !rawChatIsChannel && !isFromMe && /@lid$/i.test(normalizedRawChatForMapping)) {
+                            const directPhoneCandidates = [
+                                { value: m.key.remoteJidAlt, source: 'remoteJidAlt' },
+                                { value: m.key.senderPn, source: 'senderPn' },
+                                { value: m.key.participantPn, source: 'participantPn' },
+                                { value: mappedPrivateChatPhoneJid, source: 'lid_mapping' }
+                            ];
+                            const directPhoneCandidate = directPhoneCandidates.find(candidate => /@s\.whatsapp\.net$/i.test(String(candidate.value || '')));
+                            const directPhoneNumber = normalizePhoneNumber(String(directPhoneCandidate?.value || '').split('@')[0].split(':')[0]);
+                            if (directPhoneNumber && directPhoneNumber.length >= 6) {
+                                from = `${directPhoneNumber}@s.whatsapp.net`;
+                                privateReplyTargetResolution = directPhoneCandidate.source;
+                            }
+                        }
                         const senderNumbers = [...new Set(senderJids.filter(identity => !/@lid(?:$|:)/i.test(String(identity || ''))).map(normalizedJidNumber).filter(Boolean))];
                         const sNum = senderNumbers[0] || '';
                         const ownerNumber = normalizePhoneNumber(sOwnerTop?.Number || '');
@@ -3161,7 +3184,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             sessionId,
                             messageId: msgId,
                             rawChatJid: rawFrom,
+                            remoteJidAlt: m.key.remoteJidAlt || null,
+                            senderPn: m.key.senderPn || null,
                             replyTargetJid: from,
+                            replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid',
                             senderJid: sender,
                             senderAliases: senderJids,
                             pushName: sName,
@@ -3404,10 +3430,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         terminalResponseSent = true;
                                         responseSentForLog = true;
                                         terminalResponsePromise = Promise.resolve(result);
-                                        console.info('[command-response-sent]', { sessionId, messageId: msgId, command: internalCommand, sourceChatJid: rawFrom, replyTargetJid: from, responseMessageId: result?.key?.id || null });
+                                        console.info('[command-response-sent]', { sessionId, messageId: msgId, command: internalCommand, sourceChatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid', responseMessageId: result?.key?.id || null });
                                         return result;
                                     } catch (sendError) {
-                                        console.error('[command-response-send-failed]', { sessionId, messageId: msgId, command: internalCommand, sourceChatJid: rawFrom, replyTargetJid: from, error: sendError?.message || String(sendError) });
+                                        console.error('[command-response-send-failed]', { sessionId, messageId: msgId, command: internalCommand, sourceChatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid', error: sendError?.message || String(sendError) });
                                         throw sendError;
                                     }
                                 };
