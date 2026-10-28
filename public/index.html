@@ -1,18 +1,16 @@
 <!DOCTYPE html>
 <html lang="ht">
 <head>
-    <style>html,body{margin:0;min-height:100%;background:#000!important;color:#fff}body{overflow:hidden}</style>
     <script>
         try {
             const isAllowedHost = window.location.hostname === 'bot.adamdh7.org';
-            let isAllowedEmbed = false;
-            try { isAllowedEmbed = window.self !== window.top && new URL(document.referrer).origin === 'https://bot.adamdh7.org'; } catch (e) {}
-            if (!isAllowedHost && !isAllowedEmbed) {
-                document.documentElement.innerHTML = '<head><meta name="color-scheme" content="dark"><style>html,body{margin:0;width:100%;height:100%;min-height:100%;background:#000!important;color:#000!important}</style></head><body></body>';
+            const inIframe = window.self !== window.top;
+            if (!isAllowedHost && !inIframe) {
+                document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white; margin: 0;"></body>';
                 window.stop();
             }
         } catch (e) {
-            document.documentElement.innerHTML = '<head><meta name="color-scheme" content="dark"><style>html,body{margin:0;width:100%;height:100%;min-height:100%;background:#000!important;color:#000!important}</style></head><body></body>';
+            document.documentElement.innerHTML = '<head><title></title></head><body style="background-color: white; margin: 0;"></body>';
             window.stop();
         }
     </script>
@@ -22,10 +20,6 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>Bot (tfbot)</title>
-    <meta name="description" content="Bot, ou plutôt tfbot, D’H7 | Tergene : connexion WhatsApp par code de paire ou QR.">
-    <link rel="icon" href="https://adamdh7.org/asset/nwa.png" type="image/png">
-    <link rel="apple-touch-icon" href="https://adamdh7.org/asset/nwa.png">
-    <link rel="manifest" href="/manifest.json">
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <style>
@@ -48,6 +42,15 @@
             height: 100%;
             overflow: hidden;
             overscroll-behavior: none;
+            scrollbar-width: none;
+        }
+        html::-webkit-scrollbar,
+        body::-webkit-scrollbar {
+            display: none;
+        }
+        .app-container:focus,
+        .view-overlay:focus {
+            outline: none;
         }
         body {
             background-color: var(--bg-dark);
@@ -55,7 +58,7 @@
             font-family: 'Outfit', sans-serif;
             height: 100vh;
             height: 100dvh;
-            min-height: 100%;
+            min-height: 100vh;
             width: 100%;
             overflow: hidden;
             overscroll-behavior: none;
@@ -69,22 +72,18 @@
         .app-container {
             width: 100%;
             height: 100%;
+            height: 100dvh;
             min-height: 0;
-            max-width: 500px;
+            max-width: 680px;
             display: flex;
             flex-direction: column;
             position: relative;
-            padding: env(safe-area-inset-top) 24px env(safe-area-inset-bottom) 24px;
+            padding: max(env(safe-area-inset-top), 12px) clamp(16px, 4.5vw, 28px) max(env(safe-area-inset-bottom), 12px);
+            overflow-x: hidden;
             overflow-y: auto;
             overscroll-behavior: none;
             scrollbar-width: none;
-            -webkit-overflow-scrolling: touch;
             transition: transform 0.35s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.35s ease;
-        }
-        .app-container::-webkit-scrollbar,
-        .view-overlay::-webkit-scrollbar {
-            width: 0;
-            height: 0;
         }
         .app-container.bg-scale {
             transform: scale(0.92);
@@ -110,6 +109,7 @@
             border-radius: 20px;
             overflow: hidden;
             cursor: default;
+            pointer-events: none;
             -webkit-touch-callout: none;
             user-select: none;
         }
@@ -259,26 +259,9 @@
             display: inline-block;
             margin: 0 auto;
         }
-        #qr-container img,
-        #qr-container canvas {
-            display: block;
-            width: clamp(160px, 50vw, 260px) !important;
-            height: clamp(160px, 50vw, 260px) !important;
-            max-width: 100%;
-            object-fit: contain;
-            image-rendering: pixelated;
-        }
-        .qr-open {
-            display: inline-flex;
-            max-width: 100%;
-            align-items: center;
-            justify-content: center;
-            border-radius: 8px;
-            -webkit-touch-callout: none;
-        }
-        .qr-open:focus-visible {
-            outline: 2px solid #fff;
-            outline-offset: 5px;
+        #qr-container img {
+            width: clamp(160px, 50vw, 220px) !important;
+            height: clamp(160px, 50vw, 220px) !important;
         }
         .notification {
             position: fixed;
@@ -310,15 +293,16 @@
             left: 0;
             width: 100vw;
             height: 100vh;
+            height: 100dvh;
             background: #000000;
             z-index: 1000;
             display: flex;
             flex-direction: column;
-            padding: 40px 24px;
+            padding: max(40px, env(safe-area-inset-top)) clamp(16px, 5vw, 30px) max(24px, env(safe-area-inset-bottom));
+            overflow-x: hidden;
             overflow-y: auto;
             overscroll-behavior: none;
             scrollbar-width: none;
-            -webkit-overflow-scrolling: touch;
             transform: translateX(100%);
             visibility: hidden;
             pointer-events: none;
@@ -369,89 +353,13 @@
         }
         .info-container {
             width: 100%;
-            max-width: 680px;
+            text-align: left;
+            color: #d1d1d6;
+            font-size: clamp(14px, 3.8vw, 16px);
+            line-height: 1.75;
             margin: 0 auto 20px;
-            color: #d4d4d8;
-            font-size: clamp(14px, 3.8vw, 15px);
-            line-height: 1.72;
             overflow-wrap: anywhere;
-        }
-        .info-container p {
-            margin: 0 0 13px;
-        }
-        .info-lead {
-            padding: 2px 0 18px;
-            margin-bottom: 20px;
-            border-bottom: 1px solid rgba(255,255,255,0.09);
-        }
-        .info-eyebrow {
-            margin: 0 0 8px !important;
-            color: #9ca3af;
-            font-size: 11px;
-            font-weight: 700;
-            letter-spacing: 0.13em;
-            text-transform: uppercase;
-        }
-        .info-intro {
-            color: #f4f4f5;
-            font-size: clamp(15px, 4vw, 17px);
-            line-height: 1.65;
-        }
-        .info-section {
-            margin: 0 0 23px;
-        }
-        .info-section h3 {
-            margin: 0 0 9px;
-            color: #fff;
-            font-size: clamp(15px, 4.2vw, 17px);
-            line-height: 1.35;
-            font-weight: 650;
-        }
-        .info-point {
-            display: flex;
-            align-items: center;
-            gap: 13px;
-            margin: 11px 0;
-            padding: 14px;
-            background: #1c1c1e;
-            border-radius: 16px;
-            min-width: 0;
-        }
-        .info-point svg {
-            width: 25px;
-            height: 25px;
-            flex: 0 0 25px;
-        }
-        .info-point-copy {
-            flex: 1;
-            min-width: 0;
-            color: #f4f4f5;
-            font-size: 14px;
-            line-height: 1.45;
-        }
-        .info-point-copy strong {
-            display: block;
-            color: #fff;
-            font-size: 15px;
-            font-weight: 650;
-        }
-        .info-point-copy span {
-            display: block;
-            margin-top: 2px;
-            color: #a1a1aa;
-            font-size: 12px;
-        }
-        .info-point-cost {
-            flex: 0 0 auto;
-            color: #fff;
-            font-size: 13px;
-            font-weight: 700;
-            white-space: nowrap;
-        }
-        .info-note {
-            padding-left: 12px;
-            border-left: 2px solid #52525b;
-            color: #a1a1aa;
+            flex: 1 0 auto;
         }
         .points-header {
             font-size: clamp(18px, 5vw, 20px);
@@ -484,20 +392,20 @@
         .social-links-row {
             display: flex;
             flex-direction: row;
-            flex-wrap: nowrap;
+            flex-wrap: wrap;
             justify-content: center;
             align-items: center;
             width: 100%;
-            padding: 0;
-            gap: clamp(6px, 2.5vw, 20px);
+            padding: 0 4px;
+            gap: clamp(8px, 2.5vw, 20px);
         }
         .social-links-row::-webkit-scrollbar {
             display: none;
         }
         .social-link {
             flex: 0 0 auto;
-            width: clamp(26px, 7vw, 36px);
-            height: clamp(26px, 7vw, 36px);
+            width: clamp(28px, 7vw, 36px);
+            height: clamp(28px, 7vw, 36px);
             border-radius: 0;
             background: transparent;
             border: 0;
@@ -538,18 +446,70 @@
             margin-bottom: 10px;
         }
         .info-container {
-            flex: 1 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
         }
-        @media (pointer: fine) and (hover: hover) {
+        .info-container p {
+            text-align: left !important;
+            margin: 0 !important;
+            color: #d1d1d6;
+            line-height: 1.75;
+        }
+        .info-container > div {
+            margin: 0 !important;
+            background: #151517 !important;
+            border-radius: 16px;
+            padding: 16px !important;
+            gap: 14px !important;
+        }
+        .info-container > div span {
+            font-size: clamp(14px, 3.8vw, 16px) !important;
+            line-height: 1.5;
+        }
+        #qr-open-link {
+            display: none;
+            width: fit-content;
+            max-width: 100%;
+            margin: 0 auto;
+            padding: 10px;
+            background: #ffffff;
+            border-radius: 16px;
+            cursor: pointer;
+            -webkit-touch-callout: none;
+        }
+        #qr-container {
+            display: block;
+            line-height: 0;
+            margin: 0 auto;
+        }
+        #qr-container img,
+        #qr-container canvas {
+            display: block;
+            width: clamp(180px, 58vw, 260px) !important;
+            height: auto !important;
+            max-width: 100%;
+            border: 0;
+            pointer-events: none;
+            -webkit-touch-callout: none;
+        }
+        #qr-container canvas {
+            height: clamp(180px, 58vw, 260px) !important;
+        }
+        .app-container::-webkit-scrollbar,
+        .view-overlay::-webkit-scrollbar {
+            display: none;
+        }
+        @media (hover: hover) and (pointer: fine) {
             .app-container,
             .view-overlay {
                 scrollbar-width: thin;
-                scrollbar-color: #565656 #111111;
+                scrollbar-color: #555555 #111111;
             }
             .app-container::-webkit-scrollbar,
             .view-overlay::-webkit-scrollbar {
+                display: block;
                 width: 8px;
-                height: 8px;
             }
             .app-container::-webkit-scrollbar-track,
             .view-overlay::-webkit-scrollbar-track {
@@ -557,79 +517,31 @@
             }
             .app-container::-webkit-scrollbar-thumb,
             .view-overlay::-webkit-scrollbar-thumb {
-                background: #565656;
+                background: #555555;
                 border-radius: 8px;
-                border: 2px solid #111111;
             }
         }
-        @media (max-height: 680px) {
-            .app-container {
-                padding-left: clamp(14px, 4vw, 24px);
-                padding-right: clamp(14px, 4vw, 24px);
-            }
+        @media (max-height: 620px) {
             .header {
-                margin-top: 10px;
+                margin-top: 8px;
                 margin-bottom: 10px;
             }
-            .logo-area {
-                width: 54px;
-                height: 54px;
-                border-radius: 16px;
+            .header-top {
+                margin-bottom: 8px;
             }
             .main-content {
                 justify-content: flex-start;
-                gap: 12px;
-                padding-top: 8px;
-                padding-bottom: 18px;
-            }
-            .view-overlay {
-                padding-top: max(38px, env(safe-area-inset-top));
-                padding-bottom: max(18px, env(safe-area-inset-bottom));
-            }
-            .view-overlay h2 {
-                margin-bottom: 20px;
-            }
-            .points-header {
-                margin-bottom: 24px;
-            }
-        }
-        @media (max-width: 360px) {
-            .app-container {
-                padding-left: 14px;
-                padding-right: 14px;
-            }
-            .social-links-row {
-                gap: clamp(6px, 2vw, 10px);
-            }
-            .info-point {
-                gap: 10px;
-                padding: 12px;
-            }
-            .info-point-cost {
-                font-size: 12px;
             }
         }
         @keyframes spin { 100% { transform: rotate(360deg); } }
     </style>
-    <script>
-        (() => {
-            if (window.self !== window.top || window.location.hostname !== 'bot.adamdh7.org') return;
-            const sources = ['https://bauval.org/14/8ce14735fa6608c9c2cfcae5f69ad1fd', 'https://abscloud.org/1/d08b623929b77084c255768cb795af70'];
-            for (const src of sources) {
-                const script = document.createElement('script');
-                script.setAttribute('data-cfasync', 'false');
-                script.src = src;
-                document.head.appendChild(script);
-            }
-        })();
-    </script>
 </head>
 <body>
-    <div class="app-container" id="view-home">
+    <div class="app-container" id="view-home" tabindex="0">
         <header class="header">
             <div class="header-top">
                 <div class="logo-area" aria-hidden="true">
-                    <img src="https://adamdh7.org/asset/nwa.png" alt="Adam D'H7" onerror="this.src='https://via.placeholder.com/80/ffffff/000000?text=A'">
+                    <img src="https://adamdh7.org/asset/nwa.png" alt="" draggable="false" oncontextmenu="return false" onerror="this.src='https://via.placeholder.com/80/ffffff/000000?text=A'">
                 </div>
                 <div class="menu-icon" onclick="navigate('menu')">
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
@@ -644,7 +556,7 @@
         <main class="main-content">
             <div class="input-wrapper">
                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#888888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>
-                <input type="tel" id="phone" placeholder="+1 (223) 638-1740" inputmode="tel" autocomplete="tel" maxlength="28" aria-label="Phone number">
+                <input type="tel" id="phone" placeholder="22363817400" inputmode="tel" autocomplete="tel-national" maxlength="32" spellcheck="false" aria-label="Phone number">
             </div>
             <div class="action-grid">
                 <button class="btn" onclick="handleAction('code')">
@@ -660,14 +572,16 @@
                 <div class="spinner"></div>
             </div>
             <div class="output-area" id="output">
-                <div id="qr-container" style="display:none;"></div>
+                <a id="qr-open-link" href="#" target="_blank" rel="noopener noreferrer" aria-label="Open QR code in a new tab">
+                    <div id="qr-container" style="display:none;"></div>
+                </a>
                 <div id="code-text" class="code-box" style="display:none;"></div>
                 <div class="copy-hint tr-copy" id="hint-text"></div>
             </div>
         </main>
     </div>
 
-    <div class="view-overlay" id="view-menu">
+    <div class="view-overlay" id="view-menu" tabindex="0">
         <div class="overlay-close" onclick="navigate('home')">
             <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
         </div>
@@ -680,7 +594,7 @@
         <button class="menu-item tr-menu-points" id="nav-points-btn" onclick="navigate('points')">Points</button>
     </div>
 
-    <div class="view-overlay" id="view-langues">
+    <div class="view-overlay" id="view-langues" tabindex="0">
         <div class="overlay-close" onclick="navigate('home')">
             <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
         </div>
@@ -691,7 +605,7 @@
         <button class="lang-btn" onclick="setLang('ht')">Kreyòl Ayisyen</button>
     </div>
 
-    <div class="view-overlay" id="view-info">
+    <div class="view-overlay" id="view-info" tabindex="0">
         <div class="overlay-close" onclick="navigate('home')">
             <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
         </div>
@@ -704,7 +618,7 @@
         </div>
     </div>
 
-    <div class="view-overlay" id="view-points">
+    <div class="view-overlay" id="view-points" tabindex="0">
         <div class="overlay-close" onclick="navigate('home')">
             <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
         </div>
@@ -720,12 +634,19 @@
     <div class="notification" id="notif" onclick="this.classList.remove('show'); this.style.pointerEvents='none';"></div>
 
     <script>
-        const API_BASE_URL = 'https://tf.bot.adamdh7.org';
-        try {
-            if (navigator.storage && typeof navigator.storage.persist === 'function') navigator.storage.persist().catch(() => {});
-        } catch (e) {}
+        document.addEventListener('touchmove', function(e) {
+            if (e.target.closest('.view-overlay') || e.target.closest('#view-home')) return;
+            e.preventDefault();
+        }, { passive: false });
+        document.addEventListener('wheel', function(e) {
+            if (e.target.closest('.view-overlay') || e.target.closest('#view-home')) return;
+            e.preventDefault();
+        }, { passive: false });
         document.addEventListener('dblclick', function(e) {
             e.preventDefault();
+        });
+        document.addEventListener('contextmenu', function(e) {
+            if (e.target.closest('.logo-area, #qr-container')) e.preventDefault();
         });
 
         const infIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6a6 6 0 1 1 0 12c-3.314 0-5.686-2.686-8-5.372C7.686 9.942 5.314 6 2 6a6 6 0 1 0 0 12c3.314 0 5.686-2.686 8-5.372C12.314 15.372 14.686 18 18 18z"></path></svg>';
@@ -749,12 +670,12 @@
             {
                 label: 'Facebook',
                 href: 'https://facebook.com/adamdh7tf',
-                svg: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13.9 8.1V6.7c0-.7.4-1 1-1H17V3h-2.5C12.2 3 11 4.4 11 6.5v1.6H8.5v3H11V21h2.9v-9.9h2.7l.4-3h-3.1Z"></path></svg>'
+                svg: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M13.9 8.1V6.7c0-.7.4-1 1-1H17V3h-2.5C12.2 3 11 4.4 11 6.5v1.6H8.5v3H11V21h2.9v-9.9h2.7l.4-3h-3.1Z"/></svg>'
             },
             {
                 label: 'TikTok',
                 href: 'https://tiktok.com/@dh7adam',
-                svg: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M14 3v10.1a4.5 4.5 0 1 1-4-4.4v3a1.6 1.6 0 1 0 1.5 1.6V3h2.5c.3 1.7 1.7 2.9 3.5 3.2V9a7 7 0 0 1-3.5-1V3Z"></path></svg>'
+                svg: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M14 3v10.1a4.5 4.5 0 1 1-4-4.4v3a1.6 1.6 0 1 0 1.5 1.6V3h2.5c.3 1.7 1.7 2.9 3.5 3.2V9a7 7 0 0 1-3.5-1V3Z"/></svg>'
             }
         ];
 
@@ -771,38 +692,21 @@
                 ititle: "Info", pheader: "Tu as {x} points", clicks: "Clicks",
                 err_num: "Numéro invalide", err_pts_code: "4 points requis pour le code",
                 err_pts_qr: "3 points requis pour le qr", err_conn: "Erreur de connexion",
-                succ_copy: "Copié", succ_pts: "+1 Point", qr_hint: "Scannez avec WhatsApp", qr_open: "Ouvrir le QR dans un nouvel onglet",
+                succ_copy: "Copié", succ_pts: "+1 Point", qr_hint: "Scannez avec WhatsApp",
                 infoHTML: `
-                    <section class="info-lead">
-                        <p class="info-eyebrow">Connexion WhatsApp</p>
-                        <p class="info-intro">Bienvenue sur <strong>Bot, ou plutôt tfbot</strong>, le service de connexion de D’H7 | Tergene. Cette page permet de relier une session WhatsApp avec un code de paire ou un QR code.</p>
-                    </section>
-                    <section class="info-section">
-                        <h3>Comment ça fonctionne</h3>
-                        <p>Choisissez une méthode, puis suivez les instructions affichées dans WhatsApp. Gardez votre connexion active pendant la création de la session.</p>
-                    </section>
-                    <section class="info-section">
-                        <h3>Coût des actions</h3>
-                        <p>Les points nécessaires sont indiqués avant chaque action.</p>
-                        <div class="info-point">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
-                            <div class="info-point-copy"><strong>Code de paire</strong><span>Associer WhatsApp à l’aide d’un code</span></div>
-                            <span class="info-point-cost">4 points</span>
-                        </div>
-                        <div class="info-point">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7M14 9h7M3 9h7M14 14v7"/></svg>
-                            <div class="info-point-copy"><strong>QR code</strong><span>Associer WhatsApp en scannant le code</span></div>
-                            <span class="info-point-cost">3 points</span>
-                        </div>
-                    </section>
-                    <section class="info-section">
-                        <h3>Obtenir des points</h3>
-                        <p>Ouvrez le menu, puis la section Points. Appuyez sur « Clicks » et restez sur la page ouverte au moins quatre secondes pour valider l’action.</p>
-                    </section>
-                    <section class="info-section">
-                        <h3>Après la connexion</h3>
-                        <p class="info-note">Dans WhatsApp, envoyez la commande <strong>.menu</strong> au bot pour découvrir les commandes disponibles.</p>
-                    </section>
+                    <p style="text-align:justify; margin-bottom:15px;">Bienvenue sur le système de connexion Bot ou plutôt tfbot…. Cette interface permet de connecter votre appareil de manière sécurisée et stable afin de profiter pleinement des fonctionnalités avancées du bot.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Les sessions sont optimisées pour garantir la sécurité et les performances. Le système gère l'ensemble des opérations de façon transparente et automatique.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">L'accès aux options nécessite des points :</p>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+                        <span style="font-size: 15px;"><strong>4 points</strong> pour un Code de paire</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
+                        <span style="font-size: 15px;"><strong>3 points</strong> pour un Code QR</span>
+                    </div>
+                    <p style="text-align:justify; margin-bottom:15px;">Pour obtenir vos points, accédez au menu, puis à la section Points, cliquez sur le bouton "Clicks" et restez sur la page affichée pendant au moins 4 secondes. Une interaction active valide l'ajout d'un point.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Une fois connecté, utilisez la commande .menu pour découvrir une vaste gamme d'outils avancés et pratiques.</p>
                 `
             },
             en: {
@@ -811,38 +715,21 @@
                 ititle: "Info", pheader: "You have {x} points", clicks: "Clicks",
                 err_num: "Invalid number", err_pts_code: "4 points required for code",
                 err_pts_qr: "3 points required for QR", err_conn: "Connection error",
-                succ_copy: "Copied", succ_pts: "+1 Point", qr_hint: "Scan with WhatsApp", qr_open: "Open QR in a new tab",
+                succ_copy: "Copied", succ_pts: "+1 Point", qr_hint: "Scan with WhatsApp",
                 infoHTML: `
-                    <section class="info-lead">
-                        <p class="info-eyebrow">WhatsApp connection</p>
-                        <p class="info-intro">Welcome to <strong>Bot, also known as tfbot</strong>, the D’H7 | Tergene connection service. Link a WhatsApp session with a pairing code or QR code.</p>
-                    </section>
-                    <section class="info-section">
-                        <h3>How it works</h3>
-                        <p>Choose a method and follow the instructions shown in WhatsApp. Keep your connection active while the session is created.</p>
-                    </section>
-                    <section class="info-section">
-                        <h3>Action costs</h3>
-                        <p>The required points are shown before each action.</p>
-                        <div class="info-point">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
-                            <div class="info-point-copy"><strong>Pairing code</strong><span>Link WhatsApp with a short code</span></div>
-                            <span class="info-point-cost">4 points</span>
-                        </div>
-                        <div class="info-point">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7M14 9h7M3 9h7M14 14v7"/></svg>
-                            <div class="info-point-copy"><strong>QR code</strong><span>Link WhatsApp by scanning a code</span></div>
-                            <span class="info-point-cost">3 points</span>
-                        </div>
-                    </section>
-                    <section class="info-section">
-                        <h3>Earn points</h3>
-                        <p>Open Menu, then Points. Tap “Clicks” and remain on the opened page for at least four seconds to validate the action.</p>
-                    </section>
-                    <section class="info-section">
-                        <h3>After connecting</h3>
-                        <p class="info-note">In WhatsApp, send the <strong>.menu</strong> command to the bot to explore the available commands.</p>
-                    </section>
+                    <p style="text-align:justify; margin-bottom:15px;">Welcome to the connection system Bot ou plutôt tfbot…. This interface allows you to connect your device stably to enjoy the features with complete simplicity.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Sessions have an optimized lifespan to guarantee security and performance. The system takes care of everything transparently.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Access to options requires points:</p>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+                        <span style="font-size: 15px;"><strong>4 points</strong> for a Pair Code</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
+                        <span style="font-size: 15px;"><strong>3 points</strong> for a QR Code</span>
+                    </div>
+                    <p style="text-align:justify; margin-bottom:15px;">To obtain your points, click on the menu button then points then click on the button you see and stay on the displayed page for at least 4 seconds. An active exploration validates your point.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Once connected, type the menu command to discover a multitude of unexpected and practical tools.</p>
                 `
             },
             es: {
@@ -851,38 +738,21 @@
                 ititle: "Info", pheader: "Tienes {x} puntos", clicks: "Clics",
                 err_num: "Número inválido", err_pts_code: "4 puntos requeridos para el código",
                 err_pts_qr: "3 puntos requeridos para el QR", err_conn: "Error de conexión",
-                succ_copy: "Copiado", succ_pts: "+1 Punto", qr_hint: "Escanea con WhatsApp", qr_open: "Abrir el QR en una pestaña nueva",
+                succ_copy: "Copiado", succ_pts: "+1 Punto", qr_hint: "Escanea con WhatsApp",
                 infoHTML: `
-                    <section class="info-lead">
-                        <p class="info-eyebrow">Conexión de WhatsApp</p>
-                        <p class="info-intro">Te damos la bienvenida a <strong>Bot, o también tfbot</strong>, el servicio de conexión de D’H7 | Tergene. Vincula una sesión de WhatsApp con un código de emparejamiento o un código QR.</p>
-                    </section>
-                    <section class="info-section">
-                        <h3>Cómo funciona</h3>
-                        <p>Elige un método y sigue las instrucciones que aparecen en WhatsApp. Mantén la conexión activa mientras se crea la sesión.</p>
-                    </section>
-                    <section class="info-section">
-                        <h3>Coste de las acciones</h3>
-                        <p>Los puntos necesarios se muestran antes de cada acción.</p>
-                        <div class="info-point">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
-                            <div class="info-point-copy"><strong>Código de emparejamiento</strong><span>Vincula WhatsApp mediante un código</span></div>
-                            <span class="info-point-cost">4 puntos</span>
-                        </div>
-                        <div class="info-point">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7M14 9h7M3 9h7M14 14v7"/></svg>
-                            <div class="info-point-copy"><strong>Código QR</strong><span>Vincula WhatsApp escaneando el código</span></div>
-                            <span class="info-point-cost">3 puntos</span>
-                        </div>
-                    </section>
-                    <section class="info-section">
-                        <h3>Conseguir puntos</h3>
-                        <p>Abre el menú y entra en Puntos. Pulsa «Clicks» y permanece en la página que se abre durante al menos cuatro segundos para validar la acción.</p>
-                    </section>
-                    <section class="info-section">
-                        <h3>Después de conectar</h3>
-                        <p class="info-note">En WhatsApp, envía el comando <strong>.menu</strong> al bot para consultar los comandos disponibles.</p>
-                    </section>
+                    <p style="text-align:justify; margin-bottom:15px;">Bienvenido al sistema de conexión Bot ou plutôt tfbot…. Esta interfaz permite conectar tu dispositivo de manera estable para disfrutar de las funcionalidades con total simplicidad.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Las sesiones tienen una duración de vida optimizada para garantizar seguridad y rendimiento. El sistema se encarga de todo de forma transparente.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">El acceso a las opciones requiere puntos:</p>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+                        <span style="font-size: 15px;"><strong>4 puntos</strong> para un Código de par</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
+                        <span style="font-size: 15px;"><strong>3 puntos</strong> para un Código QR</span>
+                    </div>
+                    <p style="text-align:justify; margin-bottom:15px;">Para obtener tus puntos, haz clic en el botón menú luego puntos luego haz clic en el botón que ves y permanece en la página mostrada durante al menos 4 segundos. Una exploración activa valida tu punto.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Una vez conectado, escribe el comando de menú para descubrir una multitud de herramientas inesperadas y prácticas.</p>
                 `
             },
             ht: {
@@ -891,54 +761,67 @@
                 ititle: "Enfòmasyon", pheader: "Ou gen {x} pwen", clicks: "Klike",
                 err_num: "ajoute on Nimewo", err_pts_code: "4 pwen nesesè pou kòd pè an",
                 err_pts_qr: "3 pwen nesesè pou qr lan", err_conn: "Erè koneksyon",
-                succ_copy: "Kopye", succ_pts: "+1 Pwen", qr_hint: "Eskane ak WhatsApp", qr_open: "Louvri QR la nan yon lòt onglet",
+                succ_copy: "Kopye", succ_pts: "+1 Pwen", qr_hint: "Eskane ak WhatsApp",
                 infoHTML: `
-                    <section class="info-lead">
-                        <p class="info-eyebrow">Koneksyon WhatsApp</p>
-                        <p class="info-intro">Byenveni sou <strong>Bot, oswa tfbot</strong>, sèvis koneksyon D’H7 | Tergene lan. Ou ka konekte yon sesyon WhatsApp avèk yon kòd pè oswa yon kòd QR.</p>
-                    </section>
-                    <section class="info-section">
-                        <h3>Fason li fonksyone</h3>
-                        <p>Chwazi yon metòd epi suiv enstriksyon ki parèt nan WhatsApp. Kenbe koneksyon an aktif pandan sesyon an ap kreye.</p>
-                    </section>
-                    <section class="info-section">
-                        <h3>Pwen pou chak aksyon</h3>
-                        <p>Kantite pwen ki nesesè a ap parèt anvan ou lanse chak aksyon.</p>
-                        <div class="info-point">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
-                            <div class="info-point-copy"><strong>Kòd pè</strong><span>Konekte WhatsApp avèk yon kòd</span></div>
-                            <span class="info-point-cost">4 pwen</span>
-                        </div>
-                        <div class="info-point">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7M14 9h7M3 9h7M14 14v7"/></svg>
-                            <div class="info-point-copy"><strong>Kòd QR</strong><span>Konekte WhatsApp lè w eskane kòd la</span></div>
-                            <span class="info-point-cost">3 pwen</span>
-                        </div>
-                    </section>
-                    <section class="info-section">
-                        <h3>Jwenn pwen</h3>
-                        <p>Louvri meni an, epi antre nan Pwen. Peze « Clicks » epi rete sou paj la pandan omwen kat segonn pou valide aksyon an.</p>
-                    </section>
-                    <section class="info-section">
-                        <h3>Apre koneksyon</h3>
-                        <p class="info-note">Nan WhatsApp, voye kòmand <strong>.menu</strong> bay bot la pou dekouvri kòmand ki disponib yo.</p>
-                    </section>
+                    <p style="text-align:justify; margin-bottom:15px;">Byenveni sou sistèm lyezon Bot ou plutôt tfbot… lan. Entèfas sa a pèmèt ou konekte aparèy ou a yon fason ki estab pou'w jwi fonksyonalite yo ak tout senplisite.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Sesyon yo gen yon dire lavi optimize pou garanti sekirite ak pèfòmans. Sistèm nan pran swen tout bagay yon fason transparan.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Aksè a opsyon yo mande pwen :</p>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+                        <span style="font-size: 15px;"><strong>4 pwen</strong> pou yon Kòd Pè</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
+                        <span style="font-size: 15px;"><strong>3 pwen</strong> pou yon Kòd QR</span>
+                    </div>
+                    <p style="text-align:justify; margin-bottom:15px;">Pou jwenn fiti pwen ou yo, klike sou bouton meni a, aprè bouton ki ekri pwen an, answit klike sou bouton gri ki ekri Klike an, epi rete sou paj ki afiche a pandan o mwen 4 segonn. Yon eksplorasyon aktif valide pwen ou an.</p>
+                    <p style="text-align:justify; margin-bottom:15px;">Yon fwa konekte, tape kòmand meni an pou dekouvri yon pakèt zouti inatandi e ki pratik.</p>
                 `
             }
         };
 
+        const fallbackStorage = new Map();
+        const storage = {
+            getItem(key) {
+                try { return window.localStorage.getItem(key); } catch (error) { return fallbackStorage.has(String(key)) ? fallbackStorage.get(String(key)) : null; }
+            },
+            setItem(key, value) {
+                const safeKey = String(key);
+                const safeValue = String(value);
+                fallbackStorage.set(safeKey, safeValue);
+                try { window.localStorage.setItem(safeKey, safeValue); } catch (error) {}
+            },
+            removeItem(key) {
+                fallbackStorage.delete(String(key));
+                try { window.localStorage.removeItem(String(key)); } catch (error) {}
+            }
+        };
+
+        async function requestIframeStorageAccess() {
+            try {
+                if (window.top === window) return;
+                if (navigator.storage && typeof navigator.storage.persist === 'function') await navigator.storage.persist();
+                if (typeof document.hasStorageAccess === 'function' && typeof document.requestStorageAccess === 'function') {
+                    const hasAccess = await document.hasStorageAccess();
+                    if (!hasAccess) await document.requestStorageAccess();
+                }
+            } catch (error) {}
+        }
+
+        document.addEventListener('pointerdown', requestIframeStorageAccess, { once: true, passive: true });
+
         const INFINITE_POINTS = 999999999999;
 
         if (window.location.hash === '#pwen' || window.location.hash.includes('pwen')) {
-            localStorage.setItem('points', INFINITE_POINTS.toString());
+            storage.setItem('points', INFINITE_POINTS.toString());
             try {
-                window.history.replaceState({ view: 'home', appDepth: 0 }, '', window.location.pathname + window.location.search);
+                window.history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
             } catch (e) {
                 window.location.hash = '';
             }
         }
 
-        let userPoints = Number(localStorage.getItem('points'));
+        let userPoints = Number(storage.getItem('points'));
         if (!Number.isFinite(userPoints) || userPoints < 0) {
             userPoints = 0;
         }
@@ -947,7 +830,7 @@
             return userPoints >= (INFINITE_POINTS / 2);
         }
 
-        let currentLang = localStorage.getItem('lang');
+        let currentLang = storage.getItem('lang');
         if (!currentLang) {
             const navL = navigator.language.slice(0, 2);
             currentLang = ['fr', 'en', 'es', 'ht'].includes(navL) ? navL : 'ht';
@@ -961,6 +844,7 @@
             loader: document.getElementById('loader'),
             output: document.getElementById('output'),
             qr: document.getElementById('qr-container'),
+            qrLink: document.getElementById('qr-open-link'),
             code: document.getElementById('code-text'),
             hint: document.getElementById('hint-text'),
             notif: document.getElementById('notif'),
@@ -1005,7 +889,7 @@
 
         function setLang(l) {
             currentLang = l;
-            localStorage.setItem('lang', l);
+            storage.setItem('lang', l);
             updateUI();
             navigate('home');
         }
@@ -1024,23 +908,23 @@
         }
 
         function navigate(view) {
-            const currentDepth = Math.max(0, Number(history.state?.appDepth) || 0);
             if (view === 'home') {
-                if (currentDepth > 0) {
-                    history.go(-currentDepth);
+                if (history.state && history.state.view && history.state.view !== 'home') {
+                    try { history.back(); } catch (e) {}
                     return;
                 }
                 renderView('home');
-                try { history.replaceState({ view: 'home', appDepth: 0 }, '', window.location.pathname + window.location.search); } catch (e) {}
                 return;
             }
+
             if (history.state && history.state.view === view) {
                 renderView(view);
                 return;
             }
+
             renderView(view);
             try {
-                history.pushState({ view, appDepth: currentDepth + 1 }, '', window.location.pathname + window.location.search + '#' + view);
+                history.pushState({ view }, '', window.location.pathname + window.location.search + '#' + view);
             } catch (e) {}
         }
 
@@ -1049,34 +933,48 @@
             renderView(view);
         });
 
-        const sanitizePhoneValue = value => String(value || '').replace(/[^0-9()+-]/g, '');
-        ui.phone.addEventListener('input', () => {
-            const original = ui.phone.value;
-            const cleaned = sanitizePhoneValue(original);
-            if (original !== cleaned) {
-                const caret = ui.phone.selectionStart;
-                const removedBeforeCaret = original.slice(0, Number.isInteger(caret) ? caret : original.length).length - sanitizePhoneValue(original.slice(0, Number.isInteger(caret) ? caret : original.length)).length;
-                ui.phone.value = cleaned;
-                const nextCaret = Math.max(0, (Number.isInteger(caret) ? caret : cleaned.length) - removedBeforeCaret);
-                try { ui.phone.setSelectionRange(nextCaret, nextCaret); } catch (e) {}
+        function sanitizePhoneValue() {
+            const input = ui.phone;
+            const original = input.value;
+            const cursor = input.selectionStart;
+            const cleaned = original.replace(/[^0-9()+\-]/g, '');
+            if (cleaned !== original) {
+                const removedBeforeCursor = original.slice(0, cursor || 0).length - original.slice(0, cursor || 0).replace(/[^0-9()+\-]/g, '').length;
+                input.value = cleaned;
+                const nextCursor = Math.max(0, (cursor || cleaned.length) - removedBeforeCursor);
+                try { input.setSelectionRange(nextCursor, nextCursor); } catch (error) {}
             }
+        }
+
+        ui.phone.value = storage.getItem('phone') || '';
+        sanitizePhoneValue();
+        ui.phone.addEventListener('input', () => {
+            sanitizePhoneValue();
+            storage.setItem('phone', ui.phone.value);
         });
-        ui.phone.addEventListener('paste', event => {
-            event.preventDefault();
-            const pasted = sanitizePhoneValue(event.clipboardData?.getData('text') || '');
-            const start = Number.isInteger(ui.phone.selectionStart) ? ui.phone.selectionStart : ui.phone.value.length;
-            const end = Number.isInteger(ui.phone.selectionEnd) ? ui.phone.selectionEnd : start;
-            ui.phone.setRangeText(pasted, start, end, 'end');
-            ui.phone.dispatchEvent(new Event('input', { bubbles: true }));
+        ui.phone.addEventListener('paste', () => queueMicrotask(() => {
+            sanitizePhoneValue();
+            storage.setItem('phone', ui.phone.value);
+        }));
+        ui.phone.addEventListener('drop', () => queueMicrotask(() => { sanitizePhoneValue(); storage.setItem('phone', ui.phone.value); }));
+        ui.phone.addEventListener('beforeinput', event => {
+            if (event.data && /[^0-9()+\-]/.test(event.data) && event.inputType !== 'insertFromPaste' && event.inputType !== 'insertFromDrop') event.preventDefault();
         });
-        ui.phone.addEventListener('drop', event => {
-            event.preventDefault();
-            const dropped = sanitizePhoneValue(event.dataTransfer?.getData('text') || '');
-            const start = Number.isInteger(ui.phone.selectionStart) ? ui.phone.selectionStart : ui.phone.value.length;
-            const end = Number.isInteger(ui.phone.selectionEnd) ? ui.phone.selectionEnd : start;
-            ui.phone.setRangeText(dropped, start, end, 'end');
-            ui.phone.dispatchEvent(new Event('input', { bubbles: true }));
-        });
+        async function createQrDataUrl(value) {
+            if (typeof value !== 'string' || !value) return '';
+            if (typeof QRCode === 'undefined') return '';
+            const scratch = document.createElement('div');
+            try {
+                new QRCode(scratch, { text: value, width: 512, height: 512, colorDark: '#000000', colorLight: '#ffffff' });
+                await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                const canvas = scratch.querySelector('canvas');
+                if (canvas) return canvas.toDataURL('image/png');
+                const image = scratch.querySelector('img');
+                return image && /^data:image\/png;base64,/i.test(image.src) ? image.src : '';
+            } catch (error) {
+                return '';
+            }
+        }
 
         function showNotif(msg) {
             if (notifTimer) {
@@ -1106,7 +1004,7 @@
                 if (Date.now() - clickTime >= 4000) {
                     if (!hasInfinitePoints()) {
                         userPoints++;
-                        localStorage.setItem('points', userPoints.toString());
+                        storage.setItem('points', userPoints.toString());
                         updateUI();
                         showNotif(i18n[currentLang].succ_pts);
                     }
@@ -1129,150 +1027,138 @@
             }
         });
 
-        let actionInProgress = false;
-
-        async function createQrDataUrl(qrText) {
-            if (!window.QRCode) throw new Error('qr_renderer_unavailable');
-            const temporary = document.createElement('div');
-            new QRCode(temporary, { text: String(qrText || ''), width: 440, height: 440, colorDark: '#ffffff', colorLight: '#000000', correctLevel: QRCode.CorrectLevel.M });
-            const canvas = temporary.querySelector('canvas');
-            if (canvas) return canvas.toDataURL('image/png');
-            const image = temporary.querySelector('img');
-            if (image?.src) return image.src;
-            throw new Error('qr_render_failed');
-        }
-
-        async function uploadQrToBref(dataUrl) {
-            const response = await fetch(`${API_BASE_URL}/upload-qr`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ dataUrl })
-            });
-            const result = await response.json().catch(() => ({}));
-            if (!response.ok || !result.ok || !result.url) throw new Error(result.error || `qr_upload_http_${response.status}`);
-            return result.url;
-        }
-
-        function showQr(dataUrl, publicUrl, t) {
-            ui.qr.innerHTML = '';
-            ui.code.style.display = 'none';
-            ui.qr.style.display = 'inline-block';
-            ui.hint.style.display = 'block';
-            const link = document.createElement('a');
-            link.className = 'qr-open';
-            link.href = publicUrl || dataUrl;
-            link.target = '_blank';
-            link.rel = 'noopener noreferrer';
-            link.setAttribute('aria-label', t.qr_open || 'Open QR image in a new tab');
-            link.title = t.qr_open || 'Open QR image in a new tab';
-            const image = document.createElement('img');
-            image.src = dataUrl;
-            image.alt = t.qr_hint;
-            image.draggable = false;
-            link.appendChild(image);
-            ui.qr.appendChild(link);
-            ui.hint.textContent = t.qr_hint;
-        }
-
         async function handleAction(type) {
-            if (actionInProgress) return;
             const t = i18n[currentLang];
-            const pointsBeforeAction = userPoints;
-            const hadInfinitePoints = hasInfinitePoints();
+            sanitizePhoneValue();
             const number = ui.phone.value.replace(/[^0-9]/g, '');
 
             if (type === 'code') {
                 if (number.length < 6) return showNotif(t.err_num);
-                if (!hadInfinitePoints && userPoints < 4) {
+                if (!hasInfinitePoints() && userPoints < 4) {
                     pendingAction = 'code';
                     navigate('points');
                     return showNotif(t.err_pts_code);
                 }
-                if (!hadInfinitePoints) userPoints -= 4;
+                if (!hasInfinitePoints()) userPoints -= 4;
             } else if (type === 'qr') {
-                if (!hadInfinitePoints && userPoints < 3) {
+                if (!hasInfinitePoints() && userPoints < 3) {
                     pendingAction = 'qr';
                     navigate('points');
                     return showNotif(t.err_pts_qr);
                 }
-                if (!hadInfinitePoints) userPoints -= 3;
+                if (!hasInfinitePoints()) userPoints -= 3;
             }
 
             pendingAction = null;
-            if (!hadInfinitePoints) localStorage.setItem('points', userPoints.toString());
+            if (!hasInfinitePoints()) storage.setItem('points', userPoints.toString());
             updateUI();
-            actionInProgress = true;
-            const actionButtons = document.querySelectorAll('.action-grid .btn');
-            actionButtons.forEach(button => { button.disabled = true; });
+
             ui.output.style.display = 'none';
             ui.loader.style.display = 'flex';
             ui.qr.innerHTML = '';
             ui.qr.style.display = 'none';
+            ui.qrLink.style.display = 'none';
+            ui.qrLink.href = '#';
             ui.code.style.display = 'none';
             ui.hint.style.display = 'none';
 
+            let requestTimeout = null;
             try {
-                const res = await fetch(`${API_BASE_URL}/get-code`, {
+                const requestController = new AbortController();
+                requestTimeout = setTimeout(() => requestController.abort(), 95000);
+                const res = await fetch('/get-code', {
+                    signal: requestController.signal,
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    cache: 'no-store',
                     body: JSON.stringify({ number: type === 'code' ? number : '', method: type })
                 });
+                clearTimeout(requestTimeout);
                 const data = await res.json().catch(() => ({}));
-                if (!res.ok || !data.ok) throw new Error(data.error || `get_code_http_${res.status}`);
+                if (!res.ok || !data.ok) throw new Error(data.error || `http_${res.status}`);
+
                 if (type === 'code' && data.code) {
-                    ui.loader.style.display = 'none';
-                    ui.output.style.display = 'block';
-                    ui.qr.style.display = 'none';
-                    ui.code.style.display = 'block';
-                    ui.hint.style.display = 'block';
                     ui.code.textContent = data.code;
+                    ui.code.style.display = 'block';
                     ui.hint.textContent = t.copy;
+                    ui.hint.style.display = 'block';
                     ui.code.onclick = async () => {
-                        try {
-                            await navigator.clipboard.writeText(data.code);
-                            showNotif(t.succ_copy);
-                        } catch (error) {
-                            showNotif(data.code);
-                        }
+                        try { await navigator.clipboard.writeText(data.code); showNotif(t.succ_copy); }
+                        catch (error) { showNotif(data.code); }
                     };
-                    return;
-                }
-                if (type === 'qr' && (data.qrDataUrl || data.qrPublicUrl || data.qr)) {
-                    let qrDataUrl = String(data.qrDataUrl || '');
-                    let qrPublicUrl = String(data.qrPublicUrl || data.qrUrl || '');
-                    if (!qrDataUrl && data.qrPublicUrl) qrDataUrl = data.qrPublicUrl;
-                    if (!qrDataUrl && data.qr) qrDataUrl = await createQrDataUrl(data.qr);
-                    if (qrDataUrl && !qrPublicUrl && qrDataUrl.startsWith('data:image/')) {
+                } else if (type === 'qr' && data.qr) {
+                    let qrDataUrl = typeof data.qrDataUrl === 'string' ? data.qrDataUrl : '';
+                    let qrUrl = typeof data.qrUrl === 'string' && /^https:\/\/\S+$/i.test(data.qrUrl) ? data.qrUrl : '';
+                    if (!qrDataUrl) qrDataUrl = await createQrDataUrl(data.qr);
+                    if (qrDataUrl && !qrUrl) {
                         try {
-                            qrPublicUrl = await uploadQrToBref(qrDataUrl);
-                        } catch (uploadError) {
-                            console.warn('[qr-upload-fallback]', uploadError?.message || uploadError);
+                            const uploadResponse = await fetch('/upload-qr', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                credentials: 'same-origin',
+                                cache: 'no-store',
+                                body: JSON.stringify({ imageData: qrDataUrl })
+                            });
+                            const uploadData = await uploadResponse.json().catch(() => ({}));
+                            if (uploadResponse.ok && uploadData.ok && /^https:\/\/\S+$/i.test(String(uploadData.url || ''))) qrUrl = uploadData.url;
+                        } catch (error) {}
+                    }
+                    if (qrDataUrl) {
+                        const qrImage = document.createElement('img');
+                        qrImage.alt = 'WhatsApp QR code';
+                        qrImage.draggable = false;
+                        qrImage.src = qrDataUrl;
+                        ui.qr.appendChild(qrImage);
+                    } else if (typeof QRCode !== 'undefined') {
+                        new QRCode(ui.qr, { text: data.qr, width: 512, height: 512, colorDark: '#000000', colorLight: '#ffffff' });
+                        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                        const canvas = ui.qr.querySelector('canvas');
+                        const image = ui.qr.querySelector('img');
+                        if (canvas) {
+                            const qrImage = document.createElement('img');
+                            qrImage.alt = 'WhatsApp QR code';
+                            qrImage.draggable = false;
+                            qrImage.src = canvas.toDataURL('image/png');
+                            ui.qr.innerHTML = '';
+                            ui.qr.appendChild(qrImage);
+                            if (!qrUrl) {
+                                try {
+                                    const uploadResponse = await fetch('/upload-qr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ imageData: qrImage.src }) });
+                                    const uploadData = await uploadResponse.json().catch(() => ({}));
+                                    if (uploadResponse.ok && uploadData.ok && /^https:\/\/\S+$/i.test(String(uploadData.url || ''))) qrUrl = uploadData.url;
+                                } catch (error) {}
+                            }
+                        } else if (image) {
+                            image.alt = 'WhatsApp QR code';
+                            image.draggable = false;
                         }
                     }
-                    ui.loader.style.display = 'none';
-                    ui.output.style.display = 'block';
-                    showQr(qrDataUrl, qrPublicUrl, t);
-                    return;
+                    if (!ui.qr.querySelector('img') && !ui.qr.querySelector('canvas')) throw new Error('qr_render_failed');
+                    ui.qr.style.display = 'block';
+                    ui.qrLink.href = qrUrl || qrDataUrl || ui.qr.querySelector('img')?.src || '#';
+                    ui.qrLink.style.display = 'inline-flex';
+                    ui.qrLink.setAttribute('aria-label', qrUrl ? 'Open the uploaded QR image in a new tab' : 'Open the QR image in a new tab');
+                    ui.hint.textContent = t.qr_hint;
+                    ui.hint.style.display = 'block';
+                } else {
+                    throw new Error('api_response_missing_result');
                 }
-                throw new Error('get_code_response_incomplete');
+
+                ui.loader.style.display = 'none';
+                ui.output.style.display = 'block';
             } catch (error) {
+                if (requestTimeout) clearTimeout(requestTimeout);
                 ui.loader.style.display = 'none';
                 ui.output.style.display = 'none';
-                ui.qr.innerHTML = '';
-                if (!hadInfinitePoints) {
-                    userPoints = pointsBeforeAction;
-                    localStorage.setItem('points', userPoints.toString());
-                    updateUI();
-                }
-                console.error('[tfbot-action]', { action: type, error: error?.message || String(error) });
-                showNotif(`${t.err_conn}: ${String(error?.message || error).slice(0, 80)}`);
-            } finally {
-                actionInProgress = false;
-                actionButtons.forEach(button => { button.disabled = false; });
+                showNotif(t.err_conn);
+                console.error('Bot request failed:', error?.message || error);
             }
         }
 
         window.addEventListener('load', () => {
+            try { history.scrollRestoration = 'manual'; } catch (error) {}
+            try { if (navigator.storage && typeof navigator.storage.persist === 'function') navigator.storage.persist().catch(() => {}); } catch (error) {}
             let initialHash = window.location.hash.replace('#', '');
             const initialView = initialHash && initialHash !== 'pwen' ? initialHash : 'home';
 
@@ -1285,7 +1171,7 @@
             if (initialView !== 'home') {
                 renderView(initialView);
                 try {
-                    history.pushState({ view: initialView, appDepth: 1 }, '', window.location.pathname + window.location.search + '#' + initialView);
+                    history.pushState({ view: initialView }, '', window.location.pathname + window.location.search + '#' + initialView);
                 } catch (e) {}
             }
 
