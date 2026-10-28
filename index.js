@@ -2677,17 +2677,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             }) || null;
         };
 
-        const actionParticipantCandidates = participant => [...new Set([
-            participant?.id,
-            participant?.lid,
-            participant?.phoneNumber,
-            participant?.phone,
-            participant?.idAlt,
-            participant?.participantAlt,
-            participant?.participantPn,
-            participant?.jid,
-            participant?.pn
-        ].map(value => normalizeActionJid(value)).filter(Boolean))];
+        const actionParticipantCandidates = (participant, preferPhoneNumbers = false) => {
+            const values = preferPhoneNumbers
+                ? [participant?.phoneNumber, participant?.phone, participant?.pn, participant?.id, participant?.lid, participant?.idAlt, participant?.participantAlt, participant?.participantPn, participant?.jid]
+                : [participant?.id, participant?.lid, participant?.phoneNumber, participant?.phone, participant?.idAlt, participant?.participantAlt, participant?.participantPn, participant?.jid, participant?.pn];
+            return [...new Set(values.map(value => normalizeActionJid(value)).filter(Boolean))];
+        };
 
         const resolveGroupActionTarget = async (groupJid, target, metadata = null) => {
             const raw = String(target || '').trim();
@@ -2714,15 +2709,16 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             return (status && !['200', 'ok', 'success'].includes(status)) || ['error', 'not-authorized', 'forbidden', 'conflict', 'bad-request', '401', '403', '404', '406', '500'].includes(failureTag);
         }) : [];
 
-        const safeGroupUpdate = async (jid, participants, action, knownMetadata = null) => {
-            let metadataForAction = knownMetadata;
+        const safeGroupUpdate = async (jid, participants, action, knownMetadata = null, preferPhoneNumbers = false) => {
+            let metadataForAction = null;
             let planned = [];
             try {
-                metadataForAction = metadataForAction || await sock.groupMetadata(jid).catch(() => null);
+                metadataForAction = await sock.groupMetadata(jid).catch(() => null) || knownMetadata;
+                if (metadataForAction) groupMetadataCache.set(jid, { data: metadataForAction, ts: Date.now() });
                 const inputValues = [...new Set((participants || []).map(value => String(value || '').trim()).filter(Boolean))];
                 for (const raw of inputValues) {
                     const participant = findActionParticipant(raw, metadataForAction);
-                    let candidates = participant ? actionParticipantCandidates(participant) : [];
+                    let candidates = participant ? actionParticipantCandidates(participant, preferPhoneNumbers && action === 'remove') : [];
                     if (!candidates.length) {
                         const resolved = await resolveGroupActionTarget(jid, raw, metadataForAction);
                         if (resolved) candidates = [resolved];
@@ -3084,9 +3080,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         let botMode = sOwnerTop ? (sOwnerTop.mode || 'prive') : 'prive';
                         
                         if (botMode === 'public') {
-                            allowed = isGroup && !isChannel;
+                            allowed = !isChannel;
                         } else if (isOwnerReal) {
-                            allowed = true;
+                            allowed = !isChannel;
                         }
 
                         const bodyRaw = earlyBody;
@@ -3153,7 +3149,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             ? Math.max(120000, Number(process.env.AI_TOTAL_TIMEOUT_MS || 260000) + 15000)
                                             : internalCommand === 'kickall2'
                                                 ? Math.max(120000, Number(process.env.KICKALL2_MAX_TIMEOUT_MS || 1200000))
-                                                : 120000;
+                                                : internalCommand === 'kickall'
+                                                    ? Math.max(180000, Number(process.env.KICKALL_MAX_TIMEOUT_MS || 1200000))
+                                                    : 120000;
                                 const timeoutExecute = new Promise((_, reject) => {
                                     timeoutId = setTimeout(() => {
                                         isCancelled = true;
@@ -3388,27 +3386,29 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, internalCommand === 'kickall2' ? t.cmd_kickall2 : t.cmd_kickall, isGroup ? t.admin_required : t.group_required, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            const metadataKA = await getMeta();
-                                            if (!metadataKA) throw new Error('group_metadata_unavailable');
-                                            const toKick = metadataKA.participants
-                                                .filter(participant => participant && participant.id)
-                                                .filter(participant => participant.admin !== 'admin' && participant.admin !== 'superadmin')
-                                                .filter(participant => {
-                                                    const aliases = participantAliases(participant);
-                                                    const alternate = aliases.find(value => /@s\.whatsapp\.net$/i.test(value)) || aliases.find(value => /^\+?\d{6,}$/.test(value)) || '';
-                                                    return !isProtectedWhatsAppTarget(participant.id, sOwnerTop, botId, alternate);
-                                                })
-                                                .map(participant => participant.id);
+                                            const metadataKA = await sock.groupMetadata(from).catch(() => null) || await getMeta();
+                                            if (!metadataKA || !Array.isArray(metadataKA.participants)) throw new Error('group_metadata_unavailable');
+                                            groupMetadataCache.set(from, { data: metadataKA, ts: Date.now() });
+                                            const toKick = [...new Set(metadataKA.participants
+                                                .filter(participant => participant && (participant.id || participant.lid || participant.phoneNumber))
+                                                .map(participant => participant.id || participant.lid || participant.phoneNumber))];
                                             if (toKick.length > 0 && internalCommand === 'kickall') {
-                                                if (!await safeGroupUpdate(from, toKick, 'remove', metadataKA)) throw new Error('kickall_group_update_failed');
+                                                const completed = await safeGroupUpdate(from, toKick, 'remove', metadataKA, true);
+                                                if (!completed) throw new Error('kickall_partial_failure');
                                             } else if (toKick.length > 0 && internalCommand === 'kickall2') {
                                                 const batchSize = Math.max(1, Math.min(5, Number(process.env.KICKALL2_BATCH_SIZE || 5)));
                                                 const batchDelay = Math.max(1000, Number(process.env.KICKALL2_BATCH_DELAY_MS || 2500));
+                                                const failedBatches = [];
                                                 for (let index = 0; index < toKick.length; index += batchSize) {
                                                     if (isCancelled) throw new Error('kickall2_cancelled');
                                                     const batch = toKick.slice(index, index + batchSize);
-                                                    if (!await safeGroupUpdate(from, batch, 'remove', metadataKA)) throw new Error(`kickall2_batch_failed_at_${index + 1}`);
+                                                    const completed = await safeGroupUpdate(from, batch, 'remove', null, true);
+                                                    if (!completed) failedBatches.push(index + 1);
                                                     if (index + batchSize < toKick.length) await sleep(batchDelay);
+                                                }
+                                                if (failedBatches.length) {
+                                                    console.error('[kickall2-partial-failure]', { group: from, requested: toKick.length, failedBatchStarts: failedBatches });
+                                                    throw new Error(`kickall2_partial_failure:${failedBatches.length}`);
                                                 }
                                             }
                                             break;
@@ -4029,14 +4029,31 @@ setInterval(async () => {
 setInterval(async () => {
     if (!db) return;
     for (const [sId, sess] of activeSessions.entries()) {
+        if (!sess?.sock) continue;
+        const readyState = sess.sock.ws?.readyState;
+        if (sess.status === 'connecte' && readyState !== undefined && readyState !== 1) {
+            console.warn('[session-health] connected status has a closed websocket', { sessionId: sId, readyState });
+            try {
+                sess.status = 'deconnecte';
+                sess.disconnectTime = Date.now();
+                sess.sock.ev.removeAllListeners();
+                if (sess.sock.ws) sess.sock.ws.close();
+                sess.sock = null;
+            } catch (e) {
+                sess.sock = null;
+            }
+            await releaseSessionRuntimeLock(sId);
+            scheduleSessionReconnect(sId, false, sess.format || 'pair');
+            continue;
+        }
         if (sess.status === 'connecte' && sess.sock) {
             try {
                 const groups = await sess.sock.groupFetchAllParticipating();
                 const nowTS = Date.now();
-                for (const jid in groups) {
-                    groupMetadataCache.set(jid, { data: groups[jid], ts: nowTS });
-                }
-            } catch(e){}
+                for (const jid in groups) groupMetadataCache.set(jid, { data: groups[jid], ts: nowTS });
+            } catch (error) {
+                console.warn('[session-health-refresh-failed]', { sessionId: sId, error: error?.message || String(error) });
+            }
         }
     }
 }, 240000);
