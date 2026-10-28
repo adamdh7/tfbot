@@ -373,9 +373,25 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             }
         }
         const formattedContent = formatLinksInContent(content);
-        const echoToken = rememberOutgoingTextEcho(sessionId, jid, formattedContent);
+        let destinationJid = String(jid || '').trim();
+        if (/@lid$/i.test(destinationJid)) {
+            try {
+                const mappedPrivateJid = await sock.signalRepository?.lidMapping?.getPNForLID?.(destinationJid);
+                if (mappedPrivateJid) {
+                    const mappedValue = String(mappedPrivateJid).trim();
+                    if (/@s\.whatsapp\.net$/i.test(mappedValue)) destinationJid = `${mappedValue.split(':')[0].split('@')[0]}@s.whatsapp.net`;
+                    else {
+                        const mappedNumber = normalizePhoneNumber(mappedValue);
+                        if (mappedNumber) destinationJid = `${mappedNumber}@s.whatsapp.net`;
+                    }
+                }
+            } catch (mappingError) {
+                console.warn('[private-chat-lid-resolution]', { jid: destinationJid, error: mappingError?.message || String(mappingError) });
+            }
+        }
+        const echoToken = rememberOutgoingTextEcho(sessionId, destinationJid, formattedContent);
         try {
-            const result = await sock.sendMessage(jid, formattedContent, options);
+            const result = await sock.sendMessage(destinationJid, formattedContent, options);
             if (sessionId && result?.key?.id) {
                 outgoingMessageCache.add(`${sessionId}:${result.key.id}`);
                 if (outgoingMessageCache.size > 5000) {
@@ -384,13 +400,13 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 }
                 if (result?.message) {
                     cacheRecentMessage(sessionId, result);
-                    persistOutgoingRetryMessage(sessionId, jid, result);
+                    persistOutgoingRetryMessage(sessionId, destinationJid, result);
                 }
             }
             return result;
         } catch (error) {
             if (echoToken && outgoingTextEchoCache.get(echoToken.key) === echoToken.createdAt) outgoingTextEchoCache.delete(echoToken.key);
-            console.error('[whatsapp-send-failed]', { sessionId, jid, messageType: Object.keys(content || {}).join(','), error: error?.message || String(error) });
+            console.error('[whatsapp-send-failed]', { sessionId, jid: destinationJid, originalJid: jid, messageType: Object.keys(content || {}).join(','), error: error?.message || String(error) });
             throw error;
         }
     }, delayMs, sock);
@@ -2677,11 +2693,48 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             }) || null;
         };
 
-        const actionParticipantCandidates = (participant, preferPhoneNumbers = false) => {
-            const values = preferPhoneNumbers
-                ? [participant?.phoneNumber, participant?.phone, participant?.pn, participant?.id, participant?.lid, participant?.idAlt, participant?.participantAlt, participant?.participantPn, participant?.jid]
-                : [participant?.id, participant?.lid, participant?.phoneNumber, participant?.phone, participant?.idAlt, participant?.participantAlt, participant?.participantPn, participant?.jid, participant?.pn];
+        const actionParticipantCandidates = (participant, preferPhoneNumbers = false, addressingMode = '') => {
+            const lidAddressing = String(addressingMode || '').toLowerCase().includes('lid') || /@lid$/i.test(String(participant?.id || ''));
+            const values = lidAddressing
+                ? [participant?.id, participant?.lid, participant?.phoneNumber, participant?.phone, participant?.participantPn, participant?.pn, participant?.idAlt, participant?.participantAlt, participant?.jid]
+                : preferPhoneNumbers
+                    ? [participant?.phoneNumber, participant?.phone, participant?.pn, participant?.id, participant?.lid, participant?.idAlt, participant?.participantAlt, participant?.participantPn, participant?.jid]
+                    : [participant?.id, participant?.lid, participant?.phoneNumber, participant?.phone, participant?.idAlt, participant?.participantAlt, participant?.participantPn, participant?.jid, participant?.pn];
             return [...new Set(values.map(value => normalizeActionJid(value)).filter(Boolean))];
+        };
+
+        const participantMatchesIdentities = (participant, identities) => {
+            const candidateAliases = participantAliases(participant).map(normalizeActionJid).filter(Boolean);
+            const wantedAliases = (Array.isArray(identities) ? identities : [identities]).map(normalizeActionJid).filter(Boolean);
+            if (candidateAliases.some(alias => wantedAliases.includes(alias))) return true;
+            const candidatePhoneNumbers = participantAliases(participant)
+                .filter(value => /@s\.whatsapp\.net$/i.test(value) || /^\+?\d{6,}$/.test(value))
+                .map(normalizedJidNumber).filter(Boolean);
+            const wantedPhoneNumbers = (Array.isArray(identities) ? identities : [identities])
+                .filter(value => /@s\.whatsapp\.net$/i.test(String(value || '')) || /^\+?\d{6,}$/.test(String(value || '').trim()))
+                .map(normalizedJidNumber).filter(Boolean);
+            return candidatePhoneNumbers.some(number => wantedPhoneNumbers.includes(number));
+        };
+
+        const getBotIdentityAliases = () => [
+            sock.user?.id,
+            sock.user?.lid,
+            sock.user?.phoneNumber,
+            state.creds?.me?.id,
+            state.creds?.me?.lid,
+            activeSessions.get(sessionId)?.number ? `${normalizePhoneNumber(activeSessions.get(sessionId).number)}@s.whatsapp.net` : ''
+        ].filter(Boolean).map(String);
+
+        const isBotGroupParticipant = participant => participantMatchesIdentities(participant, getBotIdentityAliases());
+
+        const isGroupCreatorParticipant = (participant, metadata) => {
+            const creatorAliases = [metadata?.owner, metadata?.ownerPn].filter(Boolean).map(String);
+            if (creatorAliases.length) {
+                if (participantMatchesIdentities(participant, creatorAliases)) return true;
+                const creatorMatchedInMetadata = (metadata?.participants || []).some(item => participantMatchesIdentities(item, creatorAliases));
+                if (creatorMatchedInMetadata) return false;
+            }
+            return String(participant?.admin || '').toLowerCase() === 'superadmin';
         };
 
         const resolveGroupActionTarget = async (groupJid, target, metadata = null) => {
@@ -2718,7 +2771,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const inputValues = [...new Set((participants || []).map(value => String(value || '').trim()).filter(Boolean))];
                 for (const raw of inputValues) {
                     const participant = findActionParticipant(raw, metadataForAction);
-                    let candidates = participant ? actionParticipantCandidates(participant, preferPhoneNumbers && action === 'remove') : [];
+                    const lidAddressing = String(metadataForAction?.addressingMode || '').toLowerCase().includes('lid');
+                    let candidates = participant ? actionParticipantCandidates(participant, preferPhoneNumbers && action === 'remove' && !lidAddressing, metadataForAction?.addressingMode) : [];
                     if (!candidates.length) {
                         const resolved = await resolveGroupActionTarget(jid, raw, metadataForAction);
                         if (resolved) candidates = [resolved];
@@ -2729,11 +2783,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     if (!existing) planned.push({ raw, participant, candidates, primary });
                 }
                 if (!planned.length) return true;
-                const botIds = [sock.user?.id, sock.user?.lid, sock.user?.phoneNumber].map(value => normalizeActionJid(value)).filter(Boolean);
                 if (action === 'remove') {
-                    const protectedRecords = planned.filter(record => record.candidates.some(candidate => botIds.includes(normalizeActionJid(candidate))));
-                    if (protectedRecords.length) console.error('[group-remove-protected-bot]', { group: jid, skipped: protectedRecords.length });
-                    planned = planned.filter(record => !record.candidates.some(candidate => botIds.includes(normalizeActionJid(candidate))));
+                    const protectedRecords = planned.filter(record => isBotGroupParticipant(record.participant) || record.candidates.some(candidate => getBotIdentityAliases().map(normalizeActionJid).filter(Boolean).includes(normalizeActionJid(candidate))));
+                    if (protectedRecords.length) console.info('[group-remove-protected-bot]', { group: jid, skipped: protectedRecords.length });
+                    planned = planned.filter(record => !isBotGroupParticipant(record.participant) && !record.candidates.some(candidate => getBotIdentityAliases().map(normalizeActionJid).filter(Boolean).includes(normalizeActionJid(candidate))));
                 }
                 if (!planned.length) return true;
                 const primaryIds = planned.map(record => record.primary);
@@ -2926,7 +2979,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         });
 
         sock.ev.on('messages.upsert', async (up) => {
-            if (up.type !== 'notify') return;
+            if (!['notify', 'append'].includes(String(up?.type || ''))) return;
             
             for (const m of up.messages) {
                 if (m.messageStubType) continue;
@@ -2955,7 +3008,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 setImmediate(async () => {
                     try {
                         const timestampNow = Math.floor(Date.now() / 1000);
-                        if (m.messageTimestamp && (timestampNow - m.messageTimestamp > 120)) return;
+                        const messageTimestampSeconds = Number(m.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m.messageTimestamp);
+                        if (Number.isFinite(messageTimestampSeconds) && messageTimestampSeconds > 0 && timestampNow - messageTimestampSeconds > 120) return;
 
                         const from = m.key.remoteJid;
                         const isFromMe = m.key.fromMe;
@@ -2971,9 +3025,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
                         const ownerColTop = db.collection('session_owners');
                         let sOwnerTop = sessionOwnersCache.get(sessionId);
-                        if (!sOwnerTop) {
-                            sOwnerTop = await ownerColTop.findOne({ sessionId: sessionId });
-                            if (sOwnerTop) sessionOwnersCache.set(sessionId, sOwnerTop);
+                        if (!sOwnerTop || !from.endsWith('@g.us')) {
+                            const latestOwnerDoc = await ownerColTop.findOne({ sessionId: sessionId }).catch(() => null);
+                            if (latestOwnerDoc) {
+                                sOwnerTop = latestOwnerDoc;
+                                sessionOwnersCache.set(sessionId, latestOwnerDoc);
+                            }
                         }
 
                         let activeHostName = sOwnerTop ? (sOwnerTop.Name || "Adam D'H7") : "Adam D'H7";
@@ -3076,14 +3133,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         }
                         }
 
-                        let allowed = false;
-                        let botMode = sOwnerTop ? (sOwnerTop.mode || 'prive') : 'prive';
-                        
-                        if (botMode === 'public') {
-                            allowed = !isChannel;
-                        } else if (isOwnerReal) {
-                            allowed = !isChannel;
-                        }
+                        const botMode = normalizeText(sOwnerTop?.mode || sOwnerTop?.Mode || 'prive');
+                        const isPublicMode = ['public', 'piblik', 'publico'].includes(botMode);
+                        const allowed = !isChannel && (isPublicMode || isOwnerReal);
 
                         const bodyRaw = earlyBody;
                         const body = bodyRaw.trim();
@@ -3389,26 +3441,51 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             const metadataKA = await sock.groupMetadata(from).catch(() => null) || await getMeta();
                                             if (!metadataKA || !Array.isArray(metadataKA.participants)) throw new Error('group_metadata_unavailable');
                                             groupMetadataCache.set(from, { data: metadataKA, ts: Date.now() });
-                                            const toKick = [...new Set(metadataKA.participants
-                                                .filter(participant => participant && (participant.id || participant.lid || participant.phoneNumber))
-                                                .map(participant => participant.id || participant.lid || participant.phoneNumber))];
-                                            if (toKick.length > 0 && internalCommand === 'kickall') {
+                                            const participantRecordsKA = metadataKA.participants.filter(participant => participant && (participant.id || participant.lid || participant.phoneNumber));
+                                            const creatorRecordsKA = participantRecordsKA.filter(participant => isGroupCreatorParticipant(participant, metadataKA));
+                                            const botRecordsKA = participantRecordsKA.filter(participant => isBotGroupParticipant(participant));
+                                            const toKick = [...new Set(participantRecordsKA
+                                                .filter(participant => !creatorRecordsKA.includes(participant) && !botRecordsKA.includes(participant))
+                                                .map(participant => participant.id || participant.lid || participant.phoneNumber)
+                                                .filter(Boolean))];
+                                            console.info('[kickall-plan]', {
+                                                group: from,
+                                                action: internalCommand,
+                                                participantCount: participantRecordsKA.length,
+                                                requestedCount: toKick.length,
+                                                excludedCreatorCount: creatorRecordsKA.length,
+                                                excludedBotCount: botRecordsKA.length,
+                                                includesAdmins: true
+                                            });
+                                            if (!toKick.length) {
+                                                console.info('[kickall-no-targets]', { group: from, action: internalCommand });
+                                                break;
+                                            }
+                                            if (internalCommand === 'kickall') {
                                                 const completed = await safeGroupUpdate(from, toKick, 'remove', metadataKA, true);
-                                                if (!completed) throw new Error('kickall_partial_failure');
-                                            } else if (toKick.length > 0 && internalCommand === 'kickall2') {
+                                                if (!completed) {
+                                                    console.error('[kickall-partial-failure]', { group: from, requested: toKick.length, excludedCreatorCount: creatorRecordsKA.length, excludedBotCount: botRecordsKA.length });
+                                                } else {
+                                                    console.info('[kickall-complete]', { group: from, requested: toKick.length, excludedCreatorCount: creatorRecordsKA.length, excludedBotCount: botRecordsKA.length });
+                                                }
+                                            } else {
                                                 const batchSize = Math.max(1, Math.min(5, Number(process.env.KICKALL2_BATCH_SIZE || 5)));
                                                 const batchDelay = Math.max(1000, Number(process.env.KICKALL2_BATCH_DELAY_MS || 2500));
                                                 const failedBatches = [];
                                                 for (let index = 0; index < toKick.length; index += batchSize) {
-                                                    if (isCancelled) throw new Error('kickall2_cancelled');
+                                                    if (isCancelled) {
+                                                        console.warn('[kickall2-cancelled]', { group: from, completedBeforeCancel: index, requested: toKick.length });
+                                                        break;
+                                                    }
                                                     const batch = toKick.slice(index, index + batchSize);
-                                                    const completed = await safeGroupUpdate(from, batch, 'remove', null, true);
+                                                    const completed = await safeGroupUpdate(from, batch, 'remove', metadataKA, true);
                                                     if (!completed) failedBatches.push(index + 1);
                                                     if (index + batchSize < toKick.length) await sleep(batchDelay);
                                                 }
                                                 if (failedBatches.length) {
-                                                    console.error('[kickall2-partial-failure]', { group: from, requested: toKick.length, failedBatchStarts: failedBatches });
-                                                    throw new Error(`kickall2_partial_failure:${failedBatches.length}`);
+                                                    console.error('[kickall2-partial-failure]', { group: from, requested: toKick.length, failedBatchStarts: failedBatches, excludedCreatorCount: creatorRecordsKA.length, excludedBotCount: botRecordsKA.length });
+                                                } else {
+                                                    console.info('[kickall2-complete]', { group: from, requested: toKick.length, excludedCreatorCount: creatorRecordsKA.length, excludedBotCount: botRecordsKA.length });
                                                 }
                                             }
                                             break;
@@ -3766,7 +3843,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 }
                                                 return '';
                                             };
-                                            const sourceWrapperHT = quotedMessage || null;
+                                            const quotedIdHT = quoted?.stanzaId || '';
+                                            const anchorEntryHT = quotedIdHT
+                                                ? recentMsgsCache.find(entry => entry.sessionId === sessionId && entry.id === quotedIdHT && entry.from === from)
+                                                : null;
+                                            const sourceWrapperHT = quotedMessage || anchorEntryHT?.message || null;
                                             const quotedTextHT = sourceWrapperHT ? String(extractBody({ message: sourceWrapperHT }) || '').trim() : '';
                                             const primaryMediaHT = inspectHidetagMedia(sourceWrapperHT);
                                             if (!primaryMediaHT.type) {
@@ -3779,16 +3860,18 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 mediaSourcesHT = primaryMediaHT.value.map(item => inspectHidetagMedia(item)).filter(item => item.type);
                                             } else {
                                                 mediaSourcesHT = [primaryMediaHT];
-                                                const quotedIdHT = quoted?.stanzaId || '';
-                                                const anchorEntryHT = recentMsgsCache.find(entry => entry.sessionId === sessionId && entry.id === quotedIdHT && entry.from === from);
                                                 const associationHT = getMediaAssociation(sourceWrapperHT);
                                                 if (!primaryMediaHT.viewOnce && ['image', 'video'].includes(primaryMediaHT.type) && anchorEntryHT) {
                                                     const nearby = recentMsgsCache
-                                                        .filter(entry => entry.sessionId === sessionId && entry.from === from && entry.sender === anchorEntryHT.sender && Math.abs(Number(entry.ts || 0) - Number(anchorEntryHT.ts || 0)) <= 2)
+                                                        .filter(entry => entry.sessionId === sessionId && entry.from === from && entry.sender === anchorEntryHT.sender && Math.abs(Number(entry.ts || 0) - Number(anchorEntryHT.ts || 0)) <= 5)
                                                         .sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0));
                                                     const clustered = nearby.map(entry => ({ entry, media: inspectHidetagMedia(entry.message) })).filter(item => ['image', 'video'].includes(item.media.type));
-                                                    const associated = associationHT ? clustered.filter(item => getMediaAssociation(item.entry.message) === associationHT) : clustered;
-                                                    if (associated.length > 1 && associated.some(item => item.entry.id === quotedIdHT)) mediaSourcesHT = associated.map(item => ({ ...item.media, sourceEntry: item.entry }));
+                                                    const associated = associationHT
+                                                        ? clustered.filter(item => getMediaAssociation(item.entry.message) === associationHT || item.entry.id === quotedIdHT)
+                                                        : clustered;
+                                                    if (associated.length > 1 && associated.some(item => item.entry.id === quotedIdHT)) {
+                                                        mediaSourcesHT = associated.map(item => ({ ...item.media, sourceEntry: item.entry }));
+                                                    }
                                                 }
                                             }
                                             if (!mediaSourcesHT.length) {
