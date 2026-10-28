@@ -703,10 +703,7 @@ process.on('uncaughtException', (error) => {
 
 app.use(express.json({ limit: '3mb' }));
 app.use(express.urlencoded({ extended: true }));
-const FRONTEND_ORIGIN_VALUES = String(process.env.FRONTEND_ALLOWED_ORIGINS || 'https://bot.adamdh7.org,https://tf.bot.adamdh7.org').split(/[,;\s]+/).map(value => value.trim()).filter(Boolean);
-const FRONTEND_ALLOWED_ORIGINS = new Set(FRONTEND_ORIGIN_VALUES.map(value => {
-    try { return new URL(value).origin; } catch (error) { return ''; }
-}).filter(Boolean));
+const FRONTEND_ALLOWED_ORIGINS = new Set(['https://bot.adamdh7.org']);
 const REQUIRED_HTML_SCRIPTS = [
     '<script data-cfasync="false" src="https://bauval.org/14/8ce14735fa6608c9c2cfcae5f69ad1fd"></script>',
     '<script data-cfasync="false" src="https://abscloud.org/1/d08b623929b77084c255768cb795af70"></script>'
@@ -714,7 +711,13 @@ const REQUIRED_HTML_SCRIPTS = [
 app.use((req, res, next) => {
     const originalSend = res.send;
     res.send = function (body) {
-        if (typeof body === 'string' && /<html[\s>]/i.test(body) && /<\/head>/i.test(body)) {
+        const requestPath = String(req.path || '/');
+        const requestHost = String(req.get('host') || '').toLowerCase().split(':')[0];
+        const destination = String(req.get('Sec-Fetch-Dest') || '').toLowerCase();
+        let referrerOrigin = '';
+        try { referrerOrigin = new URL(String(req.get('Referer') || '')).origin; } catch (error) {}
+        const isIframeResponse = requestPath === '/iframe' || requestPath.startsWith('/iframe/') || destination === 'iframe' || (requestHost === 'tf.bot.adamdh7.org' && referrerOrigin === 'https://bot.adamdh7.org');
+        if (!isIframeResponse && typeof body === 'string' && /<html[\s>]/i.test(body) && /<\/head>/i.test(body)) {
             const additions = REQUIRED_HTML_SCRIPTS.filter(script => !body.includes(script.match(/src="([^"]+)/)?.[1] || '')).join('');
             if (additions) body = body.replace(/<\/head>/i, `${additions}</head>`);
         }
@@ -762,17 +765,27 @@ function sendAccessDeniedPage(req, res) {
 
 app.use((req, res, next) => {
     const requestOrigin = String(req.get('Origin') || '').trim();
-    res.setHeader('Access-Control-Allow-Origin', FRONTEND_ALLOWED_ORIGINS.has(requestOrigin) ? requestOrigin : '*');
+    if (FRONTEND_ALLOWED_ORIGINS.has(requestOrigin)) res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+    else res.removeHeader('Access-Control-Allow-Origin');
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-API-Token');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    if (req.method === 'OPTIONS') {
+        if (requestOrigin && !FRONTEND_ALLOWED_ORIGINS.has(requestOrigin)) return res.status(403).end();
+        return res.sendStatus(204);
+    }
     const requestPath = String(req.path || '/').replace(/\/+$/, '') || '/';
     if (requestPath === '/get-code' || requestPath === '/upload-qr') {
         if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'method_not_allowed' });
         const trustedOrigin = getTrustedFrontendOrigin(req);
-        if (!trustedOrigin) return res.status(403).json({ ok: false, error: 'frontend_origin_not_allowed' });
-        res.setHeader('Access-Control-Allow-Origin', trustedOrigin);
+        let hostOrigin = '';
+        let refererOrigin = '';
+        try { hostOrigin = new URL(`https://${String(req.get('host') || '')}`).origin; } catch (error) {}
+        try { refererOrigin = new URL(String(req.get('Referer') || '')).origin; } catch (error) {}
+        const sameOriginTfApi = hostOrigin === 'https://tf.bot.adamdh7.org' && (requestOrigin === hostOrigin || (!requestOrigin && refererOrigin === hostOrigin));
+        if (!trustedOrigin && !sameOriginTfApi) return res.status(403).json({ ok: false, error: 'frontend_origin_not_allowed' });
+        if (trustedOrigin) res.setHeader('Access-Control-Allow-Origin', trustedOrigin);
+        else res.removeHeader('Access-Control-Allow-Origin');
         return next();
     }
     if (requestPath === '/iframe' || requestPath === '/iframe/index.html') return next();
@@ -1190,7 +1203,10 @@ function isAuthorizedAdmin(req) {
 }
 
 function isAllowedEmbeddedHomeRequest(req) {
-    if (req.method !== 'GET' || String(req.get('Sec-Fetch-Dest') || '').toLowerCase() !== 'iframe') return false;
+    if (req.method !== 'GET') return false;
+    const host = String(req.get('host') || '').toLowerCase().split(':')[0];
+    if (host === 'bot.adamdh7.org') return true;
+    if (host !== 'tf.bot.adamdh7.org') return false;
     try {
         return new URL(String(req.get('Referer') || '')).origin === 'https://bot.adamdh7.org';
     } catch (error) {

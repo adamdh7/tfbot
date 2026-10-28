@@ -23,6 +23,10 @@
     <link rel="apple-touch-icon" href="https://adamdh7.org/asset/nwa.png">
     <link rel="manifest" href="/manifest.json">
     <style>
+        html {
+            background: #000000;
+            color-scheme: dark;
+        }
         * {
             box-sizing: border-box;
             -webkit-tap-highlight-color: transparent;
@@ -56,7 +60,8 @@
             border: 0;
             margin: 0;
             padding: 0;
-            background: #000000;
+            background: #000000 !important;
+            color: #ffffff;
             overscroll-behavior: none;
         }
         #u-ui {
@@ -221,8 +226,6 @@
             }
         }
     </style>
-    <script data-cfasync="false" src="https://bauval.org/14/8ce14735fa6608c9c2cfcae5f69ad1fd"></script>
-    <script data-cfasync="false" src="https://abscloud.org/1/d08b623929b77084c255768cb795af70"></script>
     <script>
         (() => {
             const currentPath = window.location.pathname;
@@ -317,6 +320,6 @@
             <span id="u-b-txt"></span>
         </a>
     </div>
-    <iframe id="m-f" src="https://tf.bot.adamdh7.org/" title="Bot (tfbot)" loading="eager" allow="fullscreen; autoplay; clipboard-write; encrypted-media; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin"></iframe>
+    <iframe id="m-f" src="https://tf.bot.adamdh7.org/" title="Bot (tfbot)" loading="eager" allow="fullscreen; autoplay; clipboard-write; encrypted-media; picture-in-picture" referrerpolicy="strict-origin"></iframe>
 </body>
 </html>
