@@ -2901,6 +2901,67 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             }
         });
 
+        sock.ev.on('messages.upsert', up => {
+            try {
+                const earlyUpsertType = String(up?.type || '');
+                const earlyMessages = Array.isArray(up?.messages) ? up.messages : [];
+                console.info('[baileys-incoming-upsert]', {
+                    sessionId,
+                    connectedAccountJid: sock.user?.id || null,
+                    sessionStatus: activeSessions.get(sessionId)?.status || null,
+                    socketReadyState: Number.isFinite(Number(sock.ws?.readyState)) ? Number(sock.ws.readyState) : null,
+                    upsertType: earlyUpsertType,
+                    messageCount: earlyMessages.length,
+                    messages: earlyMessages.slice(0, 30).map(entry => {
+                        try {
+                            const audit = getMessageAuditDetails(entry);
+                            const rawJid = String(entry?.key?.remoteJid || entry?.key?.remoteJidAlt || 'unknown-chat');
+                            const isGroup = rawJid.endsWith('@g.us');
+                            const senderJid = entry?.key?.fromMe
+                                ? (sock.user?.id || rawJid)
+                                : isGroup
+                                    ? (entry?.key?.participant || entry?.key?.participantAlt || entry?.key?.participantPn || entry?.key?.senderPn || rawJid)
+                                    : (entry?.key?.participant || entry?.key?.remoteJid || entry?.key?.remoteJidAlt || rawJid);
+                            return {
+                                messageId: entry?.key?.id || null,
+                                chatJid: rawJid,
+                                chatType: isGroup ? 'group' : rawJid.endsWith('@newsletter') ? 'channel' : rawJid === 'status@broadcast' ? 'status' : rawJid === 'unknown-chat' ? 'unknown' : 'private',
+                                fromMe: !!entry?.key?.fromMe,
+                                senderName: String(entry?.pushName || (entry?.key?.fromMe ? sock.user?.name : '') || 'Inconnu').slice(0, 100),
+                                senderJid,
+                                senderIdentityCandidates: [...new Set([entry?.key?.participant, entry?.key?.participantAlt, entry?.key?.participantPn, entry?.key?.senderPn, entry?.key?.remoteJidAlt, entry?.key?.fromMe ? sock.user?.id : null].filter(Boolean).map(String))],
+                                messageType: audit.messageType,
+                                messageTextPreview: String(audit.messageText || '').slice(0, 1200),
+                                bodyLength: audit.bodyLength,
+                                bodyTruncated: audit.bodyTruncated,
+                                mediaMetadata: audit.mediaMetadata,
+                                hasQuotedMessage: !!audit.quotedMessage
+                            };
+                        } catch (entryError) {
+                            return {
+                                messageId: entry?.key?.id || null,
+                                chatJid: entry?.key?.remoteJid || entry?.key?.remoteJidAlt || null,
+                                fromMe: !!entry?.key?.fromMe,
+                                auditError: entryError?.message || String(entryError)
+                            };
+                        }
+                    }),
+                    truncated: earlyMessages.length > 30
+                });
+            } catch (earlyUpsertLogError) {
+                console.error('[baileys-incoming-upsert-log-failed]', {
+                    sessionId,
+                    error: earlyUpsertLogError?.message || String(earlyUpsertLogError)
+                });
+            }
+        });
+        console.info('[message-event-listener-attached]', {
+            sessionId,
+            connectedAccountJid: sock.user?.id || null,
+            event: 'messages.upsert',
+            listener: 'early_diagnostic'
+        });
+
         const sessionData = {
             sock: sock,
             authState: state,
