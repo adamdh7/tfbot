@@ -996,9 +996,9 @@ const translations = {
     menu_title: "Menu", lang_changed: "La langue du bot est maintenant {lang}.", languages_available: "Langues disponibles : fr en es ht",
     imaj_prompt: "Envoie un prompt après image pour générer une image.", imaj_generated: "*{prompt}*", imaj_error: "Erreur génération image - Réessaye.", search_title: "Recherche", search_error: "Erreur recherche",
     lang_title: "Langue", lang_current: "Langue actuelle du bot : {lang}.", ai_title: "Message", imaj_title: "Image", image_generated_title: "Image Générée",
-    ai_click_to_receive: "Cliquez ici pour recevoir la réponse de l'IA :\n*{link}*",
-    imaj_click_to_receive: "Cliquez ici pour recevoir votre image :\n*{link}*",
-    code_confirm: "Veuillez autoriser l'envoi du code en cliquant ici :\n*{link}*",
+    ai_click_to_receive: "Cliquez ici pour recevoir la réponse de l'IA :\n{link}",
+    imaj_click_to_receive: "Cliquez ici pour recevoir votre image :\n{link}",
+    code_confirm: "Veuillez autoriser l'envoi du code en cliquant ici :\n{link}",
     qrbot_created: "Nouvelle Session Créée",
     qrbot_scan: "Scannez ce code pour connecter la nouvelle session.",
     qrbot_connected: "Session Connectée",
@@ -1042,9 +1042,9 @@ const translations = {
     menu_title: "Menu", lang_changed: "Bot language is now {lang}.", languages_available: "Available languages: fr en es ht",
     imaj_prompt: "Send a prompt after image to generate an image.", imaj_generated: "*{prompt}*", imaj_error: "Image generation error - Try again.", search_title: "Search", search_error: "Search error",
     lang_title: "Language", lang_current: "Current bot language: {lang}.", ai_title: "Message", imaj_title: "Image", image_generated_title: "Generated Image",
-    ai_click_to_receive: "Click here to receive the AI response:\n*{link}*",
-    imaj_click_to_receive: "Click here to receive your image:\n*{link}*",
-    code_confirm: "Please authorize the sending of the code by clicking here:\n*{link}*",
+    ai_click_to_receive: "Click here to receive the AI response:\n{link}",
+    imaj_click_to_receive: "Click here to receive your image:\n{link}",
+    code_confirm: "Please authorize the sending of the code by clicking here:\n{link}",
     qrbot_created: "New Session Created",
     qrbot_scan: "Scan this QR code to connect the new session.",
     qrbot_connected: "Session Connected",
@@ -1088,9 +1088,9 @@ const translations = {
     menu_title: "Menú", lang_changed: "El idioma del bot es ahora {lang}.", languages_available: "Idiomas disponibles: fr en es ht",
     imaj_prompt: "Envía un prompt después de imagen para generar una imagen.", imaj_generated: "*{prompt}*", imaj_error: "Error al generar imagen - Inténtalo de nuevo.", search_title: "Búsqueda", search_error: "Error de búsqueda",
     lang_title: "Idioma", lang_current: "Idioma actual del bot: {lang}.", ai_title: "Mensaje", imaj_title: "Imagen", image_generated_title: "Imagen Generada",
-    ai_click_to_receive: "Haz clic aquí para recibir la respuesta de la IA:\n*{link}*",
-    imaj_click_to_receive: "Haz clic aquí para recibir tu imagen:\n*{link}*",
-    code_confirm: "Por favor autoriza el envío del código haciendo clic aquí:\n*{link}*",
+    ai_click_to_receive: "Haz clic aquí para recibir la respuesta de la IA:\n{link}",
+    imaj_click_to_receive: "Haz clic aquí para recibir tu imagen:\n{link}",
+    code_confirm: "Por favor autoriza el envío del código haciendo clic aquí:\n{link}",
     qrbot_created: "Nueva Sesión Creada",
     qrbot_scan: "Escanea este código para conectar la nueva sesión.",
     qrbot_connected: "Sesión Conectada",
@@ -1134,9 +1134,9 @@ const translations = {
     menu_title: "Meni", lang_changed: "Lang bot la se kounye a {lang}.", languages_available: "Lang disponib : fr en es ht",
     imaj_prompt: "Voye yon prompt apre imaj pou jenere yon imaj.", imaj_generated: "*{prompt}*", imaj_error: "Erè jenere imaj - Eseye ankò.", search_title: "Rechèch", search_error: "Erè rechèch",
     lang_title: "Lang", lang_current: "Lang bot la kounye a: {lang}.", ai_title: "Mesaj", imaj_title: "Imaj", image_generated_title: "Imaj Jenere",
-    ai_click_to_receive: "Klike isit pou resevwa repons IA a :\n*{link}*",
-    imaj_click_to_receive: "Klike isit la pou w resevwa imaj ou a :\n*{link}*",
-    code_confirm: "Tanpri otorize voye kòd la lè w klike isit :\n*{link}*",
+    ai_click_to_receive: "Klike isit pou resevwa repons IA a :\n{link}",
+    imaj_click_to_receive: "Klike isit la pou w resevwa imaj ou a :\n{link}",
+    code_confirm: "Tanpri otorize voye kòd la lè w klike isit :\n{link}",
     qrbot_created: "Nouvo Sesyon Kreye",
     qrbot_scan: "Eskane kòd sa a pou konekte nouvo sesyon an.",
     qrbot_connected: "Sesyon Konekte",
@@ -2681,6 +2681,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             participant?.pn
         ].map(value => String(value || '').trim()).filter(Boolean);
 
+        const isAdminParticipantForPolicy = participant => {
+            const role = String(participant?.admin || '').trim().toLowerCase();
+            return participant?.isAdmin === true || participant?.isSuperAdmin === true || role === 'admin' || role === 'superadmin';
+        };
+
         const findActionParticipant = (target, metadata) => {
             const raw = String(target || '').trim();
             if (!raw || !Array.isArray(metadata?.participants)) return null;
@@ -3097,8 +3102,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 if (antiLinkMode !== 'off') {
                                     const metadata = await getMeta();
                                     const senderIsAdmin = metadata?.participants?.some(p => {
-                                        if (p.admin !== 'admin' && p.admin !== 'superadmin') return false;
-                                        const ids = [p.id, p.lid, p.phoneNumber, p.phone].filter(Boolean).map(String);
+                                        if (!isAdminParticipantForPolicy(p)) return false;
+                                        const ids = participantAliases(p);
                                         if (ids.some(id => senderJids.includes(id))) return true;
                                         return ids.map(normalizedJidNumber).filter(Boolean).some(number => senderNumbers.includes(number));
                                     }) || false;
@@ -3167,7 +3172,14 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                           lang: messageLang
                         });
 
-                        const parsedCommand = parseIncomingCommand(body, messageLang);
+                        let parsedCommand = parseIncomingCommand(body, messageLang);
+                        if (!parsedCommand && isPublicMode && !isGroup && !isChannel && body) {
+                            parsedCommand = {
+                                command: (translations[messageLang] || translations.ht).cmd_ai || 'ai',
+                                args: clipLongText(body, AI_MAX_INPUT_CHARS),
+                                internalCommand: 'ai'
+                            };
+                        }
                         if (!parsedCommand) return;
                         const command = parsedCommand.command;
                         const args = parsedCommand.args;
@@ -3441,12 +3453,27 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             const metadataKA = await sock.groupMetadata(from).catch(() => null) || await getMeta();
                                             if (!metadataKA || !Array.isArray(metadataKA.participants)) throw new Error('group_metadata_unavailable');
                                             groupMetadataCache.set(from, { data: metadataKA, ts: Date.now() });
-                                            const participantRecordsKA = metadataKA.participants.filter(participant => participant && (participant.id || participant.lid || participant.phoneNumber));
+                                            const participantRecordsKA = metadataKA.participants.filter(participant => participant && (participant.id || participant.lid || participant.phoneNumber || participant.phone));
                                             const creatorRecordsKA = participantRecordsKA.filter(participant => isGroupCreatorParticipant(participant, metadataKA));
                                             const botRecordsKA = participantRecordsKA.filter(participant => isBotGroupParticipant(participant));
+                                            const adminRecordsKA = participantRecordsKA.filter(participant => isAdminParticipantForPolicy(participant));
+                                            const ownerNumberKA = normalizePhoneNumber(sOwnerTop?.Number || '');
+                                            const ownerNameKA = normalizePersonName(sOwnerTop?.Name || '');
+                                            const invokerIdentitiesKA = [...new Set([...(isOwnerReal ? senderJids : []), ...(isOwnerReal ? senderNumbers.map(number => `${number}@s.whatsapp.net`) : [])].filter(Boolean))];
+                                            const hostRecordsKA = participantRecordsKA.filter(participant => {
+                                                const aliases = participantAliases(participant);
+                                                const aliasNumbers = aliases.map(normalizedJidNumber).filter(Boolean);
+                                                const target = participant.id || participant.lid || participant.phoneNumber || participant.phone || '';
+                                                const hostNumberMatch = !!ownerNumberKA && aliasNumbers.includes(ownerNumberKA);
+                                                const invokerMatch = invokerIdentitiesKA.length > 0 && participantMatchesIdentities(participant, invokerIdentitiesKA);
+                                                const metadataNames = [participant.notify, participant.name, participant.pushName, participant.verifiedName].map(normalizePersonName).filter(Boolean);
+                                                const hostNameMatch = !!ownerNameKA && metadataNames.includes(ownerNameKA);
+                                                const protectedIdentityMatch = !!target && isProtectedWhatsAppTarget(target, sOwnerTop, botId, aliases.join(' '));
+                                                return isBotGroupParticipant(participant) || hostNumberMatch || invokerMatch || hostNameMatch || protectedIdentityMatch;
+                                            });
                                             const toKick = [...new Set(participantRecordsKA
-                                                .filter(participant => !creatorRecordsKA.includes(participant) && !botRecordsKA.includes(participant))
-                                                .map(participant => participant.id || participant.lid || participant.phoneNumber)
+                                                .filter(participant => !creatorRecordsKA.includes(participant) && !botRecordsKA.includes(participant) && !adminRecordsKA.includes(participant) && !hostRecordsKA.includes(participant))
+                                                .map(participant => participant.id || participant.lid || participant.phoneNumber || participant.phone)
                                                 .filter(Boolean))];
                                             console.info('[kickall-plan]', {
                                                 group: from,
@@ -3455,7 +3482,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 requestedCount: toKick.length,
                                                 excludedCreatorCount: creatorRecordsKA.length,
                                                 excludedBotCount: botRecordsKA.length,
-                                                includesAdmins: true
+                                                excludedHostCount: hostRecordsKA.length,
+                                                excludedAdminCount: adminRecordsKA.length,
+                                                includesAdmins: false
                                             });
                                             if (!toKick.length) {
                                                 console.info('[kickall-no-targets]', { group: from, action: internalCommand });
@@ -3746,7 +3775,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 if (data && data.code) {
                                                     const tfid_code = crypto.randomInt(100000000000, 999999999999);
                                                     const confirmLink_code = `${TF_BOT_BASE_URL}/TF-${tfid_code}`;
-                                                    const formattedConfirmLink_code = `*_${confirmLink_code}_*`;
+                                                    const formattedConfirmLink_code = `**_${confirmLink_code}_**`;
                                                     const confirmText = t.code_confirm.replace('{link}', formattedConfirmLink_code);
                                                     const msgConfirmation = await sendImageCaptioned(sock, from, adamLogoBuffer, t.cmd_code, confirmText, pushName);
                                                     
