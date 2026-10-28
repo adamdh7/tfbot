@@ -232,7 +232,9 @@ let isPurging = false;
 
 const messageQueues = new WeakMap();
 const outgoingMessageCache = new Set();
+const outgoingMessageIdCache = new Map();
 const outgoingTextEchoCache = new Map();
+const OUTGOING_ECHO_TTL_MS = 120000;
 const fallbackMessageQueue = { tasks: [], isSendingQueue: false };
 
 function normalizeLidCacheKey(value) {
@@ -544,28 +546,67 @@ function normalizedJidNumber(value) {
     return normalizePhoneNumber(String(value || '').split('@')[0].split(':')[0]);
 }
 
+function normalizeOutgoingEchoJid(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    if (/@lid$/i.test(raw)) return normalizeLidCacheKey(raw);
+    const phoneJid = normalizePhoneCacheJid(raw);
+    if (phoneJid) return phoneJid;
+    return raw.toLowerCase();
+}
+
+function rememberOutgoingMessageId(sessionId, messageId) {
+    const id = String(messageId || '').trim();
+    if (!sessionId || !id) return;
+    const now = Date.now();
+    outgoingMessageIdCache.set(`${sessionId}:${id}`, now);
+    for (const [key, timestamp] of outgoingMessageIdCache.entries()) {
+        if (now - timestamp > OUTGOING_ECHO_TTL_MS) outgoingMessageIdCache.delete(key);
+    }
+    while (outgoingMessageIdCache.size > 5000) outgoingMessageIdCache.delete(outgoingMessageIdCache.keys().next().value);
+}
+
+function isRecentOutgoingMessageId(sessionId, messageId) {
+    const key = `${sessionId}:${String(messageId || '').trim()}`;
+    const timestamp = outgoingMessageIdCache.get(key);
+    if (!timestamp) return false;
+    if (Date.now() - timestamp > OUTGOING_ECHO_TTL_MS) {
+        outgoingMessageIdCache.delete(key);
+        return false;
+    }
+    return true;
+}
+
 function rememberOutgoingTextEcho(sessionId, jid, content) {
     const text = normalizeEchoText(content?.text || content?.caption || '');
-    if (!sessionId || !jid || !text) return null;
-    const key = `${sessionId}:${jid}:${text}`;
+    if (!sessionId || !text) return null;
+    const canonicalJid = normalizeOutgoingEchoJid(jid);
     const createdAt = Date.now();
-    outgoingTextEchoCache.set(key, createdAt);
-    const cutoff = createdAt - 60000;
+    const keys = [`${sessionId}:text:${text}`];
+    if (canonicalJid) keys.push(`${sessionId}:jid:${canonicalJid}:${text}`);
+    for (const key of keys) outgoingTextEchoCache.set(key, createdAt);
+    const cutoff = createdAt - OUTGOING_ECHO_TTL_MS;
     for (const [storedKey, timestamp] of outgoingTextEchoCache.entries()) {
         if (timestamp < cutoff) outgoingTextEchoCache.delete(storedKey);
     }
-    while (outgoingTextEchoCache.size > 2000) outgoingTextEchoCache.delete(outgoingTextEchoCache.keys().next().value);
-    return { key, createdAt };
+    while (outgoingTextEchoCache.size > 4000) outgoingTextEchoCache.delete(outgoingTextEchoCache.keys().next().value);
+    return { keys, createdAt };
 }
 
 function consumeOutgoingTextEcho(sessionId, jid, text) {
     const normalized = normalizeEchoText(text);
-    if (!normalized) return false;
-    const key = `${sessionId}:${jid}:${normalized}`;
-    const timestamp = outgoingTextEchoCache.get(key);
-    if (!timestamp) return false;
-    outgoingTextEchoCache.delete(key);
-    return Date.now() - timestamp <= 60000;
+    if (!sessionId || !normalized) return false;
+    const canonicalJid = normalizeOutgoingEchoJid(jid);
+    const keys = [];
+    if (canonicalJid) keys.push(`${sessionId}:jid:${canonicalJid}:${normalized}`);
+    keys.push(`${sessionId}:text:${normalized}`);
+    const now = Date.now();
+    for (const key of keys) {
+        const timestamp = outgoingTextEchoCache.get(key);
+        if (timestamp && now - timestamp <= OUTGOING_ECHO_TTL_MS) return true;
+        if (timestamp) outgoingTextEchoCache.delete(key);
+    }
+    return false;
 }
 
 async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180) {
@@ -629,7 +670,11 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             try {
                 return await sock.sendMessage(targetJid, outgoingContent, options);
             } catch (error) {
-                if (echoToken && outgoingTextEchoCache.get(echoToken.key) === echoToken.createdAt) outgoingTextEchoCache.delete(echoToken.key);
+                if (echoToken) {
+                    for (const echoKey of echoToken.keys || []) {
+                        if (outgoingTextEchoCache.get(echoKey) === echoToken.createdAt) outgoingTextEchoCache.delete(echoKey);
+                    }
+                }
                 throw error;
             }
         };
@@ -708,6 +753,8 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             durationMs: Date.now() - sendStartedAt
         });
         if (sessionId && result?.key?.id) {
+            rememberOutgoingMessageId(sessionId, result.key.id);
+            outgoingMessageCache.add(`${sessionId}:id:${result.key.id}`);
             outgoingMessageCache.add(`${sessionId}:${result.key.remoteJid || sentDestinationJid}:${result.key.id}`);
             if (outgoingMessageCache.size > 5000) {
                 const oldest = outgoingMessageCache.values().next().value;
@@ -3810,6 +3857,19 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const receivedType = Object.keys(receivedContent || {})[0] || 'unknown';
                 const receivedChat = String(m?.key?.remoteJid || m?.key?.remoteJidAlt || 'unknown-chat');
                 const receivedId = String(m?.key?.id || 'missing-id');
+                if (m?.key?.fromMe && (isRecentOutgoingMessageId(sessionId, receivedId) || consumeOutgoingTextEcho(sessionId, m?.key?.remoteJid || receivedChat, receivedBody))) {
+                    console.info('[message-ignored]', {
+                        sessionId,
+                        connectedAccountJid: sock.user?.id || null,
+                        messageId: receivedId,
+                        chatJid: receivedChat,
+                        fromMe: true,
+                        messageType: receivedType,
+                        bodyPreview: String(receivedBody || '').replace(/[\r\n\t]+/g, ' ').slice(0, 180),
+                        reason: 'outgoing_bot_echo_prevented_from_reentering_command_dispatch'
+                    });
+                    continue;
+                }
                 const receivedIsGroup = receivedChat.endsWith('@g.us');
                 const receivedSenderJid = m?.key?.fromMe
                     ? (sock.user?.id || receivedChat)
