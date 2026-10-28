@@ -592,7 +592,10 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 alternateDestinationJid = getRememberedLidForPhone(sessionId, originalDestinationJid);
                 if (!alternateDestinationJid) {
                     const mappedLid = normalizeLidCacheKey(await sock?.signalRepository?.lidMapping?.getLIDForPN?.(normalizePhoneCacheJid(originalDestinationJid)));
-                    if (/@lid$/i.test(mappedLid)) alternateDestinationJid = mappedLid;
+                    if (/@lid$/i.test(mappedLid)) {
+                        alternateDestinationJid = mappedLid;
+                        rememberLidPhonePair(sessionId, mappedLid, originalDestinationJid, 'signal_pn_lid_mapping');
+                    }
                 }
                 alternateDestinationResolution = alternateDestinationJid ? 'pn_lid_mapping' : 'unavailable';
             } catch (resolveError) {
@@ -600,13 +603,13 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             }
         }
         if (alternateDestinationJid === destinationJid) alternateDestinationJid = '';
-        if (sessionId && /@lid$/i.test(originalDestinationJid) && normalizePhoneCacheJid(alternateDestinationJid)) {
-            const resolvedPhoneJid = normalizePhoneCacheJid(alternateDestinationJid);
-            const resolvedPhoneSource = alternateDestinationResolution || 'lid_phone_mapping';
-            destinationJid = resolvedPhoneJid;
-            destinationResolution = `private_pn_preferred_from_lid_${resolvedPhoneSource}`;
+        if (sessionId && /@s\.whatsapp\.net$/i.test(originalDestinationJid) && /@lid$/i.test(alternateDestinationJid)) {
+            const resolvedLidJid = normalizeLidCacheKey(alternateDestinationJid);
+            const resolvedLidSource = alternateDestinationResolution || 'pn_lid_mapping';
+            destinationJid = resolvedLidJid;
+            destinationResolution = `private_lid_preferred_from_pn_${resolvedLidSource}`;
             alternateDestinationJid = originalDestinationJid;
-            alternateDestinationResolution = 'original_lid_fallback';
+            alternateDestinationResolution = 'original_pn_fallback';
         }
         console.info('[private-send-target]', {
             sessionId,
@@ -4022,8 +4025,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             if (directPhone) {
                                 if (!isFromMe) {
                                     senderJids.push(directPhone);
-                                    from = directPhone;
-                                    privateReplyTargetResolution = `private_pn_preferred_${directPhoneCandidate?.source || 'lid_mapping'}`;
+                                    from = normalizedRawChatForMapping;
+                                    privateReplyTargetResolution = `private_lid_preferred_pn_fallback_${directPhoneCandidate?.source || 'lid_mapping'}`;
                                 } else {
                                     privateReplyTargetResolution = 'original_lid_preserved_for_from_me';
                                 }
