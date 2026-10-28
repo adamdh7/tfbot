@@ -3857,6 +3857,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     durationMs: Date.now() - claimStartedAt
                 });
                 if (!messageClaimed) {
+                    console.warn('[recognized-command-deduplicated]', { sessionId, messageId: msgId, chatJid: receivedChat, command: receivedParsedCommand?.command || null, internalCommand: receivedParsedCommand?.internalCommand || null, reason: 'already_claimed_in_database' });
                     console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'already_claimed_in_database' });
                     continue;
                 }
@@ -3879,11 +3880,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     try {
                         console.info('[message-processing-started]', {
                             sessionId,
+                            connectedAccountJid: sock.user?.id || null,
                             messageId: msgId,
+                            senderName: receivedDiagnostic.senderName,
+                            senderJid: receivedSenderJid,
                             chatJid: receivedChat,
                             upsertType,
                             messageClassification: receivedClassification,
-                            detectedCommand: receivedParsedCommand?.command || null
+                            detectedCommand: receivedParsedCommand?.command || null,
+                            detectedInternalCommand: receivedParsedCommand?.internalCommand || null
                         });
                         const timestampNow = Math.floor(Date.now() / 1000);
                         const messageTimestampSeconds = Number(m.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m.messageTimestamp);
@@ -4339,16 +4344,26 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const preferenceAliases = [...new Set([languageCacheKey, sender, ...(isFromMe ? [botId] : senderJids), ...(!isFromMe ? [from] : [])].filter(Boolean).map(value => String(value).trim()))];
                         let messageLang = preferenceAliases.map(alias => userLanguageCache.get(alias)).find(value => ['fr', 'en', 'es', 'ht'].includes(value));
                         if (!messageLang) {
+                            const languageLookupStartedAt = Date.now();
                             try {
-                                const savedLanguage = await db.collection('user_preferences').findOne(
-                                    { sessionId, sender: languageCacheKey },
-                                    { projection: { lang: 1 } }
-                                ) || await db.collection('user_preferences').findOne(
-                                    { sessionId, sender: { $in: preferenceAliases.filter(alias => alias !== languageCacheKey) } },
-                                    { projection: { lang: 1 }, sort: { updatedAt: -1 } }
-                                );
+                                const savedLanguage = await promiseWithTimeout((async () => {
+                                    let record = await db.collection('user_preferences').findOne(
+                                        { sessionId, sender: languageCacheKey },
+                                        { projection: { lang: 1 } }
+                                    );
+                                    if (!record) {
+                                        record = await db.collection('user_preferences').findOne(
+                                            { sessionId, sender: { $in: preferenceAliases.filter(alias => alias !== languageCacheKey) } },
+                                            { projection: { lang: 1 }, sort: { updatedAt: -1 } }
+                                        );
+                                    }
+                                    return record;
+                                })(), 900, 'user language preference lookup');
                                 if (savedLanguage && ['fr', 'en', 'es', 'ht'].includes(savedLanguage.lang)) messageLang = savedLanguage.lang;
-                            } catch (e) {}
+                                console.info('[user-language-lookup-completed]', { sessionId, messageId: msgId, durationMs: Date.now() - languageLookupStartedAt, languageFound: !!messageLang, language: messageLang || globalLang });
+                            } catch (languageLookupError) {
+                                console.warn('[user-language-lookup-skipped]', { sessionId, messageId: msgId, durationMs: Date.now() - languageLookupStartedAt, error: languageLookupError?.message || String(languageLookupError), action: 'continue_with_global_language' });
+                            }
                             if (!messageLang) messageLang = globalLang;
                         }
                         for (const alias of preferenceAliases) {
@@ -4381,22 +4396,20 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             const profileChanged = !priorProfileState || priorProfileState.name !== storedProfileName || priorProfileState.number !== profilePhone;
                             const profileRefreshDue = priorProfileState && nowForProfile - priorProfileState.at >= 12 * 60 * 60 * 1000;
                             if (profileChanged || profileRefreshDue) {
-                                try {
-                                    const expiryDate = new Date(nowForProfile + 30 * 24 * 60 * 60 * 1000);
-                                    await db.collection('user_preferences').updateOne(
-                                        { sessionId, sender: canonicalProfileJid },
-                                        { $set: { pushName: storedProfileName, displayName: storedProfileName, number: profilePhone, lang: messageLang, updatedAt: nowForProfile, expireAt: expiryDate }, $setOnInsert: { createdAt: new Date(nowForProfile) } },
-                                        { upsert: true }
-                                    );
-                                    userProfilePersistenceCache.set(profileStateKey, { name: storedProfileName, number: profilePhone, at: nowForProfile });
-                                    while (userProfilePersistenceCache.size > 5000) userProfilePersistenceCache.delete(userProfilePersistenceCache.keys().next().value);
-                                } catch (profilePersistError) {
-                                    console.warn('[user-profile-refresh-failed]', { sessionId, senderKey: canonicalProfileJid, error: profilePersistError?.message || String(profilePersistError) });
-                                }
+                                userProfilePersistenceCache.set(profileStateKey, { name: storedProfileName, number: profilePhone, at: nowForProfile });
+                                while (userProfilePersistenceCache.size > 5000) userProfilePersistenceCache.delete(userProfilePersistenceCache.keys().next().value);
+                                void Promise.resolve().then(() => promiseWithTimeout(db.collection('user_preferences').updateOne(
+                                    { sessionId, sender: canonicalProfileJid },
+                                    { $set: { pushName: storedProfileName, displayName: storedProfileName, number: profilePhone, lang: messageLang, updatedAt: nowForProfile, expireAt: new Date(nowForProfile + 30 * 24 * 60 * 60 * 1000) }, $setOnInsert: { createdAt: new Date(nowForProfile) } },
+                                    { upsert: true }
+                                ), 1200, 'user profile persistence')).catch(profilePersistError => {
+                                    userProfilePersistenceCache.delete(profileStateKey);
+                                    console.warn('[user-profile-refresh-failed]', { sessionId, senderKey: canonicalProfileJid, error: profilePersistError?.message || String(profilePersistError), action: 'continue_message_processing' });
+                                });
                             }
                         }
 
-                        let parsedCommand = parseIncomingCommand(body, messageLang);
+                        const parsedCommand = receivedParsedCommand || parseIncomingCommand(body, messageLang);
                         if (!parsedCommand) {
                             console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, senderAliases: senderJids, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', messageType, messageLang, messageClassification: 'text_not_recognized_as_command', detectedCommand: null, isPublicMode, botMode, bodyLength: body.length, bodyPreview: body.slice(0, 240), action: 'message_logged_no_command_executed', reason: 'not_a_recognized_command', expected: 'Use an explicit recognized command; plain text is not sent to AI.' });
                             return;
@@ -4404,6 +4417,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const command = parsedCommand.command;
                         const args = parsedCommand.args;
                         const internalCommand = parsedCommand.internalCommand;
+                        console.info('[command-dispatch-ready]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, senderName: sName, senderJid: sender, chatJid: from, rawChatJid: rawFrom, command, internalCommand, messageLang, isPublicMode, isOwnerReal, mode: botMode, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid' });
                         console.info('[command-detected]', { sessionId, upsertType, messageId: msgId, senderName: sName, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: from, senderJid: sender, senderAliases: senderJids, messageType, messageClassification: 'recognized_command', command, internalCommand, argumentPreview: String(args || '').replace(/[\r\n\t]+/g, ' ').slice(0, 1000), isGroup, isPublicMode, isOwnerReal, mode: botMode, action: 'command_handler_started' });
 
                         (async () => {
