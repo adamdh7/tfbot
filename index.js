@@ -182,7 +182,8 @@ let db;
 
 let recentMsgsCache = [];
 const lidPhoneResolutionCache = new Map();
-const lidPhonePersistedKeys = new Set();
+const lidPhonePersistedKeys = new Map();
+const userProfilePersistenceCache = new Map();
 const lidPhonePersistingKeys = new Set();
 const chatHistories = new Map();
 const groupSettingsCache = new Map();
@@ -246,7 +247,8 @@ function rememberLidPhonePair(sessionId, first, second, source = 'message_key') 
     lidPhoneResolutionCache.set(sessionKey, record);
     lidPhoneResolutionCache.set(globalKey, record);
     while (lidPhoneResolutionCache.size > 10000) lidPhoneResolutionCache.delete(lidPhoneResolutionCache.keys().next().value);
-    if (db && !lidPhonePersistedKeys.has(lid) && !lidPhonePersistingKeys.has(lid)) {
+    const lastPersistedAt = Number(lidPhonePersistedKeys.get(lid) || 0);
+    if (db && Date.now() - lastPersistedAt >= 12 * 60 * 60 * 1000 && !lidPhonePersistingKeys.has(lid)) {
         lidPhonePersistingKeys.add(lid);
         void (async () => {
             const collection = db.collection('lid_phone_mappings');
@@ -254,14 +256,16 @@ function rememberLidPhonePair(sessionId, first, second, source = 'message_key') 
             const existingPhone = normalizePhoneCacheJid(existing?.phone || '');
             if (existingPhone && existingPhone !== phone) {
                 console.warn('[lid-phone-map-database-conflict]', { sessionId, lid, existingPhone, observedPhone: phone, source });
+                lidPhonePersistedKeys.set(lid, Date.now());
                 return;
             }
             await collection.updateOne(
                 { _id: lid },
-                { $set: { phone, lastSessionId: sessionId, source, updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } },
+                { $set: { phone, lastSessionId: sessionId, source, updatedAt: new Date(), expireAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) }, $setOnInsert: { createdAt: new Date() } },
                 { upsert: true }
             );
-            lidPhonePersistedKeys.add(lid);
+            lidPhonePersistedKeys.set(lid, Date.now());
+            while (lidPhonePersistedKeys.size > 5000) lidPhonePersistedKeys.delete(lidPhonePersistedKeys.keys().next().value);
         })().catch(error => {
             console.warn('[lid-phone-map-persist-failed]', { sessionId, lid, error: error?.message || String(error) });
         }).finally(() => {
@@ -288,6 +292,38 @@ function getRememberedPhoneForLid(sessionId, lidValue) {
     return '';
 }
 
+function getRememberedLidForPhone(sessionId, phoneValue) {
+    const phone = normalizePhoneCacheJid(phoneValue);
+    if (!phone) return '';
+    const prefix = sessionId ? `${sessionId}:` : '';
+    for (const [key, record] of lidPhoneResolutionCache.entries()) {
+        if (prefix && !key.startsWith(prefix) && !key.startsWith('global:')) continue;
+        if (normalizePhoneCacheJid(record?.phone) !== phone) continue;
+        const lid = normalizeLidCacheKey(key.startsWith('global:') ? key.slice('global:'.length) : prefix ? key.slice(prefix.length) : key.slice(key.indexOf(':') + 1));
+        if (/@lid$/i.test(lid) && Date.now() - Number(record.updatedAt || 0) <= 30 * 24 * 60 * 60 * 1000) return lid;
+    }
+    return '';
+}
+
+function phoneFromCachedGroupMetadata(sessionId, lidValue) {
+    const lid = normalizeLidCacheKey(lidValue);
+    if (!lid || !/@lid$/i.test(lid)) return null;
+    for (const [groupJid, cached] of groupMetadataCache.entries()) {
+        const participants = cached?.data?.participants;
+        if (!Array.isArray(participants)) continue;
+        for (const participant of participants) {
+            const ids = [participant?.id, participant?.lid, participant?.idAlt, participant?.participantAlt, participant?.participantPn, participant?.jid].map(value => String(value || '').trim()).filter(Boolean);
+            if (!ids.some(value => normalizeLidCacheKey(value) === lid)) continue;
+            const phones = [participant?.phoneNumber, participant?.phone, participant?.pn, participant?.participantPn, participant?.idAlt, participant?.participantAlt, participant?.jid];
+            const phone = phones.map(normalizePhoneCacheJid).find(Boolean);
+            if (!phone) continue;
+            rememberLidPhonePair(sessionId, lid, phone, 'cached_group_metadata');
+            return { phone, source: 'cached_group_metadata', groupJid };
+        }
+    }
+    return null;
+}
+
 async function resolvePhoneForLid(sessionId, sock, lidValue) {
     const lid = normalizeLidCacheKey(lidValue);
     if (!lid || !/@lid$/i.test(lid)) return null;
@@ -297,6 +333,8 @@ async function resolvePhoneForLid(sessionId, sock, lidValue) {
         const globalRecord = lidPhoneResolutionCache.get(`global:${lid}`);
         return { phone: cached, source: sessionRecord?.source || globalRecord?.source || 'lid_phone_cache' };
     }
+    const groupMetadataResolution = phoneFromCachedGroupMetadata(sessionId, lid);
+    if (groupMetadataResolution?.phone) return groupMetadataResolution;
     try {
         const mapped = normalizePhoneCacheJid(await sock?.signalRepository?.lidMapping?.getPNForLID?.(lid));
         if (mapped) {
@@ -390,7 +428,7 @@ async function claimMessageForProcessing(sessionId, messageId, remoteJid = '') {
     try {
         const result = await db.collection('processed_messages').updateOne(
             { _id: documentId },
-            { $setOnInsert: { sessionId, messageId, remoteJid: normalizedChat, ts: Date.now() } },
+            { $setOnInsert: { sessionId, messageId, remoteJid: normalizedChat, ts: Date.now(), expireAt: new Date(Date.now() + PROCESSED_MESSAGE_RETENTION_MS) } },
             { upsert: true }
         );
         return result.upsertedCount === 1;
@@ -531,25 +569,53 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         try {
             result = await sendTo(destinationJid);
         } catch (initialError) {
-            let retryTargetJid = '';
-            if (/@lid$/i.test(originalDestinationJid)) {
+            let failureError = initialError;
+            const errorText = String(initialError?.message || initialError || '');
+            const transientSignalFailure = /No sessions|SessionError|MessageCounterError|Bad MAC|pre.?key|failed to decrypt/i.test(errorText);
+            if (transientSignalFailure && !destinationJid.endsWith('@g.us') && !destinationJid.endsWith('@newsletter')) {
+                await new Promise(resolve => setTimeout(resolve, 450));
                 try {
-                    const resolved = await resolvePhoneForLid(sessionId, sock, originalDestinationJid);
-                    const mappedPhone = normalizePhoneCacheJid(resolved?.phone || getRememberedPhoneForLid(sessionId, originalDestinationJid));
-                    if (mappedPhone && mappedPhone !== destinationJid) retryTargetJid = mappedPhone;
-                } catch (resolveError) {
-                    console.warn('[private-send-retry-resolution-failed]', { sessionId, originalDestinationJid, error: resolveError?.message || String(resolveError) });
+                    console.warn('[private-send-same-target-retry]', { sessionId, destinationJid, messageType: Object.keys(outgoingContent || {}).join(','), firstError: errorText.slice(0, 180) });
+                    result = await sendTo(destinationJid);
+                    sentDestinationJid = destinationJid;
+                    destinationResolution = `${destinationResolution}_same_target_retry`;
+                } catch (sameTargetError) {
+                    failureError = sameTargetError;
+                    result = null;
                 }
-                if (!retryTargetJid && destinationJid !== originalDestinationJid) retryTargetJid = originalDestinationJid;
             }
-            if (!retryTargetJid) {
-                console.error('[whatsapp-send-failed]', { sessionId, jid: destinationJid, originalJid: originalDestinationJid, destinationResolution, messageType: Object.keys(outgoingContent || {}).join(','), error: initialError?.message || String(initialError) });
-                throw initialError;
+            if (!result) {
+                let retryTargetJid = '';
+                if (/@lid$/i.test(originalDestinationJid)) {
+                    try {
+                        const resolved = await resolvePhoneForLid(sessionId, sock, originalDestinationJid);
+                        const mappedPhone = normalizePhoneCacheJid(resolved?.phone || getRememberedPhoneForLid(sessionId, originalDestinationJid));
+                        if (mappedPhone && mappedPhone !== destinationJid) retryTargetJid = mappedPhone;
+                    } catch (resolveError) {
+                        console.warn('[private-send-retry-resolution-failed]', { sessionId, originalDestinationJid, error: resolveError?.message || String(resolveError) });
+                    }
+                    if (!retryTargetJid && destinationJid !== originalDestinationJid) retryTargetJid = originalDestinationJid;
+                } else if (/@s\.whatsapp\.net$/i.test(destinationJid) && transientSignalFailure) {
+                    retryTargetJid = getRememberedLidForPhone(sessionId, destinationJid);
+                    if (!retryTargetJid && db) {
+                        try {
+                            const mappedRecord = await db.collection('lid_phone_mappings').findOne({ phone: normalizePhoneCacheJid(destinationJid) }, { projection: { _id: 1, phone: 1 } });
+                            const rememberedLid = normalizeLidCacheKey(mappedRecord?._id || '');
+                            if (rememberedLid && /@lid$/i.test(rememberedLid)) retryTargetJid = rememberedLid;
+                        } catch (resolveError) {
+                            console.warn('[private-send-reverse-lid-resolution-failed]', { sessionId, destinationJid, error: resolveError?.message || String(resolveError) });
+                        }
+                    }
+                }
+                if (!retryTargetJid) {
+                    console.error('[whatsapp-send-failed]', { sessionId, jid: destinationJid, originalJid: originalDestinationJid, destinationResolution, messageType: Object.keys(outgoingContent || {}).join(','), error: failureError?.message || String(failureError) });
+                    throw failureError;
+                }
+                console.warn('[private-send-retry]', { sessionId, originalDestinationJid, failedDestinationJid: destinationJid, retryTargetJid, messageType: Object.keys(outgoingContent || {}).join(','), firstError: failureError?.message || String(failureError) });
+                result = await sendTo(retryTargetJid);
+                sentDestinationJid = retryTargetJid;
+                destinationResolution = retryTargetJid.endsWith('@s.whatsapp.net') ? 'pn_retry_after_lid_failure' : 'lid_fallback_after_pn_failure';
             }
-            console.warn('[private-send-retry]', { sessionId, originalDestinationJid, failedDestinationJid: destinationJid, retryTargetJid, messageType: Object.keys(outgoingContent || {}).join(','), firstError: initialError?.message || String(initialError) });
-            result = await sendTo(retryTargetJid);
-            sentDestinationJid = retryTargetJid;
-            destinationResolution = retryTargetJid.endsWith('@s.whatsapp.net') ? 'pn_retry_after_lid_failure' : 'lid_fallback_after_pn_failure';
         }
         console.info('[whatsapp-send-completed]', {
             sessionId,
@@ -591,9 +657,23 @@ async function connectMongo() {
         await mongoClient.connect();
         db = mongoClient.db('dh7bot');
         await db.collection('processed_messages').createIndex({ ts: 1 });
+        await db.collection('processed_messages').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'processed_messages_expire_at_ttl' });
         await db.collection('baileys_outgoing_messages').createIndex({ createdAt: 1 }, { expireAfterSeconds: BAILEYS_RETRY_MESSAGE_TTL_SECONDS, name: 'baileys_retry_message_ttl' });
         await db.collection('baileys_outgoing_messages').createIndex({ sessionId: 1, remoteJid: 1, messageId: 1 }, { name: 'baileys_retry_message_lookup' });
+        await db.collection('lid_phone_mappings').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'lid_phone_mappings_expire_at_ttl' });
+        await db.collection('lid_phone_mappings').createIndex({ phone: 1 }, { name: 'lid_phone_mappings_phone_lookup' });
+        await db.collection('user_preferences').createIndex({ sessionId: 1, sender: 1 }, { name: 'user_preferences_session_sender' });
+        await db.collection('user_preferences').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'user_preferences_expire_at_ttl' });
         await db.collection('group_del2').createIndex({ sessionId: 1, gjid: 1, targetJid: 1 });
+        try {
+            const oldThreshold = Date.now() - PROCESSED_MESSAGE_RETENTION_MS;
+            await db.collection('processed_messages').deleteMany({ ts: { $lt: oldThreshold }, expireAt: { $exists: false } });
+            const preferenceThreshold = Date.now() - 30 * 24 * 60 * 60 * 1000;
+            await db.collection('user_preferences').deleteMany({ updatedAt: { $type: 'number', $lt: preferenceThreshold }, expireAt: { $exists: false } });
+            await db.collection('lid_phone_mappings').deleteMany({ updatedAt: { $lt: new Date(preferenceThreshold) }, expireAt: { $exists: false } });
+        } catch (retentionCleanupError) {
+            console.warn('[mongo-retention-initial-cleanup-failed]', retentionCleanupError?.message || String(retentionCleanupError));
+        }
     } catch (e) {
         console.error('[mongo] connection failed:', e?.message || e);
         throw e;
@@ -3456,8 +3536,55 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const sNum = senderNumbers[0] || '';
                         const ownerNumber = normalizePhoneNumber(sOwnerTop?.Number || '');
                         const botNumber = normalizedJidNumber(botId);
+                        const sessionNumber = normalizePhoneNumber(activeSessions.get(sessionId)?.number || '');
+                        const ownerNumberCandidates = [...new Set([ownerNumber, botNumber, sessionNumber, normalizedJidNumber(sock.user?.id), normalizedJidNumber(sock.user?.phoneNumber), normalizedJidNumber(state.creds?.me?.id)].filter(value => /^\d{6,20}$/.test(String(value || ''))))];
+                        const ownLidCandidates = [...new Set([sock.user?.lid, state.creds?.me?.lid, state.creds?.me?.id].map(value => normalizeLidCacheKey(value)).filter(value => /@lid$/i.test(value)))];
+                        const senderMatchesOwnLid = senderJids.some(jid => ownLidCandidates.includes(normalizeLidCacheKey(jid)));
+                        const privateChatMatchesOwnLid = !isGroup && ownLidCandidates.includes(normalizeLidCacheKey(rawFrom));
+                        const senderMatchesOwnerPhone = senderNumbers.some(number => ownerNumberCandidates.includes(number));
+                        const isOwnerReal = !!isFromMe || senderJids.some(jid => jid === botId) || senderMatchesOwnerPhone || senderMatchesOwnLid || privateChatMatchesOwnLid;
                         const sName = pushName;
-                        const isOwnerReal = !!isFromMe || senderJids.some(jid => jid === botId) || (!!ownerNumber && senderNumbers.includes(ownerNumber)) || (!!botNumber && senderNumbers.includes(botNumber));
+                        const socketOwnerName = String(sock.user?.name || '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 100);
+                        if (isOwnerReal && socketOwnerName && sOwnerTop && normalizePersonName(sOwnerTop.Name || '') !== normalizePersonName(socketOwnerName)) {
+                            sOwnerTop = { ...sOwnerTop, Name: socketOwnerName };
+                            sessionOwnersCache.set(sessionId, sOwnerTop);
+                            void db.collection('session_owners').updateOne({ sessionId }, { $set: { Name: socketOwnerName, nameUpdatedAt: new Date() } }).catch(error => {
+                                console.warn('[session-owner-name-refresh-failed]', { sessionId, error: error?.message || String(error) });
+                            });
+                            activeHostName = socketOwnerName;
+                        }
+
+                        const earlyIncomingName = isOwnerReal
+                            ? (socketOwnerName || String(sOwnerTop?.Name || activeHostName || '').trim())
+                            : String(pushName || '').replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim().slice(0, 80);
+                        const earlyProfileNumber = isOwnerReal
+                            ? (ownerNumber || botNumber || sessionNumber)
+                            : (senderNumbers.find(number => !ownerNumberCandidates.includes(number)) || sNum);
+                        const earlyProfileJid = earlyProfileNumber ? `${earlyProfileNumber}@s.whatsapp.net` : normalizeLidCacheKey(sender || rawFrom || 'unknown');
+                        if (!isChannel && earlyIncomingName && !/^inconnu$/i.test(earlyIncomingName)) {
+                            const earlyProfile = { pseudo: earlyIncomingName, number: earlyProfileNumber || normalizedJidNumber(earlyProfileJid), lang: globalLang, updatedAt: Date.now() };
+                            const earlyAliases = [...new Set([earlyProfileJid, sender, ...(isFromMe ? [botId] : senderJids)].filter(Boolean).map(String))];
+                            for (const alias of earlyAliases) {
+                                userInfo.set(alias, earlyProfile);
+                                if (userInfo.size > 4000) userInfo.delete(userInfo.keys().next().value);
+                            }
+                            const earlyCacheKey = `${sessionId}:${earlyProfileJid}`;
+                            const earlyNow = Date.now();
+                            const earlyPrior = userProfilePersistenceCache.get(earlyCacheKey);
+                            if (!earlyPrior || earlyPrior.name !== earlyIncomingName || earlyPrior.number !== earlyProfile.number || earlyNow - earlyPrior.at >= 12 * 60 * 60 * 1000) {
+                                try {
+                                    await db.collection('user_preferences').updateOne(
+                                        { sessionId, sender: earlyProfileJid },
+                                        { $set: { pushName: earlyIncomingName, displayName: earlyIncomingName, number: earlyProfile.number, updatedAt: earlyNow, expireAt: new Date(earlyNow + 30 * 24 * 60 * 60 * 1000) }, $setOnInsert: { createdAt: new Date(earlyNow) } },
+                                        { upsert: true }
+                                    );
+                                    userProfilePersistenceCache.set(earlyCacheKey, { name: earlyIncomingName, number: earlyProfile.number, at: earlyNow });
+                                    while (userProfilePersistenceCache.size > 5000) userProfilePersistenceCache.delete(userProfilePersistenceCache.keys().next().value);
+                                } catch (earlyProfileError) {
+                                    console.warn('[user-profile-first-message-refresh-failed]', { sessionId, senderKey: earlyProfileJid, error: earlyProfileError?.message || String(earlyProfileError) });
+                                }
+                            }
+                        }
 
                         console.info('[message-identity-resolved]', {
                             sessionId,
@@ -3473,6 +3600,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             senderAliases: senderJids,
                             pushName: sName,
                             ownerNumberConfigured: !!ownerNumber,
+                            ownerMatchSources: { fromMe: isFromMe, senderMatchesOwnerPhone, senderMatchesOwnLid, privateChatMatchesOwnLid, ownerNumberCandidates },
                             isOwnerReal,
                             isGroup,
                             mode: normalizeText(sOwnerTop?.mode || sOwnerTop?.Mode || sOwnerTop?.botMode || 'prive')
@@ -3544,6 +3672,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     const meta = await sock.groupMetadata(from).catch(() => null);
                                     if (meta) {
                                         groupMetadataCache.set(from, { data: meta, ts: nowTsLocal });
+                                        for (const participant of meta.participants || []) {
+                                            const lidIds = [participant?.lid, participant?.id, participant?.idAlt, participant?.participantAlt].map(value => String(value || '').trim()).filter(value => /@lid$/i.test(normalizeLidCacheKey(value)));
+                                            const phoneJid = [participant?.phoneNumber, participant?.phone, participant?.pn, participant?.participantPn, participant?.idAlt, participant?.participantAlt].map(normalizePhoneCacheJid).find(Boolean);
+                                            if (phoneJid) for (const lidId of lidIds) rememberLidPhonePair(sessionId, lidId, phoneJid, 'group_metadata');
+                                        }
                                         return meta;
                                     }
                                 }
@@ -3644,18 +3777,29 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         }
                         console.info('[message-policy-allowed]', { sessionId, upsertType, messageId: msgId, chatJid: from, senderJid: sender, messageType, isGroup, isChannel, isOwnerReal, isPublicMode, botMode });
                         
-                        const languageCacheKey = sender || from || 'unknown';
-                        let messageLang = userLanguageCache.get(languageCacheKey);
+                        const profileNameFromMessage = String(pushName || '').replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim().slice(0, 80);
+                        const validIncomingDisplayName = profileNameFromMessage && !/^inconnu$/i.test(profileNameFromMessage) ? profileNameFromMessage : '';
+                        const canonicalProfileNumber = isOwnerReal ? (ownerNumber || botNumber || sessionNumber) : (senderNumbers.find(number => !ownerNumberCandidates.includes(number)) || sNum);
+                        const canonicalProfileJid = canonicalProfileNumber ? `${canonicalProfileNumber}@s.whatsapp.net` : normalizeLidCacheKey(sender || from || 'unknown');
+                        const languageCacheKey = canonicalProfileJid || sender || from || 'unknown';
+                        const preferenceAliases = [...new Set([languageCacheKey, sender, ...(isFromMe ? [botId] : senderJids), ...(!isFromMe ? [from] : [])].filter(Boolean).map(value => String(value).trim()))];
+                        let messageLang = preferenceAliases.map(alias => userLanguageCache.get(alias)).find(value => ['fr', 'en', 'es', 'ht'].includes(value));
                         if (!messageLang) {
                             try {
                                 const savedLanguage = await db.collection('user_preferences').findOne(
                                     { sessionId, sender: languageCacheKey },
                                     { projection: { lang: 1 } }
+                                ) || await db.collection('user_preferences').findOne(
+                                    { sessionId, sender: { $in: preferenceAliases.filter(alias => alias !== languageCacheKey) } },
+                                    { projection: { lang: 1 }, sort: { updatedAt: -1 } }
                                 );
                                 if (savedLanguage && ['fr', 'en', 'es', 'ht'].includes(savedLanguage.lang)) messageLang = savedLanguage.lang;
                             } catch (e) {}
                             if (!messageLang) messageLang = globalLang;
-                            userLanguageCache.set(languageCacheKey, messageLang);
+                        }
+                        for (const alias of preferenceAliases) {
+                            userLanguageCache.set(alias, messageLang);
+                            if (userLanguageCache.size > 4000) userLanguageCache.delete(userLanguageCache.keys().next().value);
                         }
 
                         const tIgnore = translations[messageLang] || translations.ht;
@@ -3665,11 +3809,38 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             return;
                         }
 
-                        userInfo.set(sender, {
-                          pseudo: pushName,
-                          number: sNum || (/^\d{6,}@s\.whatsapp\.net$/i.test(String(sender || '')) ? normalizedJidNumber(sender) : ''),
-                          lang: messageLang
-                        });
+                        const profileDisplayName = isOwnerReal
+                            ? (socketOwnerName || String(sOwnerTop?.Name || activeHostName || pushName).trim())
+                            : (validIncomingDisplayName || String(userInfo.get(canonicalProfileJid)?.pseudo || pushName || 'Inconnu').trim());
+                        const profilePhone = canonicalProfileNumber || normalizedJidNumber(canonicalProfileJid);
+                        const profileRecord = { pseudo: profileDisplayName, number: profilePhone, lang: messageLang, updatedAt: Date.now() };
+                        const profileAliases = [...new Set([canonicalProfileJid, sender, ...(isFromMe ? [botId] : senderJids), ...(!isFromMe ? senderJids : [])].filter(Boolean).map(String))];
+                        for (const alias of profileAliases) {
+                            userInfo.set(alias, profileRecord);
+                            if (userInfo.size > 4000) userInfo.delete(userInfo.keys().next().value);
+                        }
+                        if (validIncomingDisplayName || isOwnerReal && socketOwnerName) {
+                            const storedProfileName = isOwnerReal ? socketOwnerName || profileDisplayName : validIncomingDisplayName;
+                            const profileStateKey = `${sessionId}:${canonicalProfileJid}`;
+                            const priorProfileState = userProfilePersistenceCache.get(profileStateKey);
+                            const nowForProfile = Date.now();
+                            const profileChanged = !priorProfileState || priorProfileState.name !== storedProfileName || priorProfileState.number !== profilePhone;
+                            const profileRefreshDue = priorProfileState && nowForProfile - priorProfileState.at >= 12 * 60 * 60 * 1000;
+                            if (profileChanged || profileRefreshDue) {
+                                try {
+                                    const expiryDate = new Date(nowForProfile + 30 * 24 * 60 * 60 * 1000);
+                                    await db.collection('user_preferences').updateOne(
+                                        { sessionId, sender: canonicalProfileJid },
+                                        { $set: { pushName: storedProfileName, displayName: storedProfileName, number: profilePhone, lang: messageLang, updatedAt: nowForProfile, expireAt: expiryDate }, $setOnInsert: { createdAt: new Date(nowForProfile) } },
+                                        { upsert: true }
+                                    );
+                                    userProfilePersistenceCache.set(profileStateKey, { name: storedProfileName, number: profilePhone, at: nowForProfile });
+                                    while (userProfilePersistenceCache.size > 5000) userProfilePersistenceCache.delete(userProfilePersistenceCache.keys().next().value);
+                                } catch (profilePersistError) {
+                                    console.warn('[user-profile-refresh-failed]', { sessionId, senderKey: canonicalProfileJid, error: profilePersistError?.message || String(profilePersistError) });
+                                }
+                            }
+                        }
 
                         let parsedCommand = parseIncomingCommand(body, messageLang);
                         if (!parsedCommand) {
@@ -4263,7 +4434,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 userInfo.set(sender, { pseudo: pushName, number: sNum, lang: messageLang });
                                                 await db.collection('user_preferences').updateOne(
                                                     { sessionId, sender: languageCacheKey },
-                                                    { $set: { lang: messageLang, updatedAt: Date.now() } },
+                                                    { $set: { lang: messageLang, updatedAt: Date.now(), expireAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) }, $setOnInsert: { createdAt: new Date() } },
                                                     { upsert: true }
                                                 );
                                                 const languageTranslations = translations[messageLang] || translations.ht;
@@ -4693,12 +4864,22 @@ async function loadExistingSessions() {
 setInterval(async () => {
     if (!db) return;
     try {
-        const threshold = Date.now() - PROCESSED_MESSAGE_RETENTION_MS;
+        const now = Date.now();
+        const threshold = now - PROCESSED_MESSAGE_RETENTION_MS;
+        const preferenceThreshold = now - 30 * 24 * 60 * 60 * 1000;
         await db.collection('processed_messages').deleteMany({ ts: { $lt: threshold } });
+        await db.collection('user_preferences').deleteMany({ updatedAt: { $type: 'number', $lt: preferenceThreshold }, expireAt: { $exists: false } });
+        await db.collection('lid_phone_mappings').deleteMany({ updatedAt: { $lt: new Date(preferenceThreshold) }, expireAt: { $exists: false } });
+        for (const [key, value] of userProfilePersistenceCache.entries()) {
+            if (now - Number(value?.at || 0) > 30 * 24 * 60 * 60 * 1000) userProfilePersistenceCache.delete(key);
+        }
+        for (const [key, value] of lidPhonePersistedKeys.entries()) {
+            if (now - Number(value || 0) > 30 * 24 * 60 * 60 * 1000) lidPhonePersistedKeys.delete(key);
+        }
     } catch (e) {
         console.error('[maintenance]', e?.message || e);
     }
-}, 30000);
+}, 60000);
 
 setInterval(async () => {
     if (!db) return;
