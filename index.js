@@ -355,6 +355,16 @@ function phoneFromCachedGroupMetadata(sessionId, lidValue) {
     return null;
 }
 
+function promiseWithTimeout(promise, timeoutMs, label = 'operation') {
+    let timeoutHandle = null;
+    const timeoutPromise = new Promise((_, reject) => {
+        timeoutHandle = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+    });
+    return Promise.race([Promise.resolve(promise), timeoutPromise]).finally(() => {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+    });
+}
+
 async function resolvePhoneForLid(sessionId, sock, lidValue) {
     const lid = normalizeLidCacheKey(lidValue);
     if (!lid || !/@lid$/i.test(lid)) return null;
@@ -367,7 +377,7 @@ async function resolvePhoneForLid(sessionId, sock, lidValue) {
     const groupMetadataResolution = phoneFromCachedGroupMetadata(sessionId, lid);
     if (groupMetadataResolution?.phone) return groupMetadataResolution;
     try {
-        const mapped = normalizePhoneCacheJid(await sock?.signalRepository?.lidMapping?.getPNForLID?.(lid));
+        const mapped = normalizePhoneCacheJid(await promiseWithTimeout(sock?.signalRepository?.lidMapping?.getPNForLID?.(lid), 1500, 'LID-to-PN socket lookup'));
         if (mapped) {
             const accepted = rememberLidPhonePair(sessionId, lid, mapped, 'signal_lid_mapping');
             if (!accepted) {
@@ -381,7 +391,7 @@ async function resolvePhoneForLid(sessionId, sock, lidValue) {
     }
     if (db) {
         try {
-            const record = await db.collection('lid_phone_mappings').findOne({ _id: lid }, { projection: { phone: 1, source: 1 } });
+            const record = await promiseWithTimeout(db.collection('lid_phone_mappings').findOne({ _id: lid }, { projection: { phone: 1, source: 1 } }), 1500, 'LID-to-PN database lookup');
             const persistedPhone = normalizePhoneCacheJid(record?.phone || '');
             if (persistedPhone) {
                 const accepted = rememberLidPhonePair(sessionId, lid, persistedPhone, record?.source || 'mongo_lid_phone_mapping');
@@ -3813,7 +3823,40 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     continue;
                 }
                 processedLocalCache.add(msgCacheKey);
-                if (!await claimMessageForProcessing(sessionId, msgId, receivedChat)) {
+                const claimStartedAt = Date.now();
+                console.info('[message-processing-claim-started]', {
+                    sessionId,
+                    messageId: msgId,
+                    chatJid: receivedChat,
+                    upsertType,
+                    messageClassification: receivedClassification,
+                    detectedCommand: receivedParsedCommand?.command || null
+                });
+                let messageClaimed = true;
+                let messageClaimTimedOut = false;
+                try {
+                    messageClaimed = await promiseWithTimeout(claimMessageForProcessing(sessionId, msgId, receivedChat), 5000, 'message processing database claim');
+                } catch (claimError) {
+                    messageClaimTimedOut = /timed out/i.test(String(claimError?.message || claimError));
+                    console.error(messageClaimTimedOut ? '[message-processing-claim-timeout]' : '[message-processing-claim-failed-open]', {
+                        sessionId,
+                        messageId: msgId,
+                        chatJid: receivedChat,
+                        durationMs: Date.now() - claimStartedAt,
+                        error: claimError?.message || String(claimError),
+                        action: 'continue_processing_to_avoid_silent_command_loss'
+                    });
+                    messageClaimed = true;
+                }
+                console.info('[message-processing-claim-result]', {
+                    sessionId,
+                    messageId: msgId,
+                    chatJid: receivedChat,
+                    claimed: messageClaimed,
+                    timedOut: messageClaimTimedOut,
+                    durationMs: Date.now() - claimStartedAt
+                });
+                if (!messageClaimed) {
                     console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'already_claimed_in_database' });
                     continue;
                 }
@@ -3823,8 +3866,25 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 }
                 cacheRecentMessage(sessionId, m);
 
+                console.info('[message-processing-queued]', {
+                    sessionId,
+                    messageId: msgId,
+                    chatJid: receivedChat,
+                    upsertType,
+                    messageClassification: receivedClassification,
+                    detectedCommand: receivedParsedCommand?.command || null,
+                    databaseClaimTimedOut: messageClaimTimedOut
+                });
                 setImmediate(async () => {
                     try {
+                        console.info('[message-processing-started]', {
+                            sessionId,
+                            messageId: msgId,
+                            chatJid: receivedChat,
+                            upsertType,
+                            messageClassification: receivedClassification,
+                            detectedCommand: receivedParsedCommand?.command || null
+                        });
                         const timestampNow = Math.floor(Date.now() / 1000);
                         const messageTimestampSeconds = Number(m.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m.messageTimestamp);
                         const messageAgeSeconds = Number.isFinite(messageTimestampSeconds) && messageTimestampSeconds > 0 ? timestampNow - messageTimestampSeconds : null;
@@ -3857,8 +3917,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const ownerColTop = db.collection('session_owners');
                         let sOwnerTop = sessionOwnersCache.get(sessionId);
                         if (!sOwnerTop || !from.endsWith('@g.us')) {
+                            const ownerReadStartedAt = Date.now();
+                            console.info('[message-owner-record-read-started]', { sessionId, messageId: msgId, chatJid: from, hasCachedOwnerRecord: !!sOwnerTop });
                             try {
-                                const latestOwnerDoc = await ownerColTop.findOne({ sessionId: sessionId });
+                                const latestOwnerDoc = await promiseWithTimeout(ownerColTop.findOne({ sessionId: sessionId }), 2500, 'session owner record lookup');
                                 if (latestOwnerDoc) {
                                     sOwnerTop = latestOwnerDoc;
                                     sessionOwnersCache.set(sessionId, latestOwnerDoc);
@@ -3866,8 +3928,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     console.warn('[message-owner-record-missing]', { sessionId, chatJid: from, messageId: msgId, upsertType });
                                 }
                             } catch (ownerReadError) {
-                                console.error('[message-owner-record-read-failed]', { sessionId, chatJid: from, messageId: msgId, error: ownerReadError?.message || String(ownerReadError) });
+                                console.error('[message-owner-record-read-failed]', { sessionId, chatJid: from, messageId: msgId, durationMs: Date.now() - ownerReadStartedAt, error: ownerReadError?.message || String(ownerReadError), fallbackToCachedRecord: !!sOwnerTop });
                             }
+                            console.info('[message-owner-record-read-completed]', { sessionId, messageId: msgId, durationMs: Date.now() - ownerReadStartedAt, hasOwnerRecord: !!sOwnerTop });
                         }
 
                         let activeHostName = sOwnerTop ? (sOwnerTop.Name || "Adam D'H7") : "Adam D'H7";
@@ -3880,19 +3943,37 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             const normalizedSenderIdentity = normalizedLidForMapping(senderIdentity);
                             if (!/@lid$/i.test(normalizedSenderIdentity)) continue;
                             const cachedPhoneIdentity = getRememberedPhoneForLid(sessionId, normalizedSenderIdentity);
+                            const isCurrentPrivateChatLid = !rawChatIsGroup && !rawChatIsChannel && normalizedSenderIdentity === normalizedRawChatForMapping;
+                            const explicitPhoneAlias = isCurrentPrivateChatLid ? senderJids.map(normalizePhoneCacheJid).find(Boolean) || '' : '';
+                            const knownPhoneIdentity = cachedPhoneIdentity || explicitPhoneAlias;
                             if (cachedPhoneIdentity && !(isFromMe && normalizedSenderIdentity === normalizedRawChatForMapping)) senderJids.push(cachedPhoneIdentity);
+                            if (isCurrentPrivateChatLid && knownPhoneIdentity) {
+                                mappedPrivateChatPhoneJid = knownPhoneIdentity;
+                                mappedPrivateChatPhoneResolution = cachedPhoneIdentity ? 'lid_phone_cache' : 'message_phone_alias';
+                            }
+                            if (cachedPhoneIdentity || isCurrentPrivateChatLid && explicitPhoneAlias) {
+                                console.info('[lid-phone-resolution-reused]', {
+                                    sessionId,
+                                    messageId: msgId,
+                                    lid: normalizedSenderIdentity,
+                                    phoneJid: knownPhoneIdentity,
+                                    source: cachedPhoneIdentity ? 'lid_phone_cache' : 'message_phone_alias',
+                                    skippedSocketLookup: true
+                                });
+                                continue;
+                            }
                             try {
-                                const mappedPrivateIdentity = normalizePhoneCacheJid(await sock.signalRepository?.lidMapping?.getPNForLID?.(normalizedSenderIdentity));
+                                const mappedPrivateIdentity = normalizePhoneCacheJid(await promiseWithTimeout(sock.signalRepository?.lidMapping?.getPNForLID?.(normalizedSenderIdentity), 1500, 'incoming LID-to-PN lookup'));
                                 if (mappedPrivateIdentity) {
                                     rememberLidPhonePair(sessionId, normalizedSenderIdentity, mappedPrivateIdentity, 'signal_lid_mapping');
                                     if (!(isFromMe && normalizedSenderIdentity === normalizedRawChatForMapping)) senderJids.push(mappedPrivateIdentity);
-                                    if (!rawChatIsGroup && !rawChatIsChannel && normalizedSenderIdentity === normalizedRawChatForMapping) {
+                                    if (isCurrentPrivateChatLid) {
                                         mappedPrivateChatPhoneJid = mappedPrivateIdentity;
                                         mappedPrivateChatPhoneResolution = 'signal_lid_mapping';
                                     }
                                 }
                             } catch (mappingError) {
-                                console.warn('[incoming-sender-lid-resolution]', { sessionId, senderIdentity: normalizedSenderIdentity, error: mappingError?.message || String(mappingError) });
+                                console.warn('[incoming-sender-lid-resolution]', { sessionId, messageId: msgId, senderIdentity: normalizedSenderIdentity, durationBoundMs: 1500, error: mappingError?.message || String(mappingError) });
                             }
                         }
                         if (!rawChatIsGroup && !rawChatIsChannel && /@lid$/i.test(normalizedRawChatForMapping)) {
@@ -3975,17 +4056,17 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             const earlyNow = Date.now();
                             const earlyPrior = userProfilePersistenceCache.get(earlyCacheKey);
                             if (!earlyPrior || earlyPrior.name !== earlyIncomingName || earlyPrior.number !== earlyProfile.number || earlyNow - earlyPrior.at >= 12 * 60 * 60 * 1000) {
-                                try {
-                                    await db.collection('user_preferences').updateOne(
-                                        { sessionId, sender: earlyProfileJid },
-                                        { $set: { pushName: earlyIncomingName, displayName: earlyIncomingName, number: earlyProfile.number, updatedAt: earlyNow, expireAt: new Date(earlyNow + 30 * 24 * 60 * 60 * 1000) }, $setOnInsert: { createdAt: new Date(earlyNow) } },
-                                        { upsert: true }
-                                    );
-                                    userProfilePersistenceCache.set(earlyCacheKey, { name: earlyIncomingName, number: earlyProfile.number, at: earlyNow });
-                                    while (userProfilePersistenceCache.size > 5000) userProfilePersistenceCache.delete(userProfilePersistenceCache.keys().next().value);
-                                } catch (earlyProfileError) {
+                                userProfilePersistenceCache.set(earlyCacheKey, { name: earlyIncomingName, number: earlyProfile.number, at: earlyNow });
+                                while (userProfilePersistenceCache.size > 5000) userProfilePersistenceCache.delete(userProfilePersistenceCache.keys().next().value);
+                                console.info('[user-profile-refresh-queued]', { sessionId, senderKey: earlyProfileJid, displayName: earlyIncomingName, numberKnown: !!earlyProfile.number, action: 'persist_without_blocking_message_processing' });
+                                void Promise.resolve().then(() => db.collection('user_preferences').updateOne(
+                                    { sessionId, sender: earlyProfileJid },
+                                    { $set: { pushName: earlyIncomingName, displayName: earlyIncomingName, number: earlyProfile.number, updatedAt: earlyNow, expireAt: new Date(earlyNow + 30 * 24 * 60 * 60 * 1000) }, $setOnInsert: { createdAt: new Date(earlyNow) } },
+                                    { upsert: true }
+                                )).catch(earlyProfileError => {
+                                    userProfilePersistenceCache.delete(earlyCacheKey);
                                     console.warn('[user-profile-first-message-refresh-failed]', { sessionId, senderKey: earlyProfileJid, error: earlyProfileError?.message || String(earlyProfileError) });
-                                }
+                                });
                             }
                         }
 
