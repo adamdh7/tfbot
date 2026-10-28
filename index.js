@@ -296,70 +296,6 @@ function normalizeEchoText(value) {
     return String(value || '').replace(/\r\n?/g, '\n').replace(/[ \t]+/g, ' ').replace(/\n{2,}/g, '\n').trim();
 }
 
-function formatLinksInText(value) {
-    const text = String(value || '');
-    const pattern = /https?:\/\/[^\s*<>"'`]+/gi;
-    const openings = ['**_', '*_', '__', '_', '**', '*'];
-    let output = '';
-    let cursor = 0;
-    let match;
-    while ((match = pattern.exec(text))) {
-        let start = match.index;
-        let end = start + match[0].length;
-        let url = match[0];
-        let opening = '';
-        for (const candidate of openings) {
-            if (start >= candidate.length && text.slice(start - candidate.length, start) === candidate) {
-                opening = candidate;
-                break;
-            }
-        }
-        const afterRaw = text.slice(end);
-        if (opening === '**_' && url.endsWith('_') && afterRaw.startsWith('**')) {
-            url = url.replace(/_+$/, '');
-            end += 2;
-        } else if (opening === '*_' && url.endsWith('_') && afterRaw.startsWith('*')) {
-            url = url.replace(/_+$/, '');
-            end += 1;
-        } else if (opening === '__' && url.endsWith('_')) {
-            url = url.replace(/_+$/, '');
-            if (afterRaw.startsWith('_')) end += 1;
-        } else if (opening === '_' && url.endsWith('_') && !afterRaw.startsWith('*')) {
-            url = url.replace(/_+$/, '');
-        } else if (opening === '**' && afterRaw.startsWith('**')) {
-            end += 2;
-        } else if (opening === '*' && afterRaw.startsWith('*')) {
-            end += 1;
-        }
-        let punctuation = '';
-        while (/[),.;!?]$/.test(url)) {
-            punctuation = url.slice(-1) + punctuation;
-            url = url.slice(0, -1);
-        }
-        if (!/^https?:\/\//i.test(url)) continue;
-        const fullStart = start - opening.length;
-        output += text.slice(cursor, fullStart) + `**_${url}_**${punctuation}`;
-        cursor = end;
-        pattern.lastIndex = end;
-    }
-    return output ? output + text.slice(cursor) : text;
-}
-
-function formatLinksInContent(content) {
-    if (!content || typeof content !== 'object' || Array.isArray(content)) return content;
-    const result = { ...content };
-    for (const key of ['text', 'caption']) {
-        if (typeof result[key] === 'string') result[key] = formatLinksInText(result[key]);
-    }
-    for (const key of ['album', 'albumMessage']) {
-        if (Array.isArray(result[key])) result[key] = result[key].map(item => formatLinksInContent(item));
-    }
-    if (result.albumMessage && Array.isArray(result.albumMessage.messages)) {
-        result.albumMessage = { ...result.albumMessage, messages: result.albumMessage.messages.map(item => formatLinksInContent(item)) };
-    }
-    return result;
-}
-
 function normalizePersonName(value) {
     return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
@@ -401,26 +337,11 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 break;
             }
         }
-        const formattedContent = formatLinksInContent(content);
-        let destinationJid = String(jid || '').trim();
-        if (/@lid$/i.test(destinationJid)) {
-            try {
-                const mappedPrivateJid = await sock.signalRepository?.lidMapping?.getPNForLID?.(destinationJid);
-                if (mappedPrivateJid) {
-                    const mappedValue = String(mappedPrivateJid).trim();
-                    if (/@s\.whatsapp\.net$/i.test(mappedValue)) destinationJid = `${mappedValue.split(':')[0].split('@')[0]}@s.whatsapp.net`;
-                    else {
-                        const mappedNumber = normalizePhoneNumber(mappedValue);
-                        if (mappedNumber) destinationJid = `${mappedNumber}@s.whatsapp.net`;
-                    }
-                }
-            } catch (mappingError) {
-                console.warn('[private-chat-lid-resolution]', { jid: destinationJid, error: mappingError?.message || String(mappingError) });
-            }
-        }
-        const echoToken = rememberOutgoingTextEcho(sessionId, destinationJid, formattedContent);
+        const outgoingContent = content;
+        const destinationJid = String(jid || '').trim();
+        const echoToken = rememberOutgoingTextEcho(sessionId, destinationJid, outgoingContent);
         try {
-            const result = await sock.sendMessage(destinationJid, formattedContent, options);
+            const result = await sock.sendMessage(destinationJid, outgoingContent, options);
             if (sessionId && result?.key?.id) {
                 outgoingMessageCache.add(`${sessionId}:${result.key.id}`);
                 if (outgoingMessageCache.size > 5000) {
@@ -1259,25 +1180,6 @@ function normalizeCaptionText(value) {
         .trim();
 }
 
-function formatPrewrittenTranslation(value) {
-    const text = normalizeCaptionText(value);
-    if (!text || /[*_`]|https?:\/\//i.test(text)) return text;
-    const normalized = text.replace(/\s+/g, ' ').trim();
-    for (const languagePack of Object.values(translations)) {
-        for (const [key, source] of Object.entries(languagePack || {})) {
-            if (key === 'links_text' || key === 'info_text' || typeof source !== 'string') continue;
-            const candidate = normalizeCaptionText(source).replace(/\s+/g, ' ').trim();
-            if (!candidate) continue;
-            if (candidate === normalized) return `*_${text}_*`;
-            if (candidate.includes('{')) {
-                const parts = candidate.split(/\{[^{}]+\}/).map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-                if (new RegExp(`^${parts.join('.+?')}$`, 'i').test(normalized)) return `*_${text}_*`;
-            }
-        }
-    }
-    return text;
-}
-
 function buildCaption(type, text, userName) {
     const cleanType = String(type || 'Message').replace(/[\r\n]+/g, ' ').trim();
     const safeUser = String(userName || 'Inconnu').replace(/[\r\n]+/g, ' ').trim().replace(/"/g, '’');
@@ -2093,10 +1995,14 @@ function unwrapMessageContent(message) {
 
 function getMessageContextInfo(message) {
     const content = unwrapMessageContent(message);
+    const candidates = [];
+    if (content?.messageContextInfo && typeof content.messageContextInfo === 'object') candidates.push(content.messageContextInfo);
     for (const value of Object.values(content || {})) {
-        if (value && typeof value === 'object' && value.contextInfo && typeof value.contextInfo === 'object') return value.contextInfo;
+        if (value && typeof value === 'object' && value.contextInfo && typeof value.contextInfo === 'object') candidates.push(value.contextInfo);
     }
-    return {};
+    if (!candidates.length) return {};
+    const score = context => (context?.quotedMessage ? 8 : 0) + (context?.stanzaId ? 4 : 0) + (Array.isArray(context?.mentionedJid) && context.mentionedJid.length ? 2 : 0) + (context?.participant ? 1 : 0);
+    return candidates.reduce((best, candidate) => score(candidate) > score(best) ? candidate : best, candidates[0]) || {};
 }
 
 function extractBody(m) {
@@ -2401,8 +2307,7 @@ function parseIncomingCommand(body, language) {
 }
 
 async function sendFormatted(sock, from, type, text, pushName, isAI = false, hostName = "Adam D'H7", sendOptions = {}) {
-    const body = formatPrewrittenTranslation(text);
-    return sendImageCaptioned(sock, from, adamLogoBuffer, type, body, pushName || 'Inconnu', sendOptions);
+    return sendImageCaptioned(sock, from, adamLogoBuffer, type, text, pushName || 'Inconnu', sendOptions);
 }
 
 async function cleanupSocket(sessionId) {
@@ -3162,17 +3067,58 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         if (isGroup && sender && sender !== botId && !isOwnerReal) {
                             try {
                                 const del2List = await getDel2Targets(sessionId, from);
-                                const del2Match = del2List.some(target => {
-                                    const stored = normalizeActionJid(target);
-                                    if (senderJids.some(identity => normalizeActionJid(identity) === stored)) return true;
-                                    const storedNumber = normalizedJidNumber(target);
-                                    return !!storedNumber && senderNumbers.includes(storedNumber);
-                                });
-                                if (del2Match) {
-                                    await queuedSendMessage(sock, from, { delete: m.key }, {}, 200);
-                                    return;
+                                if (del2List.length) {
+                                    const cachedDel2Meta = groupMetadataCache.get(from);
+                                    let metadataDel2Match = cachedDel2Meta && Date.now() - cachedDel2Meta.ts < 240000 ? cachedDel2Meta.data : null;
+                                    if (!metadataDel2Match) {
+                                        metadataDel2Match = await sock.groupMetadata(from).catch(() => null);
+                                        if (metadataDel2Match) groupMetadataCache.set(from, { data: metadataDel2Match, ts: Date.now() });
+                                    }
+                                    const senderParticipantDel2 = findActionParticipant(sender, metadataDel2Match) || senderJids.map(identity => findActionParticipant(identity, metadataDel2Match)).find(Boolean) || null;
+                                    let del2Match = false;
+                                    for (const target of del2List) {
+                                        const stored = normalizeActionJid(target);
+                                        if (senderJids.some(identity => normalizeActionJid(identity) === stored)) {
+                                            del2Match = true;
+                                            break;
+                                        }
+                                        let storedNumber = /@lid(?:$|:)/i.test(String(target || '')) ? '' : normalizedJidNumber(target);
+                                        if (!storedNumber && /@lid$/i.test(String(target || ''))) {
+                                            try {
+                                                const mappedTarget = await sock.signalRepository?.lidMapping?.getPNForLID?.(String(target));
+                                                if (mappedTarget) storedNumber = normalizedJidNumber(mappedTarget);
+                                            } catch (mappingError) {}
+                                        }
+                                        if (storedNumber && senderNumbers.includes(storedNumber)) {
+                                            del2Match = true;
+                                            break;
+                                        }
+                                        const targetParticipantDel2 = findActionParticipant(target, metadataDel2Match);
+                                        if (targetParticipantDel2 && senderParticipantDel2 && participantMatchesIdentities(targetParticipantDel2, senderJids)) {
+                                            del2Match = true;
+                                            break;
+                                        }
+                                        if (targetParticipantDel2 && senderParticipantDel2) {
+                                            const targetAliasesDel2 = participantAliases(targetParticipantDel2).map(normalizeActionJid).filter(Boolean);
+                                            const senderAliasesDel2 = participantAliases(senderParticipantDel2).map(normalizeActionJid).filter(Boolean);
+                                            if (targetAliasesDel2.some(alias => senderAliasesDel2.includes(alias))) {
+                                                del2Match = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if (del2Match) {
+                                        try {
+                                            await queuedSendMessage(sock, from, { delete: m.key }, {}, 200);
+                                        } catch (deleteErrorDel2) {
+                                            console.warn('[del2-delete-failed]', { sessionId, group: from, messageId: msgId, error: deleteErrorDel2?.message || String(deleteErrorDel2) });
+                                        }
+                                        return;
+                                    }
                                 }
-                            } catch (e) {}
+                            } catch (del2Error) {
+                                console.warn('[del2-target-match-failed]', { sessionId, group: from, error: del2Error?.message || String(del2Error) });
+                            }
                         }
 
                         const getMeta = async () => {
@@ -3285,13 +3231,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         });
 
                         let parsedCommand = parseIncomingCommand(body, messageLang);
-                        if (!parsedCommand && isPublicMode && !isGroup && !isChannel && body && !isOwnerReal) {
-                            parsedCommand = {
-                                command: (translations[messageLang] || translations.ht).cmd_ai || 'ai',
-                                args: clipLongText(body, AI_MAX_INPUT_CHARS),
-                                internalCommand: 'ai'
-                            };
-                        }
                         if (!parsedCommand) return;
                         const command = parsedCommand.command;
                         const args = parsedCommand.args;
