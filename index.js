@@ -297,11 +297,20 @@ function normalizeEchoText(value) {
 
 function formatBrefLinksInText(value) {
     const text = String(value || '');
-    const pattern = /(?:\*_(https:\/\/bref\.adamdh7\.org(?:\/[^\s*<>"']*)?)_\*)|(https:\/\/bref\.adamdh7\.org(?:\/[^\s*<>"']*)?)/gi;
-    return text.replace(pattern, (match, wrappedUrl, bareUrl) => {
-        if (wrappedUrl) return `*_${wrappedUrl}_*`;
-        const url = String(bareUrl || match).replace(/[),.;!?]+$/, '');
-        return `*_${url}_*${String(bareUrl || match).slice(url.length)}`;
+    const pattern = /https:\/\/bref\.adamdh7\.org(?:\/[^\s*<>"']*)?/gi;
+    return text.replace(pattern, (match, offset, source) => {
+        const before = source.slice(0, offset);
+        const after = source.slice(offset + match.length);
+        const opening = /(?:\*{1,2}_?|_{1,2}\*{0,2}|\*{1,2})\s*$/.test(before);
+        const closingAfter = /^\s*(?:_{1,2}\*{0,2}|\*{1,2})/.test(after);
+        if (opening && (match.endsWith('_') || closingAfter)) return match;
+        let url = match;
+        let punctuation = '';
+        while (/[),.;!?]$/.test(url)) {
+            punctuation = url.slice(-1) + punctuation;
+            url = url.slice(0, -1);
+        }
+        return `*_${url}_*${punctuation}`;
     });
 }
 
@@ -2630,21 +2639,85 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             }
         });
 
-        const safeGroupUpdate = async (jid, participants, action) => {
+        const normalizeActionJid = value => {
+            const raw = String(value || '').trim();
+            if (!raw) return '';
+            if (/@s\.whatsapp\.net$/i.test(raw)) return `${raw.split(':')[0].split('@')[0]}@s.whatsapp.net`;
+            if (/@lid$/i.test(raw) || /@g\.us$/i.test(raw)) return raw;
+            if (raw.includes('@')) return raw;
+            const number = normalizePhoneNumber(raw);
+            return number ? `${number}@s.whatsapp.net` : '';
+        };
+
+        const participantAliases = participant => [
+            participant?.id,
+            participant?.lid,
+            participant?.phoneNumber,
+            participant?.phone,
+            participant?.idAlt,
+            participant?.participantAlt,
+            participant?.participantPn,
+            participant?.jid,
+            participant?.pn
+        ].map(value => String(value || '').trim()).filter(Boolean);
+
+        const findActionParticipant = (target, metadata) => {
+            const raw = String(target || '').trim();
+            if (!raw || !Array.isArray(metadata?.participants)) return null;
+            const rawNumber = /@lid(?:$|:)/i.test(raw) ? '' : normalizedJidNumber(raw);
+            return metadata.participants.find(participant => {
+                const aliases = participantAliases(participant);
+                if (aliases.some(alias => alias === raw)) return true;
+                if (!rawNumber) return false;
+                return aliases.some(alias => !/@lid(?:$|:)/i.test(alias) && normalizedJidNumber(alias) === rawNumber);
+            }) || null;
+        };
+
+        const resolveGroupActionTarget = async (groupJid, target, metadata = null) => {
+            const raw = String(target || '').trim();
+            if (!raw) return '';
+            const meta = metadata || await sock.groupMetadata(groupJid).catch(() => null);
+            const participant = findActionParticipant(raw, meta);
+            const alternatives = participantAliases(participant).filter(alias => !/@lid(?:$|:)/i.test(alias));
+            const preferredPhone = alternatives.find(alias => /@s\.whatsapp\.net$/i.test(alias)) || alternatives.find(alias => /^\+?\d{6,}$/.test(alias));
+            if (preferredPhone) return normalizeActionJid(preferredPhone);
+            const lid = /@lid$/i.test(raw) ? raw : participantAliases(participant).find(alias => /@lid$/i.test(alias));
+            if (lid) {
+                try {
+                    const mapping = sock.signalRepository?.lidMapping;
+                    const mapped = await mapping?.getPNForLID?.(lid);
+                    const normalized = normalizeActionJid(mapped);
+                    if (normalized && /@s\.whatsapp\.net$/i.test(normalized)) return normalized;
+                } catch (error) {
+                    console.warn('[group-participant-lid-resolution]', { group: groupJid, target: lid, error: error?.message || String(error) });
+                }
+            }
+            return normalizeActionJid(raw);
+        };
+
+        const safeGroupUpdate = async (jid, participants, action, knownMetadata = null) => {
             try {
-                const cleanParticipants = [...new Set((participants || []).map(value => {
-                    const participant = String(value || '').trim();
-                    return participant.includes('@') ? participant : `${participant.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
-                }).filter(value => value && !value.startsWith('@s.whatsapp.net')))];
+                const metadataForAction = knownMetadata || await sock.groupMetadata(jid).catch(() => null);
+                const resolvedParticipants = [];
+                for (const value of participants || []) {
+                    const resolved = await resolveGroupActionTarget(jid, value, metadataForAction);
+                    if (resolved) resolvedParticipants.push(resolved);
+                }
+                const cleanParticipants = [...new Set(resolvedParticipants)];
                 if (!cleanParticipants.length) return true;
+                const botIds = [sock.user?.id, sock.user?.lid, sock.user?.phoneNumber].map(value => normalizeActionJid(value)).filter(Boolean);
+                if (action === 'remove' && cleanParticipants.some(target => botIds.includes(normalizeActionJid(target)))) {
+                    console.error('[group-remove-protected-bot]', { group: jid, action });
+                    return false;
+                }
                 const result = await queueMessage(() => sock.groupParticipantsUpdate(jid, cleanParticipants, action), 150, sock);
                 const failures = Array.isArray(result) ? result.filter(item => {
                     const status = String(item?.status ?? '').toLowerCase();
                     const failureTag = String(item?.content?.tag || item?.content?.attrs?.type || item?.error || '').toLowerCase();
-                    return (status && !['200', 'ok', 'success'].includes(status)) || ['error', 'not-authorized', 'forbidden', 'conflict', 'bad-request', '401', '403', '404', '500'].includes(failureTag);
+                    return (status && !['200', 'ok', 'success'].includes(status)) || ['error', 'not-authorized', 'forbidden', 'conflict', 'bad-request', '401', '403', '404', '406', '500'].includes(failureTag);
                 }) : [];
                 if (failures.length) {
-                    console.error('[group-participants-update-rejected]', { group: jid, action, requested: cleanParticipants.length, failed: failures.map(item => ({ jid: item?.jid, status: item?.status, content: item?.content?.tag || null })) });
+                    console.error('[group-participants-update-rejected]', { group: jid, action, requested: cleanParticipants.length, failed: failures.map(item => ({ jid: item?.jid, status: item?.status, content: item?.content?.tag || null, phoneNumber: item?.content?.attrs?.phone_number || null })) });
                     return false;
                 }
                 return true;
@@ -2657,15 +2730,17 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         const isProtectedWhatsAppTarget = (targetJid, ownerDocument, currentBotJid, alternatePhone = '') => {
             const target = String(targetJid || '').trim();
             if (!target) return false;
-            if (target === currentBotJid) return true;
-            const targetNumber = /@lid(?:$|:)/i.test(target) ? normalizePhoneNumber(alternatePhone) : (normalizedJidNumber(target) || normalizePhoneNumber(alternatePhone));
+            const identityValues = [target, ...String(alternatePhone || '').trim().split(/\s+/)].filter(Boolean);
+            const botIdentities = [currentBotJid, sock.user?.id, sock.user?.lid, sock.user?.phoneNumber].map(value => String(value || '').trim()).filter(Boolean);
+            const normalizeIdentifier = value => normalizeActionJid(value);
+            if (identityValues.some(value => botIdentities.some(botValue => normalizeIdentifier(value) === normalizeIdentifier(botValue)))) return true;
             const ownerNumber = normalizePhoneNumber(ownerDocument?.Number || '');
-            const botNumber = normalizedJidNumber(currentBotJid);
-            if (targetNumber && ((ownerNumber && targetNumber === ownerNumber) || (botNumber && targetNumber === botNumber))) return true;
-            const cachedUser = userInfo.get(target);
-            const targetName = normalizePersonName(cachedUser?.pseudo || '');
+            const botNumbers = botIdentities.filter(value => !/@lid(?:$|:)/i.test(value)).map(normalizedJidNumber).filter(Boolean);
+            const targetNumbers = identityValues.filter(value => !/@lid(?:$|:)/i.test(value)).map(normalizedJidNumber).filter(Boolean);
+            if (targetNumbers.some(number => (ownerNumber && number === ownerNumber) || botNumbers.includes(number))) return true;
             const ownerName = normalizePersonName(ownerDocument?.Name || '');
-            return !!targetName && !!ownerName && targetName === ownerName;
+            const targetNames = identityValues.map(value => normalizePersonName(userInfo.get(value)?.pseudo || '')).filter(Boolean);
+            return !!ownerName && targetNames.some(name => name === ownerName);
         };
 
         const resolveTargets = async (arg, m, metadata = null, ownerDocument = null, currentBotJid = null) => {
@@ -2678,32 +2753,46 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             for (const contact of quoted.contactsArrayMessage?.contacts || []) {
                 if (contact?.vcard) contactSources.push(String(contact.vcard));
             }
+            const preferredParticipantId = participant => {
+                const aliases = participantAliases(participant);
+                const phoneJid = aliases.find(alias => /@s\.whatsapp\.net$/i.test(alias));
+                const phoneNumber = aliases.find(alias => /^\+?\d{6,}$/.test(alias));
+                return phoneJid || (phoneNumber ? `${normalizePhoneNumber(phoneNumber)}@s.whatsapp.net` : participant?.id || '');
+            };
             if (contactSources.length) {
                 for (const vcard of contactSources) {
                     const waid = vcard.match(/waid\s*=\s*(\d{6,})/i)?.[1];
                     const phoneMatch = vcard.match(/(?:TEL[^:\n]*:|item\d+\.TEL[^:\n]*:)\s*\+?([0-9][0-9\s().-]{5,}[0-9])/i)?.[1];
                     const number = normalizePhoneNumber(waid || phoneMatch || '');
                     if (number) {
-                        const member = metadata?.participants?.find(item => normalizedJidNumber(item.id) === number || normalizedJidNumber(item.phoneNumber || item.phone) === number);
-                        return [member?.id || `${number}@s.whatsapp.net`];
+                        const member = metadata?.participants?.find(item => normalizedJidNumber(item.id) === number || normalizedJidNumber(item.phoneNumber || item.phone || item.idAlt || '') === number);
+                        return [member ? preferredParticipantId(member) : `${number}@s.whatsapp.net`];
                     }
                 }
             }
-            if (context.mentionedJid?.length) return [...new Set(context.mentionedJid)];
-            if (context.participant) return [context.participant];
+            const quotedEntry = context.stanzaId ? recentMsgsCache.find(entry => entry.sessionId && entry.id === context.stanzaId && entry.from === (m.key?.remoteJid || '')) : null;
+            if (context.mentionedJid?.length) return [...new Set(context.mentionedJid.map(value => {
+                const member = findActionParticipant(value, metadata);
+                return member ? preferredParticipantId(member) : value;
+            }))];
+            if (context.participant) {
+                const alternate = quotedEntry?.participantAlt || quotedEntry?.message?.key?.participantAlt || quotedEntry?.message?.key?.participantPn || '';
+                const member = findActionParticipant(alternate || context.participant, metadata) || findActionParticipant(context.participant, metadata);
+                return [member ? preferredParticipantId(member) : (alternate || context.participant)];
+            }
             if (arg) {
                 const number = normalizePhoneNumber(arg);
                 const looksLikePhone = number.length >= 6 && /^[+\d()\s.-]+$/.test(String(arg).trim());
                 if (looksLikePhone) {
-                    const member = metadata?.participants?.find(item => normalizedJidNumber(item.id) === number || normalizedJidNumber(item.phoneNumber || item.phone) === number);
-                    return [member?.id || `${number}@s.whatsapp.net`];
+                    const member = metadata?.participants?.find(item => normalizedJidNumber(item.id) === number || normalizedJidNumber(item.phoneNumber || item.phone || item.idAlt || '') === number);
+                    return [member ? preferredParticipantId(member) : `${number}@s.whatsapp.net`];
                 }
                 if (ownerNumber && normalizedArg && normalizedArg === normalizePersonName(ownerDocument?.Name)) return [`${ownerNumber}@s.whatsapp.net`];
                 const participantByName = metadata?.participants?.find(item => {
-                    const candidates = [item.notify, item.name, item.subject, item.pushName].map(normalizePersonName).filter(Boolean);
+                    const candidates = [item.notify, item.name, item.subject, item.pushName, item.verifiedName].map(normalizePersonName).filter(Boolean);
                     return candidates.some(candidate => normalizedArg && (candidate === normalizedArg || candidate.startsWith(normalizedArg) || normalizedArg.startsWith(candidate)));
                 });
-                if (participantByName?.id) return [participantByName.id];
+                if (participantByName?.id) return [preferredParticipantId(participantByName)];
                 const known = [...userInfo.entries()].filter(([, value]) => {
                     const name = normalizePersonName(value?.pseudo || '');
                     return name && normalizedArg && (name === normalizedArg || name.startsWith(normalizedArg) || normalizedArg.startsWith(name));
@@ -3208,12 +3297,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             const targets = await resolveTargets(args, m, metadataTargets, sOwnerTop, botId);
                                             if (targets.length === 0) break;
                                             const filteredTargets = targets.filter(target => {
-                                                const targetParticipant = metadataTargets?.participants?.find(participant => participant?.id === target);
-                                                return !isProtectedWhatsAppTarget(target, sOwnerTop, botId, targetParticipant?.phoneNumber || targetParticipant?.phone || targetParticipant?.idAlt || '');
+                                                const targetParticipant = findActionParticipant(target, metadataTargets);
+                                                const alternates = participantAliases(targetParticipant).filter(value => value !== target).find(value => /@s\.whatsapp\.net$/i.test(value)) || participantAliases(targetParticipant).filter(value => value !== target).find(value => /^\+?\d{6,}$/.test(value)) || '';
+                                                return !isProtectedWhatsAppTarget(target, sOwnerTop, botId, alternates);
                                             });
                                             if (filteredTargets.length === 0) break;
                                             const actionMap = { kick: 'remove', promote: 'promote', demote: 'demote' };
-                                            if (!await safeGroupUpdate(from, filteredTargets, actionMap[internalCommand])) throw new Error(`group_${actionMap[internalCommand]}_failed`);
+                                            if (!await safeGroupUpdate(from, filteredTargets, actionMap[internalCommand], metadataTargets)) throw new Error(`group_${actionMap[internalCommand]}_failed`);
                                             break;
                                         case 'kickall':
                                         case 'kickall2':
@@ -3227,17 +3317,21 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             const toKick = metadataKA.participants
                                                 .filter(participant => participant && participant.id)
                                                 .filter(participant => participant.admin !== 'admin' && participant.admin !== 'superadmin')
-                                                .filter(participant => !isProtectedWhatsAppTarget(participant.id, sOwnerTop, botId, participant.phoneNumber || participant.phone || participant.idAlt || ''))
+                                                .filter(participant => {
+                                                    const aliases = participantAliases(participant);
+                                                    const alternate = aliases.find(value => /@s\.whatsapp\.net$/i.test(value)) || aliases.find(value => /^\+?\d{6,}$/.test(value)) || '';
+                                                    return !isProtectedWhatsAppTarget(participant.id, sOwnerTop, botId, alternate);
+                                                })
                                                 .map(participant => participant.id);
                                             if (toKick.length > 0 && internalCommand === 'kickall') {
-                                                if (!await safeGroupUpdate(from, toKick, 'remove')) throw new Error('kickall_group_update_failed');
+                                                if (!await safeGroupUpdate(from, toKick, 'remove', metadataKA)) throw new Error('kickall_group_update_failed');
                                             } else if (toKick.length > 0 && internalCommand === 'kickall2') {
                                                 const batchSize = Math.max(1, Math.min(5, Number(process.env.KICKALL2_BATCH_SIZE || 5)));
                                                 const batchDelay = Math.max(1000, Number(process.env.KICKALL2_BATCH_DELAY_MS || 2500));
                                                 for (let index = 0; index < toKick.length; index += batchSize) {
                                                     if (isCancelled) throw new Error('kickall2_cancelled');
                                                     const batch = toKick.slice(index, index + batchSize);
-                                                    if (!await safeGroupUpdate(from, batch, 'remove')) throw new Error(`kickall2_batch_failed_at_${index + 1}`);
+                                                    if (!await safeGroupUpdate(from, batch, 'remove', metadataKA)) throw new Error(`kickall2_batch_failed_at_${index + 1}`);
                                                     if (index + batchSize < toKick.length) await sleep(batchDelay);
                                                 }
                                             }
@@ -3395,7 +3489,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 const fUrl = uploaded.url;
                                                 const rawSize = uploaded.size;
                                                 const formattedSize = typeof rawSize === 'number' ? formatBytes(rawSize) : formatBytes(parseInt(rawSize) || bBuffer.length);
-                                                const brefText = `*${fUrl}*\n*size* : ${formattedSize}`;
+                                                const brefText = `*_${fUrl}_*\n*size* : ${formattedSize}`;
                                                 await safeSendFormatted(sock, from, 'Url', brefText, pushName, true, activeHostName);
                                             } catch (e) {
                                                 await safeSendActionError(sock, from, t.cmd_url, e, messageLang, pushName, m.messageTimestamp);
@@ -3677,7 +3771,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             }
                                             if (!albumSentHT) {
                                                 for (const itemHT of preparedMediaHT) {
-                                                    const singleViewOptsHT = itemHT.viewOnce ? { viewOnce: true } : {};
+                                                    const singleViewOptsHT = itemHT.viewOnce && ['image', 'video', 'audio'].includes(itemHT.type) ? { viewOnce: true } : {};
                                                     if (itemHT.type === 'image') {
                                                         await queuedSendMessage(sock, from, { image: itemHT.buffer, ...(itemHT.caption ? { caption: itemHT.caption } : {}), ...singleViewOptsHT, ...msgOpts }, {}, 220);
                                                     } else if (itemHT.type === 'video') {
