@@ -47,19 +47,21 @@ function logSignalDecryptionFailure(args) {
         : /Failed to decrypt message with any known session/i.test(raw) ? 'decrypt_failed'
         : 'signal_decryption_error';
     const peerMatch = raw.match(/\b\d{5,25}(?::\d+)?@(?:s\.whatsapp\.net|lid|g\.us)\b/i);
-    const messageMatch = raw.match(/\b(?:msgId|messageId|message id|id)\s*[:=]\s*['"]?([A-F0-9]{8,40})\b/i);
+    const messageMatch = raw.match(/(?:msgId|messageId|message id|["']?id["']?)\s*[:=]\s*["']?([A-F0-9]{8,40})\b/i);
     const peerJid = peerMatch ? peerMatch[0] : null;
     const messageId = messageMatch ? messageMatch[1] : null;
-    const diagnosticKey = `${kind}:${peerJid || 'unknown'}`;
+    const fromMeMatch = raw.match(/["']?fromMe["']?\s*[:=]\s*(true|false)/i);
+    const fromMe = fromMeMatch ? fromMeMatch[1].toLowerCase() === 'true' : null;
+    const diagnosticKey = `${kind}:${peerJid || 'unknown'}:${messageId || 'no-message-id'}`;
     const last = Number(signalDiagnosticTimes.get(diagnosticKey) || 0);
-    if (now - last < 10000) return;
+    if (!messageId && now - last < 10000) return;
     signalDiagnosticTimes.set(diagnosticKey, now);
     while (signalDiagnosticTimes.size > 500) signalDiagnosticTimes.delete(signalDiagnosticTimes.keys().next().value);
     const safeDetail = kind === 'message_counter_error' ? 'Signal message counter was out of sequence'
         : kind === 'signal_session_missing' ? 'No Signal session was available for this peer'
         : kind === 'bad_mac' ? 'Signal authentication check failed'
         : 'Baileys could not decrypt an incoming message';
-    originalConsoleWarn('[whatsapp-signal-diagnostic]', { kind, peerJid, messageId, detail: safeDetail, retryExpected: true, credentialsDeleted: false });
+    originalConsoleWarn('[whatsapp-signal-diagnostic]', { kind, peerJid, messageId, fromMe, detail: safeDetail, messageBodyAvailable: false, explanation: 'The message could not be decrypted, so WhatsApp did not provide readable text to the message handler.', retryExpected: true, credentialsDeleted: false });
 }
 console.log = (...args) => {
     if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
@@ -2418,6 +2420,64 @@ function extractBody(m) {
     return msg.conversation || msg.extendedTextMessage?.text || msg.imageMessage?.caption || msg.videoMessage?.caption || msg.documentMessage?.caption || msg.buttonsResponseMessage?.selectedButtonId || msg.listResponseMessage?.singleSelectReply?.selectedRowId || '';
 }
 
+function getMessageAuditDetails(message) {
+    const content = unwrapMessageContent(message?.message);
+    const messageType = Object.keys(content || {})[0] || 'unknown';
+    const payload = content?.[messageType] && typeof content[messageType] === 'object' ? content[messageType] : {};
+    const bodyText = String(extractBody(message) || '');
+    const contextInfo = getMessageContextInfo(message?.message);
+    const quotedMessage = contextInfo?.quotedMessage ? { message: contextInfo.quotedMessage } : null;
+    const quotedContent = unwrapMessageContent(contextInfo?.quotedMessage || {});
+    const quotedType = Object.keys(quotedContent || {})[0] || null;
+    const quotedText = quotedMessage ? String(extractBody(quotedMessage) || '') : '';
+    const fileLengthRaw = payload.fileLength;
+    let fileLengthBytes = null;
+    try {
+        const numericLength = Number(fileLengthRaw && typeof fileLengthRaw.toNumber === 'function' ? fileLengthRaw.toNumber() : fileLengthRaw);
+        if (Number.isFinite(numericLength) && numericLength >= 0) fileLengthBytes = numericLength;
+    } catch (e) {}
+    const mediaMetadataRaw = {
+        mimeType: payload.mimetype || null,
+        fileName: payload.fileName || payload.displayName || null,
+        fileLengthBytes,
+        caption: payload.caption ? String(payload.caption).slice(0, 12000) : null,
+        durationSeconds: Number.isFinite(Number(payload.seconds)) ? Number(payload.seconds) : null,
+        width: Number.isFinite(Number(payload.width)) ? Number(payload.width) : null,
+        height: Number.isFinite(Number(payload.height)) ? Number(payload.height) : null,
+        isPushToTalk: typeof payload.ptt === 'boolean' ? payload.ptt : null,
+        gifPlayback: typeof payload.gifPlayback === 'boolean' ? payload.gifPlayback : null,
+        isAnimated: typeof payload.isAnimated === 'boolean' ? payload.isAnimated : null,
+        contactName: payload.displayName || null,
+        locationName: payload.name || null,
+        locationAddress: payload.address || null,
+        latitude: Number.isFinite(Number(payload.degreesLatitude)) ? Number(payload.degreesLatitude) : null,
+        longitude: Number.isFinite(Number(payload.degreesLongitude)) ? Number(payload.degreesLongitude) : null,
+        pollName: payload.name && /poll/i.test(messageType) ? String(payload.name) : null,
+        pollOptionCount: Array.isArray(payload.options) ? payload.options.length : null,
+        reactionText: payload.text && /reaction/i.test(messageType) ? String(payload.text) : null,
+        reactedMessageId: payload.key?.id || null,
+        selectedButtonId: payload.selectedButtonId || null,
+        selectedRowId: payload.singleSelectReply?.selectedRowId || null,
+        hasContactCard: typeof payload.vcard === 'string' && payload.vcard.length > 0
+    };
+    const mediaMetadata = Object.fromEntries(Object.entries(mediaMetadataRaw).filter(([, value]) => value !== null && value !== false && value !== ''));
+    return {
+        messageType,
+        messageText: bodyText.slice(0, 12000),
+        bodyLength: bodyText.length,
+        bodyTruncated: bodyText.length > 12000,
+        mediaMetadata,
+        quotedMessage: contextInfo?.quotedMessage ? {
+            messageId: contextInfo.stanzaId || null,
+            participantJid: contextInfo.participant || null,
+            messageType: quotedType,
+            messageText: quotedText.slice(0, 2000),
+            bodyLength: quotedText.length,
+            bodyTruncated: quotedText.length > 2000
+        } : null
+    };
+}
+
 function waitForQr(sock, timeoutMs = 45000) {
     return new Promise((resolve, reject) => {
         let done = false;
@@ -3511,17 +3571,61 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 truncated: rawBatch.length > 30
             });
             if (!['notify', 'append'].includes(upsertType)) {
-                console.info('[message-batch-ignored]', { sessionId, upsertType, reason: 'unsupported_upsert_type', count: Array.isArray(up?.messages) ? up.messages.length : 0 });
+                console.info('[message-batch-ignored]', { sessionId, upsertType, reason: 'unsupported_upsert_type', count: rawBatch.length });
+                for (const entry of rawBatch) {
+                    const unsupportedAudit = getMessageAuditDetails(entry);
+                    const unsupportedChat = String(entry?.key?.remoteJid || entry?.key?.remoteJidAlt || 'unknown-chat');
+                    const unsupportedGroup = unsupportedChat.endsWith('@g.us');
+                    const unsupportedBody = String(unsupportedAudit.messageText || '');
+                    const unsupportedCommand = unsupportedBody.trim() ? parseIncomingCommand(unsupportedBody, globalLang) : null;
+                    console.info('[message-received-not-processed]', {
+                        sessionId,
+                        connectedAccountJid: sock.user?.id || null,
+                        upsertType,
+                        messageId: entry?.key?.id || null,
+                        chatJid: unsupportedChat,
+                        chatType: unsupportedGroup ? 'group' : unsupportedChat.endsWith('@newsletter') ? 'channel' : unsupportedChat === 'status@broadcast' ? 'status' : 'private',
+                        fromMe: !!entry?.key?.fromMe,
+                        senderName: String(entry?.pushName || (entry?.key?.fromMe ? sock.user?.name : '') || 'Inconnu').slice(0, 100),
+                        senderJid: entry?.key?.fromMe ? sock.user?.id || unsupportedChat : unsupportedGroup ? entry?.key?.participant || entry?.key?.participantAlt || unsupportedChat : entry?.key?.participant || entry?.key?.remoteJid || unsupportedChat,
+                        senderIdentityCandidates: [...new Set([entry?.key?.participant, entry?.key?.participantAlt, entry?.key?.participantPn, entry?.key?.senderPn, entry?.key?.remoteJidAlt, entry?.key?.fromMe ? sock.user?.id : null].filter(Boolean).map(String))],
+                        messageType: unsupportedAudit.messageType,
+                        messageClassification: !unsupportedBody.trim() ? 'no_text_or_caption' : unsupportedCommand ? 'recognized_command' : 'text_not_recognized_as_command',
+                        detectedCommand: unsupportedCommand?.command || null,
+                        detectedInternalCommand: unsupportedCommand?.internalCommand || null,
+                        messageText: unsupportedAudit.messageText,
+                        bodyLength: unsupportedAudit.bodyLength,
+                        bodyTruncated: unsupportedAudit.bodyTruncated,
+                        mediaMetadata: unsupportedAudit.mediaMetadata,
+                        quotedMessage: unsupportedAudit.quotedMessage,
+                        action: 'not_processed_due_to_unsupported_upsert_type',
+                        reason: 'unsupported_upsert_type'
+                    });
+                }
                 return;
             }
 
             for (const m of rawBatch) {
                 const identityAliasCount = cacheMessageIdentityAliases(sessionId, m);
                 const receivedBody = extractBody(m);
+                const receivedAuditDetails = getMessageAuditDetails(m);
                 const receivedContent = unwrapMessageContent(m?.message);
                 const receivedType = Object.keys(receivedContent || {})[0] || 'unknown';
                 const receivedChat = String(m?.key?.remoteJid || m?.key?.remoteJidAlt || 'unknown-chat');
                 const receivedId = String(m?.key?.id || 'missing-id');
+                const receivedIsGroup = receivedChat.endsWith('@g.us');
+                const receivedSenderJid = m?.key?.fromMe
+                    ? (sock.user?.id || receivedChat)
+                    : receivedIsGroup
+                        ? (m?.key?.participant || m?.key?.participantAlt || m?.key?.participantPn || m?.key?.senderPn || receivedChat)
+                        : (m?.key?.participant || m?.key?.remoteJid || m?.key?.remoteJidAlt || receivedChat);
+                const receivedSenderAliases = [...new Set([receivedSenderJid, m?.key?.participant, m?.key?.participantAlt, m?.key?.participantPn, m?.key?.senderPn, m?.key?.remoteJidAlt, m?.key?.fromMe ? sock.user?.id : null].filter(Boolean).map(String))];
+                const receivedParsedCommand = String(receivedBody || '').trim() ? parseIncomingCommand(receivedBody, globalLang) : null;
+                const receivedClassification = !String(receivedBody || '').trim()
+                    ? 'no_text_or_caption'
+                    : receivedParsedCommand
+                        ? 'recognized_command'
+                        : 'text_not_recognized_as_command';
                 const receivedDiagnostic = {
                     sessionId,
                     connectedAccountJid: sock.user?.id || null,
@@ -3530,9 +3634,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     upsertType,
                     messageId: receivedId,
                     chatJid: receivedChat,
+                    chatType: receivedChat.endsWith('@g.us') ? 'group' : receivedChat.endsWith('@newsletter') ? 'channel' : receivedChat === 'status@broadcast' ? 'status' : receivedChat === 'unknown-chat' ? 'unknown' : 'private',
                     rawRemoteJid: m?.key?.remoteJid || null,
                     rawRemoteJidAlt: m?.key?.remoteJidAlt || null,
-                    senderJid: String(m?.key?.participant || receivedChat),
+                    senderJid: receivedSenderJid,
+                    senderIdentityCandidates: receivedSenderAliases,
+                    senderName: String(m?.pushName || (m?.key?.fromMe ? sock.user?.name : '') || 'Inconnu').slice(0, 100),
                     identityAliasCount,
                     remoteJidAlt: m?.key?.remoteJidAlt || null,
                     participantAlt: m?.key?.participantAlt || null,
@@ -3544,9 +3651,37 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     messageType: receivedType,
                     messageKeys: Object.keys(m?.message || {}),
                     bodyPreview: String(receivedBody || '').replace(/[\r\n\t]+/g, ' ').slice(0, 240),
+                    bodyLength: receivedAuditDetails.bodyLength,
+                    bodyTruncated: receivedAuditDetails.bodyTruncated,
+                    messageClassification: receivedClassification,
+                    detectedCommand: receivedParsedCommand?.command || null,
+                    detectedInternalCommand: receivedParsedCommand?.internalCommand || null,
                     timestamp: Number(m?.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m?.messageTimestamp) || null
                 };
                 console.info('[message-received]', receivedDiagnostic);
+                console.info('[message-content-received]', {
+                    sessionId,
+                    connectedAccountJid: sock.user?.id || null,
+                    messageId: receivedId,
+                    chatJid: receivedChat,
+                    chatType: receivedDiagnostic.chatType,
+                    fromMe: !!m?.key?.fromMe,
+                    senderName: receivedDiagnostic.senderName,
+                    senderJid: receivedSenderJid,
+                    senderIdentityCandidates: receivedSenderAliases,
+                    upsertType,
+                    messageClassification: receivedClassification,
+                    detectedCommand: receivedParsedCommand?.command || null,
+                    detectedInternalCommand: receivedParsedCommand?.internalCommand || null,
+                    argumentPreview: String(receivedParsedCommand?.args || '').slice(0, 1000),
+                    messageText: receivedAuditDetails.messageText,
+                    bodyLength: receivedAuditDetails.bodyLength,
+                    bodyTruncated: receivedAuditDetails.bodyTruncated,
+                    messageType: receivedAuditDetails.messageType,
+                    mediaMetadata: receivedAuditDetails.mediaMetadata,
+                    quotedMessage: receivedAuditDetails.quotedMessage,
+                    timestamp: receivedDiagnostic.timestamp
+                });
 
                 if (m.messageStubType) {
                     console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'message_stub', messageStubType: m.messageStubType });
@@ -3779,6 +3914,22 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             isGroup,
                             mode: normalizeText(sOwnerTop?.mode || sOwnerTop?.Mode || sOwnerTop?.botMode || 'prive')
                         });
+                        console.info('[message-command-classification]', {
+                            sessionId,
+                            messageId: msgId,
+                            senderName: sName,
+                            senderJid: sender,
+                            senderAliases: senderJids,
+                            chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private',
+                            chatJid: rawFrom,
+                            messageClassification: receivedClassification,
+                            detectedCommand: receivedParsedCommand?.command || null,
+                            detectedInternalCommand: receivedParsedCommand?.internalCommand || null,
+                            argumentPreview: String(receivedParsedCommand?.args || '').replace(/[\r\n\t]+/g, ' ').slice(0, 1000),
+                            bodyPreview: String(earlyBody || '').replace(/[\r\n\t]+/g, ' ').slice(0, 240),
+                            bodyLength: String(earlyBody || '').length,
+                            bodyTruncated: String(earlyBody || '').length > 12000
+                        });
 
                         if (isGroup && sender && sender !== botId && !isOwnerReal) {
                             try {
@@ -3824,11 +3975,16 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         }
                                     }
                                     if (del2Match) {
+                                        let del2DeleteSucceeded = false;
+                                        let del2DeleteError = null;
                                         try {
                                             await queuedSendMessage(sock, from, { delete: m.key }, {}, 200);
+                                            del2DeleteSucceeded = true;
                                         } catch (deleteErrorDel2) {
-                                            console.warn('[del2-delete-failed]', { sessionId, group: from, messageId: msgId, error: deleteErrorDel2?.message || String(deleteErrorDel2) });
+                                            del2DeleteError = deleteErrorDel2?.message || String(deleteErrorDel2);
+                                            console.warn('[del2-delete-failed]', { sessionId, group: from, messageId: msgId, senderName: pushName, senderJid: sender, error: del2DeleteError });
                                         }
+                                        console.info('[message-action-completed]', { sessionId, messageId: msgId, action: 'delete_by_del2_rule', success: del2DeleteSucceeded, reason: 'sender_matched_del2_target', senderName: pushName, senderJid: sender, chatJid: from, error: del2DeleteError });
                                         return;
                                     }
                                 }
@@ -3905,9 +4061,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         }
 
                                         if (canDelete) {
+                                            let antiLinkDeleteSucceeded = false;
+                                            let antiLinkDeleteError = null;
                                             try {
                                                 await queuedSendMessage(sock, from, { delete: m.key }, {}, 200);
-                                            } catch (e) {}
+                                                antiLinkDeleteSucceeded = true;
+                                            } catch (antiLinkDeleteFailure) {
+                                                antiLinkDeleteError = antiLinkDeleteFailure?.message || String(antiLinkDeleteFailure);
+                                            }
+                                            console.info('[message-action-completed]', { sessionId, messageId: msgId, action: 'delete_by_anti_link_rule', success: antiLinkDeleteSucceeded, antiLinkMode, isStrict, senderIsAdmin, senderName: pushName, senderJid: sender, chatJid: from, bodyPreview: String(bodyRawStr || '').slice(0, 240), error: antiLinkDeleteError });
                                             return;
                                         }
                                     }
@@ -3929,24 +4091,29 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             sessionId,
                             connectedAccountJid: sock.user?.id || null,
                             messageId: msgId,
+                            senderName: sName,
                             chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private',
                             incomingChatJid: rawFrom,
                             replyTargetJid: from,
                             replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid',
                             senderJid: sender,
                             senderAliases: senderJids,
+                            messageClassification: receivedClassification,
+                            detectedCommand: receivedParsedCommand?.command || null,
+                            detectedInternalCommand: receivedParsedCommand?.internalCommand || null,
                             isOwnerReal,
                             isPublicMode,
                             allowed,
                             mode: botMode,
-                            bodyPreview: body.slice(0, 180)
+                            bodyLength: body.length,
+                            bodyPreview: body.slice(0, 240)
                         });
                         if (!allowed) {
-                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: from, messageType, fromMe: isFromMe, isGroup, isChannel, isOwnerReal, botMode, isPublicMode, modeFields: { mode: sOwnerTop?.mode ?? null, Mode: sOwnerTop?.Mode ?? null, botMode: sOwnerTop?.botMode ?? null }, bodyPreview: body.slice(0, 180), reason: 'mode_disallows_non_owner' });
+                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, senderAliases: senderJids, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', messageType, fromMe: isFromMe, isGroup, isChannel, isOwnerReal, botMode, isPublicMode, messageClassification: receivedClassification, detectedCommand: receivedParsedCommand?.command || null, detectedInternalCommand: receivedParsedCommand?.internalCommand || null, modeFields: { mode: sOwnerTop?.mode ?? null, Mode: sOwnerTop?.Mode ?? null, botMode: sOwnerTop?.botMode ?? null }, bodyLength: body.length, bodyPreview: body.slice(0, 240), action: 'not_processed_due_to_mode', reason: 'mode_disallows_non_owner' });
                             return;
                         }
                         if (!body) {
-                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: from, messageType, isPublicMode, reason: 'empty_extracted_body' });
+                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, senderAliases: senderJids, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', messageType, messageClassification: receivedClassification, detectedCommand: null, isPublicMode, action: 'no_command_executed', mediaMetadata: receivedAuditDetails.mediaMetadata, reason: 'empty_extracted_body' });
                             return;
                         }
                         console.info('[message-policy-allowed]', { sessionId, upsertType, messageId: msgId, chatJid: from, senderJid: sender, messageType, isGroup, isChannel, isOwnerReal, isPublicMode, botMode });
@@ -4018,13 +4185,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
                         let parsedCommand = parseIncomingCommand(body, messageLang);
                         if (!parsedCommand) {
-                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: from, senderJid: sender, messageType, messageLang, isPublicMode, botMode, bodyPreview: body.slice(0, 240), reason: 'not_a_recognized_command', expected: 'Use an explicit recognized command; plain text is not sent to AI.' });
+                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, senderAliases: senderJids, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', messageType, messageLang, messageClassification: 'text_not_recognized_as_command', detectedCommand: null, isPublicMode, botMode, bodyLength: body.length, bodyPreview: body.slice(0, 240), action: 'message_logged_no_command_executed', reason: 'not_a_recognized_command', expected: 'Use an explicit recognized command; plain text is not sent to AI.' });
                             return;
                         }
                         const command = parsedCommand.command;
                         const args = parsedCommand.args;
                         const internalCommand = parsedCommand.internalCommand;
-                        console.info('[command-detected]', { sessionId, upsertType, messageId: msgId, chatJid: from, senderJid: sender, messageType, command, internalCommand, argumentPreview: String(args || '').replace(/[\r\n\t]+/g, ' ').slice(0, 160), isGroup, isPublicMode, isOwnerReal, mode: botMode });
+                        console.info('[command-detected]', { sessionId, upsertType, messageId: msgId, senderName: sName, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: from, senderJid: sender, senderAliases: senderJids, messageType, messageClassification: 'recognized_command', command, internalCommand, argumentPreview: String(args || '').replace(/[\r\n\t]+/g, ' ').slice(0, 1000), isGroup, isPublicMode, isOwnerReal, mode: botMode, action: 'command_handler_started' });
 
                         (async () => {
                             try {
@@ -4920,9 +5087,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 const commandStartedAt = Date.now();
                                 try {
                                     await Promise.race([commandExecute(), timeoutExecute]);
-                                    console.info('[command-completed]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid', command: internalCommand, durationMs: Date.now() - commandStartedAt, responseSent: !!(terminalResponseSent || responseSentForLog) });
+                                    console.info('[command-completed]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, senderName: sName, senderJid: sender, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid', command: internalCommand, durationMs: Date.now() - commandStartedAt, action: terminalResponseSent || responseSentForLog ? 'command_completed_response_sent' : 'command_completed_without_confirmed_response', responseSent: !!(terminalResponseSent || responseSentForLog) });
                                 } catch (e) {
-                                    console.error('[command-failed]', { sessionId, messageId: msgId, chatJid: from, command: internalCommand, durationMs: Date.now() - commandStartedAt, error: e?.message || String(e) });
+                                    console.error('[command-failed]', { sessionId, messageId: msgId, senderName: sName, senderJid: sender, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: from, command: internalCommand, durationMs: Date.now() - commandStartedAt, action: 'command_handler_failed', error: e?.message || String(e) });
                                     await safeSendActionError(sock, from, getCommandActionTitle(t, internalCommand), e, messageLang, pushName, m.messageTimestamp);
                                 } finally {
                                     if (timeoutId) clearTimeout(timeoutId);
@@ -4936,7 +5103,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             }
                         })();
 
-                    } catch (cmdError) { console.error('[message-handler]', { sessionId, upsertType, messageId: msgId, incomingChatJid: rawFrom, replyTargetJid: from, error: cmdError?.message || String(cmdError) }); }
+                    } catch (cmdError) { console.error('[message-handler]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, messageClassification: receivedClassification, detectedCommand: receivedParsedCommand?.internalCommand || receivedParsedCommand?.command || null, incomingChatJid: rawFrom, replyTargetJid: from, action: 'message_handler_failed', error: cmdError?.message || String(cmdError) }); }
                 });
             }
         });
