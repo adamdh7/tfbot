@@ -189,6 +189,9 @@ const chatHistories = new Map();
 const groupSettingsCache = new Map();
 const activeDel2UsersCache = new Map();
 const msgRetryCounterCache = new Map();
+const msgRetryCounterExpiryCache = new Map();
+const MSG_RETRY_COUNTER_TTL_MS = Math.max(60000, Math.min(86400000, Number(process.env.BAILEYS_MSG_RETRY_COUNTER_TTL_MS || 3600000)));
+const MSG_RETRY_COUNTER_MAX_ENTRIES = Math.max(1000, Math.min(50000, Number(process.env.BAILEYS_MSG_RETRY_COUNTER_MAX_ENTRIES || 20000)));
 const activeSessions = new Map();
 const groupMetadataCache = new Map();
 const sessionOwnersCache = new Map();
@@ -535,23 +538,37 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         const outgoingContent = content;
         const originalDestinationJid = String(jid || '').trim();
         let destinationJid = originalDestinationJid;
-        let destinationResolution = 'original_destination';
-        if (/@lid$/i.test(originalDestinationJid) && sessionId) {
+        let destinationResolution = /@lid$/i.test(originalDestinationJid) ? 'original_lid_preferred' : 'original_destination';
+        let alternateDestinationJid = '';
+        let alternateDestinationResolution = '';
+        if (sessionId && /@lid$/i.test(originalDestinationJid)) {
             try {
                 const resolved = await resolvePhoneForLid(sessionId, sock, originalDestinationJid);
-                if (resolved?.phone) {
-                    destinationJid = normalizePhoneCacheJid(resolved.phone) || originalDestinationJid;
-                    if (destinationJid !== originalDestinationJid) destinationResolution = resolved.source || 'lid_phone_resolution';
-                }
+                alternateDestinationJid = normalizePhoneCacheJid(resolved?.phone || getRememberedPhoneForLid(sessionId, originalDestinationJid));
+                alternateDestinationResolution = resolved?.source || (alternateDestinationJid ? 'lid_phone_cache' : 'unavailable');
             } catch (resolveError) {
-                console.warn('[private-send-target-resolution-failed]', { sessionId, originalDestinationJid, error: resolveError?.message || String(resolveError) });
+                console.warn('[private-send-alternate-resolution-failed]', { sessionId, originalDestinationJid, error: resolveError?.message || String(resolveError) });
+            }
+        } else if (sessionId && /@s\.whatsapp\.net$/i.test(originalDestinationJid)) {
+            try {
+                alternateDestinationJid = getRememberedLidForPhone(sessionId, originalDestinationJid);
+                if (!alternateDestinationJid) {
+                    const mappedLid = normalizeLidCacheKey(await sock?.signalRepository?.lidMapping?.getLIDForPN?.(normalizePhoneCacheJid(originalDestinationJid)));
+                    if (/@lid$/i.test(mappedLid)) alternateDestinationJid = mappedLid;
+                }
+                alternateDestinationResolution = alternateDestinationJid ? 'pn_lid_mapping' : 'unavailable';
+            } catch (resolveError) {
+                console.warn('[private-send-alternate-resolution-failed]', { sessionId, originalDestinationJid, error: resolveError?.message || String(resolveError) });
             }
         }
+        if (alternateDestinationJid === destinationJid) alternateDestinationJid = '';
         console.info('[private-send-target]', {
             sessionId,
             originalDestinationJid,
             destinationJid,
             destinationResolution,
+            alternateDestinationJid: alternateDestinationJid || null,
+            alternateDestinationResolution: alternateDestinationResolution || null,
             destinationType: destinationJid.endsWith('@g.us') ? 'group' : destinationJid.endsWith('@newsletter') ? 'channel' : destinationJid.endsWith('@s.whatsapp.net') ? 'private_pn' : destinationJid.endsWith('@lid') ? 'private_lid' : 'other'
         });
         const sendTo = async targetJid => {
@@ -585,8 +602,8 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 }
             }
             if (!result) {
-                let retryTargetJid = '';
-                if (/@lid$/i.test(originalDestinationJid)) {
+                let retryTargetJid = alternateDestinationJid && alternateDestinationJid !== destinationJid ? alternateDestinationJid : '';
+                if (!retryTargetJid && /@lid$/i.test(originalDestinationJid)) {
                     try {
                         const resolved = await resolvePhoneForLid(sessionId, sock, originalDestinationJid);
                         const mappedPhone = normalizePhoneCacheJid(resolved?.phone || getRememberedPhoneForLid(sessionId, originalDestinationJid));
@@ -594,9 +611,17 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                     } catch (resolveError) {
                         console.warn('[private-send-retry-resolution-failed]', { sessionId, originalDestinationJid, error: resolveError?.message || String(resolveError) });
                     }
-                    if (!retryTargetJid && destinationJid !== originalDestinationJid) retryTargetJid = originalDestinationJid;
-                } else if (/@s\.whatsapp\.net$/i.test(destinationJid) && transientSignalFailure) {
+                }
+                if (!retryTargetJid && /@s\.whatsapp\.net$/i.test(destinationJid) && transientSignalFailure) {
                     retryTargetJid = getRememberedLidForPhone(sessionId, destinationJid);
+                    if (!retryTargetJid) {
+                        try {
+                            const mappedLid = normalizeLidCacheKey(await sock?.signalRepository?.lidMapping?.getLIDForPN?.(normalizePhoneCacheJid(destinationJid)));
+                            if (/@lid$/i.test(mappedLid)) retryTargetJid = mappedLid;
+                        } catch (resolveError) {
+                            console.warn('[private-send-reverse-lid-resolution-failed]', { sessionId, destinationJid, error: resolveError?.message || String(resolveError) });
+                        }
+                    }
                     if (!retryTargetJid && db) {
                         try {
                             const mappedRecord = await db.collection('lid_phone_mappings').findOne({ phone: normalizePhoneCacheJid(destinationJid) }, { projection: { _id: 1, phone: 1 } });
@@ -608,13 +633,13 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                     }
                 }
                 if (!retryTargetJid) {
-                    console.error('[whatsapp-send-failed]', { sessionId, jid: destinationJid, originalJid: originalDestinationJid, destinationResolution, messageType: Object.keys(outgoingContent || {}).join(','), error: failureError?.message || String(failureError) });
+                    console.error('[whatsapp-send-failed]', { sessionId, jid: destinationJid, originalJid: originalDestinationJid, destinationResolution, alternateDestinationResolution, messageType: Object.keys(outgoingContent || {}).join(','), error: failureError?.message || String(failureError) });
                     throw failureError;
                 }
-                console.warn('[private-send-retry]', { sessionId, originalDestinationJid, failedDestinationJid: destinationJid, retryTargetJid, messageType: Object.keys(outgoingContent || {}).join(','), firstError: failureError?.message || String(failureError) });
+                console.warn('[private-send-retry]', { sessionId, originalDestinationJid, failedDestinationJid: destinationJid, retryTargetJid, alternateDestinationResolution, messageType: Object.keys(outgoingContent || {}).join(','), firstError: failureError?.message || String(failureError) });
                 result = await sendTo(retryTargetJid);
                 sentDestinationJid = retryTargetJid;
-                destinationResolution = retryTargetJid.endsWith('@s.whatsapp.net') ? 'pn_retry_after_lid_failure' : 'lid_fallback_after_pn_failure';
+                destinationResolution = retryTargetJid.endsWith('@s.whatsapp.net') ? 'pn_fallback_after_lid_failure' : 'lid_fallback_after_pn_failure';
             }
         }
         console.info('[whatsapp-send-completed]', {
@@ -644,10 +669,51 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
     }, delayMs, sock);
 }
 
+function getMessageRetryCount(key) {
+    const normalizedKey = String(key || '');
+    const expiresAt = Number(msgRetryCounterExpiryCache.get(normalizedKey) || 0);
+    if (!expiresAt || expiresAt <= Date.now()) {
+        msgRetryCounterCache.delete(normalizedKey);
+        msgRetryCounterExpiryCache.delete(normalizedKey);
+        return undefined;
+    }
+    return msgRetryCounterCache.get(normalizedKey);
+}
+
+function setMessageRetryCount(key, value, ttlSeconds) {
+    const normalizedKey = String(key || '');
+    if (!normalizedKey) return value;
+    const requestedTtl = Number(ttlSeconds);
+    const ttlMs = requestedTtl > 0 ? Math.min(86400000, requestedTtl * 1000) : MSG_RETRY_COUNTER_TTL_MS;
+    msgRetryCounterCache.set(normalizedKey, value);
+    msgRetryCounterExpiryCache.set(normalizedKey, Date.now() + ttlMs);
+    if (msgRetryCounterCache.size > MSG_RETRY_COUNTER_MAX_ENTRIES) {
+        const now = Date.now();
+        for (const [storedKey, storedExpiry] of msgRetryCounterExpiryCache.entries()) {
+            if (storedExpiry <= now || msgRetryCounterCache.size > MSG_RETRY_COUNTER_MAX_ENTRIES) {
+                msgRetryCounterCache.delete(storedKey);
+                msgRetryCounterExpiryCache.delete(storedKey);
+            }
+        }
+    }
+    return value;
+}
+
+function deleteMessageRetryCount(key) {
+    const normalizedKey = String(key || '');
+    msgRetryCounterExpiryCache.delete(normalizedKey);
+    return msgRetryCounterCache.delete(normalizedKey);
+}
+
 const retryCache = {
-    get: (key) => msgRetryCounterCache.get(key),
-    set: (key, value) => msgRetryCounterCache.set(key, value),
-    del: (key) => msgRetryCounterCache.delete(key)
+    get: getMessageRetryCount,
+    set: setMessageRetryCount,
+    del: deleteMessageRetryCount,
+    delete: deleteMessageRetryCount,
+    clear: () => {
+        msgRetryCounterCache.clear();
+        msgRetryCounterExpiryCache.clear();
+    }
 };
 
 async function connectMongo() {
@@ -1674,6 +1740,7 @@ app.get('/list2', (req, res) => {
             groupMetadataCache.clear();
             groupSettingsCache.clear();
             msgRetryCounterCache.clear();
+            msgRetryCounterExpiryCache.clear();
             activeSessions.clear();
             activeDel2UsersCache.clear();
             processedLocalCache.clear();
@@ -2671,9 +2738,18 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         const connectionFormat = normalizeConnectionFormat(existingSessionRecordForStart?.format || initialOwnerDoc?.format || initialOwnerDoc?.Format || format, 'pair');
         console.info('[session-connection-format]', { sessionId, format: connectionFormat, source: existingSessionRecordForStart?.format ? 'active_session' : initialOwnerDoc?.format || initialOwnerDoc?.Format ? 'session_owners' : 'requested_or_default' });
 
+        const baileysLogLevelRaw = String(process.env.BAILEYS_LOG_LEVEL || 'warn').trim().toLowerCase();
+        const baileysLogLevel = ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'].includes(baileysLogLevelRaw) ? baileysLogLevelRaw : 'warn';
+        console.info('[baileys-recovery-config]', {
+            sessionId,
+            logLevel: baileysLogLevel,
+            enableAutoSessionRecreation: true,
+            retryCounterTtlMs: MSG_RETRY_COUNTER_TTL_MS,
+            retryCounterLimit: MSG_RETRY_COUNTER_MAX_ENTRIES
+        });
         const sock = makeWASocket({
             version,
-            logger: pino({ level: 'silent' }),
+            logger: pino({ level: baileysLogLevel }),
             printQRInTerminal: false,
             auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })) },
             browser: Browsers.ubuntu('Chrome'), 
@@ -2682,6 +2758,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             msgRetryCounterCache: retryCache,
             retryRequestDelayMs: 250,
             maxMsgRetryCount: 10,
+            enableAutoSessionRecreation: true,
             syncFullHistory: false,
             keepAliveIntervalMs: 15000,
                         getMessage: async (key) => {
@@ -2763,6 +2840,27 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         });
 
         sock.ev.on('creds.update', saveCreds);
+        sock.ev.on('lid-mapping.update', mappingUpdate => {
+            try {
+                const mappingEntries = [];
+                if (mappingUpdate && typeof mappingUpdate === 'object' && (mappingUpdate.lid || mappingUpdate.LID || mappingUpdate.pn || mappingUpdate.phoneNumber)) {
+                    mappingEntries.push(mappingUpdate);
+                } else if (mappingUpdate instanceof Map) {
+                    for (const [lid, pn] of mappingUpdate.entries()) mappingEntries.push({ lid, pn });
+                } else if (mappingUpdate && typeof mappingUpdate === 'object') {
+                    for (const [lid, pn] of Object.entries(mappingUpdate)) mappingEntries.push({ lid, pn });
+                }
+                let savedMappings = 0;
+                for (const item of mappingEntries) {
+                    const first = item?.lid || item?.LID || item?.lidJid || item?.lidJID || item?.from || item?.id || '';
+                    const second = item?.pn || item?.PN || item?.phoneNumber || item?.phone || item?.pnJid || item?.to || item?.value || '';
+                    if (rememberLidPhonePair(sessionId, first, second, 'lid_mapping_update')) savedMappings++;
+                }
+                console.info('[lid-mapping-update]', { sessionId, mappingCount: mappingEntries.length, savedMappings });
+            } catch (mappingUpdateError) {
+                console.warn('[lid-mapping-update-failed]', { sessionId, error: mappingUpdateError?.message || String(mappingUpdateError) });
+            }
+        });
 
         sock.ev.on('connection.update', async (update) => {
             const currentSocketSession = activeSessions.get(sessionId);
@@ -2913,6 +3011,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 }
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 const disconnectReason = String(lastDisconnect?.error?.message || 'unknown').slice(0, 180);
+                const requiresReauthentication = statusCode === DisconnectReason.loggedOut || statusCode === 401 || statusCode === 403;
                 console.warn('[whatsapp] connection closed', {
                     sessionId,
                     connectedAccountJid: sock.user?.id || null,
@@ -2921,7 +3020,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     previousStatus: currentSession?.status || null,
                     statusCode: statusCode ?? null,
                     reason: disconnectReason,
-                    willReconnect: statusCode !== DisconnectReason.loggedOut && statusCode !== 401
+                    requiresReauthentication,
+                    willReconnect: !requiresReauthentication
                 });
                 
                 try {
@@ -2931,7 +3031,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     console.error('[whatsapp-close-cleanup]', { sessionId, error: closeError?.message || String(closeError) });
                 }
 
-                if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
+                if (requiresReauthentication) {
                     try {
                         const currentRecord = activeSessions.get(sessionId);
                         const numToBackup = currentRecord ? currentRecord.number : null;
@@ -3440,11 +3540,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const sender = isFromMe ? botId : rawChatIsGroup
                             ? (m.key.participant || m.key.participantAlt || m.key.participantPn || null)
                             : (m.key.remoteJid || m.key.remoteJidAlt || m.key.participant || null);
-                        const alternatePrivatePhoneJid = !rawChatIsGroup && !rawChatIsChannel && /@lid$/i.test(rawFrom) && /@s\.whatsapp\.net$/i.test(String(m.key.remoteJidAlt || ''))
-                            ? String(m.key.remoteJidAlt)
-                            : '';
-                        let from = alternatePrivatePhoneJid || rawFrom;
-                        let privateReplyTargetResolution = alternatePrivatePhoneJid ? 'remoteJidAlt' : 'original_chat_jid';
+                        let from = rawFrom;
+                        let privateReplyTargetResolution = /@lid$/i.test(rawFrom) ? 'original_chat_jid_lid_preferred' : 'original_chat_jid_pn_preferred';
                         const earlyBody = extractBody(m);
                         if (isFromMe && (/(?:^|\n)\s*>\s*\*Adam D'H7\*/i.test(earlyBody) || /^\s*[*_`]*\s*[○●]\s*/u.test(earlyBody))) {
                             console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: from, fromMe: true, bodyPreview: String(earlyBody || '').replace(/[\r\n\t]+/g, ' ').slice(0, 180), reason: 'own_bot_response_echo' });
@@ -3511,11 +3608,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             }
                             const directPhone = normalizePhoneCacheJid(directPhoneCandidate?.value || '');
                             if (directPhone) {
-                                from = directPhone;
-                                privateReplyTargetResolution = directPhoneCandidate.source;
+                                privateReplyTargetResolution = 'original_lid_preferred_with_pn_fallback_available';
                                 if (!isFromMe) senderJids.push(directPhone);
                             } else {
-                                privateReplyTargetResolution = 'fallback_lid_no_pn_mapping';
+                                privateReplyTargetResolution = 'original_lid_preferred_no_pn_mapping';
                             }
                         }
                         const uniqueSenderJids = [...new Set(senderJids)];
