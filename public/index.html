@@ -19,6 +19,9 @@
     <meta name="theme-color" content="#000000">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" type="image/png" href="https://adamdh7.org/asset/nwa.png">
+    <link rel="apple-touch-icon" href="https://adamdh7.org/asset/nwa.png">
     <title>tfbot</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
@@ -27,7 +30,7 @@
             --bg-dark: #000000;
             --text-main: #ffffff;
             --text-muted: #666666;
-            --glass: #a9a9a9;
+            --glass: #1c1c1e;
         }
         * {
             margin: 0;
@@ -548,7 +551,7 @@
             </div>
 
             <button class="status-badge" onclick="navigate('info')">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
                 <span>It's Us Adam D'H7</span>
             </button>
         </header>
@@ -657,14 +660,14 @@
                 svg: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 1 0 0 12.324 6.162 6.162 0 0 0 0-12.324zM12 16a4 4 0 1 1 0-8 4 4 0 0 1 0 8zm6.406-11.845a1.44 1.44 0 1 0 0 2.881 1.44 1.44 0 0 0 0-2.881z"/></svg>'
             },
             {
-                label: 'Facebook',
-                href: 'https://facebook.com/adamdh7tf',
-                svg: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13.9 8.1V6.7c0-.7.4-1 1-1H17V3h-2.5C12.2 3 11 4.4 11 6.5v1.6H8.5v3H11V21h2.9v-9.9h2.7l.4-3h-3.1Z"></path></svg>'
-            },
-            {
                 label: 'Telegram',
                 href: 'https://t.me/dh7adam',
                 svg: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>'
+            },
+            {
+                label: 'Facebook',
+                href: 'https://facebook.com/adamdh7tf',
+                svg: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13.9 8.1V6.7c0-.7.4-1 1-1H17V3h-2.5C12.2 3 11 4.4 11 6.5v1.6H8.5v3H11V21h2.9v-9.9h2.7l.4-3h-3.1Z"></path></svg>'
             },
             {
                 label: 'TikTok',
@@ -685,19 +688,19 @@
                 mlang: "Langues", minfo: "Info", mpoints: "Points", ltitle: "Langues", 
                 ititle: "Info", pheader: "Tu as {x} points", clicks: "Clicks",
                 err_num: "Numéro invalide", err_pts_code: "4 points requis pour le code",
-                err_pts_qr: "3 points requis pour le QR", err_conn: "Erreur de connexion",
+                err_pts_qr: "3 points requis pour le QR", err_conn: "Impossible de joindre le serveur tfbot. Vérifiez la connexion puis réessayez.", err_access: "Accès refusé. Ouvrez tfbot depuis bot.adamdh7.org.", err_server: "Le serveur n’a pas pu créer la session. Réessayez dans un instant.", err_busy: "Trop de demandes. Attendez un peu avant de réessayer.",
                 err_qr_link: "Impossible de préparer le lien du QR.", qr_hint: "Touchez le QR pour ouvrir son lien",
                 succ_copy: "Copié", succ_pts: "+1 Point",
                 infoHTML: `
                     <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Bienvenue sur le système de connexion tfbot. Cette interface permet de connecter votre appareil de manière sécurisée et stable afin de profiter pleinement des fonctionnalités avancées du bot.</p>
                     <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Les sessions sont optimisées pour garantir la sécurité et les performances. Le système gère l'ensemble des opérations de façon transparente et automatique.</p>
                     <p style="text-align:left; line-height:1.6; margin-bottom:15px;">L'accès aux options nécessite des points :</p>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #a9a9a9; color: #000000; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; color: #ffffff; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
                         <span style="font-size: 15px;"><strong>4 points</strong> pour un Code de paire</span>
                     </div>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #a9a9a9; color: #000000; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; color: #ffffff; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
                         <span style="font-size: 15px;"><strong>3 points</strong> pour un Code QR</span>
                     </div>
                     <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Pour obtenir vos points, accédez au menu, puis à la section Points, cliquez sur le bouton "Clicks" et restez sur la page affichée pendant au moins 4 secondes. Une interaction active valide l'ajout d'un point.</p>
@@ -709,19 +712,19 @@
                 mlang: "Languages", minfo: "Info", mpoints: "Points", ltitle: "Languages", 
                 ititle: "Info", pheader: "You have {x} points", clicks: "Clicks",
                 err_num: "Invalid number", err_pts_code: "4 points required for code",
-                err_pts_qr: "3 points required for QR", err_conn: "Connection error",
+                err_pts_qr: "3 points required for QR", err_conn: "Could not reach tfbot. Check your connection and try again.", err_access: "Access denied. Open tfbot through bot.adamdh7.org.", err_server: "The server could not create the session. Try again shortly.", err_busy: "Too many requests. Wait briefly before trying again.",
                 err_qr_link: "Unable to prepare the QR link.", qr_hint: "Tap the QR to open its link",
                 succ_copy: "Copied", succ_pts: "+1 Point",
                 infoHTML: `
                     <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Welcome to the connection system tfbot. This interface allows you to connect your device stably to enjoy the features with complete simplicity.</p>
                     <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Sessions have an optimized lifespan to guarantee security and performance. The system takes care of everything transparently.</p>
                     <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Access to options requires points:</p>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #a9a9a9; color: #000000; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; color: #ffffff; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
                         <span style="font-size: 15px;"><strong>4 points</strong> for a Pair Code</span>
                     </div>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #a9a9a9; color: #000000; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; color: #ffffff; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
                         <span style="font-size: 15px;"><strong>3 points</strong> for a QR Code</span>
                     </div>
                     <p style="text-align:left; line-height:1.6; margin-bottom:15px;">To obtain your points, click on the menu button then points then click on the button you see and stay on the displayed page for at least 4 seconds. An active exploration validates your point.</p>
@@ -733,19 +736,19 @@
                 mlang: "Idiomas", minfo: "Info", mpoints: "Puntos", ltitle: "Idiomas", 
                 ititle: "Info", pheader: "Tienes {x} puntos", clicks: "Clics",
                 err_num: "Número inválido", err_pts_code: "4 puntos requeridos para el código",
-                err_pts_qr: "3 puntos requeridos para el QR", err_conn: "Error de conexión",
+                err_pts_qr: "3 puntos requeridos para el QR", err_conn: "No se pudo conectar con tfbot. Comprueba la conexión e inténtalo de nuevo.", err_access: "Acceso denegado. Abre tfbot desde bot.adamdh7.org.", err_server: "El servidor no pudo crear la sesión. Inténtalo de nuevo en breve.", err_busy: "Demasiadas solicitudes. Espera un poco antes de intentarlo otra vez.",
                 err_qr_link: "No se pudo preparar el enlace del QR.", qr_hint: "Toca el QR para abrir su enlace",
                 succ_copy: "Copiado", succ_pts: "+1 Punto",
                 infoHTML: `
                     <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Bienvenido al sistema de conexión tfbot. Esta interfaz permite conectar tu dispositivo de manera estable para disfrutar de las funcionalidades con total simplicidad.</p>
                     <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Las sesiones tienen una duración de vida optimizada para garantizar seguridad y rendimiento. El sistema se encarga de todo de forma transparente.</p>
                     <p style="text-align:left; line-height:1.6; margin-bottom:15px;">El acceso a las opciones requiere puntos:</p>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #a9a9a9; color: #000000; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; color: #ffffff; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
                         <span style="font-size: 15px;"><strong>4 puntos</strong> para un Código de par</span>
                     </div>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #a9a9a9; color: #000000; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; color: #ffffff; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
                         <span style="font-size: 15px;"><strong>3 puntos</strong> para un Código QR</span>
                     </div>
                     <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Para obtener tus puntos, haz clic en el botón menú luego puntos luego haz clic en el botón que ves y permanece en la página mostrada durante al menos 4 segundos. Una exploración activa valida tu punto.</p>
@@ -757,19 +760,19 @@
                 mlang: "Lang", minfo: "Enfòmasyon", mpoints: "Pwen", ltitle: "Lang", 
                 ititle: "Enfòmasyon", pheader: "Ou gen {x} pwen", clicks: "Klike",
                 err_num: "Ajoute yon nimewo ki valab", err_pts_code: "4 pwen nesesè pou kòd pè a",
-                err_pts_qr: "3 pwen nesesè pou QR la", err_conn: "Erè koneksyon",
+                err_pts_qr: "3 pwen nesesè pou QR la", err_conn: "Nou pa ka jwenn sèvè tfbot la. Verifye koneksyon an epi eseye ankò.", err_access: "Aksè refize. Louvri tfbot depi bot.adamdh7.org.", err_server: "Sèvè a pa t kapab kreye sesyon an. Tanpri eseye ankò talè.", err_busy: "Gen twòp demann. Tann yon ti moman anvan ou eseye ankò.",
                 err_qr_link: "Nou pa t kapab prepare lyen QR la.", qr_hint: "Klike sou QR la pou ouvri lyen li",
                 succ_copy: "Kopye", succ_pts: "+1 Pwen",
                 infoHTML: `
                     <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Byenveni sou sistèm lyezon tfbot lan. Entèfas sa a pèmèt ou konekte aparèy ou a yon fason ki estab pou'w jwi fonksyonalite yo ak tout senplisite.</p>
                     <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Sesyon yo gen yon dire lavi optimize pou garanti sekirite ak pèfòmans. Sistèm nan pran swen tout bagay yon fason transparan.</p>
                     <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Aksè a opsyon yo mande pwen :</p>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #a9a9a9; color: #000000; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; color: #ffffff; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
                         <span style="font-size: 15px;"><strong>4 pwen</strong> pou yon Kòd Pè</span>
                     </div>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #a9a9a9; color: #000000; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
+                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; color: #ffffff; padding: 14px; border-radius: 16px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
                         <span style="font-size: 15px;"><strong>3 pwen</strong> pou yon Kòd QR</span>
                     </div>
                     <p style="text-align:left; line-height:1.6; margin-bottom:15px;">Pou jwenn fiti pwen ou yo, klike sou bouton meni a, aprè bouton ki ekri pwen an, answit klike sou bouton gri ki ekri Klike an, epi rete sou paj ki afiche a pandan o mwen 4 segonn. Yon eksplorasyon aktif valide pwen ou an.</p>
@@ -943,6 +946,8 @@
             if (currentQrTargetUrl) return currentQrTargetUrl;
             if (qrUploadPromise) return qrUploadPromise;
             const version = qrRequestVersion;
+            const uploadController = new AbortController();
+            const uploadTimer = setTimeout(() => uploadController.abort(), 25000);
             qrUploadPromise = (async () => {
                 const blob = await getQrImageBlob();
                 const filename = `tfbot-qr-${Date.now()}.png`;
@@ -950,7 +955,8 @@
                 const presignResponse = await fetch(BREF_UPLOAD_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ filename, size: blob.size, contentType })
+                    body: JSON.stringify({ filename, size: blob.size, contentType }),
+                    signal: uploadController.signal
                 });
                 const presignText = await presignResponse.text();
                 let presignData;
@@ -963,13 +969,15 @@
                 const putResponse = await fetch(parsedUploadUrl.href, {
                     method: 'PUT',
                     headers: presignData.headers,
-                    body: blob
+                    body: blob,
+                    signal: uploadController.signal
                 });
                 if (!putResponse.ok) throw new Error(`Bref binary upload failed (HTTP ${putResponse.status})`);
                 const confirmResponse = await fetch(`${BREF_UPLOAD_URL.replace(/\/+$/, '')}/confirm`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ token: presignData.token })
+                    body: JSON.stringify({ token: presignData.token }),
+                    signal: uploadController.signal
                 });
                 const confirmText = await confirmResponse.text();
                 let confirmData;
@@ -985,7 +993,11 @@
             })();
             try {
                 return await qrUploadPromise;
+            } catch (error) {
+                if (error && error.name === 'AbortError') throw new Error('bref_client_upload_timeout');
+                throw error;
             } finally {
+                clearTimeout(uploadTimer);
                 qrUploadPromise = null;
             }
         }
@@ -996,6 +1008,10 @@
                 event.stopPropagation();
             }
             const t = i18n[currentLang];
+            if (!currentQrTargetUrl) {
+                showNotif(t.err_qr_link);
+                return;
+            }
             const targetWindow = window.open('about:blank', '_blank');
             if (!targetWindow) {
                 showNotif(t.err_qr_link);
@@ -1003,9 +1019,7 @@
             }
             try { targetWindow.opener = null; } catch (error) {}
             try {
-                const targetUrl = currentQrTargetUrl || await uploadQrImageToBref();
-                if (!targetUrl) throw new Error('QR target URL is missing');
-                targetWindow.location.replace(targetUrl);
+                targetWindow.location.replace(currentQrTargetUrl);
             } catch (error) {
                 try { targetWindow.close(); } catch (closeError) {}
                 showNotif(t.err_qr_link);
@@ -1149,6 +1163,15 @@
             }
         });
 
+        function actionErrorText(error, status, t) {
+            const code = String(error && error.message ? error.message : error || '').toLowerCase();
+            if (code.includes('invalid_number')) return t.err_num;
+            if (code.includes('frontend_origin_denied') || code.includes('token_required') || status === 401 || status === 403) return t.err_access;
+            if (code.includes('rate_limited') || status === 429) return t.err_busy;
+            if (status >= 500 || code.includes('pair_error') || code.includes('session_start')) return t.err_server;
+            return t.err_conn;
+        }
+
         async function handleAction(type) {
             const t = i18n[currentLang];
             sanitizePhoneField();
@@ -1181,49 +1204,93 @@
             ui.qr.style.background = 'transparent';
             ui.qr.style.padding = '0';
             ui.qr.style.border = 'none';
+            ui.code.style.display = 'none';
+            ui.hint.style.display = 'none';
+            currentQrTargetUrl = '';
+            qrUploadPromise = null;
+            let statusCode = 0;
+            let qrShown = false;
 
             try {
                 const res = await fetch('/get-code', {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    cache: 'no-store',
+                    credentials: 'same-origin',
                     body: JSON.stringify({ number: type === 'code' ? number : '', method: type })
                 });
+                statusCode = res.status;
                 const responseText = await res.text();
                 let data;
-                try { data = JSON.parse(responseText || '{}'); } catch (error) { throw new Error('Invalid server response'); }
-                if (!res.ok || data.error || data.success === false) throw new Error(String(data.error || data.message || `HTTP ${res.status}`));
-                ui.loader.style.display = 'none';
-                ui.output.style.display = 'block';
+                try { data = JSON.parse(responseText || '{}'); } catch (error) { throw new Error(`invalid_server_response_http_${res.status}`); }
+                if (!res.ok || data.error || data.ok === false || data.success === false) {
+                    throw new Error(String(data.error || data.message || `http_${res.status}`));
+                }
 
                 if (type === 'code' && data.code) {
+                    ui.output.style.display = 'block';
                     ui.qr.style.display = 'none';
                     ui.code.style.display = 'block';
                     ui.hint.style.display = 'block';
                     ui.code.textContent = data.code;
                     ui.hint.textContent = t.copy;
                     ui.code.onclick = () => {
-                        navigator.clipboard.writeText(data.code);
-                        showNotif(t.succ_copy);
+                        navigator.clipboard.writeText(data.code).then(() => showNotif(t.succ_copy)).catch(() => showNotif(t.err_conn));
                     };
-                } else if (type === 'qr' && data.qr) {
-                    qrRequestVersion++;
-                    qrUploadPromise = null;
-                    currentQrTargetUrl = getQrUrlFromServer(data);
-                    persistentSet('qr_open_url', currentQrTargetUrl);
-                    ui.qr.innerHTML = '';
-                    ui.code.style.display = 'none';
-                    ui.qr.style.display = 'inline-block';
-                    ui.hint.style.display = 'block';
-                    new QRCode(ui.qr, { text: String(data.qr), width: 220, height: 220, colorDark: "#ffffff", colorLight: "#000000" });
-                    ui.hint.textContent = t.qr_hint;
-                } else {
-                    throw new Error('The server did not return a valid code or QR payload');
+                    ui.loader.style.display = 'none';
+                    return;
                 }
 
-            } catch (e) {
+                if (type !== 'qr' || !data.qr) throw new Error('server_response_missing_qr_or_code');
+
+                qrRequestVersion++;
+                const thisQrVersion = qrRequestVersion;
+                currentQrTargetUrl = getQrUrlFromServer(data);
+                persistentSet('qr_open_url', currentQrTargetUrl);
+                ui.output.style.display = 'block';
+                ui.qr.innerHTML = '';
+                ui.code.style.display = 'none';
+                ui.qr.style.display = 'inline-block';
+                ui.qr.style.pointerEvents = currentQrTargetUrl ? 'auto' : 'none';
+                ui.qr.tabIndex = currentQrTargetUrl ? 0 : -1;
+                ui.qr.setAttribute('aria-disabled', currentQrTargetUrl ? 'false' : 'true');
+                ui.hint.style.display = 'block';
+                ui.hint.textContent = t.qr_hint;
+                if (typeof QRCode === 'function') {
+                    new QRCode(ui.qr, { text: String(data.qr), width: 220, height: 220, colorDark: '#ffffff', colorLight: '#000000' });
+                } else if (typeof data.qrDataUrl === 'string' && data.qrDataUrl.startsWith('data:image/')) {
+                    const qrImage = document.createElement('img');
+                    qrImage.src = data.qrDataUrl;
+                    qrImage.alt = 'WhatsApp QR code';
+                    qrImage.draggable = false;
+                    qrImage.style.width = 'clamp(160px, 50vw, 220px)';
+                    qrImage.style.height = 'auto';
+                    qrImage.style.maxWidth = '100%';
+                    ui.qr.appendChild(qrImage);
+                } else {
+                    throw new Error('qr_renderer_unavailable');
+                }
+                qrShown = true;
+
+                await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                if (!currentQrTargetUrl && thisQrVersion === qrRequestVersion) {
+                    try {
+                        currentQrTargetUrl = await uploadQrImageToBref();
+                        persistentSet('qr_open_url', currentQrTargetUrl);
+                    } catch (uploadError) {
+                        console.error('[tfbot-qr-upload-failed]', uploadError && uploadError.message ? uploadError.message : uploadError);
+                        showNotif(t.err_qr_link);
+                    }
+                }
+                ui.qr.style.pointerEvents = currentQrTargetUrl ? 'auto' : 'none';
+                ui.qr.tabIndex = currentQrTargetUrl ? 0 : -1;
+                ui.qr.setAttribute('aria-disabled', currentQrTargetUrl ? 'false' : 'true');
                 ui.loader.style.display = 'none';
-                ui.output.style.display = 'none';
-                showNotif(t.err_conn);
+            } catch (error) {
+                console.error('[tfbot-ui-action-failed]', { action: type, status: statusCode, error: error && error.message ? error.message : String(error) });
+                ui.loader.style.display = 'none';
+                if (!qrShown) ui.output.style.display = 'none';
+                showNotif(actionErrorText(error, statusCode, t));
             }
         }
 
