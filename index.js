@@ -9,7 +9,16 @@ const originalConsoleDir = console.dir.bind(console);
 const originalConsoleTable = console.table.bind(console);
 let lastSignalDiagnosticAt = 0;
 function getSignalLogText(args) {
-    return args.map(value => typeof value === 'string' ? value : value instanceof Error ? `${value.name}: ${value.message}` : '').join(' ');
+    return args.map(value => {
+        if (typeof value === 'string') return value;
+        if (value instanceof Error) return `${value.name}: ${value.message} ${String(value.stack || '').slice(0, 1200)}`;
+        if (value && typeof value === 'object') {
+            const selected = [value.name, value.message, value.error?.name, value.error?.message, value.fromJid, value.remoteJid, value.msgId, value.messageId, value.id, value.retryCount]
+                .filter(item => item !== undefined && item !== null && typeof item !== 'object');
+            return selected.join(' ');
+        }
+        return '';
+    }).join(' ');
 }
 function containsSignalKeyData(value, depth = 0, seen = new WeakSet()) {
     if (!value || typeof value !== 'object' || depth > 5 || Buffer.isBuffer(value) || value instanceof Uint8Array || seen.has(value)) return false;
@@ -25,53 +34,70 @@ function isSensitiveSignalLog(args) {
     const value = getSignalLogText(args);
     return containsSignalKeyData(args) || /Closing open session in favor of incoming prekey bundle|Closing stale open session for new outgoing prekey bundle|Closing session:|Removing old closed session:|SessionEntry|ephemeralKeyPair|remoteIdentityKey|previousCounter|rootKey|pendingPreKey/i.test(value);
 }
+const signalDiagnosticTimes = new Map();
 function isSignalDecryptionFailure(args) {
-    return /Failed to decrypt message with any known session|Session error:.*Bad MAC|Bad MAC/i.test(getSignalLogText(args));
+    return /Failed to decrypt message with any known session|Session error:.*Bad MAC|Bad MAC|MessageCounterError|Key used already or never filled|SessionError:\s*No sessions|No sessions/i.test(getSignalLogText(args));
 }
-function logSignalDecryptionFailure() {
+function logSignalDecryptionFailure(args) {
+    const raw = getSignalLogText(args);
     const now = Date.now();
-    if (now - lastSignalDiagnosticAt >= 30000) {
-        lastSignalDiagnosticAt = now;
-        originalConsoleWarn('[whatsapp-signal] Signal could not decrypt a message (Bad MAC). Stored credentials and keys were preserved; no keys were automatically deleted.');
-    }
+    const kind = /MessageCounterError|Key used already or never filled/i.test(raw) ? 'message_counter_error'
+        : /SessionError:\s*No sessions|No sessions/i.test(raw) ? 'signal_session_missing'
+        : /Bad MAC/i.test(raw) ? 'bad_mac'
+        : /Failed to decrypt message with any known session/i.test(raw) ? 'decrypt_failed'
+        : 'signal_decryption_error';
+    const peerMatch = raw.match(/\b\d{5,25}(?::\d+)?@(?:s\.whatsapp\.net|lid|g\.us)\b/i);
+    const messageMatch = raw.match(/\b(?:msgId|messageId|message id|id)\s*[:=]\s*['"]?([A-F0-9]{8,40})\b/i);
+    const peerJid = peerMatch ? peerMatch[0] : null;
+    const messageId = messageMatch ? messageMatch[1] : null;
+    const diagnosticKey = `${kind}:${peerJid || 'unknown'}`;
+    const last = Number(signalDiagnosticTimes.get(diagnosticKey) || 0);
+    if (now - last < 10000) return;
+    signalDiagnosticTimes.set(diagnosticKey, now);
+    while (signalDiagnosticTimes.size > 500) signalDiagnosticTimes.delete(signalDiagnosticTimes.keys().next().value);
+    const safeDetail = kind === 'message_counter_error' ? 'Signal message counter was out of sequence'
+        : kind === 'signal_session_missing' ? 'No Signal session was available for this peer'
+        : kind === 'bad_mac' ? 'Signal authentication check failed'
+        : 'Baileys could not decrypt an incoming message';
+    originalConsoleWarn('[whatsapp-signal-diagnostic]', { kind, peerJid, messageId, detail: safeDetail, retryExpected: true, credentialsDeleted: false });
 }
 console.log = (...args) => {
-    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure();
+    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
     originalConsoleLog(...args);
 };
 console.error = (...args) => {
-    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure();
+    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
     originalConsoleError(...args);
 };
 console.warn = (...args) => {
-    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure();
+    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
     originalConsoleWarn(...args);
 };
 console.info = (...args) => {
-    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure();
+    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
     originalConsoleInfo(...args);
 };
 console.debug = (...args) => {
-    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure();
+    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
     originalConsoleDebug(...args);
 };
 console.trace = (...args) => {
-    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure();
+    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
     originalConsoleTrace(...args);
 };
 console.dir = (...args) => {
-    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure();
+    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
     originalConsoleDir(...args);
 };
 console.table = (...args) => {
-    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure();
+    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
     originalConsoleTable(...args);
 };
@@ -705,16 +731,24 @@ function deleteMessageRetryCount(key) {
     return msgRetryCounterCache.delete(normalizedKey);
 }
 
-const retryCache = {
-    get: getMessageRetryCount,
-    set: setMessageRetryCount,
-    del: deleteMessageRetryCount,
-    delete: deleteMessageRetryCount,
-    clear: () => {
-        msgRetryCounterCache.clear();
-        msgRetryCounterExpiryCache.clear();
-    }
-};
+function createSessionRetryCache(sessionId) {
+    const prefix = `${String(sessionId || 'default')}:`;
+    const keyFor = key => `${prefix}${String(key || '')}`;
+    return {
+        get: key => getMessageRetryCount(keyFor(key)),
+        set: (key, value, ttlSeconds) => setMessageRetryCount(keyFor(key), value, ttlSeconds),
+        del: key => deleteMessageRetryCount(keyFor(key)),
+        delete: key => deleteMessageRetryCount(keyFor(key)),
+        clear: () => {
+            for (const key of msgRetryCounterCache.keys()) {
+                if (key.startsWith(prefix)) {
+                    msgRetryCounterCache.delete(key);
+                    msgRetryCounterExpiryCache.delete(key);
+                }
+            }
+        }
+    };
+}
 
 async function connectMongo() {
     if (!mongoUri) throw new Error('MONGO_URI is not configured');
@@ -2740,33 +2774,56 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
         const baileysLogLevelRaw = String(process.env.BAILEYS_LOG_LEVEL || 'warn').trim().toLowerCase();
         const baileysLogLevel = ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'].includes(baileysLogLevelRaw) ? baileysLogLevelRaw : 'warn';
+        const signalStoreLogLevelRaw = String(process.env.BAILEYS_SIGNAL_STORE_LOG_LEVEL || 'warn').trim().toLowerCase();
+        const signalStoreLogLevel = ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'].includes(signalStoreLogLevelRaw) ? signalStoreLogLevelRaw : 'warn';
         console.info('[baileys-recovery-config]', {
             sessionId,
             logLevel: baileysLogLevel,
+            signalStoreLogLevel,
             enableAutoSessionRecreation: true,
+            enableRecentMessageCache: true,
             retryCounterTtlMs: MSG_RETRY_COUNTER_TTL_MS,
             retryCounterLimit: MSG_RETRY_COUNTER_MAX_ENTRIES
         });
         const sock = makeWASocket({
             version,
-            logger: pino({ level: baileysLogLevel }),
+            logger: pino({ level: baileysLogLevel, base: { sessionId, component: 'baileys' } }),
             printQRInTerminal: false,
-            auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })) },
+            auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: signalStoreLogLevel, base: { sessionId, component: 'signal-key-store' } })) },
             browser: Browsers.ubuntu('Chrome'), 
             markOnlineOnConnect: false,
             generateHighQualityLinkPreview: true,
-            msgRetryCounterCache: retryCache,
+            msgRetryCounterCache: createSessionRetryCache(sessionId),
             retryRequestDelayMs: 250,
             maxMsgRetryCount: 10,
             enableAutoSessionRecreation: true,
+            enableRecentMessageCache: true,
             syncFullHistory: false,
             keepAliveIntervalMs: 15000,
                         getMessage: async (key) => {
+                let exactRecentMessage = null;
+                let sameIdRecentMessage = null;
                 for (let i = recentMsgsCache.length - 1; i >= 0; i--) {
                     const found = recentMsgsCache[i];
-                    if (found.sessionId === sessionId && found.id === key.id && (!key.remoteJid || found.from === key.remoteJid)) return found.message;
+                    if (found.sessionId !== sessionId || found.id !== key.id) continue;
+                    if (!sameIdRecentMessage) sameIdRecentMessage = found;
+                    if (!key.remoteJid || found.from === key.remoteJid) {
+                        exactRecentMessage = found;
+                        break;
+                    }
                 }
-                if (!key?.id || !db) return undefined;
+                if (exactRecentMessage) {
+                    console.debug('[message-retry-cache-hit]', { sessionId, messageId: key.id, match: 'exact_chat' });
+                    return exactRecentMessage.message;
+                }
+                if (sameIdRecentMessage) {
+                    console.info('[message-retry-cache-hit]', { sessionId, messageId: key.id, requestedChatJid: key.remoteJid || null, cachedChatJid: sameIdRecentMessage.from || null, match: 'same_session_message_id' });
+                    return sameIdRecentMessage.message;
+                }
+                if (!key?.id || !db) {
+                    console.info('[message-retry-cache-miss]', { sessionId, messageId: key?.id || null, requestedChatJid: key?.remoteJid || null, databaseAvailable: !!db });
+                    return undefined;
+                }
                 try {
                     const query = { _id: `${sessionId}:${String(key.id)}` };
                     if (key.remoteJid) query.remoteJid = key.remoteJid;
@@ -2840,6 +2897,25 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         });
 
         sock.ev.on('creds.update', saveCreds);
+        sock.ev.on('messages.update', updates => {
+            if (!Array.isArray(updates)) return;
+            for (const item of updates.slice(0, 50)) {
+                const update = item?.update || {};
+                const status = update.status;
+                const error = update.error;
+                if (status === undefined && !error) continue;
+                console.info('[whatsapp-message-status-update]', {
+                    sessionId,
+                    messageId: item?.key?.id || null,
+                    chatJid: item?.key?.remoteJid || null,
+                    fromMe: !!item?.key?.fromMe,
+                    status: status ?? null,
+                    errorName: error?.name || error?.constructor?.name || null,
+                    errorMessage: String(error?.message || '').replace(/[\r\n\t]+/g, ' ').slice(0, 180) || null
+                });
+            }
+        });
+
         sock.ev.on('lid-mapping.update', mappingUpdate => {
             try {
                 const mappingEntries = [];
@@ -3009,6 +3085,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     currentSession.status = 'deconnecte';
                     currentSession.disconnectTime = Date.now();
                 }
+                const previousStatus = currentSession?.status || null;
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 const disconnectReason = String(lastDisconnect?.error?.message || 'unknown').slice(0, 180);
                 const requiresReauthentication = statusCode === DisconnectReason.loggedOut || statusCode === 401 || statusCode === 403;
@@ -3017,7 +3094,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     connectedAccountJid: sock.user?.id || null,
                     connectedNumber: sock.user?.id ? normalizedJidNumber(sock.user.id) : null,
                     connectionFormat,
-                    previousStatus: currentSession?.status || null,
+                    previousStatus,
                     statusCode: statusCode ?? null,
                     reason: disconnectReason,
                     requiresReauthentication,
@@ -3048,7 +3125,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const logoutTimer = reconnectTimers.get(sessionId);
                         if (logoutTimer) clearTimeout(logoutTimer);
                         reconnectTimers.delete(sessionId);
-                        console.warn('[whatsapp] reauthentication required; MongoDB auth data preserved', { sessionId, statusCode: statusCode ?? null });
+                        await releaseSessionRuntimeLock(sessionId);
+                        console.warn('[whatsapp] reauthentication required; MongoDB auth data preserved and runtime lock released', { sessionId, statusCode: statusCode ?? null });
                     } catch (logoutCleanupError) {
                         console.error('[whatsapp-reauth-state]', { sessionId, error: logoutCleanupError?.message || String(logoutCleanupError) });
                     }
@@ -4126,7 +4204,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 printQRInTerminal: false,
                                                 auth: { creds: tempState.creds, keys: makeCacheableSignalKeyStore(tempState.keys, pino({ level: "silent" })) },
                                                 browser: Browsers.ubuntu('Chrome'),
-                                                msgRetryCounterCache: retryCache
+                                                msgRetryCounterCache: createSessionRetryCache(tempId)
                                             });
 
                                             tempSock.ev.on('creds.update', tempSaveCreds);
