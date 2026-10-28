@@ -257,6 +257,7 @@ function cacheRecentMessage(sessionId, message) {
     const entry = {
         sessionId,
         id,
+        key: message.key ? { ...message.key } : null,
         from: message.key.remoteJid || '',
         sender: message.key.participant || message.key.remoteJid || '',
         fromMe: !!message.key.fromMe,
@@ -298,22 +299,50 @@ function normalizeEchoText(value) {
 function formatLinksInText(value) {
     const text = String(value || '');
     const pattern = /https?:\/\/[^\s*<>"'`]+/gi;
-    const existingPairs = [['**_', '_**'], ['*_', '_*'], ['**', '**'], ['*', '*'], ['__', '__'], ['_', '_']];
-    return text.replace(pattern, (match, offset, source) => {
-        const before = source.slice(0, offset);
-        const after = source.slice(offset + match.length);
-        if (existingPairs.some(([opening, closing]) => before.endsWith(opening) && after.startsWith(closing))) return match;
-        if (match.endsWith('_') && existingPairs.some(([opening, closing]) => before.endsWith(opening) && closing.startsWith('_') && after.startsWith(closing.slice(1)))) return match;
-        if (match.endsWith('_') && before.endsWith('_') && !after.trimStart().startsWith('*')) return match;
-        let url = match;
+    const openings = ['**_', '*_', '__', '_', '**', '*'];
+    let output = '';
+    let cursor = 0;
+    let match;
+    while ((match = pattern.exec(text))) {
+        let start = match.index;
+        let end = start + match[0].length;
+        let url = match[0];
+        let opening = '';
+        for (const candidate of openings) {
+            if (start >= candidate.length && text.slice(start - candidate.length, start) === candidate) {
+                opening = candidate;
+                break;
+            }
+        }
+        const afterRaw = text.slice(end);
+        if (opening === '**_' && url.endsWith('_') && afterRaw.startsWith('**')) {
+            url = url.replace(/_+$/, '');
+            end += 2;
+        } else if (opening === '*_' && url.endsWith('_') && afterRaw.startsWith('*')) {
+            url = url.replace(/_+$/, '');
+            end += 1;
+        } else if (opening === '__' && url.endsWith('_')) {
+            url = url.replace(/_+$/, '');
+            if (afterRaw.startsWith('_')) end += 1;
+        } else if (opening === '_' && url.endsWith('_') && !afterRaw.startsWith('*')) {
+            url = url.replace(/_+$/, '');
+        } else if (opening === '**' && afterRaw.startsWith('**')) {
+            end += 2;
+        } else if (opening === '*' && afterRaw.startsWith('*')) {
+            end += 1;
+        }
         let punctuation = '';
         while (/[),.;!?]$/.test(url)) {
             punctuation = url.slice(-1) + punctuation;
             url = url.slice(0, -1);
         }
-        if (!url) return match;
-        return `**_${url}_**${punctuation}`;
-    });
+        if (!/^https?:\/\//i.test(url)) continue;
+        const fullStart = start - opening.length;
+        output += text.slice(cursor, fullStart) + `**_${url}_**${punctuation}`;
+        cursor = end;
+        pattern.lastIndex = end;
+    }
+    return output ? output + text.slice(cursor) : text;
 }
 
 function formatLinksInContent(content) {
@@ -899,13 +928,68 @@ async function createCodeSession(sId, format = 'pair', expectExisting = false) {
     return sess;
 }
 
+function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs = 30000) {
+    const sock = sessionData?.sock;
+    if (!sock) return Promise.reject(new Error('pairing_socket_unavailable'));
+    if (sessionData?.authState?.creds?.registered) return Promise.reject(new Error('pairing_session_already_registered'));
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        let requestStarted = false;
+        let timer = null;
+        const finish = (error, value) => {
+            if (settled) return;
+            settled = true;
+            if (timer) clearTimeout(timer);
+            try { sock.ev.off('connection.update', onUpdate); } catch (e) {}
+            if (error) reject(error);
+            else resolve(value);
+        };
+        const request = async () => {
+            if (settled || requestStarted) return;
+            requestStarted = true;
+            try {
+                const active = activeSessions.get(sessionId);
+                if (!active || active.sock !== sock) throw new Error('pairing_socket_replaced');
+                const result = await sock.requestPairingCode(number);
+                const code = String(result || '').trim();
+                if (!code) throw new Error('pairing_code_empty');
+                finish(null, code);
+            } catch (error) {
+                finish(error);
+            }
+        };
+        const onUpdate = update => {
+            if (settled) return;
+            if (update?.connection === 'open' && !requestStarted) {
+                finish(new Error('pairing_session_connected_before_code'));
+                return;
+            }
+            if (update?.connection === 'close' && !requestStarted) {
+                finish(new Error('pairing_socket_closed_before_code'));
+                return;
+            }
+            if (update?.qr) void request();
+        };
+        sock.ev.on('connection.update', onUpdate);
+        timer = setTimeout(() => finish(new Error('pairing_code_timeout')), timeoutMs);
+        const active = activeSessions.get(sessionId);
+        if (!active || active.sock !== sock) {
+            finish(new Error('pairing_socket_replaced'));
+            return;
+        }
+        if (String(active.status || '').toLowerCase() === 'qr_disponible' && active.qrString) {
+            setImmediate(() => void request());
+        }
+    });
+}
+
 app.all('/get-code', async (req, res) => {
     const body = req.method === 'GET' ? req.query : req.body;
     const number = normalizePhoneNumber(body?.number || body?.phone || body?.jid || body?.msisdn || '');
     const method = String(body?.method || 'code').toLowerCase();
     const autoExpire = body?.autoExpire === true || body?.autoExpire === 'true' || body?.autoExpire === 1 || body?.autoExpire === '1';
     
-    if (method === 'code' && !number) return res.status(400).json({ ok: false, error: 'invalid_number' });
+    if (method !== 'qr' && !/^\d{8,15}$/.test(number)) return res.status(400).json({ ok: false, error: 'invalid_international_number' });
 
     const sId = `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     let sess = null;
@@ -944,12 +1028,7 @@ app.all('/get-code', async (req, res) => {
             }
             return res.json({ ok: true, qr, qrDataUrl, qrUrl, sessionId: sId });
         }
-        const codeRaw = await new Promise((resolve, reject) => {
-            setTimeout(async () => {
-                try { resolve(await sess.sock.requestPairingCode(number)); } catch(e) { reject(e); }
-            }, 4500); 
-        });
-        const code = String(codeRaw || '').match(/.{1,4}/g)?.join('-') || String(codeRaw || '');
+        const code = await requestPairingCodeWhenReady(sId, sess, number, 30000);
         return res.json({ ok: true, code, sessionId: sId, number });
     } catch (e) {
         try {
@@ -981,7 +1060,7 @@ app.post('/upload-qr', async (req, res) => {
     }
 });
 
-const links_common = "*_Bot (tfbot)_* : https://bot.adamdh7.org\n*_Brefs (tfbrefs)_* : *_https://bref.adamdh7.org_*\n*_Havox (tfhavox)_* : https://havox.sou.adamdh7.org\n*Chaine* : https://whatsapp.com/channel/0029Vb6WLps7oQhWrUlyPQ2m\n*Canal* : https://t.me/dh7adam\n*Pages* : https://m.facebook.com/dh7adam";
+const links_common = "*_Bot (tfbot)_* : https://bot.adamdh7.org\n*_Brefs (tfbrefs)_* : https://bref.adamdh7.org\n*_Havox (tfhavox)_* : https://havox.sou.adamdh7.org\n*Chaine* : https://whatsapp.com/channel/0029Vb6WLps7oQhWrUlyPQ2m\n*Canal* : https://t.me/dh7adam\n*Pages* : https://m.facebook.com/dh7adam";
 
 const translations = {
   fr: {
@@ -2012,6 +2091,14 @@ function unwrapMessageContent(message) {
     return msg || {};
 }
 
+function getMessageContextInfo(message) {
+    const content = unwrapMessageContent(message);
+    for (const value of Object.values(content || {})) {
+        if (value && typeof value === 'object' && value.contextInfo && typeof value.contextInfo === 'object') return value.contextInfo;
+    }
+    return {};
+}
+
 function extractBody(m) {
     const msg = unwrapMessageContent(m?.message);
     return msg.conversation || msg.extendedTextMessage?.text || msg.imageMessage?.caption || msg.videoMessage?.caption || msg.documentMessage?.caption || msg.buttonsResponseMessage?.selectedButtonId || msg.listResponseMessage?.singleSelectReply?.selectedRowId || '';
@@ -2394,7 +2481,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     if (!stored && key.remoteJid) stored = await db.collection('baileys_outgoing_messages').findOne({ _id: `${sessionId}:${String(key.id)}` }, { projection: { message: 1, remoteJid: 1 } });
                     if (stored?.message) {
                         const restoredMessage = fixBuffers(stored.message);
-                        cacheRecentMessage(sessionId, { key: { id: key.id, remoteJid: stored.remoteJid || key.remoteJid || '' }, message: restoredMessage, messageTimestamp: Math.floor(Date.now() / 1000) });
+                        cacheRecentMessage(sessionId, { key: { id: key.id, remoteJid: stored.remoteJid || key.remoteJid || '', fromMe: true }, message: restoredMessage, messageTimestamp: Math.floor(Date.now() / 1000) });
                         return restoredMessage;
                     }
                 } catch (error) {
@@ -2406,6 +2493,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
         const sessionData = {
             sock: sock,
+            authState: state,
             qrString: null,
             ownerJid: null,
             active: true,
@@ -2767,7 +2855,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             return (status && !['200', 'ok', 'success'].includes(status)) || ['error', 'not-authorized', 'forbidden', 'conflict', 'bad-request', '401', '403', '404', '406', '500'].includes(failureTag);
         }) : [];
 
-        const safeGroupUpdate = async (jid, participants, action, knownMetadata = null, preferPhoneNumbers = false) => {
+        const safeGroupUpdate = async (jid, participants, action, knownMetadata = null, preferPhoneNumbers = false, batchOnly = false) => {
             let metadataForAction = null;
             let planned = [];
             try {
@@ -2799,6 +2887,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 try {
                     result = await queueMessage(() => sock.groupParticipantsUpdate(jid, primaryIds, action), 150, sock);
                 } catch (batchError) {
+                    if (batchOnly) {
+                        console.error('[group-participants-update-batch-failed]', { group: jid, action, requested: primaryIds.length, error: batchError?.message || String(batchError) });
+                        return false;
+                    }
                     console.warn('[group-participants-update-batch-retry]', { group: jid, action, requested: primaryIds.length, error: batchError?.message || String(batchError) });
                     const unresolved = [];
                     for (const record of planned) {
@@ -2822,6 +2914,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const failures = groupUpdateFailures(result);
                 if (!failures.length) return true;
                 console.error('[group-participants-update-rejected]', { group: jid, action, requested: primaryIds.length, failed: failures.map(item => ({ jid: item?.jid, status: item?.status, content: item?.content?.tag || null, phoneNumber: item?.content?.attrs?.phone_number || null })) });
+                if (batchOnly) return false;
                 const failedRecords = [];
                 for (const failure of failures) {
                     const failureIds = [failure?.jid, failure?.content?.attrs?.jid, failure?.content?.attrs?.phone_number].filter(Boolean).map(value => normalizeActionJid(value));
@@ -2872,7 +2965,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         };
 
         const resolveTargets = async (arg, m, metadata = null, ownerDocument = null, currentBotJid = null) => {
-            const context = unwrapMessageContent(m.message)?.extendedTextMessage?.contextInfo || {};
+            const context = getMessageContextInfo(m.message);
             const quoted = context.quotedMessage ? unwrapMessageContent(context.quotedMessage) : {};
             const normalizedArg = normalizePersonName(arg);
             const ownerNumber = normalizePhoneNumber(ownerDocument?.Number || '');
@@ -2905,10 +2998,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const member = findActionParticipant(value, metadata);
                 return member ? preferredParticipantId(member) : value;
             }))];
-            if (context.participant) {
-                const alternate = quotedEntry?.participantAlt || quotedEntry?.message?.key?.participantAlt || quotedEntry?.message?.key?.participantPn || '';
-                const member = findActionParticipant(alternate || context.participant, metadata) || findActionParticipant(context.participant, metadata);
-                return [member ? preferredParticipantId(member) : (alternate || context.participant)];
+            const quotedSenderId = context.participant || quotedEntry?.key?.participant || quotedEntry?.sender || '';
+            if (quotedSenderId) {
+                const alternate = quotedEntry?.participantAlt || quotedEntry?.key?.participantAlt || quotedEntry?.key?.participantPn || quotedEntry?.key?.remoteJidAlt || '';
+                const member = findActionParticipant(alternate || quotedSenderId, metadata) || findActionParticipant(quotedSenderId, metadata);
+                return [member ? preferredParticipantId(member) : (alternate || quotedSenderId)];
             }
             if (arg) {
                 const number = normalizePhoneNumber(arg);
@@ -3040,7 +3134,19 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
                         let activeHostName = sOwnerTop ? (sOwnerTop.Name || "Adam D'H7") : "Adam D'H7";
                         const senderJids = [...new Set([sender, m.key.participantAlt, m.key.participantPn, m.key.remoteJidAlt, m.key.senderPn].filter(Boolean).map(String))];
-                        const senderNumbers = senderJids.map(normalizedJidNumber).filter(Boolean);
+                        for (const senderIdentity of [...senderJids]) {
+                            if (!/@lid$/i.test(senderIdentity)) continue;
+                            try {
+                                const mappedPrivateIdentity = await sock.signalRepository?.lidMapping?.getPNForLID?.(senderIdentity);
+                                const mappedNumber = normalizePhoneNumber(String(mappedPrivateIdentity || '').split('@')[0].split(':')[0]);
+                                if (mappedNumber && mappedNumber.length >= 6) senderJids.push(`${mappedNumber}@s.whatsapp.net`);
+                            } catch (mappingError) {
+                                console.warn('[incoming-sender-lid-resolution]', { sessionId, error: mappingError?.message || String(mappingError) });
+                            }
+                        }
+                        const uniqueSenderJids = [...new Set(senderJids)];
+                        senderJids.splice(0, senderJids.length, ...uniqueSenderJids);
+                        const senderNumbers = [...new Set(senderJids.filter(identity => !/@lid(?:$|:)/i.test(String(identity || ''))).map(normalizedJidNumber).filter(Boolean))];
                         const sNum = senderNumbers[0] || '';
                         const ownerNumber = normalizePhoneNumber(sOwnerTop?.Number || '');
                         const botNumber = normalizedJidNumber(botId);
@@ -3056,7 +3162,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         if (isGroup && sender && sender !== botId && !isOwnerReal) {
                             try {
                                 const del2List = await getDel2Targets(sessionId, from);
-                                if (del2List.includes(sender)) {
+                                const del2Match = del2List.some(target => {
+                                    const stored = normalizeActionJid(target);
+                                    if (senderJids.some(identity => normalizeActionJid(identity) === stored)) return true;
+                                    const storedNumber = normalizedJidNumber(target);
+                                    return !!storedNumber && senderNumbers.includes(storedNumber);
+                                });
+                                if (del2Match) {
                                     await queuedSendMessage(sock, from, { delete: m.key }, {}, 200);
                                     return;
                                 }
@@ -3085,7 +3197,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 if (!isGroup || from.endsWith('@s.whatsapp.net')) return false;
                                 const metadataA = await getMeta();
                                 return metadataA ? metadataA.participants.some(p => {
-                                    if (!p?.admin) return false;
+                                    if (!isAdminParticipantForPolicy(p)) return false;
                                     const participantIds = [p.id, p.lid, p.phoneNumber, p.phone].filter(Boolean).map(String);
                                     if (participantIds.some(id => senderJids.includes(id))) return true;
                                     const participantNumbers = participantIds.map(normalizedJidNumber).filter(Boolean);
@@ -3173,7 +3285,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         });
 
                         let parsedCommand = parseIncomingCommand(body, messageLang);
-                        if (!parsedCommand && isPublicMode && !isGroup && !isChannel && body) {
+                        if (!parsedCommand && isPublicMode && !isGroup && !isChannel && body && !isOwnerReal) {
                             parsedCommand = {
                                 command: (translations[messageLang] || translations.ht).cmd_ai || 'ai',
                                 args: clipLongText(body, AI_MAX_INPUT_CHARS),
@@ -3197,7 +3309,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 try { await sock.sendPresenceUpdate('composing', from); } catch (e) {}
 
                                 const messageContentForContext = unwrapMessageContent(m.message);
-                                const quoted = messageContentForContext?.extendedTextMessage?.contextInfo || {};
+                                const quoted = getMessageContextInfo(m.message);
                                 const quotedMessage = quoted.quotedMessage || undefined;
                                 const t = translations[messageLang] || translations.ht;
 
@@ -3371,7 +3483,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 
                                                 let lienTextForm = '';
                                                 if (metadataLien && metadataLien.subject) lienTextForm += `*${metadataLien.subject}*\n`;
-                                                lienTextForm += `*_${link}_*`;
+                                                lienTextForm += link;
                                                 if (metadataLien && metadataLien.desc) lienTextForm += `\n\n${metadataLien.desc.toString().trim()}`;
 
                                                 const lienCapTitle = t.cmd_lien.charAt(0).toUpperCase() + t.cmd_lien.slice(1);
@@ -3491,7 +3603,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 break;
                                             }
                                             if (internalCommand === 'kickall') {
-                                                const completed = await safeGroupUpdate(from, toKick, 'remove', metadataKA, true);
+                                                const completed = await safeGroupUpdate(from, toKick, 'remove', metadataKA, true, true);
                                                 if (!completed) {
                                                     console.error('[kickall-partial-failure]', { group: from, requested: toKick.length, excludedCreatorCount: creatorRecordsKA.length, excludedBotCount: botRecordsKA.length });
                                                 } else {
@@ -3507,7 +3619,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                         break;
                                                     }
                                                     const batch = toKick.slice(index, index + batchSize);
-                                                    const completed = await safeGroupUpdate(from, batch, 'remove', metadataKA, true);
+                                                    const completed = await safeGroupUpdate(from, batch, 'remove', metadataKA, true, true);
                                                     if (!completed) failedBatches.push(index + 1);
                                                     if (index + batchSize < toKick.length) await sleep(batchDelay);
                                                 }
@@ -3573,14 +3685,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         case 'del':
                                             if (!quoted?.stanzaId) break;
                                             const cachedQuotedMessage = recentMsgsCache.find(entry => entry.sessionId === sessionId && entry.id === quoted.stanzaId && entry.from === from);
-                                            const quotedParticipant = quoted.participant || (isGroup ? cachedQuotedMessage?.sender : null) || null;
-                                            const quotedFromMe = !!cachedQuotedMessage?.fromMe || !!cachedQuotedMessage?.message?.key?.fromMe || (!!quotedParticipant && isProtectedWhatsAppTarget(quotedParticipant, sOwnerTop, botId));
+                                            const quotedOriginalKey = cachedQuotedMessage?.key || {};
+                                            const quotedParticipant = quotedOriginalKey.participant || quoted.participant || (isGroup ? cachedQuotedMessage?.sender : null) || null;
+                                            const quotedFromMe = !!cachedQuotedMessage?.fromMe || !!quotedOriginalKey.fromMe;
                                             if (isGroup) {
                                                 if (quotedFromMe ? !isOwnerReal : !await checkAdmin()) break;
                                             } else if (!isOwnerReal) {
                                                 break;
                                             }
-                                            const delKey = { remoteJid: from, id: quoted.stanzaId, fromMe: quotedFromMe };
+                                            const delKey = { remoteJid: quotedOriginalKey.remoteJid || from, id: quoted.stanzaId, fromMe: quotedFromMe };
                                             if (isGroup && quotedParticipant && !quotedFromMe) delKey.participant = quotedParticipant;
                                             const quotedTimestamp = Number(cachedQuotedMessage?.ts || m.messageTimestamp || Math.floor(Date.now() / 1000));
                                             try {
@@ -3603,12 +3716,26 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             const targetsDel2 = await resolveTargets(args, m, metadataDel2, sOwnerTop, botId);
                                             if (targetsDel2.length === 0) break;
                                             const targetJid = targetsDel2[0];
-                                            const targetParticipantDel2 = metadataDel2?.participants?.find(participant => participant?.id === targetJid);
+                                            const targetParticipantDel2 = findActionParticipant(targetJid, metadataDel2);
                                             if (isProtectedWhatsAppTarget(targetJid, sOwnerTop, botId, targetParticipantDel2?.phoneNumber || targetParticipantDel2?.phone || targetParticipantDel2?.idAlt || '')) break;
                                             const currentDel2Targets = await getDel2Targets(sessionId, from);
+                                            const requestedParticipantDel2 = findActionParticipant(targetJid, metadataDel2);
+                                            const existingDel2Target = currentDel2Targets.find(storedTarget => {
+                                                const storedParticipant = findActionParticipant(storedTarget, metadataDel2);
+                                                if (storedParticipant && requestedParticipantDel2) {
+                                                    const storedAliases = participantAliases(storedParticipant).map(normalizeActionJid).filter(Boolean);
+                                                    const requestedAliases = participantAliases(requestedParticipantDel2).map(normalizeActionJid).filter(Boolean);
+                                                    if (storedAliases.some(alias => requestedAliases.includes(alias))) return true;
+                                                }
+                                                const storedJid = normalizeActionJid(storedTarget);
+                                                const requestedJid = normalizeActionJid(targetJid);
+                                                if (storedJid && storedJid === requestedJid) return true;
+                                                const storedNumber = normalizedJidNumber(storedTarget);
+                                                return !!storedNumber && storedNumber === normalizedJidNumber(targetJid);
+                                            });
                                             let msgTextDel2 = "";
-                                            if (currentDel2Targets.includes(targetJid)) {
-                                                await removeDel2Target(sessionId, from, targetJid);
+                                            if (existingDel2Target) {
+                                                await removeDel2Target(sessionId, from, existingDel2Target);
                                                 msgTextDel2 = t.del2_deactivated.replace('{user}', targetJid.split('@')[0]);
                                             } else {
                                                 await addDel2Target(sessionId, from, targetJid);
@@ -3671,7 +3798,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 const fUrl = uploaded.url;
                                                 const rawSize = uploaded.size;
                                                 const formattedSize = typeof rawSize === 'number' ? formatBytes(rawSize) : formatBytes(parseInt(rawSize) || bBuffer.length);
-                                                const brefText = `*_${fUrl}_*\n*size* : ${formattedSize}`;
+                                                const brefText = `${fUrl}\n*size* : ${formattedSize}`;
                                                 await safeSendFormatted(sock, from, 'Url', brefText, pushName, true, activeHostName);
                                             } catch (e) {
                                                 await safeSendActionError(sock, from, t.cmd_url, e, messageLang, pushName, m.messageTimestamp);
@@ -3775,8 +3902,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 if (data && data.code) {
                                                     const tfid_code = crypto.randomInt(100000000000, 999999999999);
                                                     const confirmLink_code = `${TF_BOT_BASE_URL}/TF-${tfid_code}`;
-                                                    const formattedConfirmLink_code = `**_${confirmLink_code}_**`;
-                                                    const confirmText = t.code_confirm.replace('{link}', formattedConfirmLink_code);
+                                                    const confirmText = t.code_confirm.replace('{link}', confirmLink_code);
                                                     const msgConfirmation = await sendImageCaptioned(sock, from, adamLogoBuffer, t.cmd_code, confirmText, pushName);
                                                     
                                                     let clicked_code = false;
