@@ -301,6 +301,13 @@ function normalizePersonName(value) {
     return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
+function normalizeConnectionFormat(value, fallback = 'pair') {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (['qr', 'qrcode', 'qr-code', 'scan', 'scanqr'].includes(normalized)) return 'qr';
+    if (['pair', 'paircode', 'pair-code', 'pairing', 'code'].includes(normalized)) return 'pair';
+    return String(fallback || '').trim().toLowerCase() === 'qr' ? 'qr' : 'pair';
+}
+
 function normalizedJidNumber(value) {
     return normalizePhoneNumber(String(value || '').split('@')[0].split(':')[0]);
 }
@@ -719,19 +726,19 @@ function getAccessDeniedMessage(req) {
     const header = String(req.get('Accept-Language') || '').toLowerCase();
     const language = /^fr(?:-|,|$)/.test(header) ? 'fr' : /^es(?:-|,|$)/.test(header) ? 'es' : /^ht(?:-|,|$)/.test(header) ? 'ht' : 'en';
     const messages = {
-        fr: 'Accès refusé : cette page est réservée à une intégration autorisée. Pour continuer, visitez https://bot.adamdh7.org, puis ouvrez le service depuis cette plateforme. Si ce blocage vous semble incorrect, retournez à l’accueil et réessayez depuis l’interface officielle. L’accès direct non autorisé est bloqué pour protéger le service et les sessions.',
-        en: 'Access denied: this page is available only through an authorized integration. To continue, visit https://bot.adamdh7.org directly and open the service from that platform. If you believe this restriction is a mistake, return to the site homepage and try again through its official interface. Direct access that is not authorized is disabled to help protect the service and its sessions.',
-        es: 'Acceso denegado: esta página solo está disponible mediante una integración autorizada. Para continuar, visite directamente https://bot.adamdh7.org y abra el servicio desde esa plataforma. Si cree que el bloqueo es un error, vuelva a la página principal e inténtelo de nuevo desde la interfaz oficial. El acceso directo no autorizado está desactivado para proteger el servicio y las sesiones.',
-        ht: 'Aksè refize: paj sa a disponib sèlman atravè yon entegrasyon ki otorize. Pou kontinye, vizite https://bot.adamdh7.org dirèkteman epi ouvri sèvis la depi platfòm sa a. Si ou panse blokaj la se yon erè, retounen sou paj prensipal la epi eseye ankò atravè koòdone ofisyèl la. Aksè dirèk ki pa otorize dezaktive pou pwoteje sèvis la ak sesyon yo.'
+        fr: 'Cette page est réservée à une intégration autorisée.\nPour continuer, visitez Bot (tfbot).\nSi ce blocage vous semble incorrect, retournez à l’accueil et réessayez depuis l’interface Bot (tfbot) officielle.',
+        en: 'This page is reserved for an authorized integration.\nTo continue, visit Bot (tfbot).\nIf you believe this restriction is incorrect, return to the homepage and try again through the official Bot (tfbot) interface.',
+        es: 'Esta página está reservada para una integración autorizada.\nPara continuar, visite Bot (tfbot).\nSi cree que esta restricción es incorrecta, vuelva al inicio e inténtelo de nuevo desde la interfaz oficial de Bot (tfbot).',
+        ht: 'Paj sa a rezève pou yon entegrasyon ki otorize.\nPou kontinye, vizite Bot (tfbot).\nSi ou panse restriksyon sa a pa kòrèk, retounen nan paj dakèy la epi eseye ankò atravè koòdone ofisyèl Bot (tfbot).'
     };
     return { language, message: messages[language] || messages.en };
 }
 
 function sendAccessDeniedPage(req, res) {
     const denied = getAccessDeniedMessage(req);
-    const safeMessage = denied.message.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const safeMessage = denied.message.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;').replace(/'/g, '&#39;').replace(/Bot \(tfbot\)/g, '<em><strong>Bot (tfbot)</strong></em>');
     const label = denied.language === 'fr' ? 'Visiter bot.adamdh7.org' : denied.language === 'es' ? 'Visitar bot.adamdh7.org' : denied.language === 'ht' ? 'Vizite bot.adamdh7.org' : 'Visit bot.adamdh7.org';
-    return res.status(403).type('html').send(`<!doctype html><html lang="${denied.language}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>Accès refusé</title><style>*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:#000;color:#f5f5f5}body{min-height:100vh;padding:28px;display:flex;align-items:center;justify-content:center;font:16px/1.7 system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}main{width:100%;max-width:720px;margin:0 auto}p{margin:0 0 22px;white-space:pre-wrap;overflow-wrap:anywhere}a{color:#bdbdbd;text-decoration:underline;text-underline-offset:4px;font-weight:600}a:focus-visible{outline:1px solid #fff;outline-offset:5px}a:hover{color:#fff}@media(max-width:480px){body{padding:22px;font-size:15px}}</style></head><body><main><p>${safeMessage}</p><a href="https://bot.adamdh7.org/">${label}</a></main></body></html>`);
+    return res.status(403).type('html').send(`<!doctype html><html lang="${denied.language}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"><meta name="color-scheme" content="dark"><title>Bot (tfbot)</title><style>*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}html,body{margin:0;min-height:100%;width:100%;background:#000;color:#f5f5f5;overscroll-behavior:none;-webkit-user-select:none;user-select:none;touch-action:pan-y}body{min-height:100vh;min-height:100svh;padding:max(20px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right)) max(20px,env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left));display:flex;align-items:center;justify-content:center;font:clamp(14px,3.8vw,16px)/1.75 system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}main{width:min(100%,680px);margin:auto}p{margin:0 0 24px;white-space:pre-line;overflow-wrap:anywhere}em{font-style:italic}strong{font-weight:700}a{display:inline-block;max-width:100%;color:#fff;text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:5px;font-weight:600;overflow-wrap:anywhere}a:focus-visible{outline:1px solid #fff;outline-offset:5px}a:hover{color:#d6d6d6}@media(max-width:480px){body{line-height:1.65}}@media(orientation:landscape) and (max-height:420px){body{align-items:flex-start}main{margin:auto 0}}</style></head><body oncopy="return false" oncut="return false" onpaste="return false"><main><p>${safeMessage}</p><a href="https://bot.adamdh7.org/">${label}</a></main><script>for(const eventName of ['copy','cut','paste','contextmenu','dragstart','selectstart'])document.addEventListener(eventName,event=>event.preventDefault());document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&['+','=','-','0','c','x','v','a'].includes(String(event.key).toLowerCase()))event.preventDefault()});document.addEventListener('wheel',event=>{if(event.ctrlKey)event.preventDefault()},{passive:false})</script></body></html>`);
 }
 
 function injectAdScriptsIntoHtml(value) {
@@ -909,16 +916,25 @@ app.all('/get-code', async (req, res) => {
     const body = req.method === 'GET' ? req.query : req.body;
     const number = normalizePhoneNumber(body?.number || body?.phone || body?.jid || body?.msisdn || '');
     const method = String(body?.method || 'code').toLowerCase();
+    const connectionFormat = normalizeConnectionFormat(method === 'qr' ? 'qr' : 'pair');
     const autoExpire = body?.autoExpire === true || body?.autoExpire === 'true' || body?.autoExpire === 1 || body?.autoExpire === '1';
     
-    if (method !== 'qr' && !/^\d{8,15}$/.test(number)) return res.status(400).json({ ok: false, error: 'invalid_international_number' });
+    if (connectionFormat === 'pair' && !/^\d{8,15}$/.test(number)) return res.status(400).json({ ok: false, error: 'invalid_international_number' });
 
     const sId = `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     let sess = null;
     let cleanupTimer = null;
 
     try {
-        sess = await createCodeSession(sId, method === 'qr' ? 'qr' : 'pair', false);
+        sess = await createCodeSession(sId, connectionFormat, false);
+        await db.collection('session_owners').updateOne(
+            { sessionId: sId },
+            { $set: { format: connectionFormat, Format: connectionFormat } },
+            { upsert: true }
+        );
+        const liveSessionFormat = activeSessions.get(sId);
+        if (liveSessionFormat) liveSessionFormat.format = connectionFormat;
+        console.info('[session-connection-format-saved]', { sessionId: sId, format: connectionFormat });
         cleanupTimer = setTimeout(async () => {
             const checkSess = activeSessions.get(sId);
             if (checkSess && checkSess.status !== 'connecte') {
@@ -1413,7 +1429,7 @@ app.get('/list', async (req, res) => {
           Sessions: s.status || 'connecte',
           Numero: s.number || 'N/A',
           Name: ownerDoc ? (ownerDoc.Name || "Adam D'H7") : "Adam D'H7",
-          Format: s.format || 'pair',
+          Format: normalizeConnectionFormat(s.format || ownerDoc?.format || ownerDoc?.Format || 'pair'),
           Mode: ownerDoc ? (ownerDoc.mode || 'prive') : 'prive',
           Alive: aliveStr
         });
@@ -2355,11 +2371,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         const { version } = await fetchLatestBaileysVersion();
 
         let globalLang = 'en';
+        let initialOwnerDoc = null;
         try {
             const ownerColInitial = db.collection('session_owners');
-            const initialOwnerDoc = await ownerColInitial.findOne({ sessionId: sessionId });
+            initialOwnerDoc = await ownerColInitial.findOne({ sessionId: sessionId });
             if (initialOwnerDoc && initialOwnerDoc.lang) globalLang = initialOwnerDoc.lang;
         } catch (e) {}
+        const existingSessionRecordForStart = activeSessions.get(sessionId);
+        const connectionFormat = normalizeConnectionFormat(existingSessionRecordForStart?.format || initialOwnerDoc?.format || initialOwnerDoc?.Format || format, 'pair');
+        console.info('[session-connection-format]', { sessionId, format: connectionFormat, source: existingSessionRecordForStart?.format ? 'active_session' : initialOwnerDoc?.format || initialOwnerDoc?.Format ? 'session_owners' : 'requested_or_default' });
 
         const sock = makeWASocket({
             version,
@@ -2442,7 +2462,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         activeSessions.set(sessionId, {
             id: sessionId,
             number: existingSessionRecord?.number || restoredNumber || null,
-            format: format,
+            format: connectionFormat,
             status: 'initialisation',
             createdAt: existingSessionRecord ? existingSessionRecord.createdAt : Date.now(),
             lastRefresh: Date.now(),
@@ -2534,12 +2554,14 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 ...backupFields,
                                 sessionId: sessionId,
                                 Number: currentBotNum,
+                                format: connectionFormat,
+                                Format: connectionFormat,
                                 connectedSince: now,
                                 reauthRequired: false,
                                 connectionStatus: 'connected',
                                 lastAuthFailure: null
                             };
-                            if (currentBotName !== "Adam D'H7" && currentBotName) {
+                            if (currentBotName) {
                                 finalRecord.Name = currentBotName;
                             }
                             await ownerCol.updateOne(
@@ -2551,7 +2573,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 await ownerCol.deleteOne({ _id: matchingBackup._id });
                             }
                         } else {
-                            const newOwner = { sessionId: sessionId, Number: currentBotNum, Name: currentBotName, connectedSince: now, mode: 'prive', lang: globalLang, reauthRequired: false, connectionStatus: 'connected' };
+                            const newOwner = { sessionId: sessionId, Number: currentBotNum, Name: currentBotName, format: connectionFormat, Format: connectionFormat, connectedSince: now, mode: 'prive', lang: globalLang, reauthRequired: false, connectionStatus: 'connected' };
                             await ownerCol.updateOne(
                                 { sessionId: sessionId },
                                 { $set: newOwner },
@@ -2561,21 +2583,19 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         }
                     } else {
                         const updateData = {};
+                        if (!existingRecord.Number) updateData.Number = currentBotNum;
+                        if (currentBotName && existingRecord.Name !== currentBotName) updateData.Name = currentBotName;
+                        if (!existingRecord.mode) updateData.mode = 'prive';
+                        if (!existingRecord.lang) updateData.lang = globalLang;
+                        if (normalizeConnectionFormat(existingRecord.format || existingRecord.Format || connectionFormat) !== connectionFormat || !existingRecord.format) updateData.format = connectionFormat;
+                        if (existingRecord.Format !== connectionFormat) updateData.Format = connectionFormat;
                         if (!existingRecord.connectedSince) updateData.connectedSince = now;
                         if (existingRecord.reauthRequired) updateData.reauthRequired = false;
                         if (existingRecord.connectionStatus !== 'connected') updateData.connectionStatus = 'connected';
                         if (existingRecord.lastAuthFailure) updateData.lastAuthFailure = null;
-                        if (currentBotName !== "Adam D'H7" && currentBotName && existingRecord.Name !== currentBotName) updateData.Name = currentBotName;
                         if (Object.keys(updateData).length > 0) {
-                            await ownerCol.updateOne(
-                                { sessionId: sessionId },
-                                { $set: updateData }
-                            );
-                            if (updateData.connectedSince) finalRecord.connectedSince = now;
-                            if (updateData.Name) finalRecord.Name = currentBotName;
-                            if (Object.prototype.hasOwnProperty.call(updateData, 'reauthRequired')) finalRecord.reauthRequired = false;
-                            if (updateData.connectionStatus) finalRecord.connectionStatus = updateData.connectionStatus;
-                            if (Object.prototype.hasOwnProperty.call(updateData, 'lastAuthFailure')) finalRecord.lastAuthFailure = null;
+                            await ownerCol.updateOne({ sessionId: sessionId }, { $set: updateData });
+                            Object.assign(finalRecord, updateData);
                         }
                     }
                     sessionOwnersCache.set(sessionId, finalRecord);
@@ -2585,7 +2605,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 if (currentSession) {
                     currentSession.number = sock.user ? sock.user.id.split(':')[0] : null;
                     currentSession.status = 'connecte';
-                    currentSession.format = format;
+                    currentSession.format = connectionFormat;
                     currentSession.sock = sock;
                     currentSession.disconnectTime = null;
                     currentSession.reconnectAttempts = 0;
@@ -2639,7 +2659,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         console.error('[whatsapp-reauth-state]', { sessionId, error: logoutCleanupError?.message || String(logoutCleanupError) });
                     }
                 } else {
-                    scheduleSessionReconnect(sessionId, autoExpire, format);
+                    scheduleSessionReconnect(sessionId, autoExpire, connectionFormat);
                 }
             }
             } catch (connectionHandlerError) {
@@ -2648,7 +2668,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 if (current && current.sock === sock && current.status === 'opening') {
                     current.status = 'deconnecte';
                     current.disconnectTime = Date.now();
-                    scheduleSessionReconnect(sessionId, autoExpire, format);
+                    scheduleSessionReconnect(sessionId, autoExpire, connectionFormat);
                 }
             }
         });
@@ -3077,19 +3097,27 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             return;
                         }
 
-                        const from = m.key.remoteJid || m.key.remoteJidAlt || m.key.participant;
-                        const isFromMe = m.key.fromMe;
-                        const pushName = m.pushName || 'Inconnu';
+                        const rawFrom = String(m.key.remoteJid || m.key.remoteJidAlt || m.key.participant || '');
+                        const isFromMe = !!m.key.fromMe;
+                        const pushName = String(m.pushName || 'Inconnu');
                         const botId = sock.user?.id ? (sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id) : null;
-                        const sender = m.key.participant || m.key.remoteJid || (isFromMe ? botId : null);
+                        const rawChatIsGroup = rawFrom.endsWith('@g.us');
+                        const rawChatIsChannel = rawFrom.endsWith('@newsletter');
+                        const sender = isFromMe ? botId : rawChatIsGroup
+                            ? (m.key.participant || m.key.participantAlt || m.key.participantPn || null)
+                            : (m.key.remoteJid || m.key.remoteJidAlt || m.key.participant || null);
+                        const alternatePrivatePhoneJid = !rawChatIsGroup && !rawChatIsChannel && /@lid$/i.test(rawFrom) && /@s\.whatsapp\.net$/i.test(String(m.key.remoteJidAlt || ''))
+                            ? String(m.key.remoteJidAlt)
+                            : '';
+                        const from = alternatePrivatePhoneJid || rawFrom;
                         const earlyBody = extractBody(m);
                         if (isFromMe && (/(?:^|\n)\s*>\s*\*Adam D'H7\*/i.test(earlyBody) || /^\s*[*_`]*\s*[○●]\s*/u.test(earlyBody))) {
                             console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: from, fromMe: true, bodyPreview: String(earlyBody || '').replace(/[\r\n\t]+/g, ' ').slice(0, 180), reason: 'own_bot_response_echo' });
                             return;
                         }
                         
-                        const isGroup = from.endsWith('@g.us');
-                        const isChannel = from.endsWith('@newsletter');
+                        const isGroup = rawChatIsGroup;
+                        const isChannel = rawChatIsChannel;
                         const messageType = Object.keys(unwrapMessageContent(m.message) || {})[0];
 
                         const ownerColTop = db.collection('session_owners');
@@ -3109,7 +3137,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         }
 
                         let activeHostName = sOwnerTop ? (sOwnerTop.Name || "Adam D'H7") : "Adam D'H7";
-                        const senderJids = [...new Set([sender, m.key.participantAlt, m.key.participantPn, m.key.remoteJidAlt, m.key.senderPn].filter(Boolean).map(String))];
+                        const senderJids = [...new Set([sender, m.key.participantAlt, m.key.participantPn, m.key.senderPn, (!isGroup ? m.key.remoteJidAlt : null)].filter(Boolean).map(String))];
                         for (const senderIdentity of [...senderJids]) {
                             if (!/@lid$/i.test(senderIdentity)) continue;
                             try {
@@ -3129,11 +3157,19 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const sName = pushName;
                         const isOwnerReal = !!isFromMe || senderJids.some(jid => jid === botId) || (!!ownerNumber && senderNumbers.includes(ownerNumber)) || (!!botNumber && senderNumbers.includes(botNumber));
 
-                        if (isOwnerReal && sName !== 'Inconnu' && sName !== '' && sName !== activeHostName && sOwnerTop && !isFromMe) {
-                            sOwnerTop.Name = sName;
-                            await ownerColTop.updateOne({ sessionId: sessionId }, { $set: { Name: sName } }, { upsert: true });
-                            activeHostName = sName;
-                        }
+                        console.info('[message-identity-resolved]', {
+                            sessionId,
+                            messageId: msgId,
+                            rawChatJid: rawFrom,
+                            replyTargetJid: from,
+                            senderJid: sender,
+                            senderAliases: senderJids,
+                            pushName: sName,
+                            ownerNumberConfigured: !!ownerNumber,
+                            isOwnerReal,
+                            isGroup,
+                            mode: normalizeText(sOwnerTop?.mode || sOwnerTop?.Mode || sOwnerTop?.botMode || 'prive')
+                        });
 
                         if (isGroup && sender && sender !== botId && !isOwnerReal) {
                             try {
@@ -3308,7 +3344,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
                         userInfo.set(sender, {
                           pseudo: pushName,
-                          number: sender ? sender.split('@')[0].replace(/[^0-9]/g, '') : '',
+                          number: sNum || (/^\d{6,}@s\.whatsapp\.net$/i.test(String(sender || '')) ? normalizedJidNumber(sender) : ''),
                           lang: messageLang
                         });
 
@@ -3341,6 +3377,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 let isCancelled = false;
                                 let terminalResponseSent = false;
                                 let terminalResponsePromise = null;
+                                let responseSentForLog = false;
                                 let timeoutId = null;
                                 const commandTimeoutMs = internalCommand === 'cheche'
                                     ? Math.max(120000, SEARCH_TOTAL_TIMEOUT_MS + Number(process.env.AI_TOTAL_TIMEOUT_MS || 260000) + 15000)
@@ -3361,8 +3398,18 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 });
 
                                 const safeSendFormatted = async (...sendArgs) => {
-                                    if (isCancelled || terminalResponseSent) return;
-                                    return await sendFormatted(...sendArgs);
+                                    if (isCancelled || terminalResponseSent) return null;
+                                    try {
+                                        const result = await sendFormatted(...sendArgs);
+                                        terminalResponseSent = true;
+                                        responseSentForLog = true;
+                                        terminalResponsePromise = Promise.resolve(result);
+                                        console.info('[command-response-sent]', { sessionId, messageId: msgId, command: internalCommand, sourceChatJid: rawFrom, replyTargetJid: from, responseMessageId: result?.key?.id || null });
+                                        return result;
+                                    } catch (sendError) {
+                                        console.error('[command-response-send-failed]', { sessionId, messageId: msgId, command: internalCommand, sourceChatJid: rawFrom, replyTargetJid: from, error: sendError?.message || String(sendError) });
+                                        throw sendError;
+                                    }
                                 };
                                 const safeSendActionError = async (...errorArgs) => {
                                     if (terminalResponseSent) return terminalResponsePromise;
@@ -3929,6 +3976,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                     const confirmLink_code = `${TF_BOT_BASE_URL}/TF-${tfid_code}`;
                                                     const confirmText = t.code_confirm.replace('{link}', confirmLink_code);
                                                     const msgConfirmation = await sendImageCaptioned(sock, from, adamLogoBuffer, t.cmd_code, confirmText, pushName);
+                                                    responseSentForLog = !!msgConfirmation;
+                                                    console.info('[pair-code-confirmation-sent]', { sessionId, messageId: msgId, replyTargetJid: from, responseMessageId: msgConfirmation?.key?.id || null, connectionFormat: normalizeConnectionFormat(activeSessions.get(sessionId)?.format || 'pair') });
                                                     
                                                     let clicked_code = false;
                                                     const timeoutId_code = setTimeout(async () => {
@@ -4171,7 +4220,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 const commandStartedAt = Date.now();
                                 try {
                                     await Promise.race([commandExecute(), timeoutExecute]);
-                                    console.info('[command-completed]', { sessionId, messageId: msgId, chatJid: from, command: internalCommand, durationMs: Date.now() - commandStartedAt, responseSent: !!terminalResponseSent });
+                                    console.info('[command-completed]', { sessionId, messageId: msgId, chatJid: rawFrom, replyTargetJid: from, command: internalCommand, durationMs: Date.now() - commandStartedAt, responseSent: !!(terminalResponseSent || responseSentForLog) });
                                 } catch (e) {
                                     console.error('[command-failed]', { sessionId, messageId: msgId, chatJid: from, command: internalCommand, durationMs: Date.now() - commandStartedAt, error: e?.message || String(e) });
                                     await safeSendActionError(sock, from, getCommandActionTitle(t, internalCommand), e, messageLang, pushName, m.messageTimestamp);
@@ -4268,16 +4317,20 @@ async function loadExistingSessions() {
             if (aConnected !== bConnected) return bConnected - aConnected;
             return b.timestampFromId - a.timestampFromId;
         });
-        sessionsToRestore.push(group[0].sessionId);
+        const selectedSession = group[0];
+        const storedOwner = owners.get(selectedSession.sessionId);
+        sessionsToRestore.push({ sessionId: selectedSession.sessionId, format: normalizeConnectionFormat(storedOwner?.format || storedOwner?.Format || 'pair') });
         for (const duplicate of group.slice(1)) {
             console.warn('[session-restore-duplicate-skipped-preserved]', { number: identity, keptSessionId: group[0].sessionId, preservedSessionId: duplicate.sessionId });
         }
     }
-    for (const sessionId of sessionsToRestore) {
+    for (const restoredSession of sessionsToRestore) {
+        const { sessionId, format: restoredFormat } = restoredSession;
         try {
-            await startAdamBot(sessionId, false, 'pair', true);
+            console.info('[session-restore-format]', { sessionId, format: restoredFormat });
+            await startAdamBot(sessionId, false, restoredFormat, true);
         } catch (error) {
-            console.error('[session-restore-start-failed]', { sessionId, error: error?.message || String(error) });
+            console.error('[session-restore-start-failed]', { sessionId, format: restoredFormat, error: error?.message || String(error) });
         }
     }
 }
