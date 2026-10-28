@@ -3685,6 +3685,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             }
 
             for (const m of rawBatch) {
+                try {
                 const identityAliasCount = cacheMessageIdentityAliases(sessionId, m);
                 const receivedBody = extractBody(m);
                 const receivedAuditDetails = getMessageAuditDetails(m);
@@ -3782,21 +3783,29 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     });
                 }
 
-                if (m.messageStubType) {
-                    console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'message_stub', messageStubType: m.messageStubType });
+                if (m.messageStubType && !receivedParsedCommand) {
+                    console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'message_stub_without_command', messageStubType: m.messageStubType });
                     continue;
                 }
                 if (!m.message || Object.keys(m.message).length === 0) {
                     console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'empty_message_content' });
                     continue;
                 }
-                if (m.message.protocolMessage) {
-                    console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'protocol_message' });
+                if (m.message.protocolMessage && !receivedParsedCommand) {
+                    console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'protocol_message_without_command' });
                     continue;
                 }
                 if (m.message.messageContextInfo?.deviceListMetadata) {
-                    console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'device_list_metadata' });
-                    continue;
+                    console.info('[message-context-metadata-present]', {
+                        sessionId,
+                        messageId: receivedId,
+                        chatJid: receivedChat,
+                        messageType: receivedType,
+                        messageClassification: receivedClassification,
+                        hasReadableContent: !!String(receivedBody || '').trim(),
+                        hasRecognizedCommand: !!receivedParsedCommand,
+                        action: receivedParsedCommand || String(receivedBody || '').trim() ? 'continue_processing_content' : 'metadata_only_message_will_continue_to_normal_checks'
+                    });
                 }
                 if (m.key && m.key.remoteJid === 'status@broadcast') {
                     console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'status_broadcast' });
@@ -3808,6 +3817,14 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'missing_message_id' });
                     continue;
                 }
+                console.info('[message-pre-dispatch-checks-started]', {
+                    sessionId,
+                    messageId: msgId,
+                    chatJid: receivedChat,
+                    fromMe: !!m.key.fromMe,
+                    messageClassification: receivedClassification,
+                    detectedCommand: receivedParsedCommand?.command || null
+                });
                 const msgCacheKey = `${sessionId}:${receivedChat}:${msgId}`;
                 if (m.key.fromMe && consumeOutgoingTextEcho(sessionId, m.key.remoteJid || '', extractBody(m))) {
                     console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'outgoing_text_echo' });
@@ -3823,6 +3840,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     continue;
                 }
                 processedLocalCache.add(msgCacheKey);
+                console.info('[message-pre-dispatch-checks-passed]', {
+                    sessionId,
+                    messageId: msgId,
+                    chatJid: receivedChat,
+                    messageClassification: receivedClassification,
+                    detectedCommand: receivedParsedCommand?.command || null
+                });
                 const claimStartedAt = Date.now();
                 console.info('[message-processing-claim-started]', {
                     sessionId,
@@ -5332,6 +5356,25 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
                     } catch (cmdError) { console.error('[message-handler]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, messageClassification: receivedClassification, detectedCommand: receivedParsedCommand?.internalCommand || receivedParsedCommand?.command || null, incomingChatJid: rawFrom, replyTargetJid: from, action: 'message_handler_failed', error: cmdError?.message || String(cmdError) }); }
                 });
+                } catch (messageDispatchError) {
+                    const failedBody = String(extractBody(m) || '');
+                    const failedCommand = failedBody.trim() ? parseIncomingCommand(failedBody, globalLang) : null;
+                    console.error('[message-pre-dispatch-failed]', {
+                        sessionId,
+                        connectedAccountJid: sock.user?.id || null,
+                        upsertType,
+                        messageId: m?.key?.id || null,
+                        chatJid: m?.key?.remoteJid || m?.key?.remoteJidAlt || null,
+                        fromMe: !!m?.key?.fromMe,
+                        senderName: String(m?.pushName || 'Inconnu').slice(0, 100),
+                        messageText: failedBody.replace(/[\r\n\t]+/g, ' ').slice(0, 1200),
+                        detectedCommand: failedCommand?.command || null,
+                        detectedInternalCommand: failedCommand?.internalCommand || null,
+                        errorName: messageDispatchError?.name || 'Error',
+                        error: messageDispatchError?.message || String(messageDispatchError),
+                        action: failedCommand ? 'recognized_command_failed_before_dispatch' : 'message_failed_before_dispatch'
+                    });
+                }
             }
         });
         return sessionData;
