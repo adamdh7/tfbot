@@ -15,11 +15,22 @@
         }
     </script>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="theme-color" content="#000000">
+    <meta name="description" content="Bot (tfbot) permet de connecter un appareil à WhatsApp à l’aide d’un code de paire ou d’un QR code, avec une interface adaptée aux mobiles.">
+    <meta name="robots" content="index, follow, max-image-preview:large">
+    <meta name="author" content="Adam D’H7">
+    <meta name="application-name" content="Bot (tfbot)">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <title>Bot (tfbot)</title>
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Bot (tfbot) — Connexion WhatsApp">
+    <meta property="og:description" content="Connectez un appareil à WhatsApp avec un code de paire ou un QR code.">
+    <meta property="og:url" content="https://bot.adamdh7.org/">
+    <meta property="og:site_name" content="Bot (tfbot)">
+    <meta name="twitter:card" content="summary">
+    <link rel="canonical" href="https://bot.adamdh7.org/">
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebApplication","name":"Bot (tfbot)","url":"https://bot.adamdh7.org/","description":"Interface web permettant de connecter un appareil à WhatsApp avec un code de paire ou un QR code.","applicationCategory":"UtilitiesApplication","operatingSystem":"Any","inLanguage":["fr","en","es","ht"]}</script>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <style>
@@ -59,7 +70,7 @@
             font-family: 'Outfit', sans-serif;
             height: 100vh;
             height: 100dvh;
-            min-height: 100vh;
+            min-height: 100svh;
             width: 100%;
             overflow: hidden;
             overscroll-behavior: none;
@@ -93,8 +104,8 @@
         }
         .header {
             text-align: center;
-            margin-top: clamp(2vh, 4vh, 40px);
-            margin-bottom: clamp(1vh, 2vh, 20px);
+            margin-top: clamp(4px, 2.8vh, 28px);
+            margin-bottom: clamp(8px, 1.5vh, 16px);
             position: relative;
         }
         .header-top {
@@ -142,6 +153,17 @@
             font-weight: 700;
             color: #ffffff;
         }
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
         .status-badge {
             display: inline-flex;
             align-items: center;
@@ -158,14 +180,14 @@
             border: none;
         }
         .main-content {
-            flex: 1 0 auto;
+            flex: 1 1 auto;
             min-height: 0;
             min-width: 0;
             display: flex;
             flex-direction: column;
             justify-content: center;
-            gap: clamp(12px, 3vh, 20px);
-            padding-bottom: 12px;
+            gap: clamp(10px, 2.5vh, 18px);
+            padding-bottom: clamp(4px, 1vh, 10px);
         }
         .input-wrapper {
             background: var(--glass);
@@ -299,6 +321,7 @@
             width: 100vw;
             height: 100vh;
             height: 100dvh;
+            min-height: 0;
             background: #000000;
             z-index: 1000;
             display: flex;
@@ -327,8 +350,8 @@
             z-index: 1001;
         }
         .view-overlay h2 {
-            margin-top: 15px;
-            margin-bottom: 30px;
+            margin-top: 10px;
+            margin-bottom: clamp(12px, 2.5vh, 24px);
             text-align: center;
             font-size: clamp(20px, 6vw, 24px);
         }
@@ -358,16 +381,21 @@
             width: 100%;
             text-align: left;
             color: #d1d1d6;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             font-size: clamp(14px, 3.8vw, 16px);
-            line-height: 1.75;
-            margin: 0 auto 20px;
+            font-weight: 400;
+            font-variant: normal;
+            letter-spacing: normal;
+            line-height: 1.65;
+            margin: 0 auto 12px;
             overflow-wrap: anywhere;
-            flex: 1 0 auto;
+            flex: 1 1 auto;
         }
         .points-header {
             font-size: clamp(18px, 5vw, 20px);
             text-align: center;
-            margin-bottom: 40px;
+            margin-top: clamp(12px, 4vh, 32px);
+            margin-bottom: clamp(12px, 3vh, 28px);
             display: flex;
             align-items: center;
             justify-content: center;
@@ -430,8 +458,8 @@
         .social-link svg {
             width: 100%;
             height: 100%;
-            max-width: 26px;
-            max-height: 26px;
+            max-width: 30px;
+            max-height: 30px;
             fill: currentColor;
             display: block;
         }
@@ -443,8 +471,8 @@
         .social-footer {
             margin-top: auto;
             width: 100%;
-            padding-top: 10px;
-            padding-bottom: max(6px, env(safe-area-inset-bottom));
+            padding-top: 8px;
+            padding-bottom: 0;
         }
         .social-footer.points-footer {
             margin-top: 10px;
@@ -532,6 +560,8 @@
             width: clamp(180px, 58vw, 260px) !important;
             height: auto !important;
             max-width: 100%;
+            aspect-ratio: 1 / 1;
+            object-fit: contain;
             border: 0;
             pointer-events: none;
             -webkit-touch-callout: none;
@@ -564,10 +594,31 @@
                 border-radius: 8px;
             }
         }
-        @media (max-height: 700px) {
+        @media (max-height: 740px) {
             .header {
                 margin-top: 4px;
                 margin-bottom: 8px;
+            }
+            .view-overlay {
+                padding-top: max(28px, env(safe-area-inset-top));
+            }
+            .view-overlay h2 {
+                margin-top: 4px;
+                margin-bottom: 12px;
+            }
+            .menu-item,
+            .lang-btn {
+                min-height: 46px;
+                padding-top: 12px;
+                padding-bottom: 12px;
+                margin-bottom: 7px;
+            }
+            .points-header {
+                margin-top: 4px;
+                margin-bottom: 12px;
+            }
+            .social-footer {
+                padding-top: 4px;
             }
             .header-top {
                 margin-bottom: 7px;
@@ -583,6 +634,33 @@
             .btn {
                 padding: clamp(12px, 2.5vh, 18px);
                 gap: 8px;
+            }
+            .main-content {
+                gap: clamp(8px, 1.8vh, 14px);
+            }
+        }
+        @media (max-height: 560px) {
+            .logo-area {
+                width: 44px;
+                height: 44px;
+                border-radius: 12px;
+            }
+            .header-top {
+                margin-bottom: 5px;
+            }
+            .status-badge {
+                margin-top: 6px;
+                padding: 6px 12px;
+            }
+            .input-wrapper {
+                padding: 12px;
+            }
+            .btn {
+                padding: 11px;
+                gap: 7px;
+            }
+            .points-header {
+                margin-top: 0;
             }
         }
         @media (max-width: 360px) {
@@ -618,7 +696,14 @@
     </style>
 </head>
 <body>
+    <noscript>
+        <main style="max-width:720px;margin:0 auto;padding:24px;font-family:Arial,sans-serif;color:#fff;background:#000;line-height:1.6">
+            <h1>Bot (tfbot)</h1>
+            <p>Interface web pour connecter un appareil à WhatsApp à l’aide d’un code de paire ou d’un QR code. Activez JavaScript pour utiliser les fonctions interactives.</p>
+        </main>
+    </noscript>
     <div class="app-container" id="view-home" tabindex="0">
+        <h1 class="sr-only">Bot (tfbot) — Connexion WhatsApp par code de paire ou QR code</h1>
         <header class="header">
             <div class="header-top">
                 <div class="logo-area" aria-hidden="true">
@@ -756,7 +841,7 @@
             {
                 label: 'TikTok',
                 href: 'https://tiktok.com/@dh7adam',
-                svg: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M14 3v10.1a4.5 4.5 0 1 1-4-4.4v3a1.6 1.6 0 1 0 1.5 1.6V3h2.5c.3 1.7 1.7 2.9 3.5 3.2V9a7 7 0 0 1-3.5-1V3Z"/></svg>'
+                svg: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.9 2.9 0 0 1-2.9 2.9 2.9 2.9 0 0 1-2.9-2.9 2.9 2.9 0 0 1 2.9-2.9c.28 0 .55.04.81.12V9.35a6.37 6.37 0 0 0-.81-.05A6.34 6.34 0 0 0 3.13 15.6a6.34 6.34 0 0 0 6.34 6.34 6.34 6.34 0 0 0 6.34-6.34V8.54a8.16 8.16 0 0 0 4.78 1.54V6.63a4.85 4.85 0 0 1-1-.1z"/></svg>'
             }
         ];
 
@@ -842,19 +927,49 @@
         };
 
         const fallbackStorage = new Map();
+        const persistentCookiePrefix = 'tfbot_';
         const storage = {
             getItem(key) {
-                try { return window.localStorage.getItem(key); } catch (error) { return fallbackStorage.has(String(key)) ? fallbackStorage.get(String(key)) : null; }
+                const safeKey = String(key);
+                try {
+                    const value = window.localStorage.getItem(safeKey);
+                    if (value !== null) {
+                        fallbackStorage.set(safeKey, value);
+                        return value;
+                    }
+                } catch (error) {}
+                try {
+                    const cookieName = encodeURIComponent(persistentCookiePrefix + safeKey) + '=';
+                    const cookie = document.cookie.split('; ').find(entry => entry.startsWith(cookieName));
+                    if (cookie) {
+                        const value = decodeURIComponent(cookie.slice(cookieName.length));
+                        fallbackStorage.set(safeKey, value);
+                        try { window.localStorage.setItem(safeKey, value); } catch (error) {}
+                        return value;
+                    }
+                } catch (error) {}
+                return fallbackStorage.has(safeKey) ? fallbackStorage.get(safeKey) : null;
             },
             setItem(key, value) {
                 const safeKey = String(key);
                 const safeValue = String(value);
                 fallbackStorage.set(safeKey, safeValue);
                 try { window.localStorage.setItem(safeKey, safeValue); } catch (error) {}
+                try {
+                    const secureFlag = window.location.protocol === 'https:' ? '; Secure' : '';
+                    document.cookie = encodeURIComponent(persistentCookiePrefix + safeKey) + '=' + encodeURIComponent(safeValue) + '; Max-Age=31536000; Path=/; SameSite=Lax' + secureFlag;
+                } catch (error) {}
+                try { window.sessionStorage.setItem(safeKey, safeValue); } catch (error) {}
             },
             removeItem(key) {
-                fallbackStorage.delete(String(key));
-                try { window.localStorage.removeItem(String(key)); } catch (error) {}
+                const safeKey = String(key);
+                fallbackStorage.delete(safeKey);
+                try { window.localStorage.removeItem(safeKey); } catch (error) {}
+                try { window.sessionStorage.removeItem(safeKey); } catch (error) {}
+                try {
+                    const secureFlag = window.location.protocol === 'https:' ? '; Secure' : '';
+                    document.cookie = encodeURIComponent(persistentCookiePrefix + safeKey) + '=; Max-Age=0; Path=/; SameSite=Lax' + secureFlag;
+                } catch (error) {}
             }
         };
 
@@ -892,12 +1007,12 @@
         }
 
         let currentLang = storage.getItem('lang');
-        if (!currentLang) {
+        if (!['fr', 'en', 'es', 'ht'].includes(currentLang)) {
             const navL = navigator.language.slice(0, 2);
             currentLang = ['fr', 'en', 'es', 'ht'].includes(navL) ? navL : 'ht';
         }
         let clickTime = 0;
-        let pendingAction = null;
+        let isRequesting = false;
         let notifTimer = null;
 
         const ui = {
@@ -914,11 +1029,13 @@
             navPointsBtn: document.getElementById('nav-points-btn'),
             menuSocialLinks: document.getElementById('menu-social-links'),
             pointsSocialLinks: document.getElementById('points-social-links'),
-            infoSocialLinks: document.getElementById('info-social-links')
+            infoSocialLinks: document.getElementById('info-social-links'),
+            actionButtons: Array.from(document.querySelectorAll('.action-grid .btn'))
         };
         
 
         function updateUI() {
+            document.documentElement.lang = currentLang;
             const t = i18n[currentLang];
             document.querySelector('.tr-code').textContent = t.code;
             document.querySelector('.tr-qr').textContent = t.qr;
@@ -969,6 +1086,8 @@
         }
 
         function navigate(view) {
+            if (!['home', 'menu', 'langues', 'info', 'points'].includes(view)) view = 'home';
+            clickTime = 0;
             if (view === 'home') {
                 if (history.state && history.state.view && history.state.view !== 'home') {
                     try { history.back(); } catch (e) {}
@@ -990,7 +1109,9 @@
         }
 
         window.addEventListener('popstate', () => {
-            const view = history.state && history.state.view ? history.state.view : 'home';
+            clickTime = 0;
+            const requestedView = history.state && history.state.view ? history.state.view : 'home';
+            const view = ['home', 'menu', 'langues', 'info', 'points'].includes(requestedView) ? requestedView : 'home';
             renderView(view);
         });
 
@@ -1046,10 +1167,36 @@
                 const canvas = scratch.querySelector('canvas');
                 if (canvas) return canvas.toDataURL('image/png');
                 const image = scratch.querySelector('img');
-                return image && /^data:image\/png;base64,/i.test(image.src) ? image.src : '';
+                if (image) {
+                    await waitForImageReady(image);
+                    return /^data:image\/png;base64,/i.test(image.src) ? image.src : '';
+                }
+                return '';
             } catch (error) {
                 return '';
             }
+        }
+
+        function waitForImageReady(image) {
+            return new Promise((resolve, reject) => {
+                const finish = () => {
+                    if (image.naturalWidth > 0 && image.naturalHeight > 0) resolve();
+                    else reject(new Error('qr_image_load_failed'));
+                };
+                if (image.complete) {
+                    finish();
+                    return;
+                }
+                image.addEventListener('load', finish, { once: true });
+                image.addEventListener('error', () => reject(new Error('qr_image_load_failed')), { once: true });
+            }).then(async () => {
+                if (typeof image.decode === 'function') {
+                    try { await image.decode(); } catch (error) {
+                        if (!image.complete || image.naturalWidth <= 0) throw error;
+                    }
+                }
+                return image;
+            });
         }
 
         function showNotif(msg) {
@@ -1084,51 +1231,30 @@
                         updateUI();
                         showNotif(i18n[currentLang].succ_pts);
                     }
-
-                    if (pendingAction) {
-                        if (pendingAction === 'code' && (hasInfinitePoints() || userPoints >= 4)) {
-                            let actionToRun = pendingAction;
-                            pendingAction = null;
-                            navigate('home');
-                            handleAction(actionToRun);
-                        } else if (pendingAction === 'qr' && (hasInfinitePoints() || userPoints >= 3)) {
-                            let actionToRun = pendingAction;
-                            pendingAction = null;
-                            navigate('home');
-                            handleAction(actionToRun);
-                        }
-                    }
                 }
                 clickTime = 0;
             }
         });
 
         async function handleAction(type) {
+            if (!['code', 'qr'].includes(type) || isRequesting) return;
             const t = i18n[currentLang];
             sanitizePhoneValue();
             const number = ui.phone.value.replace(/[^0-9]/g, '');
+            const pointsCost = type === 'code' ? 4 : 3;
 
-            if (type === 'code') {
-                if (number.length < 6) return showNotif(t.err_num);
-                if (!hasInfinitePoints() && userPoints < 4) {
-                    pendingAction = 'code';
-                    navigate('points');
-                    return showNotif(t.err_pts_code);
-                }
-                if (!hasInfinitePoints()) userPoints -= 4;
-            } else if (type === 'qr') {
-                if (!hasInfinitePoints() && userPoints < 3) {
-                    pendingAction = 'qr';
-                    navigate('points');
-                    return showNotif(t.err_pts_qr);
-                }
-                if (!hasInfinitePoints()) userPoints -= 3;
+            if (type === 'code' && number.length < 6) return showNotif(t.err_num);
+            if (!hasInfinitePoints() && userPoints < pointsCost) {
+                clickTime = 0;
+                navigate('points');
+                return showNotif(type === 'code' ? t.err_pts_code : t.err_pts_qr);
             }
 
-            pendingAction = null;
-            if (!hasInfinitePoints()) storage.setItem('points', userPoints.toString());
-            updateUI();
-
+            isRequesting = true;
+            ui.actionButtons.forEach(button => {
+                button.disabled = true;
+                button.setAttribute('aria-busy', 'true');
+            });
             ui.output.style.display = 'none';
             ui.loader.style.display = 'flex';
             ui.qr.innerHTML = '';
@@ -1180,12 +1306,15 @@
                             if (uploadResponse.ok && uploadData.ok && /^https:\/\/\S+$/i.test(String(uploadData.url || ''))) qrUrl = uploadData.url;
                         } catch (error) {}
                     }
+
                     if (qrDataUrl) {
                         const qrImage = document.createElement('img');
                         qrImage.alt = 'WhatsApp QR code';
                         qrImage.draggable = false;
+                        qrImage.decoding = 'async';
                         qrImage.src = qrDataUrl;
                         ui.qr.appendChild(qrImage);
+                        await waitForImageReady(qrImage);
                     } else if (typeof QRCode !== 'undefined') {
                         new QRCode(ui.qr, { text: data.qr, width: 512, height: 512, colorDark: '#000000', colorLight: '#ffffff' });
                         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -1195,12 +1324,20 @@
                             const qrImage = document.createElement('img');
                             qrImage.alt = 'WhatsApp QR code';
                             qrImage.draggable = false;
+                            qrImage.decoding = 'async';
                             qrImage.src = canvas.toDataURL('image/png');
                             ui.qr.innerHTML = '';
                             ui.qr.appendChild(qrImage);
+                            await waitForImageReady(qrImage);
                             if (!qrUrl) {
                                 try {
-                                    const uploadResponse = await fetch('/upload-qr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ imageData: qrImage.src }) });
+                                    const uploadResponse = await fetch('/upload-qr', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        credentials: 'same-origin',
+                                        cache: 'no-store',
+                                        body: JSON.stringify({ imageData: qrImage.src })
+                                    });
                                     const uploadData = await uploadResponse.json().catch(() => ({}));
                                     if (uploadResponse.ok && uploadData.ok && /^https:\/\/\S+$/i.test(String(uploadData.url || ''))) qrUrl = uploadData.url;
                                 } catch (error) {}
@@ -1208,11 +1345,13 @@
                         } else if (image) {
                             image.alt = 'WhatsApp QR code';
                             image.draggable = false;
+                            await waitForImageReady(image);
                         }
                     }
-                    if (!ui.qr.querySelector('img') && !ui.qr.querySelector('canvas')) throw new Error('qr_render_failed');
+                    const readyImage = ui.qr.querySelector('img');
+                    if (!readyImage || !readyImage.complete || readyImage.naturalWidth <= 0) throw new Error('qr_render_failed');
                     ui.qr.style.display = 'block';
-                    ui.qrLink.href = qrUrl || qrDataUrl || ui.qr.querySelector('img')?.src || '#';
+                    ui.qrLink.href = qrUrl || qrDataUrl || readyImage.src || '#';
                     ui.qrLink.style.display = 'inline-flex';
                     ui.qrLink.setAttribute('aria-label', qrUrl ? 'Open the uploaded QR image in a new tab' : 'Open the QR image in a new tab');
                     ui.hint.textContent = t.qr_hint;
@@ -1221,6 +1360,11 @@
                     throw new Error('api_response_missing_result');
                 }
 
+                if (!hasInfinitePoints()) {
+                    userPoints = Math.max(0, userPoints - pointsCost);
+                    storage.setItem('points', userPoints.toString());
+                    updateUI();
+                }
                 ui.loader.style.display = 'none';
                 ui.output.style.display = 'block';
             } catch (error) {
@@ -1231,14 +1375,46 @@
                 const failureMessage = /abort|timeout|deadline/.test(failureReason) ? t.err_timeout : /token_required|unauthori[sz]ed|forbidden|http_401|http_403|\b401\b|\b403\b/.test(failureReason) ? t.err_auth : /invalid_number/.test(failureReason) ? t.err_num : /qr_render_failed|qr_image|qrcode/.test(failureReason) ? t.err_qr : /http_5\d\d|connection closed|connection failure|pair_error|session_runtime|mongo_not_connected/.test(failureReason) ? t.err_server : t.err_conn;
                 showNotif(failureMessage);
                 console.error('Bot request failed:', error?.message || error);
+            } finally {
+                isRequesting = false;
+                ui.actionButtons.forEach(button => {
+                    button.disabled = false;
+                    button.removeAttribute('aria-busy');
+                });
             }
         }
+
+        function restoreSavedState() {
+            const savedPoints = Number(storage.getItem('points'));
+            if (Number.isFinite(savedPoints) && savedPoints >= 0) userPoints = savedPoints;
+            const savedLang = storage.getItem('lang');
+            if (savedLang && Object.prototype.hasOwnProperty.call(i18n, savedLang)) currentLang = savedLang;
+            const savedPhone = storage.getItem('phone');
+            if (savedPhone !== null && document.activeElement !== ui.phone) ui.phone.value = savedPhone;
+            sanitizePhoneValue();
+            storage.setItem('points', userPoints.toString());
+            storage.setItem('lang', currentLang);
+            storage.setItem('phone', ui.phone.value);
+            updateUI();
+        }
+
+        window.addEventListener('pagehide', () => {
+            clickTime = 0;
+            storage.setItem('points', userPoints.toString());
+            storage.setItem('lang', currentLang);
+            storage.setItem('phone', ui.phone.value);
+        });
+
+        window.addEventListener('pageshow', () => {
+            restoreSavedState();
+        });
 
         window.addEventListener('load', () => {
             try { history.scrollRestoration = 'manual'; } catch (error) {}
             try { if (navigator.storage && typeof navigator.storage.persist === 'function') navigator.storage.persist().catch(() => {}); } catch (error) {}
             let initialHash = window.location.hash.replace('#', '');
-            const initialView = initialHash && initialHash !== 'pwen' ? initialHash : 'home';
+            const allowedViews = ['home', 'menu', 'langues', 'info', 'points'];
+            const initialView = allowedViews.includes(initialHash) ? initialHash : 'home';
 
             try {
                 history.replaceState({ view: 'home' }, '', window.location.pathname + window.location.search);
@@ -1253,7 +1429,7 @@
                 } catch (e) {}
             }
 
-            updateUI();
+            restoreSavedState();
         });
     </script>
 </body>
