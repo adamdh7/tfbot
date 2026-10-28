@@ -186,7 +186,6 @@ const groupSettingsCache = new Map();
 const activeDel2UsersCache = new Map();
 const msgRetryCounterCache = new Map();
 const activeSessions = new Map();
-const socketSessionIds = new WeakMap();
 const groupMetadataCache = new Map();
 const sessionOwnersCache = new Map();
 const processedLocalCache = new Set();
@@ -327,7 +326,6 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 break;
             }
         }
-        if (!sessionId) sessionId = socketSessionIds.get(sock) || null;
         const echoToken = rememberOutgoingTextEcho(sessionId, jid, content);
         try {
             const result = await sock.sendMessage(jid, content, options);
@@ -701,49 +699,8 @@ process.on('uncaughtException', (error) => {
     process.exit(1);
 });
 
-app.use(express.json({ limit: '3mb' }));
-app.use(express.urlencoded({ extended: true }));
-const FRONTEND_ALLOWED_ORIGINS = new Set(['https://bot.adamdh7.org']);
-const REQUIRED_HTML_SCRIPTS = [
-    '<script data-cfasync="false" src="https://bauval.org/14/8ce14735fa6608c9c2cfcae5f69ad1fd"></script>',
-    '<script data-cfasync="false" src="https://abscloud.org/1/d08b623929b77084c255768cb795af70"></script>'
-];
-app.use((req, res, next) => {
-    const originalSend = res.send;
-    res.send = function (body) {
-        const requestPath = String(req.path || '/');
-        const requestHost = String(req.get('host') || '').toLowerCase().split(':')[0];
-        const destination = String(req.get('Sec-Fetch-Dest') || '').toLowerCase();
-        let referrerOrigin = '';
-        try { referrerOrigin = new URL(String(req.get('Referer') || '')).origin; } catch (error) {}
-        const isIframeResponse = destination === 'iframe' || (requestHost === 'tf.bot.adamdh7.org' && referrerOrigin === 'https://bot.adamdh7.org');
-        if (!isIframeResponse && typeof body === 'string' && /<html[\s>]/i.test(body) && /<\/head>/i.test(body)) {
-            const additions = REQUIRED_HTML_SCRIPTS.filter(script => !body.includes(script.match(/src="([^"]+)/)?.[1] || '')).join('');
-            if (additions) body = body.replace(/<\/head>/i, `${additions}</head>`);
-        }
-        return originalSend.call(this, body);
-    };
-    next();
-});
-function getTrustedFrontendOrigin(req) {
-    const candidates = [String(req.get('Origin') || '').trim(), String(req.get('Referer') || '').trim()];
-    for (const candidate of candidates) {
-        if (!candidate) continue;
-        try {
-            const origin = new URL(candidate).origin;
-            if (FRONTEND_ALLOWED_ORIGINS.has(origin)) return origin;
-            return '';
-        } catch (error) {
-            return '';
-        }
-    }
-    try {
-        const hostOrigin = new URL(`https://${String(req.get('host') || '')}`).origin;
-        return FRONTEND_ALLOWED_ORIGINS.has(hostOrigin) ? hostOrigin : '';
-    } catch (error) {
-        return '';
-    }
-}
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 function getAccessDeniedMessage(req) {
     const header = String(req.get('Accept-Language') || '').toLowerCase();
     const language = /^fr(?:-|,|$)/.test(header) ? 'fr' : /^es(?:-|,|$)/.test(header) ? 'es' : /^ht(?:-|,|$)/.test(header) ? 'ht' : 'en';
@@ -763,51 +720,99 @@ function sendAccessDeniedPage(req, res) {
     return res.status(403).type('html').send(`<!doctype html><html lang="${denied.language}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>Accès refusé</title><style>*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:#000;color:#f5f5f5}body{min-height:100vh;padding:28px;display:flex;align-items:center;justify-content:center;font:16px/1.7 system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}main{width:100%;max-width:720px;margin:0 auto}p{margin:0 0 22px;white-space:pre-wrap;overflow-wrap:anywhere}a{color:#bdbdbd;text-decoration:underline;text-underline-offset:4px;font-weight:600}a:focus-visible{outline:1px solid #fff;outline-offset:5px}a:hover{color:#fff}@media(max-width:480px){body{padding:22px;font-size:15px}}</style></head><body><main><p>${safeMessage}</p><a href="https://bot.adamdh7.org/">${label}</a></main></body></html>`);
 }
 
+const AD_PAGE_SCRIPTS = '<script data-cfasync="false" src="https://bauval.org/14/8ce14735fa6608c9c2cfcae5f69ad1fd"></script>\n<script data-cfasync="false" src="https://abscloud.org/1/d08b623929b77084c255768cb795af70"></script>';
+
+function injectAdScriptsIntoHtml(value) {
+    const html = String(value || '');
+    const scripts = [];
+    if (!html.includes('https://bauval.org/14/8ce14735fa6608c9c2cfcae5f69ad1fd')) scripts.push('<script data-cfasync="false" src="https://bauval.org/14/8ce14735fa6608c9c2cfcae5f69ad1fd"></script>');
+    if (!html.includes('https://abscloud.org/1/d08b623929b77084c255768cb795af70')) scripts.push('<script data-cfasync="false" src="https://abscloud.org/1/d08b623929b77084c255768cb795af70"></script>');
+    if (!scripts.length) return html;
+    const tags = scripts.join('\n');
+    if (/<\/head\s*>/i.test(html)) return html.replace(/<\/head\s*>/i, `${tags}\n</head>`);
+    return `${tags}\n${html}`;
+}
+
+function isSameOriginFrontendApiRequest(req) {
+    const requestHost = String(req.get('host') || '').toLowerCase();
+    if (!requestHost) return false;
+    const originValue = String(req.get('origin') || '').trim();
+    if (originValue) {
+        try {
+            const origin = new URL(originValue);
+            if (origin.protocol === 'https:' && origin.host.toLowerCase() === requestHost) return true;
+        } catch (error) {}
+    }
+    const refererValue = String(req.get('referer') || '').trim();
+    if (refererValue) {
+        try {
+            const referer = new URL(refererValue);
+            if (referer.protocol === 'https:' && referer.host.toLowerCase() === requestHost) return true;
+        } catch (error) {}
+    }
+    return false;
+}
+
 app.use((req, res, next) => {
-    const requestOrigin = String(req.get('Origin') || '').trim();
-    if (FRONTEND_ALLOWED_ORIGINS.has(requestOrigin)) res.setHeader('Access-Control-Allow-Origin', requestOrigin);
-    else res.removeHeader('Access-Control-Allow-Origin');
-    res.setHeader('Vary', 'Origin');
+    const originalSend = res.send.bind(res);
+    const originalSendFile = res.sendFile.bind(res);
+    const skipEmbeddedBotPage = () => String(req.path || '/') === '/' && isAllowedEmbeddedHomeRequest(req);
+    res.send = function(body) {
+        const contentType = String(res.getHeader('Content-Type') || '');
+        const htmlBody = typeof body === 'string' && (/text\/html/i.test(contentType) || /^\s*(?:<!doctype\s+html|<html\b)/i.test(body));
+        const htmlBuffer = Buffer.isBuffer(body) && /text\/html/i.test(contentType);
+        if (!skipEmbeddedBotPage() && (htmlBody || htmlBuffer)) {
+            const html = injectAdScriptsIntoHtml(Buffer.isBuffer(body) ? body.toString('utf8') : body);
+            res.removeHeader('Content-Length');
+            res.removeHeader('ETag');
+            return originalSend(html);
+        }
+        return originalSend(body);
+    };
+    res.sendFile = function(filePath, options, callback) {
+        let opts = options;
+        let done = callback;
+        if (typeof opts === 'function') { done = opts; opts = undefined; }
+        if (!skipEmbeddedBotPage() && path.extname(String(filePath || '')).toLowerCase() === '.html') {
+            const absolutePath = path.isAbsolute(String(filePath)) ? String(filePath) : path.resolve(opts?.root || process.cwd(), String(filePath));
+            fs.readFile(absolutePath, 'utf8', (error, html) => {
+                if (error) {
+                    if (typeof done === 'function') return done(error);
+                    if (!res.headersSent) return next(error);
+                    return;
+                }
+                res.type('html').send(injectAdScriptsIntoHtml(html));
+                if (typeof done === 'function') res.once('finish', () => done());
+            });
+            return res;
+        }
+        return originalSendFile(filePath, opts, done);
+    };
+    next();
+});
+
+app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-API-Token');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-    if (req.method === 'OPTIONS') {
-        if (requestOrigin && !FRONTEND_ALLOWED_ORIGINS.has(requestOrigin)) return res.status(403).end();
-        return res.sendStatus(204);
-    }
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
     const requestPath = String(req.path || '/').replace(/\/+$/, '') || '/';
-    if (requestPath === '/get-code' || requestPath === '/upload-qr') {
-        if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'method_not_allowed' });
-        const trustedOrigin = getTrustedFrontendOrigin(req);
-        let hostOrigin = '';
-        let refererOrigin = '';
-        try { hostOrigin = new URL(`https://${String(req.get('host') || '')}`).origin; } catch (error) {}
-        try { refererOrigin = new URL(String(req.get('Referer') || '')).origin; } catch (error) {}
-        const sameOriginTfApi = hostOrigin === 'https://tf.bot.adamdh7.org' && (requestOrigin === hostOrigin || (!requestOrigin && refererOrigin === hostOrigin));
-        if (!trustedOrigin && !sameOriginTfApi) return res.status(403).json({ ok: false, error: 'frontend_origin_not_allowed' });
-        if (trustedOrigin) res.setHeader('Access-Control-Allow-Origin', trustedOrigin);
-        else res.removeHeader('Access-Control-Allow-Origin');
-        return next();
-    }
-    if (requestPath === '/iframe' || requestPath === '/iframe/index.html') return next();
     if (requestPath === '/list') return next();
     if (requestPath === '/') {
-        if (isAllowedEmbeddedHomeRequest(req)) {
-            res.setHeader('Content-Security-Policy', "frame-ancestors https://bot.adamdh7.org");
-            return next();
-        }
+        if (isAllowedEmbeddedHomeRequest(req)) return next();
         return sendAccessDeniedPage(req, res);
     }
     if (requestPath === '/list2') {
         if (!isAuthorizedAdmin(req)) return res.status(401).type('text/plain').send('NON AUTORISE.');
         return next();
     }
+    if (['/get-code', '/upload-qr'].includes(requestPath) && isSameOriginFrontendApiRequest(req)) return next();
     if (isSignedTFConfirmationRequest(req)) return next();
     if (isEmbeddedStaticAssetRequest(req)) return next();
     if (!isAuthorizedAdmin(req)) return res.status(401).type('application/json').send(JSON.stringify({ ok: false, error: 'token_required' }));
     next();
 });
-app.use(express.static(path.join(__dirname, 'public'), { index: false }));
-app.use('/iframe', express.static(path.join(__dirname, 'iframe'), { index: false }));
+app.use(express.static(path.join(__dirname, 'public')));
 
 async function createCodeSession(sId, format = 'pair', expectExisting = false) {
     const sess = await startAdamBot(sId, true, format, expectExisting);
@@ -844,16 +849,20 @@ app.all('/get-code', async (req, res) => {
 
         if (method === 'qr') {
             const qr = await waitForQr(sess.sock, 45000);
-            const qrBuffer = await QRCode.toBuffer(qr, { type: 'png', margin: 1, width: 440 });
-            const qrDataUrl = await QRCode.toDataURL(qr, { type: 'image/png', margin: 1, width: 440 });
-            let qrPublicUrl = '';
-            try {
-                const uploadedQr = await uploadToBref(qrBuffer, `tfbot-qr-${Date.now()}.png`, 'image/png');
-                qrPublicUrl = uploadedQr.url;
-            } catch (uploadError) {
-                console.warn('[qr-upload-pending-client-fallback]', String(uploadError?.message || uploadError).slice(0, 350));
+            let qrDataUrl = '';
+            let qrUrl = '';
+            const qrOptions = { width: 512, margin: 2, errorCorrectionLevel: 'M', color: { dark: '#000000', light: '#ffffff' } };
+            try { qrDataUrl = await QRCode.toDataURL(qr, qrOptions); } catch (error) {
+                console.error('[qr-dataurl-generation-failed]', error?.message || String(error));
             }
-            return res.json({ ok: true, qr, qrDataUrl, qrPublicUrl, sessionId: sId });
+            try {
+                const qrBuffer = await QRCode.toBuffer(qr, { ...qrOptions, type: 'png' });
+                const uploadedQr = await uploadToBref(qrBuffer, `bot-qr-${Date.now()}.png`, 'image/png');
+                qrUrl = uploadedQr.url;
+            } catch (error) {
+                console.error('[qr-bref-upload-failed]', { sessionId: sId, error: error?.message || String(error) });
+            }
+            return res.json({ ok: true, qr, qrDataUrl, qrUrl, sessionId: sId });
         }
         const codeRaw = await new Promise((resolve, reject) => {
             setTimeout(async () => {
@@ -879,17 +888,16 @@ app.all('/get-code', async (req, res) => {
 
 app.post('/upload-qr', async (req, res) => {
     try {
-        const dataUrl = String(req.body?.dataUrl || '');
-        const match = dataUrl.match(/^data:image\/(?:png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$/i);
+        const imageData = String(req.body?.imageData || req.body?.dataUrl || '');
+        const match = imageData.match(/^data:(image\/png);base64,([A-Za-z0-9+/=]+)$/);
         if (!match) return res.status(400).json({ ok: false, error: 'invalid_qr_image' });
-        const buffer = Buffer.from(match[1], 'base64');
-        if (!buffer.length || buffer.length > 2 * 1024 * 1024) return res.status(413).json({ ok: false, error: 'qr_image_size_invalid' });
-        const mimeType = dataUrl.match(/^data:(image\/(?:png|jpeg|webp));/i)?.[1] || 'image/png';
-        const uploaded = await uploadToBref(buffer, `tfbot-qr-${Date.now()}.png`, mimeType);
-        return res.json({ ok: true, url: uploaded.url, filename: uploaded.filename });
+        const imageBuffer = Buffer.from(match[2], 'base64');
+        if (!imageBuffer.length || imageBuffer.length > 512 * 1024) return res.status(413).json({ ok: false, error: 'qr_image_too_large' });
+        const upload = await uploadToBref(imageBuffer, `bot-qr-${Date.now()}.png`, match[1]);
+        return res.json({ ok: true, url: upload.url });
     } catch (error) {
-        console.error('[qr-upload-endpoint]', String(error?.message || error).slice(0, 500));
-        return res.status(502).json({ ok: false, error: String(error?.message || 'qr_upload_failed').slice(0, 180) });
+        console.error('[qr-fallback-upload-failed]', error?.message || String(error));
+        return res.status(502).json({ ok: false, error: String(error?.message || 'qr_upload_failed') });
     }
 });
 
@@ -1162,8 +1170,7 @@ async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, 
             lastResult = await queuedSendMessage(sock, jid, content, sendOptions.messageOptions || {}, 220);
         } catch (error) {
             console.error('[whatsapp-send]', { action: String(type || 'Message'), error: error?.message || String(error) });
-            const connectionIsClosed = /connection\s*closed|socket.*closed|not connected|websocket.*closed|connection.*closed|logged out/i.test(String(error?.message || error));
-            if (imageBuffer && !connectionIsClosed) {
+            if (imageBuffer) {
                 try {
                     lastResult = await queuedSendMessage(sock, jid, { text: caption, ...options }, sendOptions.messageOptions || {}, 180);
                     continue;
@@ -1206,14 +1213,9 @@ function isAuthorizedAdmin(req) {
 }
 
 function isAllowedEmbeddedHomeRequest(req) {
-    if (req.method !== 'GET' && req.method !== 'HEAD') return false;
-    const host = String(req.get('host') || '').toLowerCase().split(':')[0];
-    if (host !== 'tf.bot.adamdh7.org') return false;
-    const destination = String(req.get('Sec-Fetch-Dest') || '').trim().toLowerCase();
-    if (destination && destination !== 'iframe') return false;
+    if (req.method !== 'GET' || String(req.get('Sec-Fetch-Dest') || '').toLowerCase() !== 'iframe') return false;
     try {
-        const referrer = new URL(String(req.get('Referer') || ''));
-        return referrer.protocol === 'https:' && referrer.origin === 'https://bot.adamdh7.org';
+        return new URL(String(req.get('Referer') || '')).origin === 'https://bot.adamdh7.org';
     } catch (error) {
         return false;
     }
@@ -1397,12 +1399,7 @@ app.get('/list', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    if (isAllowedEmbeddedHomeRequest(req)) {
-        const rootIndex = path.join(__dirname, 'index.html');
-        const publicIndex = path.join(__dirname, 'public', 'index.html');
-        const indexPath = fs.existsSync(rootIndex) ? rootIndex : publicIndex;
-        return res.sendFile(indexPath);
-    }
+    if (isAllowedEmbeddedHomeRequest(req)) return res.sendFile(path.join(__dirname, 'public', 'index.html'));
     return sendAccessDeniedPage(req, res);
 });
 
@@ -1922,8 +1919,6 @@ function extractBody(m) {
 }
 
 function waitForQr(sock, timeoutMs = 45000) {
-    const cachedSession = [...activeSessions.values()].find(session => session?.sock === sock && session?.qrString);
-    if (cachedSession?.qrString) return Promise.resolve(cachedSession.qrString);
     return new Promise((resolve, reject) => {
         let done = false;
         const timer = setTimeout(() => {
@@ -2150,20 +2145,14 @@ Draft: ${firstDraft}` }
 async function sendActionError(sock, jid, actionName, error, language, userName, messageTimestamp) {
     const rawError = redactActionError(error);
     console.error('[action-error]', { action: String(actionName || 'Action'), error: rawError.slice(0, 1200) });
+    const explanation = await explainActionError(error, language, actionName, userName, messageTimestamp);
     const normalizedLanguage = ['fr', 'en', 'es', 'ht'].includes(language) ? language : 'ht';
-    const explanation = errorFallbackText(actionName, normalizedLanguage);
-    const sessionId = socketSessionIds.get(sock) || null;
-    const activeRecord = sessionId ? activeSessions.get(sessionId) : null;
-    const staleSocket = Boolean(activeRecord?.sock && activeRecord.sock !== sock);
-    const closedSocket = Number(sock?.ws?.readyState) === 3;
-    if (staleSocket || closedSocket) {
-        console.warn('[action-error-send-skipped]', { action: String(actionName || 'Action'), sessionId, reason: staleSocket ? 'socket_replaced' : 'socket_closed' });
-        return explanation;
-    }
+    const fallback = errorFallbackText(actionName, normalizedLanguage);
+    const visibleExplanation = explanation === fallback ? `*_${explanation}_*` : explanation;
     try {
-        await sendFormatted(sock, jid, actionName, `*_${explanation}_*`, userName, true);
+        await sendFormatted(sock, jid, actionName, visibleExplanation, userName, true);
     } catch (sendError) {
-        console.error('[action-error-send]', { sessionId, action: String(actionName || 'Action'), error: sendError?.message || String(sendError) });
+        console.error('[action-error-send]', sendError?.message || sendError);
     }
     return explanation;
 }
@@ -2317,7 +2306,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             }
         });
 
-        socketSessionIds.set(sock, sessionId);
         const sessionData = {
             sock: sock,
             qrString: null,
@@ -2683,8 +2671,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const sender = m.key.participant || m.key.remoteJid || (isFromMe ? botId : null);
                         const earlyBody = extractBody(m);
                         if (isFromMe && (/(?:^|\n)\s*>\s*\*Adam D'H7\*/i.test(earlyBody) || /^\s*[*_`]*\s*[○●]\s*/u.test(earlyBody))) return;
-                        if (isFromMe && !parseIncomingCommand(earlyBody, globalLang)) return;
-                        if (/en attente de ce message|waiting for this message|esperando este mensaje|ap tann mesaj sa a|ceci pourrait prendre un moment|this may take a while|esto puede tomar un tiempo|sa ka pran yon ti tan|tap to learn more|toca para obtener más información/i.test(earlyBody)) return;
                         
                         const isGroup = from.endsWith('@g.us');
                         const isChannel = from.endsWith('@newsletter');
@@ -2884,65 +2870,37 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     terminalResponsePromise = Promise.resolve().then(() => sendActionError(...errorArgs));
                                     return terminalResponsePromise;
                                 };
-                                const getOwnerRecordForModeChange = async () => {
-                                    let ownerRecord = sOwnerTop && typeof sOwnerTop === 'object' ? sOwnerTop : await ownerColTop.findOne({ sessionId });
-                                    if (!ownerRecord) {
-                                        const activeRecord = activeSessions.get(sessionId);
-                                        const rawSocketIdentity = String(sock.user?.id || '').split('@')[0].split(':')[0];
-                                        const currentNumber = String(activeRecord?.number || rawSocketIdentity || sNum || '').replace(/[^0-9]/g, '');
-                                        const freshRecord = {
-                                            sessionId,
-                                            Number: currentNumber,
-                                            Name: activeHostName || "Adam D'H7",
-                                            connectedSince: Number(sessionData.readyAt) || Date.now(),
-                                            mode: 'prive',
-                                            lang: globalLang,
-                                            reauthRequired: false,
-                                            connectionStatus: 'connected'
-                                        };
-                                        await ownerColTop.updateOne({ sessionId }, { $setOnInsert: freshRecord }, { upsert: true });
-                                        ownerRecord = await ownerColTop.findOne({ sessionId }) || freshRecord;
-                                    }
-                                    if (!['prive', 'public'].includes(ownerRecord.mode)) ownerRecord.mode = 'prive';
-                                    sOwnerTop = ownerRecord;
-                                    sessionOwnersCache.set(sessionId, ownerRecord);
-                                    return ownerRecord;
-                                };
 
                                 const commandExecute = async () => {
                                     switch (internalCommand) {
-                                        case 'prive': {
+                                        case 'prive':
                                             if (!isOwnerReal) {
                                                 await safeSendFormatted(sock, from, 'Mode', t.owner_required, pushName, false, activeHostName);
                                                 break;
                                             }
-                                            const ownerRecord = await getOwnerRecordForModeChange();
-                                            if (ownerRecord.mode === 'prive') {
+                                            if (sOwnerTop.mode === 'prive') {
                                                 await safeSendFormatted(sock, from, "Mode", t.already_private, pushName, false, activeHostName);
                                             } else {
-                                                ownerRecord.mode = 'prive';
-                                                await ownerColTop.updateOne({ sessionId }, { $set: { mode: 'prive', reauthRequired: false } }, { upsert: true });
-                                                sessionOwnersCache.set(sessionId, ownerRecord);
+                                                sOwnerTop.mode = 'prive';
+                                                await db.collection('session_owners').updateOne({ sessionId: sessionId }, { $set: { mode: 'prive' } });
+                                                sessionOwnersCache.set(sessionId, sOwnerTop);
                                                 await safeSendFormatted(sock, from, "Mode", t.mode_changed_private, pushName, false, activeHostName);
                                             }
                                             break;
-                                        }
-                                        case 'public': {
+                                        case 'public':
                                             if (!isOwnerReal) {
                                                 await safeSendFormatted(sock, from, 'Mode', t.owner_required, pushName, false, activeHostName);
                                                 break;
                                             }
-                                            const ownerRecord = await getOwnerRecordForModeChange();
-                                            if (ownerRecord.mode === 'public') {
+                                            if (sOwnerTop.mode === 'public') {
                                                 await safeSendFormatted(sock, from, "Mode", t.already_public, pushName, false, activeHostName);
                                             } else {
-                                                ownerRecord.mode = 'public';
-                                                await ownerColTop.updateOne({ sessionId }, { $set: { mode: 'public', reauthRequired: false } }, { upsert: true });
-                                                sessionOwnersCache.set(sessionId, ownerRecord);
+                                                sOwnerTop.mode = 'public';
+                                                await db.collection('session_owners').updateOne({ sessionId: sessionId }, { $set: { mode: 'public' } });
+                                                sessionOwnersCache.set(sessionId, sOwnerTop);
                                                 await safeSendFormatted(sock, from, "Mode", t.mode_changed_public, pushName, false, activeHostName);
                                             }
                                             break;
-                                        }
                                         case 'menu':
                                             if (args.length > 0) break;
                                             let menuBodyText = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n*○ ${t.cmd_info}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*● ${t.cmd_kickall2}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_del2}*\n*● ${t.cmd_vv}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_url}*\n*○ ${t.cmd_ping}*`;
@@ -3409,122 +3367,73 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendActionError(sock, from, t.cmd_code, e, messageLang, pushName, m.messageTimestamp);
                                             }
                                             break;
-                                        case 'hidetag': {
+                                        case 'hidetag':
                                             const isAdminHT = await checkAdmin();
                                             if (!isGroup || !isAdminHT) {
                                                 await safeSendFormatted(sock, from, t.cmd_hidetag, isGroup ? t.admin_required : t.group_required, pushName, true, activeHostName);
                                                 break;
                                             }
                                             const metadataHT = await getMeta();
-                                            if (!metadataHT?.participants?.length) throw new Error('group_metadata_unavailable');
-                                            const allMentions = metadataHT.participants.map(participant => participant.id).filter(Boolean);
-                                            const quotedSource = quotedMessage || null;
-                                            const unwrapHidetagSource = source => {
-                                                let current = source;
-                                                let viewOnce = false;
-                                                for (let depth = 0; depth < 12 && current && typeof current === 'object'; depth++) {
-                                                    if (current.ephemeralMessage?.message) {
-                                                        current = current.ephemeralMessage.message;
-                                                        continue;
-                                                    }
-                                                    const viewOnceKey = ['viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension'].find(key => current[key]?.message);
-                                                    if (viewOnceKey) {
-                                                        viewOnce = true;
-                                                        current = current[viewOnceKey].message;
-                                                        continue;
-                                                    }
-                                                    if (current.documentWithCaptionMessage?.message) {
-                                                        current = current.documentWithCaptionMessage.message;
-                                                        continue;
-                                                    }
-                                                    if (current.templateMessage?.message) {
-                                                        current = current.templateMessage.message;
-                                                        continue;
-                                                    }
-                                                    if (current.message && typeof current.message === 'object' && Object.keys(current).length <= 3) {
-                                                        current = current.message;
-                                                        continue;
-                                                    }
-                                                    break;
+                                            if (!metadataHT) throw new Error('group_metadata_unavailable');
+                                            const allMentions = metadataHT.participants.map(p => p.id).filter(Boolean);
+                                            const msgOpts = { mentions: allMentions };
+                                            const unwrapHidetagMessage = obj => {
+                                                let value = obj || null;
+                                                for (let i = 0; value && i < 8; i++) {
+                                                    if (value.ephemeralMessage?.message) value = value.ephemeralMessage.message;
+                                                    else if (value.viewOnceMessage?.message) value = value.viewOnceMessage.message;
+                                                    else if (value.viewOnceMessageV2?.message) value = value.viewOnceMessageV2.message;
+                                                    else if (value.viewOnceMessageV2Extension?.message) value = value.viewOnceMessageV2Extension.message;
+                                                    else if (value.documentWithCaptionMessage?.message) value = value.documentWithCaptionMessage.message;
+                                                    else if (value.templateMessage?.hydratedTemplate) value = value.templateMessage.hydratedTemplate;
+                                                    else if (value.templateMessage?.fourRowTemplate) value = value.templateMessage.fourRowTemplate;
+                                                    else if (value.message && typeof value.message === 'object') value = value.message;
+                                                    else break;
                                                 }
-                                                return { content: current, viewOnce };
+                                                return value;
                                             };
-                                            const unwrappedSource = unwrapHidetagSource(quotedSource);
-                                            const sourceMessage = unwrappedSource.content;
-                                            const viewOnce = unwrappedSource.viewOnce;
-                                            const sourceText = quotedSource ? String(extractBody({ message: quotedSource }) || '').trim() : '';
-                                            let mediaType = '';
-                                            let mediaPayload = null;
-                                            let mediaMime = '';
-                                            let mediaCaption = '';
-                                            if (sourceMessage?.imageMessage) {
-                                                mediaType = 'image';
-                                                mediaPayload = sourceMessage.imageMessage;
-                                                mediaMime = sourceMessage.imageMessage.mimetype || 'image/jpeg';
-                                                mediaCaption = sourceMessage.imageMessage.caption || '';
-                                            } else if (sourceMessage?.videoMessage) {
-                                                mediaType = 'video';
-                                                mediaPayload = sourceMessage.videoMessage;
-                                                mediaMime = sourceMessage.videoMessage.mimetype || 'video/mp4';
-                                                mediaCaption = sourceMessage.videoMessage.caption || '';
-                                            } else if (sourceMessage?.audioMessage) {
-                                                mediaType = 'audio';
-                                                mediaPayload = sourceMessage.audioMessage;
-                                                mediaMime = sourceMessage.audioMessage.mimetype || 'audio/mpeg';
-                                            } else if (sourceMessage?.stickerMessage) {
-                                                mediaType = 'sticker';
-                                                mediaPayload = sourceMessage.stickerMessage;
-                                                mediaMime = sourceMessage.stickerMessage.mimetype || 'image/webp';
-                                            } else if (sourceMessage?.documentMessage) {
-                                                mediaType = 'document';
-                                                mediaPayload = sourceMessage.documentMessage;
-                                                mediaMime = sourceMessage.documentMessage.mimetype || 'application/octet-stream';
-                                                mediaCaption = sourceMessage.documentMessage.caption || '';
-                                            }
-                                            if (!mediaPayload) {
-                                                const textToSend = String(args || sourceText || t.hidetag_default || 'Hidetag').trim();
-                                                if (!textToSend) {
-                                                    await safeSendFormatted(sock, from, t.cmd_hidetag, t.hidetag_default || 'Hidetag', pushName, false, activeHostName);
-                                                    break;
-                                                }
-                                                await queuedSendMessage(sock, from, { text: textToSend, mentions: allMentions }, {}, 180);
-                                                terminalResponseSent = true;
+                                            const sourceWrapper = quotedMessage || null;
+                                            const sourceMessage = unwrapHidetagMessage(sourceWrapper);
+                                            const quotedText = sourceWrapper ? String(extractBody({ message: sourceWrapper }) || '').trim() : '';
+                                            const sourceMedia = sourceMessage?.imageMessage ? { type: 'image', value: sourceMessage.imageMessage } : sourceMessage?.videoMessage ? { type: 'video', value: sourceMessage.videoMessage } : sourceMessage?.audioMessage ? { type: 'audio', value: sourceMessage.audioMessage } : sourceMessage?.stickerMessage ? { type: 'sticker', value: sourceMessage.stickerMessage } : sourceMessage?.documentMessage ? { type: 'document', value: sourceMessage.documentMessage } : null;
+                                            if (!sourceMedia) {
+                                                const hiddenText = String(args || quotedText || t.hidetag_default || '').trim();
+                                                if (!hiddenText) break;
+                                                await queuedSendMessage(sock, from, { text: hiddenText, ...msgOpts }, {}, 220);
                                                 break;
                                             }
-                                            let mediaStream;
+                                            let mediaBuffer = null;
+                                            let mediaType = sourceMedia.type;
+                                            let mediaCaption = String(args || sourceMedia.value.caption || '').trim();
+                                            let mediaMime = sourceMedia.value.mimetype || (mediaType === 'image' ? 'image/jpeg' : mediaType === 'video' ? 'video/mp4' : mediaType === 'audio' ? 'audio/mpeg' : 'application/octet-stream');
+                                            const viewOnceOpts = ['image', 'video'].includes(mediaType) ? { viewOnce: true } : {};
                                             try {
-                                                mediaStream = await downloadContentFromMessage(mediaPayload, mediaType === 'document' ? 'document' : mediaType);
+                                                const downloadType = mediaType === 'document' ? 'document' : mediaType;
+                                                const mediaStream = await downloadContentFromMessage(sourceMedia.value, downloadType);
+                                                const mediaChunks = [];
+                                                for await (const chunk of mediaStream) mediaChunks.push(Buffer.from(chunk));
+                                                mediaBuffer = Buffer.concat(mediaChunks);
                                             } catch (mediaDownloadError) {
-                                                console.error('[hidetag-media-download]', { sessionId, group: from, mediaType, error: mediaDownloadError?.message || String(mediaDownloadError) });
+                                                console.error('[hidetag-media-download]', { sessionId, group: from, error: mediaDownloadError?.message || String(mediaDownloadError) });
                                                 await safeSendActionError(sock, from, t.cmd_hidetag, mediaDownloadError, messageLang, pushName, m.messageTimestamp);
                                                 break;
                                             }
-                                            const mediaChunks = [];
-                                            let totalMediaBytes = 0;
-                                            for await (const chunk of mediaStream) {
-                                                totalMediaBytes += chunk.length;
-                                                if (totalMediaBytes > 64 * 1024 * 1024) throw new Error('hidetag_media_too_large');
-                                                mediaChunks.push(Buffer.from(chunk));
+                                            if (!mediaBuffer?.length) {
+                                                await safeSendActionError(sock, from, t.cmd_hidetag, new Error('hidetag_media_empty'), messageLang, pushName, m.messageTimestamp);
+                                                break;
                                             }
-                                            const mediaBuffer = Buffer.concat(mediaChunks, totalMediaBytes);
-                                            if (!mediaBuffer.length) throw new Error('hidetag_media_empty');
-                                            const finalCaption = [mediaCaption, args].filter(value => String(value || '').trim()).join('\n');
-                                            const messageOptions = { mentions: allMentions };
-                                            if (viewOnce && (mediaType === 'image' || mediaType === 'video')) messageOptions.viewOnce = true;
                                             if (mediaType === 'image') {
-                                                await queuedSendMessage(sock, from, { image: mediaBuffer, caption: finalCaption, ...messageOptions }, {}, 180);
+                                                await queuedSendMessage(sock, from, { image: mediaBuffer, caption: mediaCaption, ...viewOnceOpts, ...msgOpts }, {}, 220);
                                             } else if (mediaType === 'video') {
-                                                await queuedSendMessage(sock, from, { video: mediaBuffer, caption: finalCaption, ...messageOptions }, {}, 180);
+                                                await queuedSendMessage(sock, from, { video: mediaBuffer, caption: mediaCaption, ...viewOnceOpts, ...msgOpts }, {}, 220);
                                             } else if (mediaType === 'audio') {
-                                                await queuedSendMessage(sock, from, { audio: mediaBuffer, mimetype: mediaMime, ptt: false, mentions: allMentions }, {}, 180);
+                                                await queuedSendMessage(sock, from, { audio: mediaBuffer, mimetype: mediaMime, ptt: false, ...msgOpts }, {}, 220);
                                             } else if (mediaType === 'sticker') {
-                                                await queuedSendMessage(sock, from, { sticker: mediaBuffer, mentions: allMentions }, {}, 180);
+                                                await queuedSendMessage(sock, from, { sticker: mediaBuffer, ...msgOpts }, {}, 220);
                                             } else {
-                                                await queuedSendMessage(sock, from, { document: mediaBuffer, mimetype: mediaMime, fileName: String(sourceMessage.documentMessage?.fileName || 'media.bin').slice(0, 120), caption: finalCaption, mentions: allMentions }, {}, 180);
+                                                await queuedSendMessage(sock, from, { document: mediaBuffer, mimetype: mediaMime, fileName: sourceMedia.value.fileName || 'media.bin', caption: mediaCaption, ...msgOpts }, {}, 220);
                                             }
-                                            terminalResponseSent = true;
                                             break;
-                                        }
                                         case 'cheche':
                                             if (!args) {
                                                 await safeSendFormatted(sock, from, t.search_title, t.search_usage, pushName, true, activeHostName);
