@@ -234,19 +234,20 @@ function queueMessage(executeFn, delayMs = 150, queueKey = null) {
     });
 }
 
-async function claimMessageForProcessing(sessionId, messageId) {
+async function claimMessageForProcessing(sessionId, messageId, remoteJid = '') {
     if (!db || !sessionId || !messageId) return true;
-    const documentId = `${sessionId}:${messageId}`;
+    const normalizedChat = String(remoteJid || 'unknown-chat').trim();
+    const documentId = `${sessionId}:${normalizedChat}:${messageId}`;
     try {
         const result = await db.collection('processed_messages').updateOne(
             { _id: documentId },
-            { $setOnInsert: { sessionId, messageId, ts: Date.now() } },
+            { $setOnInsert: { sessionId, messageId, remoteJid: normalizedChat, ts: Date.now() } },
             { upsert: true }
         );
         return result.upsertedCount === 1;
     } catch (error) {
         if (error && error.code === 11000) return false;
-        console.error('[message-dedupe]', error?.message || error);
+        console.error('[message-dedupe]', { sessionId, remoteJid: normalizedChat, messageId, error: error?.message || String(error) });
         return true;
     }
 }
@@ -343,7 +344,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         try {
             const result = await sock.sendMessage(destinationJid, outgoingContent, options);
             if (sessionId && result?.key?.id) {
-                outgoingMessageCache.add(`${sessionId}:${result.key.id}`);
+                outgoingMessageCache.add(`${sessionId}:${result.key.remoteJid || jid}:${result.key.id}`);
                 if (outgoingMessageCache.size > 5000) {
                     const oldest = outgoingMessageCache.values().next().value;
                     if (oldest) outgoingMessageCache.delete(oldest);
@@ -2983,26 +2984,83 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         });
 
         sock.ev.on('messages.upsert', async (up) => {
-            if (!['notify', 'append'].includes(String(up?.type || ''))) return;
-            
-            for (const m of up.messages) {
-                if (m.messageStubType) continue;
-                if (!m.message || Object.keys(m.message).length === 0) continue;
-                if (m.message.protocolMessage) continue;
-                if (m.message.messageContextInfo?.deviceListMetadata) continue;
-                if (m.key && m.key.remoteJid === 'status@broadcast') continue;
+            const upsertType = String(up?.type || '');
+            if (!['notify', 'append'].includes(upsertType)) {
+                console.info('[message-batch-ignored]', { sessionId, upsertType, reason: 'unsupported_upsert_type', count: Array.isArray(up?.messages) ? up.messages.length : 0 });
+                return;
+            }
 
-                const msgId = m.key.id;
-                if (!msgId) continue;
-                const msgCacheKey = `${sessionId}:${msgId}`;
-                if (m.key.fromMe && consumeOutgoingTextEcho(sessionId, m.key.remoteJid || '', extractBody(m))) continue;
-                if (outgoingMessageCache.has(msgCacheKey)) {
-                    outgoingMessageCache.delete(msgCacheKey);
+            for (const m of up.messages || []) {
+                const receivedBody = extractBody(m);
+                const receivedContent = unwrapMessageContent(m?.message);
+                const receivedType = Object.keys(receivedContent || {})[0] || 'unknown';
+                const receivedChat = String(m?.key?.remoteJid || m?.key?.remoteJidAlt || 'unknown-chat');
+                const receivedId = String(m?.key?.id || 'missing-id');
+                const receivedDiagnostic = {
+                    sessionId,
+                    upsertType,
+                    messageId: receivedId,
+                    chatJid: receivedChat,
+                    senderJid: String(m?.key?.participant || receivedChat),
+                    remoteJidAlt: m?.key?.remoteJidAlt || null,
+                    participantAlt: m?.key?.participantAlt || null,
+                    participantPn: m?.key?.participantPn || null,
+                    senderPn: m?.key?.senderPn || null,
+                    addressingMode: m?.key?.addressingMode || null,
+                    fromMe: !!m?.key?.fromMe,
+                    pushName: String(m?.pushName || 'Inconnu').slice(0, 80),
+                    messageType: receivedType,
+                    messageKeys: Object.keys(m?.message || {}),
+                    bodyPreview: String(receivedBody || '').replace(/[\r\n\t]+/g, ' ').slice(0, 240),
+                    timestamp: Number(m?.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m?.messageTimestamp) || null
+                };
+                console.info('[message-received]', receivedDiagnostic);
+
+                if (m.messageStubType) {
+                    console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'message_stub', messageStubType: m.messageStubType });
                     continue;
                 }
-                if (processedLocalCache.has(msgCacheKey)) continue;
+                if (!m.message || Object.keys(m.message).length === 0) {
+                    console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'empty_message_content' });
+                    continue;
+                }
+                if (m.message.protocolMessage) {
+                    console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'protocol_message' });
+                    continue;
+                }
+                if (m.message.messageContextInfo?.deviceListMetadata) {
+                    console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'device_list_metadata' });
+                    continue;
+                }
+                if (m.key && m.key.remoteJid === 'status@broadcast') {
+                    console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'status_broadcast' });
+                    continue;
+                }
+
+                const msgId = m.key.id;
+                if (!msgId) {
+                    console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'missing_message_id' });
+                    continue;
+                }
+                const msgCacheKey = `${sessionId}:${receivedChat}:${msgId}`;
+                if (m.key.fromMe && consumeOutgoingTextEcho(sessionId, m.key.remoteJid || '', extractBody(m))) {
+                    console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'outgoing_text_echo' });
+                    continue;
+                }
+                if (outgoingMessageCache.has(msgCacheKey)) {
+                    outgoingMessageCache.delete(msgCacheKey);
+                    console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'outgoing_message_echo' });
+                    continue;
+                }
+                if (processedLocalCache.has(msgCacheKey)) {
+                    console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'duplicate_in_process_cache' });
+                    continue;
+                }
                 processedLocalCache.add(msgCacheKey);
-                if (!await claimMessageForProcessing(sessionId, msgId)) continue;
+                if (!await claimMessageForProcessing(sessionId, msgId, receivedChat)) {
+                    console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'already_claimed_in_database' });
+                    continue;
+                }
                 if (processedLocalCache.size > 3000) {
                     const arr = Array.from(processedLocalCache);
                     for (let i = 0; i < 500 && i < arr.length; i++) processedLocalCache.delete(arr[i]);
@@ -3013,15 +3071,22 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     try {
                         const timestampNow = Math.floor(Date.now() / 1000);
                         const messageTimestampSeconds = Number(m.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m.messageTimestamp);
-                        if (Number.isFinite(messageTimestampSeconds) && messageTimestampSeconds > 0 && timestampNow - messageTimestampSeconds > 120) return;
+                        const messageAgeSeconds = Number.isFinite(messageTimestampSeconds) && messageTimestampSeconds > 0 ? timestampNow - messageTimestampSeconds : null;
+                        if (upsertType === 'append' && messageAgeSeconds !== null && messageAgeSeconds > 120) {
+                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: m.key.remoteJid || m.key.remoteJidAlt || null, messageAgeSeconds, reason: 'stale_history_append' });
+                            return;
+                        }
 
-                        const from = m.key.remoteJid;
+                        const from = m.key.remoteJid || m.key.remoteJidAlt || m.key.participant;
                         const isFromMe = m.key.fromMe;
                         const pushName = m.pushName || 'Inconnu';
                         const botId = sock.user?.id ? (sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id) : null;
                         const sender = m.key.participant || m.key.remoteJid || (isFromMe ? botId : null);
                         const earlyBody = extractBody(m);
-                        if (isFromMe && (/(?:^|\n)\s*>\s*\*Adam D'H7\*/i.test(earlyBody) || /^\s*[*_`]*\s*[○●]\s*/u.test(earlyBody))) return;
+                        if (isFromMe && (/(?:^|\n)\s*>\s*\*Adam D'H7\*/i.test(earlyBody) || /^\s*[*_`]*\s*[○●]\s*/u.test(earlyBody))) {
+                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: from, fromMe: true, bodyPreview: String(earlyBody || '').replace(/[\r\n\t]+/g, ' ').slice(0, 180), reason: 'own_bot_response_echo' });
+                            return;
+                        }
                         
                         const isGroup = from.endsWith('@g.us');
                         const isChannel = from.endsWith('@newsletter');
@@ -3030,10 +3095,16 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const ownerColTop = db.collection('session_owners');
                         let sOwnerTop = sessionOwnersCache.get(sessionId);
                         if (!sOwnerTop || !from.endsWith('@g.us')) {
-                            const latestOwnerDoc = await ownerColTop.findOne({ sessionId: sessionId }).catch(() => null);
-                            if (latestOwnerDoc) {
-                                sOwnerTop = latestOwnerDoc;
-                                sessionOwnersCache.set(sessionId, latestOwnerDoc);
+                            try {
+                                const latestOwnerDoc = await ownerColTop.findOne({ sessionId: sessionId });
+                                if (latestOwnerDoc) {
+                                    sOwnerTop = latestOwnerDoc;
+                                    sessionOwnersCache.set(sessionId, latestOwnerDoc);
+                                } else if (!sOwnerTop) {
+                                    console.warn('[message-owner-record-missing]', { sessionId, chatJid: from, messageId: msgId, upsertType });
+                                }
+                            } catch (ownerReadError) {
+                                console.error('[message-owner-record-read-failed]', { sessionId, chatJid: from, messageId: msgId, error: ownerReadError?.message || String(ownerReadError) });
                             }
                         }
 
@@ -3196,15 +3267,23 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         }
                         }
 
-                        const botMode = normalizeText(sOwnerTop?.mode || sOwnerTop?.Mode || 'prive');
-                        const isPublicMode = ['public', 'piblik', 'publico'].includes(botMode);
+                        const modeCandidates = [sOwnerTop?.mode, sOwnerTop?.Mode, sOwnerTop?.botMode].filter(value => value !== undefined && value !== null && String(value).trim() !== '').map(value => normalizeText(value));
+                        const isPublicMode = modeCandidates.some(value => ['public', 'piblik', 'publico'].includes(value));
+                        const botMode = modeCandidates.length ? [...new Set(modeCandidates)].join('|') : 'prive';
                         const allowed = !isChannel && (isPublicMode || isOwnerReal);
 
                         const bodyRaw = earlyBody;
                         const body = bodyRaw.trim();
 
-                        if (!allowed) return;
-                        if (!body) return;
+                        if (!allowed) {
+                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: from, messageType, fromMe: isFromMe, isGroup, isChannel, isOwnerReal, botMode, isPublicMode, modeFields: { mode: sOwnerTop?.mode ?? null, Mode: sOwnerTop?.Mode ?? null, botMode: sOwnerTop?.botMode ?? null }, bodyPreview: body.slice(0, 180), reason: 'mode_disallows_non_owner' });
+                            return;
+                        }
+                        if (!body) {
+                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: from, messageType, isPublicMode, reason: 'empty_extracted_body' });
+                            return;
+                        }
+                        console.info('[message-policy-allowed]', { sessionId, upsertType, messageId: msgId, chatJid: from, senderJid: sender, messageType, isGroup, isChannel, isOwnerReal, isPublicMode, botMode });
                         
                         const languageCacheKey = sender || from || 'unknown';
                         let messageLang = userLanguageCache.get(languageCacheKey);
@@ -3222,7 +3301,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
                         const tIgnore = translations[messageLang] || translations.ht;
                         const ignoreTexts = [tIgnore.pending_msg, tIgnore.msg_unloaded, tIgnore.take_time];
-                        if (ignoreTexts.some(text => body.includes(text))) return;
+                        if (ignoreTexts.some(text => body.includes(text))) {
+                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: from, messageType, reason: 'known_loading_placeholder', bodyPreview: body.slice(0, 180) });
+                            return;
+                        }
 
                         userInfo.set(sender, {
                           pseudo: pushName,
@@ -3231,10 +3313,14 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         });
 
                         let parsedCommand = parseIncomingCommand(body, messageLang);
-                        if (!parsedCommand) return;
+                        if (!parsedCommand) {
+                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: from, senderJid: sender, messageType, messageLang, isPublicMode, botMode, bodyPreview: body.slice(0, 240), reason: 'not_a_recognized_command', expected: 'Use an explicit recognized command; plain text is not sent to AI.' });
+                            return;
+                        }
                         const command = parsedCommand.command;
                         const args = parsedCommand.args;
                         const internalCommand = parsedCommand.internalCommand;
+                        console.info('[command-detected]', { sessionId, upsertType, messageId: msgId, chatJid: from, senderJid: sender, messageType, command, internalCommand, argumentPreview: String(args || '').replace(/[\r\n\t]+/g, ' ').slice(0, 160), isGroup, isPublicMode, isOwnerReal, mode: botMode });
 
                         (async () => {
                             try {
@@ -4082,9 +4168,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     }
                                 };
 
+                                const commandStartedAt = Date.now();
                                 try {
                                     await Promise.race([commandExecute(), timeoutExecute]);
+                                    console.info('[command-completed]', { sessionId, messageId: msgId, chatJid: from, command: internalCommand, durationMs: Date.now() - commandStartedAt, responseSent: !!terminalResponseSent });
                                 } catch (e) {
+                                    console.error('[command-failed]', { sessionId, messageId: msgId, chatJid: from, command: internalCommand, durationMs: Date.now() - commandStartedAt, error: e?.message || String(e) });
                                     await safeSendActionError(sock, from, getCommandActionTitle(t, internalCommand), e, messageLang, pushName, m.messageTimestamp);
                                 } finally {
                                     if (timeoutId) clearTimeout(timeoutId);
