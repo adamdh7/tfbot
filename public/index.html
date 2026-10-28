@@ -147,9 +147,9 @@
             align-items: center;
             justify-content: center;
             gap: 6px;
-            background: transparent;
-            padding: 8px 0;
-            border-radius: 0;
+            background: var(--glass);
+            padding: 8px 16px;
+            border-radius: 20px;
             font-size: clamp(11px, 3.5vw, 13px);
             font-weight: 500;
             color: #ffffff;
@@ -168,13 +168,12 @@
             padding-bottom: 12px;
         }
         .input-wrapper {
-            background: transparent;
-            border-radius: 0;
-            padding: clamp(14px, 4vw, 18px) 0;
+            background: var(--glass);
+            border-radius: 18px;
+            padding: clamp(14px, 4vw, 18px);
             display: flex;
             align-items: center;
-            border: 0;
-            border-bottom: 1px solid #282828;
+            border: none;
         }
         .input-wrapper svg {
             margin-right: 12px;
@@ -198,10 +197,10 @@
             margin-top: 10px;
         }
         .btn {
-            background: transparent;
-            color: #ffffff;
+            background: #ffffff;
+            color: #000000;
             padding: clamp(15px, 4vw, 20px);
-            border-radius: 0;
+            border-radius: 18px;
             font-size: clamp(14px, 4vw, 16px);
             font-weight: 600;
             cursor: pointer;
@@ -214,10 +213,10 @@
             border: none;
         }
         .btn svg {
-            stroke: #ffffff;
+            stroke: #000000;
         }
         .btn-secondary {
-            background: transparent;
+            background: var(--glass);
             color: #ffffff;
         }
         .btn-secondary svg {
