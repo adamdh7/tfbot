@@ -2,6 +2,11 @@ try { require('dotenv').config(); } catch (e) {}
 const originalConsoleLog = console.log.bind(console);
 const originalConsoleError = console.error.bind(console);
 const originalConsoleWarn = console.warn.bind(console);
+const originalConsoleInfo = console.info.bind(console);
+const originalConsoleDebug = console.debug.bind(console);
+const originalConsoleTrace = console.trace.bind(console);
+const originalConsoleDir = console.dir.bind(console);
+const originalConsoleTable = console.table.bind(console);
 let lastSignalDiagnosticAt = 0;
 function getSignalLogText(args) {
     return args.map(value => typeof value === 'string' ? value : value instanceof Error ? `${value.name}: ${value.message}` : '').join(' ');
@@ -44,6 +49,31 @@ console.warn = (...args) => {
     if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure();
     if (isSensitiveSignalLog(args)) return;
     originalConsoleWarn(...args);
+};
+console.info = (...args) => {
+    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure();
+    if (isSensitiveSignalLog(args)) return;
+    originalConsoleInfo(...args);
+};
+console.debug = (...args) => {
+    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure();
+    if (isSensitiveSignalLog(args)) return;
+    originalConsoleDebug(...args);
+};
+console.trace = (...args) => {
+    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure();
+    if (isSensitiveSignalLog(args)) return;
+    originalConsoleTrace(...args);
+};
+console.dir = (...args) => {
+    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure();
+    if (isSensitiveSignalLog(args)) return;
+    originalConsoleDir(...args);
+};
+console.table = (...args) => {
+    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure();
+    if (isSensitiveSignalLog(args)) return;
+    originalConsoleTable(...args);
 };
 const crypto = require('crypto');
 const express = require('express');
@@ -145,6 +175,8 @@ const sessionLockRetryTimers = new Map();
 const processInstanceId = `${process.env.RENDER_INSTANCE_ID || process.env.HOSTNAME || 'render'}-${process.pid}-${typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : crypto.randomBytes(12).toString('hex')}`;
 const SESSION_RUNTIME_LOCK_LEASE_MS = Math.max(45000, Number(process.env.SESSION_RUNTIME_LOCK_LEASE_MS || 90000));
 const SESSION_RUNTIME_LOCK_RENEW_MS = Math.max(10000, Math.min(SESSION_RUNTIME_LOCK_LEASE_MS / 3, Number(process.env.SESSION_RUNTIME_LOCK_RENEW_MS || 20000)));
+const BAILEYS_RETRY_MESSAGE_TTL_SECONDS = Math.max(3600, Number(process.env.BAILEYS_RETRY_MESSAGE_TTL_SECONDS || 604800));
+const PROCESSED_MESSAGE_RETENTION_MS = Math.max(60000, Number(process.env.PROCESSED_MESSAGE_RETENTION_MS || 86400000));
 let mongoClient;
 let db;
 
@@ -236,6 +268,27 @@ function cacheRecentMessage(sessionId, message) {
     if (recentMsgsCache.length > 1000) recentMsgsCache.splice(0, recentMsgsCache.length - 1000);
 }
 
+function persistOutgoingRetryMessage(sessionId, jid, message) {
+    if (!db || !sessionId || !message?.key?.id || !message?.message) return;
+    const messageId = String(message.key.id);
+    const remoteJid = String(message.key.remoteJid || jid || '');
+    const record = {
+        _id: `${sessionId}:${messageId}`,
+        sessionId,
+        messageId,
+        remoteJid,
+        message: message.message,
+        createdAt: new Date()
+    };
+    db.collection('baileys_outgoing_messages').updateOne(
+        { _id: record._id },
+        { $set: record },
+        { upsert: true }
+    ).catch(error => {
+        console.warn('[message-retry-store-write-failed]', { sessionId, messageId, error: error?.message || String(error) });
+    });
+}
+
 function normalizeEchoText(value) {
     return String(value || '').replace(/\r\n?/g, '\n').replace(/[ \t]+/g, ' ').replace(/\n{2,}/g, '\n').trim();
 }
@@ -282,7 +335,10 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                     const oldest = outgoingMessageCache.values().next().value;
                     if (oldest) outgoingMessageCache.delete(oldest);
                 }
-                if (result?.message) cacheRecentMessage(sessionId, result);
+                if (result?.message) {
+                    cacheRecentMessage(sessionId, result);
+                    persistOutgoingRetryMessage(sessionId, jid, result);
+                }
             }
             return result;
         } catch (error) {
@@ -306,6 +362,8 @@ async function connectMongo() {
         await mongoClient.connect();
         db = mongoClient.db('dh7bot');
         await db.collection('processed_messages').createIndex({ ts: 1 });
+        await db.collection('baileys_outgoing_messages').createIndex({ createdAt: 1 }, { expireAfterSeconds: BAILEYS_RETRY_MESSAGE_TTL_SECONDS, name: 'baileys_retry_message_ttl' });
+        await db.collection('baileys_outgoing_messages').createIndex({ sessionId: 1, remoteJid: 1, messageId: 1 }, { name: 'baileys_retry_message_lookup' });
         await db.collection('group_del2').createIndex({ sessionId: 1, gjid: 1, targetJid: 1 });
     } catch (e) {
         console.error('[mongo] connection failed:', e?.message || e);
@@ -2131,6 +2189,20 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     const found = recentMsgsCache[i];
                     if (found.sessionId === sessionId && found.id === key.id && (!key.remoteJid || found.from === key.remoteJid)) return found.message;
                 }
+                if (!key?.id || !db) return undefined;
+                try {
+                    const query = { _id: `${sessionId}:${String(key.id)}` };
+                    if (key.remoteJid) query.remoteJid = key.remoteJid;
+                    let stored = await db.collection('baileys_outgoing_messages').findOne(query, { projection: { message: 1, remoteJid: 1 } });
+                    if (!stored && key.remoteJid) stored = await db.collection('baileys_outgoing_messages').findOne({ _id: `${sessionId}:${String(key.id)}` }, { projection: { message: 1, remoteJid: 1 } });
+                    if (stored?.message) {
+                        const restoredMessage = fixBuffers(stored.message);
+                        cacheRecentMessage(sessionId, { key: { id: key.id, remoteJid: stored.remoteJid || key.remoteJid || '' }, message: restoredMessage, messageTimestamp: Math.floor(Date.now() / 1000) });
+                        return restoredMessage;
+                    }
+                } catch (error) {
+                    console.warn('[message-retry-store-read-failed]', { sessionId, messageId: String(key.id), error: error?.message || String(error) });
+                }
                 return undefined;
             }
         });
@@ -3449,7 +3521,7 @@ async function loadExistingSessions() {
 setInterval(async () => {
     if (!db) return;
     try {
-        const threshold = Date.now() - 60000;
+        const threshold = Date.now() - PROCESSED_MESSAGE_RETENTION_MS;
         await db.collection('processed_messages').deleteMany({ ts: { $lt: threshold } });
     } catch (e) {
         console.error('[maintenance]', e?.message || e);
