@@ -36,6 +36,7 @@
             -webkit-tap-highlight-color: transparent;
             touch-action: pan-y;
             overscroll-behavior: none;
+            min-width: 0;
         }
         html {
             width: 100%;
@@ -156,11 +157,14 @@
             border: none;
         }
         .main-content {
-            flex: 1;
+            flex: 1 0 auto;
+            min-height: 0;
+            min-width: 0;
             display: flex;
             flex-direction: column;
             justify-content: center;
             gap: clamp(12px, 3vh, 20px);
+            padding-bottom: 12px;
         }
         .input-wrapper {
             background: var(--glass);
@@ -521,16 +525,54 @@
                 border-radius: 8px;
             }
         }
-        @media (max-height: 620px) {
+        @media (max-height: 700px) {
             .header {
-                margin-top: 8px;
-                margin-bottom: 10px;
+                margin-top: 4px;
+                margin-bottom: 8px;
             }
             .header-top {
-                margin-bottom: 8px;
+                margin-bottom: 7px;
+            }
+            .logo-area {
+                width: clamp(48px, 11vh, 68px);
+                height: clamp(48px, 11vh, 68px);
+                border-radius: 16px;
             }
             .main-content {
                 justify-content: flex-start;
+            }
+            .btn {
+                padding: clamp(12px, 2.5vh, 18px);
+                gap: 8px;
+            }
+        }
+        @media (max-width: 360px) {
+            .app-container {
+                padding-left: 12px;
+                padding-right: 12px;
+            }
+            .action-grid {
+                gap: 8px;
+            }
+            .btn {
+                padding-left: 9px;
+                padding-right: 9px;
+                font-size: 14px;
+            }
+            .status-badge {
+                padding: 8px 11px;
+            }
+            .social-links-row {
+                gap: 6px;
+            }
+        }
+        @media (min-width: 681px) {
+            .app-container {
+                max-width: 760px;
+            }
+            .main-content {
+                width: min(100%, 560px);
+                align-self: center;
             }
         }
         @keyframes spin { 100% { transform: rotate(360deg); } }
@@ -556,7 +598,7 @@
         <main class="main-content">
             <div class="input-wrapper">
                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#888888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>
-                <input type="tel" id="phone" placeholder="22363817400" inputmode="tel" autocomplete="tel-national" maxlength="32" spellcheck="false" aria-label="Phone number">
+                <input type="text" id="phone" placeholder="22363817400" inputmode="tel" autocomplete="tel-national" maxlength="32" spellcheck="false" aria-label="Phone number" autocapitalize="off">
             </div>
             <div class="action-grid">
                 <button class="btn" onclick="handleAction('code')">
@@ -691,92 +733,72 @@
                 mlang: "Langues", minfo: "Info", mpoints: "Points", ltitle: "Langues", 
                 ititle: "Info", pheader: "Tu as {x} points", clicks: "Clicks",
                 err_num: "Numéro invalide", err_pts_code: "4 points requis pour le code",
-                err_pts_qr: "3 points requis pour le qr", err_conn: "Erreur de connexion",
+                err_pts_qr: "3 points requis pour le qr", err_conn: "Connexion au serveur impossible", err_timeout: "Le serveur met trop de temps à répondre", err_auth: "Accès refusé par le serveur", err_server: "Le serveur n’a pas pu terminer la demande", err_qr: "Le QR code n’a pas pu être créé",
                 succ_copy: "Copié", succ_pts: "+1 Point", qr_hint: "Scannez avec WhatsApp",
-                infoHTML: `
-                    <p style="text-align:justify; margin-bottom:15px;">Bienvenue sur le système de connexion Bot ou plutôt tfbot…. Cette interface permet de connecter votre appareil de manière sécurisée et stable afin de profiter pleinement des fonctionnalités avancées du bot.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Les sessions sont optimisées pour garantir la sécurité et les performances. Le système gère l'ensemble des opérations de façon transparente et automatique.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">L'accès aux options nécessite des points :</p>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
-                        <span style="font-size: 15px;"><strong>4 points</strong> pour un Code de paire</span>
-                    </div>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
-                        <span style="font-size: 15px;"><strong>3 points</strong> pour un Code QR</span>
-                    </div>
-                    <p style="text-align:justify; margin-bottom:15px;">Pour obtenir vos points, accédez au menu, puis à la section Points, cliquez sur le bouton "Clicks" et restez sur la page affichée pendant au moins 4 secondes. Une interaction active valide l'ajout d'un point.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Une fois connecté, utilisez la commande .menu pour découvrir une vaste gamme d'outils avancés et pratiques.</p>
-                `
+                infoHTML: `<div class="info-copy">
+                    <p><strong>Bot</strong> <em>(tfbot)</em> est un service de D’H7 | Tergene conçu pour faciliter la connexion et le déploiement de bots.</p>
+                    <p>Cette interface permet de générer un <strong>code de paire</strong> ou un <strong>QR code</strong> afin de relier un appareil à WhatsApp. Suivez les instructions affichées et gardez votre session sécurisée.</p>
+                    <h3>Accès aux fonctionnalités</h3>
+                    <p>Les options utilisent des points :</p>
+                    <div class="info-card"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg><span><strong>4 points</strong><br><em>Code de paire</em></span></div>
+                    <div class="info-card"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7M14 9h7M3 9h7M14 14v7"/></svg><span><strong>3 points</strong><br><em>QR code</em></span></div>
+                    <p>Pour obtenir des points, ouvrez le menu, choisissez <strong>Points</strong>, puis sélectionnez <em>Clicks</em>. Restez sur la page ouverte pendant au moins quatre secondes pour valider l’interaction.</p>
+                    <p class="info-final"><strong>Une fois connecté,</strong> envoyez <code>.menu</code> dans WhatsApp pour consulter les commandes et les outils disponibles.</p>
+                </div>`
             },
             en: {
                 code: "Pair Code", qr: "Scan QR", copy: "Tap to copy", menu: "Menu", 
                 mlang: "Languages", minfo: "Info", mpoints: "Points", ltitle: "Languages", 
                 ititle: "Info", pheader: "You have {x} points", clicks: "Clicks",
                 err_num: "Invalid number", err_pts_code: "4 points required for code",
-                err_pts_qr: "3 points required for QR", err_conn: "Connection error",
+                err_pts_qr: "3 points required for QR", err_conn: "Cannot reach the server", err_timeout: "The server took too long to respond", err_auth: "The server denied access", err_server: "The server could not complete the request", err_qr: "The QR code could not be created",
                 succ_copy: "Copied", succ_pts: "+1 Point", qr_hint: "Scan with WhatsApp",
-                infoHTML: `
-                    <p style="text-align:justify; margin-bottom:15px;">Welcome to the connection system Bot ou plutôt tfbot…. This interface allows you to connect your device stably to enjoy the features with complete simplicity.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Sessions have an optimized lifespan to guarantee security and performance. The system takes care of everything transparently.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Access to options requires points:</p>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
-                        <span style="font-size: 15px;"><strong>4 points</strong> for a Pair Code</span>
-                    </div>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
-                        <span style="font-size: 15px;"><strong>3 points</strong> for a QR Code</span>
-                    </div>
-                    <p style="text-align:justify; margin-bottom:15px;">To obtain your points, click on the menu button then points then click on the button you see and stay on the displayed page for at least 4 seconds. An active exploration validates your point.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Once connected, type the menu command to discover a multitude of unexpected and practical tools.</p>
-                `
+                infoHTML: `<div class="info-copy">
+                    <p><strong>Bot</strong> <em>(tfbot)</em> is a D’H7 | Tergene service designed to make connecting and deploying bots easier.</p>
+                    <p>Use this interface to generate a <strong>pairing code</strong> or a <strong>QR code</strong> to link a device with WhatsApp. Follow the on-screen instructions and keep your session secure.</p>
+                    <h3>Access to features</h3>
+                    <p>Using these options requires points:</p>
+                    <div class="info-card"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg><span><strong>4 points</strong><br><em>Pairing code</em></span></div>
+                    <div class="info-card"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7M14 9h7M3 9h7M14 14v7"/></svg><span><strong>3 points</strong><br><em>QR code</em></span></div>
+                    <p>To earn points, open the menu, select <strong>Points</strong>, then choose <em>Clicks</em>. Stay on the page that opens for at least four seconds to validate the interaction.</p>
+                    <p class="info-final"><strong>After connecting,</strong> send <code>.menu</code> in WhatsApp to view the available commands and tools.</p>
+                </div>`
             },
             es: {
                 code: "Código de par", qr: "Escanear QR", copy: "Toca para copiar", menu: "Menú", 
                 mlang: "Idiomas", minfo: "Info", mpoints: "Puntos", ltitle: "Idiomas", 
                 ititle: "Info", pheader: "Tienes {x} puntos", clicks: "Clics",
                 err_num: "Número inválido", err_pts_code: "4 puntos requeridos para el código",
-                err_pts_qr: "3 puntos requeridos para el QR", err_conn: "Error de conexión",
+                err_pts_qr: "3 puntos requeridos para el QR", err_conn: "No se puede conectar con el servidor", err_timeout: "El servidor tardó demasiado en responder", err_auth: "El servidor denegó el acceso", err_server: "El servidor no pudo completar la solicitud", err_qr: "No se pudo crear el código QR",
                 succ_copy: "Copiado", succ_pts: "+1 Punto", qr_hint: "Escanea con WhatsApp",
-                infoHTML: `
-                    <p style="text-align:justify; margin-bottom:15px;">Bienvenido al sistema de conexión Bot ou plutôt tfbot…. Esta interfaz permite conectar tu dispositivo de manera estable para disfrutar de las funcionalidades con total simplicidad.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Las sesiones tienen una duración de vida optimizada para garantizar seguridad y rendimiento. El sistema se encarga de todo de forma transparente.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">El acceso a las opciones requiere puntos:</p>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
-                        <span style="font-size: 15px;"><strong>4 puntos</strong> para un Código de par</span>
-                    </div>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
-                        <span style="font-size: 15px;"><strong>3 puntos</strong> para un Código QR</span>
-                    </div>
-                    <p style="text-align:justify; margin-bottom:15px;">Para obtener tus puntos, haz clic en el botón menú luego puntos luego haz clic en el botón que ves y permanece en la página mostrada durante al menos 4 segundos. Una exploración activa valida tu punto.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Una vez conectado, escribe el comando de menú para descubrir una multitud de herramientas inesperadas y prácticas.</p>
-                `
+                infoHTML: `<div class="info-copy">
+                    <p><strong>Bot</strong> <em>(tfbot)</em> es un servicio de D’H7 | Tergene diseñado para facilitar la conexión y el despliegue de bots.</p>
+                    <p>Utiliza esta interfaz para generar un <strong>código de vinculación</strong> o un <strong>código QR</strong> y conectar un dispositivo con WhatsApp. Sigue las instrucciones y protege tu sesión.</p>
+                    <h3>Acceso a las funciones</h3>
+                    <p>Estas opciones requieren puntos:</p>
+                    <div class="info-card"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg><span><strong>4 puntos</strong><br><em>Código de vinculación</em></span></div>
+                    <div class="info-card"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7M14 9h7M3 9h7M14 14v7"/></svg><span><strong>3 puntos</strong><br><em>Código QR</em></span></div>
+                    <p>Para conseguir puntos, abre el menú, entra en <strong>Puntos</strong> y selecciona <em>Clicks</em>. Permanece en la página que se abre durante al menos cuatro segundos para validar la interacción.</p>
+                    <p class="info-final"><strong>Después de conectarte,</strong> envía <code>.menu</code> en WhatsApp para consultar los comandos y las herramientas disponibles.</p>
+                </div>`
             },
             ht: {
                 code: "Kòd Pè", qr: "Eskane QR", copy: "Klike pou kopye", menu: "Meni", 
                 mlang: "Lang", minfo: "Enfòmasyon", mpoints: "Pwen", ltitle: "Lang", 
                 ititle: "Enfòmasyon", pheader: "Ou gen {x} pwen", clicks: "Klike",
                 err_num: "ajoute on Nimewo", err_pts_code: "4 pwen nesesè pou kòd pè an",
-                err_pts_qr: "3 pwen nesesè pou qr lan", err_conn: "Erè koneksyon",
+                err_pts_qr: "3 pwen nesesè pou qr lan", err_conn: "Pa ka konekte ak sèvè a", err_timeout: "Sèvè a pran twòp tan pou reponn", err_auth: "Sèvè a refize aksè a", err_server: "Sèvè a pa t kapab fini demann lan", err_qr: "Li pa t posib pou kreye kòd QR la",
                 succ_copy: "Kopye", succ_pts: "+1 Pwen", qr_hint: "Eskane ak WhatsApp",
-                infoHTML: `
-                    <p style="text-align:justify; margin-bottom:15px;">Byenveni sou sistèm lyezon Bot ou plutôt tfbot… lan. Entèfas sa a pèmèt ou konekte aparèy ou a yon fason ki estab pou'w jwi fonksyonalite yo ak tout senplisite.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Sesyon yo gen yon dire lavi optimize pou garanti sekirite ak pèfòmans. Sistèm nan pran swen tout bagay yon fason transparan.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Aksè a opsyon yo mande pwen :</p>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>
-                        <span style="font-size: 15px;"><strong>4 pwen</strong> pou yon Kòd Pè</span>
-                    </div>
-                    <div style="display: flex; align-items: center; gap: 12px; margin: 12px 0; background: #1c1c1e; padding: 14px; border-radius: 16px;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7"/><path d="M14 9h7"/><path d="M3 9h7"/><path d="M14 14v7"/></svg>
-                        <span style="font-size: 15px;"><strong>3 pwen</strong> pou yon Kòd QR</span>
-                    </div>
-                    <p style="text-align:justify; margin-bottom:15px;">Pou jwenn fiti pwen ou yo, klike sou bouton meni a, aprè bouton ki ekri pwen an, answit klike sou bouton gri ki ekri Klike an, epi rete sou paj ki afiche a pandan o mwen 4 segonn. Yon eksplorasyon aktif valide pwen ou an.</p>
-                    <p style="text-align:justify; margin-bottom:15px;">Yon fwa konekte, tape kòmand meni an pou dekouvri yon pakèt zouti inatandi e ki pratik.</p>
-                `
+                infoHTML: `<div class="info-copy">
+                    <p><strong>Bot</strong> <em>(tfbot)</em> se yon sèvis D’H7 | Tergene ki fèt pou rann koneksyon ak deplwaman bot yo pi fasil.</p>
+                    <p>Sèvi ak entèfas sa a pou kreye yon <strong>kòd pè</strong> oswa yon <strong>kòd QR</strong> pou konekte yon aparèy ak WhatsApp. Swiv enstriksyon yo epi pwoteje sesyon ou.</p>
+                    <h3>Aksè ak fonksyon yo</h3>
+                    <p>Opsyon sa yo mande pwen:</p>
+                    <div class="info-card"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg><span><strong>4 pwen</strong><br><em>Kòd pè</em></span></div>
+                    <div class="info-card"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M9 14v7M14 9h7M3 9h7M14 14v7"/></svg><span><strong>3 pwen</strong><br><em>Kòd QR</em></span></div>
+                    <p>Pou jwenn pwen, ouvri meni an, chwazi <strong>Pwen</strong>, epi peze <em>Clicks</em>. Rete sou paj ki louvri a pandan omwen kat segonn pou valide entèraksyon an.</p>
+                    <p class="info-final"><strong>Apre ou fin konekte,</strong> voye <code>.menu</code> nan WhatsApp pou wè kòmand ak zouti ki disponib yo.</p>
+                </div>`
             }
         };
 
@@ -952,13 +974,28 @@
             sanitizePhoneValue();
             storage.setItem('phone', ui.phone.value);
         });
-        ui.phone.addEventListener('paste', () => queueMicrotask(() => {
+        ui.phone.addEventListener('paste', event => {
+            event.preventDefault();
+            const clipboardText = event.clipboardData?.getData('text') || '';
+            const cleaned = clipboardText.replace(/[^0-9()+\-]/g, '');
+            const start = ui.phone.selectionStart ?? ui.phone.value.length;
+            const end = ui.phone.selectionEnd ?? start;
+            ui.phone.setRangeText(cleaned, start, end, 'end');
             sanitizePhoneValue();
             storage.setItem('phone', ui.phone.value);
-        }));
-        ui.phone.addEventListener('drop', () => queueMicrotask(() => { sanitizePhoneValue(); storage.setItem('phone', ui.phone.value); }));
+        });
+        ui.phone.addEventListener('drop', event => {
+            event.preventDefault();
+            const droppedText = event.dataTransfer?.getData('text') || '';
+            const cleaned = droppedText.replace(/[^0-9()+\-]/g, '');
+            const start = ui.phone.selectionStart ?? ui.phone.value.length;
+            const end = ui.phone.selectionEnd ?? start;
+            ui.phone.setRangeText(cleaned, start, end, 'end');
+            sanitizePhoneValue();
+            storage.setItem('phone', ui.phone.value);
+        });
         ui.phone.addEventListener('beforeinput', event => {
-            if (event.data && /[^0-9()+\-]/.test(event.data) && event.inputType !== 'insertFromPaste' && event.inputType !== 'insertFromDrop') event.preventDefault();
+            if (event.data && /[^0-9()+\-]/.test(event.data) && !['insertFromPaste', 'insertFromDrop', 'deleteContentBackward', 'deleteContentForward'].includes(event.inputType)) event.preventDefault();
         });
         async function createQrDataUrl(value) {
             if (typeof value !== 'string' || !value) return '';
@@ -1151,7 +1188,9 @@
                 if (requestTimeout) clearTimeout(requestTimeout);
                 ui.loader.style.display = 'none';
                 ui.output.style.display = 'none';
-                showNotif(t.err_conn);
+                const failureReason = String(error?.message || '').toLowerCase();
+                const failureMessage = /abort|timeout|deadline/.test(failureReason) ? t.err_timeout : /token_required|unauthori[sz]ed|forbidden|http_401|http_403|\b401\b|\b403\b/.test(failureReason) ? t.err_auth : /invalid_number/.test(failureReason) ? t.err_num : /qr_render_failed|qr_image|qrcode/.test(failureReason) ? t.err_qr : /http_5\d\d|connection closed|connection failure|pair_error|session_runtime|mongo_not_connected/.test(failureReason) ? t.err_server : t.err_conn;
+                showNotif(failureMessage);
                 console.error('Bot request failed:', error?.message || error);
             }
         }
