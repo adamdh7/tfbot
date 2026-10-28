@@ -181,6 +181,7 @@ let mongoClient;
 let db;
 
 let recentMsgsCache = [];
+const lidPhoneResolutionCache = new Map();
 const chatHistories = new Map();
 const groupSettingsCache = new Map();
 const activeDel2UsersCache = new Map();
@@ -195,6 +196,68 @@ const messageQueues = new WeakMap();
 const outgoingMessageCache = new Set();
 const outgoingTextEchoCache = new Map();
 const fallbackMessageQueue = { tasks: [], isSendingQueue: false };
+
+function normalizeLidCacheKey(value) {
+    return String(value || '').trim().replace(/:\d+@lid$/i, '@lid').toLowerCase();
+}
+
+function normalizePhoneCacheJid(value) {
+    const raw = String(value || '').trim();
+    if (!/@s\.whatsapp\.net$/i.test(raw)) return '';
+    const number = normalizePhoneNumber(raw.split('@')[0].split(':')[0]);
+    return /^\d{6,20}$/.test(number) ? `${number}@s.whatsapp.net` : '';
+}
+
+function rememberLidPhonePair(sessionId, first, second, source = 'message_key') {
+    const left = String(first || '').trim();
+    const right = String(second || '').trim();
+    const leftIsLid = /@lid$/i.test(normalizeLidCacheKey(left));
+    const rightIsLid = /@lid$/i.test(normalizeLidCacheKey(right));
+    const leftPhone = normalizePhoneCacheJid(left);
+    const rightPhone = normalizePhoneCacheJid(right);
+    let lid = '';
+    let phone = '';
+    if (leftIsLid && rightPhone) {
+        lid = normalizeLidCacheKey(left);
+        phone = rightPhone;
+    } else if (rightIsLid && leftPhone) {
+        lid = normalizeLidCacheKey(right);
+        phone = leftPhone;
+    }
+    if (!sessionId || !lid || !phone) return false;
+    const key = `${sessionId}:${lid}`;
+    lidPhoneResolutionCache.set(key, { phone, source, updatedAt: Date.now() });
+    while (lidPhoneResolutionCache.size > 10000) lidPhoneResolutionCache.delete(lidPhoneResolutionCache.keys().next().value);
+    return true;
+}
+
+function getRememberedPhoneForLid(sessionId, lidValue) {
+    const lid = normalizeLidCacheKey(lidValue);
+    if (!sessionId || !/@lid$/i.test(lid)) return '';
+    const key = `${sessionId}:${lid}`;
+    const record = lidPhoneResolutionCache.get(key);
+    if (!record) return '';
+    if (Date.now() - record.updatedAt > 30 * 24 * 60 * 60 * 1000) {
+        lidPhoneResolutionCache.delete(key);
+        return '';
+    }
+    return record.phone || '';
+}
+
+function cacheMessageIdentityAliases(sessionId, message) {
+    const key = message?.key || {};
+    const pairs = [
+        [key.remoteJid, key.remoteJidAlt],
+        [key.remoteJid, key.senderPn],
+        [key.remoteJid, key.participantPn],
+        [key.participant, key.participantAlt],
+        [key.participant, key.participantPn],
+        [key.participant, key.senderPn]
+    ];
+    let saved = 0;
+    for (const [first, second] of pairs) if (rememberLidPhonePair(sessionId, first, second)) saved++;
+    return saved;
+}
 
 function getMessageQueue(queueKey) {
     if (!queueKey || (typeof queueKey !== 'object' && typeof queueKey !== 'function')) return fallbackMessageQueue;
@@ -348,8 +411,19 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         const outgoingContent = content;
         const destinationJid = String(jid || '').trim();
         const echoToken = rememberOutgoingTextEcho(sessionId, destinationJid, outgoingContent);
+        const sendStartedAt = Date.now();
         try {
             const result = await sock.sendMessage(destinationJid, outgoingContent, options);
+            console.info('[whatsapp-send-completed]', {
+                sessionId,
+                connectedAccountJid: sock.user?.id || null,
+                destinationJid,
+                destinationType: destinationJid.endsWith('@g.us') ? 'group' : destinationJid.endsWith('@newsletter') ? 'channel' : destinationJid.endsWith('@s.whatsapp.net') ? 'private_pn' : destinationJid.endsWith('@lid') ? 'private_lid' : 'other',
+                messageType: Object.keys(outgoingContent || {}).join(',') || 'unknown',
+                responseMessageId: result?.key?.id || null,
+                responseChatJid: result?.key?.remoteJid || null,
+                durationMs: Date.now() - sendStartedAt
+            });
             if (sessionId && result?.key?.id) {
                 outgoingMessageCache.add(`${sessionId}:${result.key.remoteJid || jid}:${result.key.id}`);
                 if (outgoingMessageCache.size > 5000) {
@@ -2625,6 +2699,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const disconnectReason = String(lastDisconnect?.error?.message || 'unknown').slice(0, 180);
                 console.warn('[whatsapp] connection closed', {
                     sessionId,
+                    connectedAccountJid: sock.user?.id || null,
+                    connectedNumber: sock.user?.id ? normalizedJidNumber(sock.user.id) : null,
+                    connectionFormat,
+                    previousStatus: currentSession?.status || null,
                     statusCode: statusCode ?? null,
                     reason: disconnectReason,
                     willReconnect: statusCode !== DisconnectReason.loggedOut && statusCode !== 401
@@ -3005,12 +3083,46 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
         sock.ev.on('messages.upsert', async (up) => {
             const upsertType = String(up?.type || '');
+            const rawBatch = Array.isArray(up?.messages) ? up.messages : [];
+            console.info('[messages-upsert-batch]', {
+                sessionId,
+                connectedAccountJid: sock.user?.id || null,
+                sessionStatus: activeSessions.get(sessionId)?.status || null,
+                socketReadyState: Number.isFinite(Number(sock.ws?.readyState)) ? Number(sock.ws.readyState) : null,
+                upsertType,
+                messageCount: rawBatch.length,
+                messages: rawBatch.slice(0, 30).map(entry => {
+                    const remoteJid = String(entry?.key?.remoteJid || '');
+                    const remoteJidAlt = String(entry?.key?.remoteJidAlt || '');
+                    const mainChat = remoteJid || remoteJidAlt || String(entry?.key?.participant || 'unknown-chat');
+                    const messageBody = String(extractBody(entry) || '').replace(/[\r\n\t]+/g, ' ').slice(0, 180);
+                    return {
+                        messageId: entry?.key?.id || null,
+                        chatJid: mainChat,
+                        remoteJid,
+                        remoteJidAlt: remoteJidAlt || null,
+                        participant: entry?.key?.participant || null,
+                        participantAlt: entry?.key?.participantAlt || null,
+                        participantPn: entry?.key?.participantPn || null,
+                        senderPn: entry?.key?.senderPn || null,
+                        addressingMode: entry?.key?.addressingMode || null,
+                        chatType: mainChat.endsWith('@g.us') ? 'group' : mainChat.endsWith('@newsletter') ? 'channel' : mainChat === 'status@broadcast' ? 'status' : mainChat === 'unknown-chat' ? 'unknown' : 'private',
+                        fromMe: !!entry?.key?.fromMe,
+                        pushName: String(entry?.pushName || '').slice(0, 80),
+                        messageType: Object.keys(unwrapMessageContent(entry?.message) || {})[0] || 'unknown',
+                        messageKeys: Object.keys(entry?.message || {}),
+                        bodyPreview: messageBody
+                    };
+                }),
+                truncated: rawBatch.length > 30
+            });
             if (!['notify', 'append'].includes(upsertType)) {
                 console.info('[message-batch-ignored]', { sessionId, upsertType, reason: 'unsupported_upsert_type', count: Array.isArray(up?.messages) ? up.messages.length : 0 });
                 return;
             }
 
-            for (const m of up.messages || []) {
+            for (const m of rawBatch) {
+                const identityAliasCount = cacheMessageIdentityAliases(sessionId, m);
                 const receivedBody = extractBody(m);
                 const receivedContent = unwrapMessageContent(m?.message);
                 const receivedType = Object.keys(receivedContent || {})[0] || 'unknown';
@@ -3018,10 +3130,16 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const receivedId = String(m?.key?.id || 'missing-id');
                 const receivedDiagnostic = {
                     sessionId,
+                    connectedAccountJid: sock.user?.id || null,
+                    sessionStatus: activeSessions.get(sessionId)?.status || null,
+                    socketReadyState: Number.isFinite(Number(sock.ws?.readyState)) ? Number(sock.ws.readyState) : null,
                     upsertType,
                     messageId: receivedId,
                     chatJid: receivedChat,
+                    rawRemoteJid: m?.key?.remoteJid || null,
+                    rawRemoteJidAlt: m?.key?.remoteJidAlt || null,
                     senderJid: String(m?.key?.participant || receivedChat),
+                    identityAliasCount,
                     remoteJidAlt: m?.key?.remoteJidAlt || null,
                     participantAlt: m?.key?.participantAlt || null,
                     participantPn: m?.key?.participantPn || null,
@@ -3145,6 +3263,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         for (const senderIdentity of [...senderJids]) {
                             const normalizedSenderIdentity = normalizedLidForMapping(senderIdentity);
                             if (!/@lid$/i.test(normalizedSenderIdentity)) continue;
+                            const cachedPhoneIdentity = getRememberedPhoneForLid(sessionId, normalizedSenderIdentity);
+                            if (cachedPhoneIdentity) senderJids.push(cachedPhoneIdentity);
                             try {
                                 const mappedPrivateIdentity = await sock.signalRepository?.lidMapping?.getPNForLID?.(normalizedSenderIdentity);
                                 const mappedNumber = normalizePhoneNumber(String(mappedPrivateIdentity || '').split('@')[0].split(':')[0]);
@@ -3164,7 +3284,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 { value: m.key.remoteJidAlt, source: 'remoteJidAlt' },
                                 { value: m.key.senderPn, source: 'senderPn' },
                                 { value: m.key.participantPn, source: 'participantPn' },
-                                { value: mappedPrivateChatPhoneJid, source: 'lid_mapping' }
+                                { value: mappedPrivateChatPhoneJid, source: 'lid_mapping' },
+                                { value: getRememberedPhoneForLid(sessionId, normalizedRawChatForMapping), source: 'lid_phone_cache' }
                             ];
                             const directPhoneCandidate = directPhoneCandidates.find(candidate => /@s\.whatsapp\.net$/i.test(String(candidate.value || '')));
                             const directPhoneNumber = normalizePhoneNumber(String(directPhoneCandidate?.value || '').split('@')[0].split(':')[0]);
@@ -3182,7 +3303,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
                         console.info('[message-identity-resolved]', {
                             sessionId,
+                            connectedAccountJid: sock.user?.id || null,
                             messageId: msgId,
+                            rawChatType: rawChatIsGroup ? 'group' : rawChatIsChannel ? 'channel' : 'private',
                             rawChatJid: rawFrom,
                             remoteJidAlt: m.key.remoteJidAlt || null,
                             senderPn: m.key.senderPn || null,
@@ -3337,6 +3460,22 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const bodyRaw = earlyBody;
                         const body = bodyRaw.trim();
 
+                        console.info('[message-policy-evaluation]', {
+                            sessionId,
+                            connectedAccountJid: sock.user?.id || null,
+                            messageId: msgId,
+                            chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private',
+                            incomingChatJid: rawFrom,
+                            replyTargetJid: from,
+                            replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid',
+                            senderJid: sender,
+                            senderAliases: senderJids,
+                            isOwnerReal,
+                            isPublicMode,
+                            allowed,
+                            mode: botMode,
+                            bodyPreview: body.slice(0, 180)
+                        });
                         if (!allowed) {
                             console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: from, messageType, fromMe: isFromMe, isGroup, isChannel, isOwnerReal, botMode, isPublicMode, modeFields: { mode: sOwnerTop?.mode ?? null, Mode: sOwnerTop?.Mode ?? null, botMode: sOwnerTop?.botMode ?? null }, bodyPreview: body.slice(0, 180), reason: 'mode_disallows_non_owner' });
                             return;
@@ -3443,6 +3582,38 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     terminalResponsePromise = Promise.resolve().then(() => sendActionError(...errorArgs));
                                     return terminalResponsePromise;
                                 };
+                                const trackedSendImageCaptioned = async (...sendArgs) => {
+                                    const sendStartedAt = Date.now();
+                                    try {
+                                        const result = await sendImageCaptioned(...sendArgs);
+                                        responseSentForLog = !!result?.key?.id || responseSentForLog;
+                                        console.info('[command-response-sent]', {
+                                            sessionId,
+                                            messageId: msgId,
+                                            command: internalCommand,
+                                            responseType: 'image_or_text',
+                                            sourceChatJid: rawFrom,
+                                            remoteJidAlt: m.key.remoteJidAlt || null,
+                                            replyTargetJid: from,
+                                            replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid',
+                                            responseMessageId: result?.key?.id || null,
+                                            durationMs: Date.now() - sendStartedAt
+                                        });
+                                        return result;
+                                    } catch (sendError) {
+                                        console.error('[command-response-send-failed]', {
+                                            sessionId,
+                                            messageId: msgId,
+                                            command: internalCommand,
+                                            responseType: 'image_or_text',
+                                            sourceChatJid: rawFrom,
+                                            replyTargetJid: from,
+                                            replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid',
+                                            error: sendError?.message || String(sendError)
+                                        });
+                                        throw sendError;
+                                    }
+                                };
 
                                 const commandExecute = async () => {
                                     switch (internalCommand) {
@@ -3518,7 +3689,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 console.error('[qr-upload-to-bref]', redactActionError(qrUploadError).slice(0, 400));
                                             }
                                             const qrCaptionText = Buffer.byteLength(args, 'utf8') <= 500 ? `${args}${qrPublicUrl ? `\n${qrPublicUrl}` : ''}` : `${t.qr_generated || 'QR code generated.'}${qrPublicUrl ? `\n${qrPublicUrl}` : ''}`;
-                                            await sendImageCaptioned(sock, from, qrBuffer, t.cmd_qr, qrCaptionText, pushName);
+                                            await trackedSendImageCaptioned(sock, from, qrBuffer, t.cmd_qr, qrCaptionText, pushName);
                                             terminalResponseSent = true;
                                             break;
                                         case 'qrbot':
@@ -3542,7 +3713,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                     qrSent = true;
                                                     try {
                                                         const qrbuf = await QRCode.toBuffer(qr);
-                                                        await sendImageCaptioned(sock, from, qrbuf, t.qrbot_created, t.qrbot_scan, pushName);
+                                                        await trackedSendImageCaptioned(sock, from, qrbuf, t.qrbot_created, t.qrbot_scan, pushName);
                                                     } catch (e) {}
                                                 }
                                                 if (connection === 'open') {
@@ -3593,7 +3764,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 } catch (profileError) {
                                                     console.warn('[link-profile-image]', profileError?.message || profileError);
                                                 }
-                                                await sendImageCaptioned(sock, from, linkImage, lienCapTitle, lienTextForm, pushName);
+                                                await trackedSendImageCaptioned(sock, from, linkImage, lienCapTitle, lienTextForm, pushName);
                                             } catch (e) {
                                                 await safeSendActionError(sock, from, t.cmd_lien, e, messageLang, pushName, m.messageTimestamp);
                                             }
@@ -3609,7 +3780,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             const tagTitle = t.cmd_tagall.charAt(0).toUpperCase() + t.cmd_tagall.slice(1);
                                             const participants = metadataTag.participants.map(p => p.id);
                                             const tagBody = participants.map((p, i) => (i % 2 === 0 ? '●' : '○') + ' @' + p.split('@')[0]).join('\n');
-                                            await sendImageCaptioned(sock, from, adamLogoBuffer, tagTitle, tagBody, pushName, { mentions: participants });
+                                            await trackedSendImageCaptioned(sock, from, adamLogoBuffer, tagTitle, tagBody, pushName, { mentions: participants });
                                             break;
                                         case 'add':
                                             const isAdminKAdd = await checkAdmin();
@@ -3839,7 +4010,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await addDel2Target(sessionId, from, targetJid);
                                                 msgTextDel2 = t.del2_activated.replace('{user}', targetJid.split('@')[0]);
                                             }
-                                            await sendImageCaptioned(sock, from, adamLogoBuffer, t.cmd_del2, msgTextDel2, pushName, { mentions: [targetJid] });
+                                            await trackedSendImageCaptioned(sock, from, adamLogoBuffer, t.cmd_del2, msgTextDel2, pushName, { mentions: [targetJid] });
                                             break;
                                         case 'vv':
                                             if (!quotedMessage) break;
@@ -3971,7 +4142,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 const capText = uploadError
                                                     ? await explainActionError(uploadError, messageLang, t.image_generated_title, pushName, m.messageTimestamp)
                                                     : `${t.imaj_generated.replace('{prompt}', imagePrompt)}${publicImageUrl ? `\n${publicImageUrl}` : ''}`;
-                                                await sendImageCaptioned(sock, from, imageBuffer, t.image_generated_title, capText, pushName);
+                                                await trackedSendImageCaptioned(sock, from, imageBuffer, t.image_generated_title, capText, pushName);
                                                 terminalResponseSent = true;
                                             } catch (e) {
                                                 await safeSendActionError(sock, from, t.imaj_title, e, messageLang, pushName, m.messageTimestamp);
@@ -4001,7 +4172,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                     const tfid_code = crypto.randomInt(100000000000, 999999999999);
                                                     const confirmLink_code = `${TF_BOT_BASE_URL}/TF-${tfid_code}`;
                                                     const confirmText = t.code_confirm.replace('{link}', confirmLink_code);
-                                                    const msgConfirmation = await sendImageCaptioned(sock, from, adamLogoBuffer, t.cmd_code, confirmText, pushName);
+                                                    const msgConfirmation = await trackedSendImageCaptioned(sock, from, adamLogoBuffer, t.cmd_code, confirmText, pushName);
                                                     responseSentForLog = !!msgConfirmation;
                                                     console.info('[pair-code-confirmation-sent]', { sessionId, messageId: msgId, replyTargetJid: from, responseMessageId: msgConfirmation?.key?.id || null, connectionFormat: normalizeConnectionFormat(activeSessions.get(sessionId)?.format || 'pair') });
                                                     
@@ -4246,7 +4417,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 const commandStartedAt = Date.now();
                                 try {
                                     await Promise.race([commandExecute(), timeoutExecute]);
-                                    console.info('[command-completed]', { sessionId, messageId: msgId, chatJid: rawFrom, replyTargetJid: from, command: internalCommand, durationMs: Date.now() - commandStartedAt, responseSent: !!(terminalResponseSent || responseSentForLog) });
+                                    console.info('[command-completed]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid', command: internalCommand, durationMs: Date.now() - commandStartedAt, responseSent: !!(terminalResponseSent || responseSentForLog) });
                                 } catch (e) {
                                     console.error('[command-failed]', { sessionId, messageId: msgId, chatJid: from, command: internalCommand, durationMs: Date.now() - commandStartedAt, error: e?.message || String(e) });
                                     await safeSendActionError(sock, from, getCommandActionTitle(t, internalCommand), e, messageLang, pushName, m.messageTimestamp);
@@ -4262,7 +4433,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             }
                         })();
 
-                    } catch (cmdError) { console.error('[message-handler]', cmdError?.message || cmdError); }
+                    } catch (cmdError) { console.error('[message-handler]', { sessionId, upsertType, messageId: msgId, incomingChatJid: rawFrom, replyTargetJid: from, error: cmdError?.message || String(cmdError) }); }
                 });
             }
         });
