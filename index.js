@@ -716,7 +716,7 @@ app.use((req, res, next) => {
         const destination = String(req.get('Sec-Fetch-Dest') || '').toLowerCase();
         let referrerOrigin = '';
         try { referrerOrigin = new URL(String(req.get('Referer') || '')).origin; } catch (error) {}
-        const isIframeResponse = requestPath === '/iframe' || requestPath.startsWith('/iframe/') || destination === 'iframe' || (requestHost === 'tf.bot.adamdh7.org' && referrerOrigin === 'https://bot.adamdh7.org');
+        const isIframeResponse = destination === 'iframe' || (requestHost === 'tf.bot.adamdh7.org' && referrerOrigin === 'https://bot.adamdh7.org');
         if (!isIframeResponse && typeof body === 'string' && /<html[\s>]/i.test(body) && /<\/head>/i.test(body)) {
             const additions = REQUIRED_HTML_SCRIPTS.filter(script => !body.includes(script.match(/src="([^"]+)/)?.[1] || '')).join('');
             if (additions) body = body.replace(/<\/head>/i, `${additions}</head>`);
@@ -791,7 +791,10 @@ app.use((req, res, next) => {
     if (requestPath === '/iframe' || requestPath === '/iframe/index.html') return next();
     if (requestPath === '/list') return next();
     if (requestPath === '/') {
-        if (isAllowedEmbeddedHomeRequest(req)) return next();
+        if (isAllowedEmbeddedHomeRequest(req)) {
+            res.setHeader('Content-Security-Policy', "frame-ancestors https://bot.adamdh7.org");
+            return next();
+        }
         return sendAccessDeniedPage(req, res);
     }
     if (requestPath === '/list2') {
@@ -1203,12 +1206,14 @@ function isAuthorizedAdmin(req) {
 }
 
 function isAllowedEmbeddedHomeRequest(req) {
-    if (req.method !== 'GET') return false;
+    if (req.method !== 'GET' && req.method !== 'HEAD') return false;
     const host = String(req.get('host') || '').toLowerCase().split(':')[0];
-    if (host === 'bot.adamdh7.org') return true;
     if (host !== 'tf.bot.adamdh7.org') return false;
+    const destination = String(req.get('Sec-Fetch-Dest') || '').trim().toLowerCase();
+    if (destination && destination !== 'iframe') return false;
     try {
-        return new URL(String(req.get('Referer') || '')).origin === 'https://bot.adamdh7.org';
+        const referrer = new URL(String(req.get('Referer') || ''));
+        return referrer.protocol === 'https:' && referrer.origin === 'https://bot.adamdh7.org';
     } catch (error) {
         return false;
     }
