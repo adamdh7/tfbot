@@ -259,6 +259,8 @@ function cacheRecentMessage(sessionId, message) {
         id,
         from: message.key.remoteJid || '',
         sender: message.key.participant || message.key.remoteJid || '',
+        fromMe: !!message.key.fromMe,
+        participantAlt: message.key.participantAlt || message.key.participantPn || '',
         ts: Number(message.messageTimestamp) || Math.floor(Date.now() / 1000),
         message: message.message
     };
@@ -291,6 +293,39 @@ function persistOutgoingRetryMessage(sessionId, jid, message) {
 
 function normalizeEchoText(value) {
     return String(value || '').replace(/\r\n?/g, '\n').replace(/[ \t]+/g, ' ').replace(/\n{2,}/g, '\n').trim();
+}
+
+function formatBrefLinksInText(value) {
+    const text = String(value || '');
+    const pattern = /(?:\*_(https:\/\/bref\.adamdh7\.org(?:\/[^\s*<>"']*)?)_\*)|(https:\/\/bref\.adamdh7\.org(?:\/[^\s*<>"']*)?)/gi;
+    return text.replace(pattern, (match, wrappedUrl, bareUrl) => {
+        if (wrappedUrl) return `*_${wrappedUrl}_*`;
+        const url = String(bareUrl || match).replace(/[),.;!?]+$/, '');
+        return `*_${url}_*${String(bareUrl || match).slice(url.length)}`;
+    });
+}
+
+function formatBrefLinksInContent(content) {
+    if (!content || typeof content !== 'object' || Array.isArray(content)) return content;
+    const result = { ...content };
+    for (const key of ['text', 'caption']) {
+        if (typeof result[key] === 'string') result[key] = formatBrefLinksInText(result[key]);
+    }
+    for (const key of ['album', 'albumMessage']) {
+        if (Array.isArray(result[key])) result[key] = result[key].map(item => formatBrefLinksInContent(item));
+    }
+    if (result.albumMessage && Array.isArray(result.albumMessage.messages)) {
+        result.albumMessage = { ...result.albumMessage, messages: result.albumMessage.messages.map(item => formatBrefLinksInContent(item)) };
+    }
+    return result;
+}
+
+function normalizePersonName(value) {
+    return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function normalizedJidNumber(value) {
+    return normalizePhoneNumber(String(value || '').split('@')[0].split(':')[0]);
 }
 
 function rememberOutgoingTextEcho(sessionId, jid, content) {
@@ -326,9 +361,10 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 break;
             }
         }
-        const echoToken = rememberOutgoingTextEcho(sessionId, jid, content);
+        const formattedContent = formatBrefLinksInContent(content);
+        const echoToken = rememberOutgoingTextEcho(sessionId, jid, formattedContent);
         try {
-            const result = await sock.sendMessage(jid, content, options);
+            const result = await sock.sendMessage(jid, formattedContent, options);
             if (sessionId && result?.key?.id) {
                 outgoingMessageCache.add(`${sessionId}:${result.key.id}`);
                 if (outgoingMessageCache.size > 5000) {
@@ -720,8 +756,6 @@ function sendAccessDeniedPage(req, res) {
     return res.status(403).type('html').send(`<!doctype html><html lang="${denied.language}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>Accès refusé</title><style>*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:#000;color:#f5f5f5}body{min-height:100vh;padding:28px;display:flex;align-items:center;justify-content:center;font:16px/1.7 system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}main{width:100%;max-width:720px;margin:0 auto}p{margin:0 0 22px;white-space:pre-wrap;overflow-wrap:anywhere}a{color:#bdbdbd;text-decoration:underline;text-underline-offset:4px;font-weight:600}a:focus-visible{outline:1px solid #fff;outline-offset:5px}a:hover{color:#fff}@media(max-width:480px){body{padding:22px;font-size:15px}}</style></head><body><main><p>${safeMessage}</p><a href="https://bot.adamdh7.org/">${label}</a></main></body></html>`);
 }
 
-const AD_PAGE_SCRIPTS = '<script data-cfasync="false" src="https://bauval.org/14/8ce14735fa6608c9c2cfcae5f69ad1fd"></script>\n<script data-cfasync="false" src="https://abscloud.org/1/d08b623929b77084c255768cb795af70"></script>';
-
 function injectAdScriptsIntoHtml(value) {
     const html = String(value || '');
     const scripts = [];
@@ -756,7 +790,7 @@ function isSameOriginFrontendApiRequest(req) {
 app.use((req, res, next) => {
     const originalSend = res.send.bind(res);
     const originalSendFile = res.sendFile.bind(res);
-    const skipEmbeddedBotPage = () => String(req.path || '/') === '/' && isAllowedEmbeddedHomeRequest(req);
+    const skipEmbeddedBotPage = () => isBotIframeDocumentRequest(req);
     res.send = function(body) {
         const contentType = String(res.getHeader('Content-Type') || '');
         const htmlBody = typeof body === 'string' && (/text\/html/i.test(contentType) || /^\s*(?:<!doctype\s+html|<html\b)/i.test(body));
@@ -807,11 +841,30 @@ app.use((req, res, next) => {
         return next();
     }
     if (['/get-code', '/upload-qr'].includes(requestPath) && isSameOriginFrontendApiRequest(req)) return next();
-    if (isSignedTFConfirmationRequest(req)) return next();
+    if (isSignedTFConfirmationRequest(req) || isTFConfirmationPendingRequest(req) || /^\/TF-[A-Za-z0-9_-]{7,80}$/i.test(requestPath)) return next();
     if (isEmbeddedStaticAssetRequest(req)) return next();
     if (!isAuthorizedAdmin(req)) return res.status(401).type('application/json').send(JSON.stringify({ ok: false, error: 'token_required' }));
     next();
 });
+const PUBLIC_HTML_ROOT = path.resolve(__dirname, 'public');
+
+app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    const requestPath = String(req.path || '/');
+    if (isBotIframeDocumentRequest(req)) return next();
+    const relativePath = requestPath === '/' ? 'index.html' : requestPath.replace(/^\/+/, '');
+    if (!relativePath.toLowerCase().endsWith('.html')) return next();
+    let decodedPath = relativePath;
+    try { decodedPath = decodeURIComponent(relativePath); } catch (error) { return next(); }
+    const filePath = path.resolve(PUBLIC_HTML_ROOT, decodedPath);
+    if (filePath !== PUBLIC_HTML_ROOT && !filePath.startsWith(PUBLIC_HTML_ROOT + path.sep)) return res.sendStatus(404);
+    fs.readFile(filePath, 'utf8', (error, source) => {
+        if (error) return next();
+        const output = isBotIframeDocumentRequest(req, source) ? source : injectAdScriptsIntoHtml(source);
+        res.type('html').send(output);
+    });
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 async function createCodeSession(sId, format = 'pair', expectExisting = false) {
@@ -838,7 +891,7 @@ app.all('/get-code', async (req, res) => {
             if (checkSess && checkSess.status !== 'connecte') {
                 try {
                     if (checkSess.sock) {
-                        try { checkSess.sock.logout(); } catch (e) {}
+                        try { await Promise.resolve(checkSess.sock.logout()).catch(() => {}); } catch (e) {}
                         try { if (checkSess.sock.ws) checkSess.sock.ws.close(); } catch (e) {}
                     }
                 } catch (e) {}
@@ -876,7 +929,7 @@ app.all('/get-code', async (req, res) => {
             if (cleanupTimer) clearTimeout(cleanupTimer);
             const checkSess = activeSessions.get(sId);
             if (checkSess && checkSess.sock) {
-                try { checkSess.sock.logout(); } catch (err) {}
+                try { await Promise.resolve(checkSess.sock.logout()).catch(() => {}); } catch (err) {}
                 try { if (checkSess.sock.ws) checkSess.sock.ws.close(); } catch (err) {}
             }
         } catch (err) {}
@@ -901,7 +954,7 @@ app.post('/upload-qr', async (req, res) => {
     }
 });
 
-const links_common = "*_Bot_ (tfbot)* : https://bot.adamdh7.org\n*_Brefs_ (tfbrefs)* : https://bref.adamdh7.org\n*_Havox_ (tfhavox)* https://havox.sou.adamdh7.org\n*Chaine* : https://whatsapp.com/channel/0029Vb6WLps7oQhWrUlyPQ2m\n*Canal* : https://t.me/dh7adam\n*Pages* : https://m.facebook.com/dh7adam";
+const links_common = "*_Bot (tfbot)_* : https://bot.adamdh7.org\n*_Brefs (tfbrefs)_* : *_https://bref.adamdh7.org_*\n*_Havox (tfhavox)_* : https://havox.sou.adamdh7.org\n*Chaine* : https://whatsapp.com/channel/0029Vb6WLps7oQhWrUlyPQ2m\n*Canal* : https://t.me/dh7adam\n*Pages* : https://m.facebook.com/dh7adam";
 
 const translations = {
   fr: {
@@ -941,7 +994,7 @@ const translations = {
     ai_usage: "Utilise : ia ta question",
     url_usage: "Réponds à une image, une vidéo, un audio, un document ou un sticker avec la commande url.",
     url_error: "Impossible de créer le lien. Vérifie le média et réessaie.",
-    qr_usage: "Utilise : qr ton texte ou ton lien",
+    qr_usage: "Utilise : qr ton texte ou ton lien", qr_too_long: "Le texte est trop long pour un QR code. Utilise un texte plus court ou un lien.", qr_generated: "QR code généré.",
     search_usage: "Utilise : chercher ta question",
     code_usage: "Utilise : code suivi du numéro avec indicatif international.",
     owner_required: "Cette commande est réservée au propriétaire du bot.",
@@ -987,7 +1040,7 @@ const translations = {
     ai_usage: "Use: ai your question",
     url_usage: "Reply to an image, video, audio, document, or sticker with the url command.",
     url_error: "Could not create the link. Check the media and try again.",
-    qr_usage: "Use: qr your text or link",
+    qr_usage: "Use: qr your text or link", qr_too_long: "This text is too long for a QR code. Use shorter text or a URL.", qr_generated: "QR code generated.",
     search_usage: "Use: search your question",
     code_usage: "Use: code followed by the number with its international country code.",
     owner_required: "This command is restricted to the bot owner.",
@@ -1033,7 +1086,7 @@ const translations = {
     ai_usage: "Usa: ia tu pregunta",
     url_usage: "Responde a una imagen, vídeo, audio, documento o sticker con el comando url.",
     url_error: "No se pudo crear el enlace. Comprueba el archivo e inténtalo de nuevo.",
-    qr_usage: "Usa: qr tu texto o enlace",
+    qr_usage: "Usa: qr tu texto o enlace", qr_too_long: "El texto es demasiado largo para un código QR. Usa un texto más corto o un enlace.", qr_generated: "Código QR generado.",
     search_usage: "Usa: buscar tu pregunta",
     code_usage: "Usa: código seguido del número con el prefijo internacional.",
     owner_required: "Este comando está reservado al propietario del bot.",
@@ -1079,7 +1132,7 @@ const translations = {
     ai_usage: "Sèvi ak: ai kesyon ou an",
     url_usage: "Reponn sou yon imaj, videyo, odyo, dokiman oswa sticker avèk kòmand url la.",
     url_error: "Li pa t posib pou kreye lyen an. Verifye fichye a epi eseye ankò.",
-    qr_usage: "Sèvi ak: qr tèks oswa lyen ou",
+    qr_usage: "Sèvi ak: qr tèks oswa lyen ou", qr_too_long: "Tèks la twò long pou yon kòd QR. Sèvi ak yon tèks ki pi kout oswa yon lyen.", qr_generated: "Kòd QR la kreye.",
     search_usage: "Sèvi ak: cheche kesyon ou",
     code_usage: "Sèvi ak: kòd apre sa mete nimewo a ak kòd peyi a.",
     owner_required: "Kòmand sa a se pou pwopriyetè bot la sèlman.",
@@ -1192,14 +1245,14 @@ let adamLogoBuffer = fs.existsSync(logoPath) ? fs.readFileSync(logoPath) : null;
 app.get('/sitemap.xml', (req, res) => res.sendFile(path.join(__dirname, 'sitemap.xml')));
 app.get('/manifest.json', (req, res) => res.sendFile(path.join(__dirname, 'manifest.json')));
 app.get('/sw.js', (req, res) => res.sendFile(path.join(__dirname, 'sw.js')));
-app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s me Adam D'H7"));
+app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s Us Adam D’H7"));
 app.get('/ok', (req, res) => res.send('ok'));
 app.get('/TF-:id', (req, res) => {
     const id = String(req.params.id || '');
-    if (!/^\d+$/.test(id) || !isSignedTFConfirmationRequest(req)) return res.status(401).type('text/plain').send('NON AUTORISE.');
-    tfEvents.emit('ok-' + id);
+    if (!/^[A-Za-z0-9_-]{7,80}$/.test(id)) return res.status(404).type('text/plain').send('Lien indisponible.');
+    if (isTFConfirmationPendingRequest(req)) tfEvents.emit('ok-' + id);
     if (!TF_REDIRECT_URL) return res.status(503).type('text/plain').send('Redirect is not configured.');
-    return res.redirect(TF_REDIRECT_URL);
+    return res.redirect(303, TF_REDIRECT_URL);
 });
 
 function isAuthorizedAdmin(req) {
@@ -1213,7 +1266,9 @@ function isAuthorizedAdmin(req) {
 }
 
 function isAllowedEmbeddedHomeRequest(req) {
-    if (req.method !== 'GET' || String(req.get('Sec-Fetch-Dest') || '').toLowerCase() !== 'iframe') return false;
+    if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+    const destination = String(req.get('Sec-Fetch-Dest') || '').toLowerCase();
+    if (destination && destination !== 'iframe') return false;
     try {
         return new URL(String(req.get('Referer') || '')).origin === 'https://bot.adamdh7.org';
     } catch (error) {
@@ -1252,6 +1307,19 @@ function isSignedTFConfirmationRequest(req) {
     return expectedBuffer.length === suppliedBuffer.length && crypto.timingSafeEqual(expectedBuffer, suppliedBuffer) && tfEvents.listenerCount(`ok-${match[1]}`) > 0;
 }
 
+function isTFConfirmationPendingRequest(req) {
+    const match = String(req.path || '').match(/^\/TF-([A-Za-z0-9_-]{7,80})$/i);
+    return !!match && tfEvents.listenerCount(`ok-${match[1]}`) > 0;
+}
+
+function isBotIframeDocumentRequest(req, html = '') {
+    const requestPath = String(req.path || '/').toLowerCase();
+    if (/(?:^|\/)iframe(?:\/index\.html)?\/?$/.test(requestPath)) return true;
+    if (requestPath === '/' && isAllowedEmbeddedHomeRequest(req)) return true;
+    if (String(html || '').includes('id="m-f"') && String(html || '').includes('id="frame-loading"')) return true;
+    return false;
+}
+
 app.get('/list2', (req, res) => {
     if (!(process.env.ADMIN_API_TOKEN || process.env.TOKEN)) return res.status(503).type('text/plain').send('MAINTENANCE DESACTIVE : configurez TOKEN ou ADMIN_API_TOKEN.');
     if (!isAuthorizedAdmin(req)) return res.status(401).type('text/plain').send('NON AUTORISE.');
@@ -1272,7 +1340,7 @@ app.get('/list2', (req, res) => {
                         await new Promise(resolve => setTimeout(resolve, 2500));
                     } catch (err) {}
                     try {
-                        session.sock.logout();
+                        await Promise.resolve(session.sock.logout()).catch(() => {});
                         if (session.sock.ws) session.sock.ws.close();
                     } catch (err) {}
                 }
@@ -1906,11 +1974,12 @@ function normalizePhoneNumber(number) {
 
 function unwrapMessageContent(message) {
     let msg = message || {};
-    if (msg.ephemeralMessage?.message) msg = msg.ephemeralMessage.message;
-    if (msg.viewOnceMessage?.message) msg = msg.viewOnceMessage.message;
-    if (msg.viewOnceMessageV2?.message) msg = msg.viewOnceMessageV2.message;
-    if (msg.viewOnceMessageV2Extension?.message) msg = msg.viewOnceMessageV2Extension.message;
-    return msg;
+    for (let depth = 0; msg && depth < 10; depth++) {
+        const next = msg.ephemeralMessage?.message || msg.viewOnceMessage?.message || msg.viewOnceMessageV2?.message || msg.viewOnceMessageV2Extension?.message || msg.documentWithCaptionMessage?.message;
+        if (!next || next === msg) break;
+        msg = next;
+    }
+    return msg || {};
 }
 
 function extractBody(m) {
@@ -2437,9 +2506,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     if (!existingRecord) {
                         const matchingBackup = await ownerCol.findOne({ Number: currentBotNum });
                         if (matchingBackup) {
+                            const { _id: ignoredBackupId, ...backupFields } = matchingBackup;
                             finalRecord = {
-                                ...matchingBackup,
+                                ...backupFields,
                                 sessionId: sessionId,
+                                Number: currentBotNum,
                                 connectedSince: now,
                                 reauthRequired: false,
                                 connectionStatus: 'connected',
@@ -2532,10 +2603,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             { $set: { reauthRequired: true, connectionStatus: 'reauth_required', lastAuthFailureAt: new Date(), lastAuthFailure: disconnectReason } },
                             { upsert: true }
                         );
-                        if (numToBackup) {
-                            const docToBackup = await db.collection('session_owners').findOne({ sessionId });
-                            if (docToBackup) await db.collection('session_owners').updateOne({ Number: numToBackup }, { $set: docToBackup }, { upsert: true });
-                        }
                         if (currentRecord) {
                             currentRecord.status = 'reauth_required';
                             currentRecord.disconnectTime = Date.now();
@@ -2565,20 +2632,85 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
         const safeGroupUpdate = async (jid, participants, action) => {
             try {
-                const cleanParticipants = participants.map(p => p.includes('@') ? p : `${p.replace(/[^0-9]/g, '')}@s.whatsapp.net`);
-                await queueMessage(() => sock.groupParticipantsUpdate(jid, cleanParticipants, action), 150, sock);
+                const cleanParticipants = [...new Set((participants || []).map(value => {
+                    const participant = String(value || '').trim();
+                    return participant.includes('@') ? participant : `${participant.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
+                }).filter(value => value && !value.startsWith('@s.whatsapp.net')))];
+                if (!cleanParticipants.length) return true;
+                const result = await queueMessage(() => sock.groupParticipantsUpdate(jid, cleanParticipants, action), 150, sock);
+                const failures = Array.isArray(result) ? result.filter(item => {
+                    const status = String(item?.status ?? '').toLowerCase();
+                    const failureTag = String(item?.content?.tag || item?.content?.attrs?.type || item?.error || '').toLowerCase();
+                    return (status && !['200', 'ok', 'success'].includes(status)) || ['error', 'not-authorized', 'forbidden', 'conflict', 'bad-request', '401', '403', '404', '500'].includes(failureTag);
+                }) : [];
+                if (failures.length) {
+                    console.error('[group-participants-update-rejected]', { group: jid, action, requested: cleanParticipants.length, failed: failures.map(item => ({ jid: item?.jid, status: item?.status, content: item?.content?.tag || null })) });
+                    return false;
+                }
                 return true;
-            } catch (e) {
-                console.error('[group-participants-update]', { group: jid, action, error: e?.message || String(e) });
+            } catch (error) {
+                console.error('[group-participants-update]', { group: jid, action, requested: participants?.length || 0, error: error?.message || String(error) });
                 return false;
             }
         };
 
-        const resolveTargets = async (arg, m) => {
-            const ctx = m.message?.extendedTextMessage?.contextInfo;
-            if (ctx?.mentionedJid?.length) return ctx.mentionedJid;
-            if (ctx?.participant) return [ctx.participant];
-            if (arg) return [arg.replace(/[^0-9]/g, '') + '@s.whatsapp.net'];
+        const isProtectedWhatsAppTarget = (targetJid, ownerDocument, currentBotJid, alternatePhone = '') => {
+            const target = String(targetJid || '').trim();
+            if (!target) return false;
+            if (target === currentBotJid) return true;
+            const targetNumber = /@lid(?:$|:)/i.test(target) ? normalizePhoneNumber(alternatePhone) : (normalizedJidNumber(target) || normalizePhoneNumber(alternatePhone));
+            const ownerNumber = normalizePhoneNumber(ownerDocument?.Number || '');
+            const botNumber = normalizedJidNumber(currentBotJid);
+            if (targetNumber && ((ownerNumber && targetNumber === ownerNumber) || (botNumber && targetNumber === botNumber))) return true;
+            const cachedUser = userInfo.get(target);
+            const targetName = normalizePersonName(cachedUser?.pseudo || '');
+            const ownerName = normalizePersonName(ownerDocument?.Name || '');
+            return !!targetName && !!ownerName && targetName === ownerName;
+        };
+
+        const resolveTargets = async (arg, m, metadata = null, ownerDocument = null, currentBotJid = null) => {
+            const context = unwrapMessageContent(m.message)?.extendedTextMessage?.contextInfo || {};
+            const quoted = context.quotedMessage ? unwrapMessageContent(context.quotedMessage) : {};
+            const normalizedArg = normalizePersonName(arg);
+            const ownerNumber = normalizePhoneNumber(ownerDocument?.Number || '');
+            const contactSources = [];
+            if (quoted.contactMessage?.vcard) contactSources.push(String(quoted.contactMessage.vcard));
+            for (const contact of quoted.contactsArrayMessage?.contacts || []) {
+                if (contact?.vcard) contactSources.push(String(contact.vcard));
+            }
+            if (contactSources.length) {
+                for (const vcard of contactSources) {
+                    const waid = vcard.match(/waid\s*=\s*(\d{6,})/i)?.[1];
+                    const phoneMatch = vcard.match(/(?:TEL[^:\n]*:|item\d+\.TEL[^:\n]*:)\s*\+?([0-9][0-9\s().-]{5,}[0-9])/i)?.[1];
+                    const number = normalizePhoneNumber(waid || phoneMatch || '');
+                    if (number) {
+                        const member = metadata?.participants?.find(item => normalizedJidNumber(item.id) === number || normalizedJidNumber(item.phoneNumber || item.phone) === number);
+                        return [member?.id || `${number}@s.whatsapp.net`];
+                    }
+                }
+            }
+            if (context.mentionedJid?.length) return [...new Set(context.mentionedJid)];
+            if (context.participant) return [context.participant];
+            if (arg) {
+                const number = normalizePhoneNumber(arg);
+                const looksLikePhone = number.length >= 6 && /^[+\d()\s.-]+$/.test(String(arg).trim());
+                if (looksLikePhone) {
+                    const member = metadata?.participants?.find(item => normalizedJidNumber(item.id) === number || normalizedJidNumber(item.phoneNumber || item.phone) === number);
+                    return [member?.id || `${number}@s.whatsapp.net`];
+                }
+                if (ownerNumber && normalizedArg && normalizedArg === normalizePersonName(ownerDocument?.Name)) return [`${ownerNumber}@s.whatsapp.net`];
+                const participantByName = metadata?.participants?.find(item => {
+                    const candidates = [item.notify, item.name, item.subject, item.pushName].map(normalizePersonName).filter(Boolean);
+                    return candidates.some(candidate => normalizedArg && (candidate === normalizedArg || candidate.startsWith(normalizedArg) || normalizedArg.startsWith(candidate)));
+                });
+                if (participantByName?.id) return [participantByName.id];
+                const known = [...userInfo.entries()].filter(([, value]) => {
+                    const name = normalizePersonName(value?.pseudo || '');
+                    return name && normalizedArg && (name === normalizedArg || name.startsWith(normalizedArg) || normalizedArg.startsWith(name));
+                }).map(([jid]) => jid);
+                if (known.length) return [...new Set(known)];
+            }
+            if (currentBotJid && context.participant === currentBotJid) return [currentBotJid];
             return [];
         };
 
@@ -2683,27 +2815,19 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             if (sOwnerTop) sessionOwnersCache.set(sessionId, sOwnerTop);
                         }
 
-                        let isOwnerReal = false;
                         let activeHostName = sOwnerTop ? (sOwnerTop.Name || "Adam D'H7") : "Adam D'H7";
-                        const sNum = sender ? sender.split('@')[0].split(':')[0].replace(/[^0-9]/g, '') : '';
+                        const senderJids = [...new Set([sender, m.key.participantAlt, m.key.participantPn, m.key.remoteJidAlt, m.key.senderPn].filter(Boolean).map(String))];
+                        const senderNumbers = senderJids.map(normalizedJidNumber).filter(Boolean);
+                        const sNum = senderNumbers[0] || '';
+                        const ownerNumber = normalizePhoneNumber(sOwnerTop?.Number || '');
+                        const botNumber = normalizedJidNumber(botId);
                         const sName = pushName;
+                        const isOwnerReal = !!isFromMe || senderJids.some(jid => jid === botId) || (!!ownerNumber && senderNumbers.includes(ownerNumber)) || (!!botNumber && senderNumbers.includes(botNumber));
 
-                        if (isFromMe) {
-                            isOwnerReal = true;
-                            if (sName !== 'Inconnu' && sName !== '' && sName !== activeHostName && sOwnerTop) {
-                                sOwnerTop.Name = sName;
-                                await ownerColTop.updateOne({ sessionId: sessionId }, { $set: { Name: sName } }, { upsert: true });
-                                activeHostName = sName;
-                            }
-                        } else if (sOwnerTop) {
-                            if (sNum === sOwnerTop.Number) {
-                                isOwnerReal = true;
-                                if (sName !== 'Inconnu' && sName !== '' && sName !== activeHostName) {
-                                    sOwnerTop.Name = sName;
-                                    await ownerColTop.updateOne({ sessionId: sessionId }, { $set: { Name: sName } });
-                                    activeHostName = sName;
-                                }
-                            }
+                        if (isOwnerReal && sName !== 'Inconnu' && sName !== '' && sName !== activeHostName && sOwnerTop && !isFromMe) {
+                            sOwnerTop.Name = sName;
+                            await ownerColTop.updateOne({ sessionId: sessionId }, { $set: { Name: sName } }, { upsert: true });
+                            activeHostName = sName;
                         }
 
                         if (isGroup && sender && sender !== botId && !isOwnerReal) {
@@ -2737,7 +2861,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 if (isOwnerReal) return true;
                                 if (!isGroup || from.endsWith('@s.whatsapp.net')) return false;
                                 const metadataA = await getMeta();
-                                return metadataA ? metadataA.participants.some(p => p.id === sender && p.admin) : false;
+                                return metadataA ? metadataA.participants.some(p => {
+                                    if (!p?.admin) return false;
+                                    const participantIds = [p.id, p.lid, p.phoneNumber, p.phone].filter(Boolean).map(String);
+                                    if (participantIds.some(id => senderJids.includes(id))) return true;
+                                    const participantNumbers = participantIds.map(normalizedJidNumber).filter(Boolean);
+                                    return participantNumbers.some(number => senderNumbers.includes(number));
+                                }) : false;
                             } catch (e) {
                                 return false;
                             }
@@ -2748,7 +2878,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 const antiLinkMode = await getGroupSetting(sessionId, from, 'noLien') || 'off';
                                 if (antiLinkMode !== 'off') {
                                     const metadata = await getMeta();
-                                    const senderIsAdmin = metadata?.participants?.some(p => p.id === sender && (p.admin === 'admin' || p.admin === 'superadmin')) || false;
+                                    const senderIsAdmin = metadata?.participants?.some(p => {
+                                        if (p.admin !== 'admin' && p.admin !== 'superadmin') return false;
+                                        const ids = [p.id, p.lid, p.phoneNumber, p.phone].filter(Boolean).map(String);
+                                        if (ids.some(id => senderJids.includes(id))) return true;
+                                        return ids.map(normalizedJidNumber).filter(Boolean).some(number => senderNumbers.includes(number));
+                                    }) || false;
                                     const isStrict = antiLinkMode === 'strict';
                                     let shouldDelete = false;
 
@@ -2784,7 +2919,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         let botMode = sOwnerTop ? (sOwnerTop.mode || 'prive') : 'prive';
                         
                         if (botMode === 'public') {
-                            allowed = true;
+                            allowed = isGroup && !isChannel;
                         } else if (isOwnerReal) {
                             allowed = true;
                         }
@@ -2836,8 +2971,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
                                 try { await sock.sendPresenceUpdate('composing', from); } catch (e) {}
 
-                                const quoted = m.message?.extendedTextMessage?.contextInfo;
-                                const quotedMessage = quoted?.quotedMessage;
+                                const messageContentForContext = unwrapMessageContent(m.message);
+                                const quoted = messageContentForContext?.extendedTextMessage?.contextInfo || {};
+                                const quotedMessage = quoted.quotedMessage || undefined;
                                 const t = translations[messageLang] || translations.ht;
 
                                 let isCancelled = false;
@@ -2932,7 +3068,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, t.cmd_qr, t.qr_usage, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            const qrBuffer = await QRCode.toBuffer(args);
+                                            if (Buffer.byteLength(args, 'utf8') > 2900) {
+                                                await safeSendFormatted(sock, from, t.cmd_qr, t.qr_too_long || 'QR text is too long. Use a shorter text or a URL.', pushName, true, activeHostName);
+                                                break;
+                                            }
+                                            const qrBuffer = await QRCode.toBuffer(args, { errorCorrectionLevel: 'L', type: 'png', width: 1024, margin: 2 });
                                             let qrPublicUrl = '';
                                             try {
                                                 const qrUpload = await uploadToBref(qrBuffer, `adamdh7-qr-${Date.now()}.png`, 'image/png');
@@ -2940,7 +3080,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             } catch (qrUploadError) {
                                                 console.error('[qr-upload-to-bref]', redactActionError(qrUploadError).slice(0, 400));
                                             }
-                                            await sendImageCaptioned(sock, from, qrBuffer, t.cmd_qr, `${args}${qrPublicUrl ? `\n${qrPublicUrl}` : ''}`, pushName);
+                                            const qrCaptionText = Buffer.byteLength(args, 'utf8') <= 500 ? `${args}${qrPublicUrl ? `\n${qrPublicUrl}` : ''}` : `${t.qr_generated || 'QR code generated.'}${qrPublicUrl ? `\n${qrPublicUrl}` : ''}`;
+                                            await sendImageCaptioned(sock, from, qrBuffer, t.cmd_qr, qrCaptionText, pushName);
                                             terminalResponseSent = true;
                                             break;
                                         case 'qrbot':
@@ -3039,7 +3180,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, t.cmd_add, isGroup ? t.admin_required : t.group_required, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            const targetsAdd = await resolveTargets(args, m);
+                                            const metadataAdd = await getMeta();
+                                            const targetsAdd = await resolveTargets(args, m, metadataAdd, sOwnerTop, botId);
                                             if (targetsAdd.length === 0) break;
                                             const filteredTargetsAdd = targetsAdd.filter(tr => tr !== botId);
                                             if (filteredTargetsAdd.length === 0) break;
@@ -3062,9 +3204,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, t.cmd_kick, isGroup ? t.admin_required : t.group_required, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            const targets = await resolveTargets(args, m);
+                                            const metadataTargets = await getMeta();
+                                            const targets = await resolveTargets(args, m, metadataTargets, sOwnerTop, botId);
                                             if (targets.length === 0) break;
-                                            const filteredTargets = targets.filter(tr => tr !== botId);
+                                            const filteredTargets = targets.filter(target => {
+                                                const targetParticipant = metadataTargets?.participants?.find(participant => participant?.id === target);
+                                                return !isProtectedWhatsAppTarget(target, sOwnerTop, botId, targetParticipant?.phoneNumber || targetParticipant?.phone || targetParticipant?.idAlt || '');
+                                            });
                                             if (filteredTargets.length === 0) break;
                                             const actionMap = { kick: 'remove', promote: 'promote', demote: 'demote' };
                                             if (!await safeGroupUpdate(from, filteredTargets, actionMap[internalCommand])) throw new Error(`group_${actionMap[internalCommand]}_failed`);
@@ -3078,7 +3224,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             }
                                             const metadataKA = await getMeta();
                                             if (!metadataKA) throw new Error('group_metadata_unavailable');
-                                            const toKick = metadataKA.participants.filter(p => p.admin === null && p.id !== botId).map(p => p.id);
+                                            const toKick = metadataKA.participants
+                                                .filter(participant => participant && participant.id)
+                                                .filter(participant => participant.admin !== 'admin' && participant.admin !== 'superadmin')
+                                                .filter(participant => !isProtectedWhatsAppTarget(participant.id, sOwnerTop, botId, participant.phoneNumber || participant.phone || participant.idAlt || ''))
+                                                .map(participant => participant.id);
                                             if (toKick.length > 0 && internalCommand === 'kickall') {
                                                 if (!await safeGroupUpdate(from, toKick, 'remove')) throw new Error('kickall_group_update_failed');
                                             } else if (toKick.length > 0 && internalCommand === 'kickall2') {
@@ -3145,17 +3295,26 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             await safeSendFormatted(sock, from, t.cmd_nolien2, `*${nl2Stat}*`, pushName, false, activeHostName);
                                             break;
                                         case 'del':
-                                            if (!quoted) break;
-                                            const quotedParticipant = quoted.participant || quoted.remoteJid;
-                                            const isQuotedBot = quotedParticipant === botId;
-                                            const delKey = { remoteJid: from, id: quoted.stanzaId, participant: quotedParticipant };
-                                            if (isQuotedBot) {
-                                                if (!isOwnerReal) break;
-                                                await queuedSendMessage(sock, from, { delete: delKey });
-                                            } else {
-                                                const isAdminD = await checkAdmin();
-                                                if (!isGroup || !isAdminD) break;
-                                                await queuedSendMessage(sock, from, { delete: delKey });
+                                            if (!quoted?.stanzaId) break;
+                                            const cachedQuotedMessage = recentMsgsCache.find(entry => entry.sessionId === sessionId && entry.id === quoted.stanzaId && entry.from === from);
+                                            const quotedParticipant = quoted.participant || (isGroup ? cachedQuotedMessage?.sender : null) || null;
+                                            const quotedFromMe = !!cachedQuotedMessage?.fromMe || !!cachedQuotedMessage?.message?.key?.fromMe || (!!quotedParticipant && isProtectedWhatsAppTarget(quotedParticipant, sOwnerTop, botId));
+                                            if (isGroup) {
+                                                if (quotedFromMe ? !isOwnerReal : !await checkAdmin()) break;
+                                            } else if (!isOwnerReal) {
+                                                break;
+                                            }
+                                            const delKey = { remoteJid: from, id: quoted.stanzaId, fromMe: quotedFromMe };
+                                            if (isGroup && quotedParticipant && !quotedFromMe) delKey.participant = quotedParticipant;
+                                            const quotedTimestamp = Number(cachedQuotedMessage?.ts || m.messageTimestamp || Math.floor(Date.now() / 1000));
+                                            try {
+                                                await queuedSendMessage(sock, from, { delete: delKey }, {}, 180);
+                                            } catch (deleteEveryoneError) {
+                                                try {
+                                                    await sock.chatModify({ deleteForMe: { deleteMedia: true, key: delKey, timestamp: quotedTimestamp } }, from);
+                                                } catch (deleteForMeError) {
+                                                    console.error('[message-delete-failed]', { sessionId, chat: from, messageId: quoted.stanzaId, deleteEveryone: deleteEveryoneError?.message || String(deleteEveryoneError), deleteForMe: deleteForMeError?.message || String(deleteForMeError) });
+                                                }
                                             }
                                             break;
                                         case 'del2':
@@ -3164,10 +3323,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, t.cmd_del2, isGroup ? t.admin_required : t.group_required, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            const targetsDel2 = await resolveTargets(args, m);
+                                            const metadataDel2 = await getMeta();
+                                            const targetsDel2 = await resolveTargets(args, m, metadataDel2, sOwnerTop, botId);
                                             if (targetsDel2.length === 0) break;
                                             const targetJid = targetsDel2[0];
-                                            if (targetJid === botId || (sOwnerTop && sOwnerTop.Number && targetJid.includes(sOwnerTop.Number))) break;
+                                            const targetParticipantDel2 = metadataDel2?.participants?.find(participant => participant?.id === targetJid);
+                                            if (isProtectedWhatsAppTarget(targetJid, sOwnerTop, botId, targetParticipantDel2?.phoneNumber || targetParticipantDel2?.phone || targetParticipantDel2?.idAlt || '')) break;
                                             const currentDel2Targets = await getDel2Targets(sessionId, from);
                                             let msgTextDel2 = "";
                                             if (currentDel2Targets.includes(targetJid)) {
@@ -3336,9 +3497,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 const data = await response.json();
                                                 if (isCancelled) return;
                                                 if (data && data.code) {
-                                                    const tfid_code = Math.floor(1000000 + Math.random() * 9000000);
-                                                    const confirmLink_code = `${TF_BOT_BASE_URL}/TF-${tfid_code}?sig=${signTFConfirmation(tfid_code)}`;
-                                                    const formattedConfirmLink_code = `_${confirmLink_code}_`;
+                                                    const tfid_code = crypto.randomInt(100000000000, 999999999999);
+                                                    const confirmLink_code = `${TF_BOT_BASE_URL}/TF-${tfid_code}`;
+                                                    const formattedConfirmLink_code = `*_${confirmLink_code}_*`;
                                                     const confirmText = t.code_confirm.replace('{link}', formattedConfirmLink_code);
                                                     const msgConfirmation = await sendImageCaptioned(sock, from, adamLogoBuffer, t.cmd_code, confirmText, pushName);
                                                     
@@ -3348,7 +3509,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                             try { await queuedSendMessage(sock, from, { delete: msgConfirmation.key }, {}, 200); } catch (e) {}
                                                             tfEvents.removeAllListeners('ok-' + tfid_code);
                                                         }
-                                                    }, 7000);
+                                                    }, 120000);
 
                                                     tfEvents.once('ok-' + tfid_code, async () => {
                                                         clicked_code = true;
@@ -3375,63 +3536,160 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             }
                                             const metadataHT = await getMeta();
                                             if (!metadataHT) throw new Error('group_metadata_unavailable');
-                                            const allMentions = metadataHT.participants.map(p => p.id).filter(Boolean);
+                                            const allMentions = metadataHT.participants.map(participant => participant.id).filter(Boolean);
                                             const msgOpts = { mentions: allMentions };
-                                            const unwrapHidetagMessage = obj => {
-                                                let value = obj || null;
-                                                for (let i = 0; value && i < 8; i++) {
-                                                    if (value.ephemeralMessage?.message) value = value.ephemeralMessage.message;
-                                                    else if (value.viewOnceMessage?.message) value = value.viewOnceMessage.message;
+                                            const inspectHidetagMedia = source => {
+                                                let value = source || {};
+                                                let viewOnce = false;
+                                                for (let depth = 0; value && depth < 10; depth++) {
+                                                    if (value.viewOnceMessage?.message) {
+                                                        viewOnce = true;
+                                                        value = value.viewOnceMessage.message;
+                                                    } else if (value.viewOnceMessageV2?.message) {
+                                                        viewOnce = true;
+                                                        value = value.viewOnceMessageV2.message;
+                                                    } else if (value.viewOnceMessageV2Extension?.message) {
+                                                        viewOnce = true;
+                                                        value = value.viewOnceMessageV2Extension.message;
+                                                    } else if (value.ephemeralMessage?.message) {
+                                                        value = value.ephemeralMessage.message;
+                                                    } else if (value.documentWithCaptionMessage?.message) {
+                                                        value = value.documentWithCaptionMessage.message;
+                                                    } else if (value.message && typeof value.message === 'object' && !Object.keys(value).some(key => /(?:image|video|audio|sticker|document)Message$/.test(key))) {
+                                                        value = value.message;
+                                                    } else {
+                                                        break;
+                                                    }
+                                                }
+                                                const types = [
+                                                    ['imageMessage', 'image'],
+                                                    ['videoMessage', 'video'],
+                                                    ['audioMessage', 'audio'],
+                                                    ['stickerMessage', 'sticker'],
+                                                    ['documentMessage', 'document']
+                                                ];
+                                                for (const [key, type] of types) {
+                                                    if (value?.[key]) return { type, value: value[key], viewOnce, raw: source };
+                                                }
+                                                if (Array.isArray(value?.albumMessage?.messages)) {
+                                                    return { type: 'album', value: value.albumMessage.messages, viewOnce, raw: source };
+                                                }
+                                                if (Array.isArray(value?.albumMessage)) {
+                                                    return { type: 'album', value: value.albumMessage, viewOnce, raw: source };
+                                                }
+                                                if (Array.isArray(value?.album)) {
+                                                    return { type: 'album', value: value.album, viewOnce, raw: source };
+                                                }
+                                                return { type: '', value: null, viewOnce, raw: source };
+                                            };
+                                            const getMediaAssociation = source => {
+                                                let value = source || {};
+                                                for (let depth = 0; value && depth < 8; depth++) {
+                                                    const association = value.messageContextInfo?.messageAssociation || value.messageAssociation;
+                                                    const id = association?.parentMessageKey?.id || association?.messageKey?.id || association?.id || association?.associationId;
+                                                    if (id) return String(id);
+                                                    if (value.viewOnceMessage?.message) value = value.viewOnceMessage.message;
                                                     else if (value.viewOnceMessageV2?.message) value = value.viewOnceMessageV2.message;
                                                     else if (value.viewOnceMessageV2Extension?.message) value = value.viewOnceMessageV2Extension.message;
-                                                    else if (value.documentWithCaptionMessage?.message) value = value.documentWithCaptionMessage.message;
-                                                    else if (value.templateMessage?.hydratedTemplate) value = value.templateMessage.hydratedTemplate;
-                                                    else if (value.templateMessage?.fourRowTemplate) value = value.templateMessage.fourRowTemplate;
-                                                    else if (value.message && typeof value.message === 'object') value = value.message;
+                                                    else if (value.ephemeralMessage?.message) value = value.ephemeralMessage.message;
                                                     else break;
                                                 }
-                                                return value;
+                                                return '';
                                             };
-                                            const sourceWrapper = quotedMessage || null;
-                                            const sourceMessage = unwrapHidetagMessage(sourceWrapper);
-                                            const quotedText = sourceWrapper ? String(extractBody({ message: sourceWrapper }) || '').trim() : '';
-                                            const sourceMedia = sourceMessage?.imageMessage ? { type: 'image', value: sourceMessage.imageMessage } : sourceMessage?.videoMessage ? { type: 'video', value: sourceMessage.videoMessage } : sourceMessage?.audioMessage ? { type: 'audio', value: sourceMessage.audioMessage } : sourceMessage?.stickerMessage ? { type: 'sticker', value: sourceMessage.stickerMessage } : sourceMessage?.documentMessage ? { type: 'document', value: sourceMessage.documentMessage } : null;
-                                            if (!sourceMedia) {
-                                                const hiddenText = String(args || quotedText || t.hidetag_default || '').trim();
-                                                if (!hiddenText) break;
-                                                await queuedSendMessage(sock, from, { text: hiddenText, ...msgOpts }, {}, 220);
+                                            const sourceWrapperHT = quotedMessage || null;
+                                            const quotedTextHT = sourceWrapperHT ? String(extractBody({ message: sourceWrapperHT }) || '').trim() : '';
+                                            const primaryMediaHT = inspectHidetagMedia(sourceWrapperHT);
+                                            if (!primaryMediaHT.type) {
+                                                const hiddenText = String(args || quotedTextHT || t.hidetag_default || '').trim();
+                                                if (hiddenText) await queuedSendMessage(sock, from, { text: hiddenText, ...msgOpts }, {}, 220);
                                                 break;
                                             }
-                                            let mediaBuffer = null;
-                                            let mediaType = sourceMedia.type;
-                                            let mediaCaption = String(args || sourceMedia.value.caption || '').trim();
-                                            let mediaMime = sourceMedia.value.mimetype || (mediaType === 'image' ? 'image/jpeg' : mediaType === 'video' ? 'video/mp4' : mediaType === 'audio' ? 'audio/mpeg' : 'application/octet-stream');
-                                            const viewOnceOpts = ['image', 'video'].includes(mediaType) ? { viewOnce: true } : {};
-                                            try {
-                                                const downloadType = mediaType === 'document' ? 'document' : mediaType;
-                                                const mediaStream = await downloadContentFromMessage(sourceMedia.value, downloadType);
-                                                const mediaChunks = [];
-                                                for await (const chunk of mediaStream) mediaChunks.push(Buffer.from(chunk));
-                                                mediaBuffer = Buffer.concat(mediaChunks);
-                                            } catch (mediaDownloadError) {
-                                                console.error('[hidetag-media-download]', { sessionId, group: from, error: mediaDownloadError?.message || String(mediaDownloadError) });
-                                                await safeSendActionError(sock, from, t.cmd_hidetag, mediaDownloadError, messageLang, pushName, m.messageTimestamp);
+                                            let mediaSourcesHT = [];
+                                            if (primaryMediaHT.type === 'album') {
+                                                mediaSourcesHT = primaryMediaHT.value.map(item => inspectHidetagMedia(item)).filter(item => item.type);
+                                            } else {
+                                                mediaSourcesHT = [primaryMediaHT];
+                                                const quotedIdHT = quoted?.stanzaId || '';
+                                                const anchorEntryHT = recentMsgsCache.find(entry => entry.sessionId === sessionId && entry.id === quotedIdHT && entry.from === from);
+                                                const associationHT = getMediaAssociation(sourceWrapperHT);
+                                                if (!primaryMediaHT.viewOnce && ['image', 'video'].includes(primaryMediaHT.type) && anchorEntryHT) {
+                                                    const nearby = recentMsgsCache
+                                                        .filter(entry => entry.sessionId === sessionId && entry.from === from && entry.sender === anchorEntryHT.sender && Math.abs(Number(entry.ts || 0) - Number(anchorEntryHT.ts || 0)) <= 2)
+                                                        .sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0));
+                                                    const clustered = nearby.map(entry => ({ entry, media: inspectHidetagMedia(entry.message) })).filter(item => ['image', 'video'].includes(item.media.type));
+                                                    const associated = associationHT ? clustered.filter(item => getMediaAssociation(item.entry.message) === associationHT) : clustered;
+                                                    if (associated.length > 1 && associated.some(item => item.entry.id === quotedIdHT)) mediaSourcesHT = associated.map(item => ({ ...item.media, sourceEntry: item.entry }));
+                                                }
+                                            }
+                                            if (!mediaSourcesHT.length) {
+                                                await safeSendFormatted(sock, from, t.cmd_hidetag, t.url_error || 'The replied media could not be read.', pushName, true, activeHostName);
                                                 break;
                                             }
-                                            if (!mediaBuffer?.length) {
+                                            if (mediaSourcesHT.length > 10) mediaSourcesHT = mediaSourcesHT.slice(0, 10);
+                                            const preparedMediaHT = [];
+                                            for (let mediaIndexHT = 0; mediaIndexHT < mediaSourcesHT.length; mediaIndexHT++) {
+                                                const itemHT = mediaSourcesHT[mediaIndexHT];
+                                                try {
+                                                    const downloadTypeHT = itemHT.type === 'document' ? 'document' : itemHT.type;
+                                                    const streamHT = await downloadContentFromMessage(itemHT.value, downloadTypeHT);
+                                                    const chunksHT = [];
+                                                    for await (const chunkHT of streamHT) chunksHT.push(Buffer.from(chunkHT));
+                                                    const bufferHT = Buffer.concat(chunksHT);
+                                                    if (!bufferHT.length) continue;
+                                                    const itemCaptionHT = mediaIndexHT === 0 && args ? String(args).trim() : String(itemHT.value.caption || '').trim();
+                                                    preparedMediaHT.push({
+                                                        type: itemHT.type,
+                                                        buffer: bufferHT,
+                                                        caption: itemCaptionHT,
+                                                        viewOnce: !!itemHT.viewOnce,
+                                                        mimetype: itemHT.value.mimetype || (itemHT.type === 'image' ? 'image/jpeg' : itemHT.type === 'video' ? 'video/mp4' : itemHT.type === 'audio' ? 'audio/ogg; codecs=opus' : 'application/octet-stream'),
+                                                        fileName: itemHT.value.fileName || 'media.bin',
+                                                        ptt: !!itemHT.value.ptt
+                                                    });
+                                                } catch (mediaDownloadErrorHT) {
+                                                    console.error('[hidetag-media-download]', { sessionId, group: from, mediaType: itemHT.type, error: mediaDownloadErrorHT?.message || String(mediaDownloadErrorHT) });
+                                                    if (preparedMediaHT.length === 0) await safeSendActionError(sock, from, t.cmd_hidetag, mediaDownloadErrorHT, messageLang, pushName, m.messageTimestamp);
+                                                }
+                                            }
+                                            if (!preparedMediaHT.length) {
                                                 await safeSendActionError(sock, from, t.cmd_hidetag, new Error('hidetag_media_empty'), messageLang, pushName, m.messageTimestamp);
                                                 break;
                                             }
-                                            if (mediaType === 'image') {
-                                                await queuedSendMessage(sock, from, { image: mediaBuffer, caption: mediaCaption, ...viewOnceOpts, ...msgOpts }, {}, 220);
-                                            } else if (mediaType === 'video') {
-                                                await queuedSendMessage(sock, from, { video: mediaBuffer, caption: mediaCaption, ...viewOnceOpts, ...msgOpts }, {}, 220);
-                                            } else if (mediaType === 'audio') {
-                                                await queuedSendMessage(sock, from, { audio: mediaBuffer, mimetype: mediaMime, ptt: false, ...msgOpts }, {}, 220);
-                                            } else if (mediaType === 'sticker') {
-                                                await queuedSendMessage(sock, from, { sticker: mediaBuffer, ...msgOpts }, {}, 220);
-                                            } else {
-                                                await queuedSendMessage(sock, from, { document: mediaBuffer, mimetype: mediaMime, fileName: sourceMedia.value.fileName || 'media.bin', caption: mediaCaption, ...msgOpts }, {}, 220);
+                                            let albumSentHT = false;
+                                            if (preparedMediaHT.length > 1 && preparedMediaHT.every(item => ['image', 'video'].includes(item.type) && !item.viewOnce)) {
+                                                const albumContentHT = preparedMediaHT.map(item => ({
+                                                    [item.type]: item.buffer,
+                                                    ...(item.caption ? { caption: item.caption } : {})
+                                                }));
+                                                try {
+                                                    try {
+                                                        const albumResultHT = await queuedSendMessage(sock, from, { albumMessage: albumContentHT, ...msgOpts }, {}, 220);
+                                                        if (!albumResultHT?.key?.id) throw new Error('album_message_not_confirmed');
+                                                        albumSentHT = true;
+                                                    } catch (newAlbumErrorHT) {
+                                                        const legacyAlbumResultHT = await queuedSendMessage(sock, from, { album: albumContentHT, ...msgOpts }, {}, 220);
+                                                        if (!legacyAlbumResultHT?.key?.id) throw new Error('legacy_album_message_not_confirmed');
+                                                        albumSentHT = true;
+                                                    }
+                                                } catch (albumErrorHT) {
+                                                    console.warn('[hidetag-album-fallback]', { sessionId, group: from, items: preparedMediaHT.length, error: albumErrorHT?.message || String(albumErrorHT) });
+                                                }
+                                            }
+                                            if (!albumSentHT) {
+                                                for (const itemHT of preparedMediaHT) {
+                                                    const singleViewOptsHT = itemHT.viewOnce ? { viewOnce: true } : {};
+                                                    if (itemHT.type === 'image') {
+                                                        await queuedSendMessage(sock, from, { image: itemHT.buffer, ...(itemHT.caption ? { caption: itemHT.caption } : {}), ...singleViewOptsHT, ...msgOpts }, {}, 220);
+                                                    } else if (itemHT.type === 'video') {
+                                                        await queuedSendMessage(sock, from, { video: itemHT.buffer, ...(itemHT.caption ? { caption: itemHT.caption } : {}), ...singleViewOptsHT, ...msgOpts }, {}, 220);
+                                                    } else if (itemHT.type === 'audio') {
+                                                        await queuedSendMessage(sock, from, { audio: itemHT.buffer, mimetype: itemHT.mimetype, ptt: itemHT.ptt, ...singleViewOptsHT, ...msgOpts }, {}, 220);
+                                                    } else if (itemHT.type === 'sticker') {
+                                                        await queuedSendMessage(sock, from, { sticker: itemHT.buffer, ...msgOpts }, {}, 220);
+                                                    } else if (itemHT.type === 'document') {
+                                                        await queuedSendMessage(sock, from, { document: itemHT.buffer, mimetype: itemHT.mimetype, fileName: itemHT.fileName, ...(itemHT.caption ? { caption: itemHT.caption } : {}), ...singleViewOptsHT, ...msgOpts }, {}, 220);
+                                                    }
+                                                }
                                             }
                                             break;
                                         case 'cheche':
