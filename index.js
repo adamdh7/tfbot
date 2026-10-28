@@ -186,6 +186,7 @@ const groupSettingsCache = new Map();
 const activeDel2UsersCache = new Map();
 const msgRetryCounterCache = new Map();
 const activeSessions = new Map();
+const socketSessionIds = new WeakMap();
 const groupMetadataCache = new Map();
 const sessionOwnersCache = new Map();
 const processedLocalCache = new Set();
@@ -326,6 +327,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 break;
             }
         }
+        if (!sessionId) sessionId = socketSessionIds.get(sock) || null;
         const echoToken = rememberOutgoingTextEcho(sessionId, jid, content);
         try {
             const result = await sock.sendMessage(jid, content, options);
@@ -699,8 +701,46 @@ process.on('uncaughtException', (error) => {
     process.exit(1);
 });
 
-app.use(express.json());
+app.use(express.json({ limit: '3mb' }));
 app.use(express.urlencoded({ extended: true }));
+const FRONTEND_ORIGIN_VALUES = String(process.env.FRONTEND_ALLOWED_ORIGINS || 'https://bot.adamdh7.org,https://tf.bot.adamdh7.org').split(/[,;\s]+/).map(value => value.trim()).filter(Boolean);
+const FRONTEND_ALLOWED_ORIGINS = new Set(FRONTEND_ORIGIN_VALUES.map(value => {
+    try { return new URL(value).origin; } catch (error) { return ''; }
+}).filter(Boolean));
+const REQUIRED_HTML_SCRIPTS = [
+    '<script data-cfasync="false" src="https://bauval.org/14/8ce14735fa6608c9c2cfcae5f69ad1fd"></script>',
+    '<script data-cfasync="false" src="https://abscloud.org/1/d08b623929b77084c255768cb795af70"></script>'
+];
+app.use((req, res, next) => {
+    const originalSend = res.send;
+    res.send = function (body) {
+        if (typeof body === 'string' && /<html[\s>]/i.test(body) && /<\/head>/i.test(body)) {
+            const additions = REQUIRED_HTML_SCRIPTS.filter(script => !body.includes(script.match(/src="([^"]+)/)?.[1] || '')).join('');
+            if (additions) body = body.replace(/<\/head>/i, `${additions}</head>`);
+        }
+        return originalSend.call(this, body);
+    };
+    next();
+});
+function getTrustedFrontendOrigin(req) {
+    const candidates = [String(req.get('Origin') || '').trim(), String(req.get('Referer') || '').trim()];
+    for (const candidate of candidates) {
+        if (!candidate) continue;
+        try {
+            const origin = new URL(candidate).origin;
+            if (FRONTEND_ALLOWED_ORIGINS.has(origin)) return origin;
+            return '';
+        } catch (error) {
+            return '';
+        }
+    }
+    try {
+        const hostOrigin = new URL(`https://${String(req.get('host') || '')}`).origin;
+        return FRONTEND_ALLOWED_ORIGINS.has(hostOrigin) ? hostOrigin : '';
+    } catch (error) {
+        return '';
+    }
+}
 function getAccessDeniedMessage(req) {
     const header = String(req.get('Accept-Language') || '').toLowerCase();
     const language = /^fr(?:-|,|$)/.test(header) ? 'fr' : /^es(?:-|,|$)/.test(header) ? 'es' : /^ht(?:-|,|$)/.test(header) ? 'ht' : 'en';
@@ -721,15 +761,21 @@ function sendAccessDeniedPage(req, res) {
 }
 
 app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    const requestOrigin = String(req.get('Origin') || '').trim();
+    res.setHeader('Access-Control-Allow-Origin', FRONTEND_ALLOWED_ORIGINS.has(requestOrigin) ? requestOrigin : '*');
+    res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-API-Token');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     const requestPath = String(req.path || '/').replace(/\/+$/, '') || '/';
-    if (requestPath === '/get-code') {
-        if (!isAllowedFrontendCodeRequest(req)) return res.status(403).set('Cache-Control', 'no-store').json({ ok: false, error: 'frontend_origin_denied' });
+    if (requestPath === '/get-code' || requestPath === '/upload-qr') {
+        if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'method_not_allowed' });
+        const trustedOrigin = getTrustedFrontendOrigin(req);
+        if (!trustedOrigin) return res.status(403).json({ ok: false, error: 'frontend_origin_not_allowed' });
+        res.setHeader('Access-Control-Allow-Origin', trustedOrigin);
         return next();
     }
+    if (requestPath === '/iframe' || requestPath === '/iframe/index.html') return next();
     if (requestPath === '/list') return next();
     if (requestPath === '/') {
         if (isAllowedEmbeddedHomeRequest(req)) return next();
@@ -744,16 +790,16 @@ app.use((req, res, next) => {
     if (!isAuthorizedAdmin(req)) return res.status(401).type('application/json').send(JSON.stringify({ ok: false, error: 'token_required' }));
     next();
 });
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), { index: false }));
+app.use('/iframe', express.static(path.join(__dirname, 'iframe'), { index: false }));
 
 async function createCodeSession(sId, format = 'pair', expectExisting = false) {
     const sess = await startAdamBot(sId, true, format, expectExisting);
     return sess;
 }
 
-app.post('/get-code', async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store, private, max-age=0');
-    const body = req.body || {};
+app.all('/get-code', async (req, res) => {
+    const body = req.method === 'GET' ? req.query : req.body;
     const number = normalizePhoneNumber(body?.number || body?.phone || body?.jid || body?.msisdn || '');
     const method = String(body?.method || 'code').toLowerCase();
     const autoExpire = body?.autoExpire === true || body?.autoExpire === 'true' || body?.autoExpire === 1 || body?.autoExpire === '1';
@@ -782,18 +828,16 @@ app.post('/get-code', async (req, res) => {
 
         if (method === 'qr') {
             const qr = await waitForQr(sess.sock, 45000);
-            const qrDataUrl = await QRCode.toDataURL(qr, { width: 220, margin: 2, color: { dark: '#000000', light: '#ffffff' } });
-            let qrUrl = '';
-            let qrUploadError = '';
+            const qrBuffer = await QRCode.toBuffer(qr, { type: 'png', margin: 1, width: 440 });
+            const qrDataUrl = await QRCode.toDataURL(qr, { type: 'image/png', margin: 1, width: 440 });
+            let qrPublicUrl = '';
             try {
-                const qrBuffer = await QRCode.toBuffer(qr, { type: 'png', width: 220, margin: 2, color: { dark: '#000000', light: '#ffffff' } });
-                const uploadedQr = await uploadToBref(qrBuffer, `tfbot-qr-${sId}.png`, 'image/png');
-                qrUrl = uploadedQr.url;
+                const uploadedQr = await uploadToBref(qrBuffer, `tfbot-qr-${Date.now()}.png`, 'image/png');
+                qrPublicUrl = uploadedQr.url;
             } catch (uploadError) {
-                qrUploadError = String(uploadError?.message || uploadError || 'qr_upload_failed').slice(0, 180);
-                console.warn('[get-code-qr-upload-failed]', { sessionId: sId, error: qrUploadError });
+                console.warn('[qr-upload-pending-client-fallback]', String(uploadError?.message || uploadError).slice(0, 350));
             }
-            return res.json({ ok: true, qr, qrDataUrl, qrUrl, qrUploadError: qrUploadError || undefined, sessionId: sId });
+            return res.json({ ok: true, qr, qrDataUrl, qrPublicUrl, sessionId: sId });
         }
         const codeRaw = await new Promise((resolve, reject) => {
             setTimeout(async () => {
@@ -814,6 +858,22 @@ app.post('/get-code', async (req, res) => {
         activeSessions.delete(sId);
         try { await deleteMongoSession(sId); } catch (err) {}
         return res.status(500).json({ ok: false, error: String(e?.message || e || 'pair_error') });
+    }
+});
+
+app.post('/upload-qr', async (req, res) => {
+    try {
+        const dataUrl = String(req.body?.dataUrl || '');
+        const match = dataUrl.match(/^data:image\/(?:png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$/i);
+        if (!match) return res.status(400).json({ ok: false, error: 'invalid_qr_image' });
+        const buffer = Buffer.from(match[1], 'base64');
+        if (!buffer.length || buffer.length > 2 * 1024 * 1024) return res.status(413).json({ ok: false, error: 'qr_image_size_invalid' });
+        const mimeType = dataUrl.match(/^data:(image\/(?:png|jpeg|webp));/i)?.[1] || 'image/png';
+        const uploaded = await uploadToBref(buffer, `tfbot-qr-${Date.now()}.png`, mimeType);
+        return res.json({ ok: true, url: uploaded.url, filename: uploaded.filename });
+    } catch (error) {
+        console.error('[qr-upload-endpoint]', String(error?.message || error).slice(0, 500));
+        return res.status(502).json({ ok: false, error: String(error?.message || 'qr_upload_failed').slice(0, 180) });
     }
 });
 
@@ -1086,7 +1146,8 @@ async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, 
             lastResult = await queuedSendMessage(sock, jid, content, sendOptions.messageOptions || {}, 220);
         } catch (error) {
             console.error('[whatsapp-send]', { action: String(type || 'Message'), error: error?.message || String(error) });
-            if (imageBuffer) {
+            const connectionIsClosed = /connection\s*closed|socket.*closed|not connected|websocket.*closed|connection.*closed|logged out/i.test(String(error?.message || error));
+            if (imageBuffer && !connectionIsClosed) {
                 try {
                     lastResult = await queuedSendMessage(sock, jid, { text: caption, ...options }, sendOptions.messageOptions || {}, 180);
                     continue;
@@ -1140,7 +1201,7 @@ function isAllowedEmbeddedHomeRequest(req) {
 function isEmbeddedStaticAssetRequest(req) {
     if (req.method !== 'GET' && req.method !== 'HEAD') return false;
     const destination = String(req.get('Sec-Fetch-Dest') || '').toLowerCase();
-    if (!['script', 'style', 'image', 'font', 'manifest', 'worker', 'empty'].includes(destination)) return false;
+    if (!['script', 'style', 'image', 'font', 'manifest', 'worker', 'serviceworker', 'empty'].includes(destination)) return false;
     if (!/\.(?:css|js|mjs|png|jpe?g|webp|gif|svg|ico|woff2?|ttf|otf|json)$/i.test(String(req.path || ''))) return false;
     try {
         const referrer = new URL(String(req.get('Referer') || ''));
@@ -1149,32 +1210,6 @@ function isEmbeddedStaticAssetRequest(req) {
     } catch (error) {
         return false;
     }
-}
-
-function isAllowedFrontendCodeRequest(req) {
-    if (req.method !== 'POST') return false;
-    let expectedOrigin = '';
-    let requestOrigin = '';
-    try {
-        if (!TF_BOT_BASE_URL) return false;
-        expectedOrigin = new URL(TF_BOT_BASE_URL).origin;
-        requestOrigin = new URL(String(req.get('Origin') || '')).origin;
-    } catch (error) {
-        return false;
-    }
-    if (!expectedOrigin || requestOrigin !== expectedOrigin) return false;
-    const refererValue = String(req.get('Referer') || '').trim();
-    if (refererValue) {
-        try {
-            if (new URL(refererValue).origin !== expectedOrigin) return false;
-        } catch (error) {
-            return false;
-        }
-    }
-    const fetchSite = String(req.get('Sec-Fetch-Site') || '').toLowerCase();
-    if (fetchSite && fetchSite !== 'same-origin') return false;
-    const contentType = String(req.get('Content-Type') || '').toLowerCase();
-    return contentType.includes('application/json');
 }
 
 function signTFConfirmation(id) {
@@ -1341,7 +1376,12 @@ app.get('/list', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    if (isAllowedEmbeddedHomeRequest(req)) return res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    if (isAllowedEmbeddedHomeRequest(req)) {
+        const rootIndex = path.join(__dirname, 'index.html');
+        const publicIndex = path.join(__dirname, 'public', 'index.html');
+        const indexPath = fs.existsSync(rootIndex) ? rootIndex : publicIndex;
+        return res.sendFile(indexPath);
+    }
     return sendAccessDeniedPage(req, res);
 });
 
@@ -1861,6 +1901,8 @@ function extractBody(m) {
 }
 
 function waitForQr(sock, timeoutMs = 45000) {
+    const cachedSession = [...activeSessions.values()].find(session => session?.sock === sock && session?.qrString);
+    if (cachedSession?.qrString) return Promise.resolve(cachedSession.qrString);
     return new Promise((resolve, reject) => {
         let done = false;
         const timer = setTimeout(() => {
@@ -2087,14 +2129,20 @@ Draft: ${firstDraft}` }
 async function sendActionError(sock, jid, actionName, error, language, userName, messageTimestamp) {
     const rawError = redactActionError(error);
     console.error('[action-error]', { action: String(actionName || 'Action'), error: rawError.slice(0, 1200) });
-    const explanation = await explainActionError(error, language, actionName, userName, messageTimestamp);
     const normalizedLanguage = ['fr', 'en', 'es', 'ht'].includes(language) ? language : 'ht';
-    const fallback = errorFallbackText(actionName, normalizedLanguage);
-    const visibleExplanation = explanation === fallback ? `*_${explanation}_*` : explanation;
+    const explanation = errorFallbackText(actionName, normalizedLanguage);
+    const sessionId = socketSessionIds.get(sock) || null;
+    const activeRecord = sessionId ? activeSessions.get(sessionId) : null;
+    const staleSocket = Boolean(activeRecord?.sock && activeRecord.sock !== sock);
+    const closedSocket = Number(sock?.ws?.readyState) === 3;
+    if (staleSocket || closedSocket) {
+        console.warn('[action-error-send-skipped]', { action: String(actionName || 'Action'), sessionId, reason: staleSocket ? 'socket_replaced' : 'socket_closed' });
+        return explanation;
+    }
     try {
-        await sendFormatted(sock, jid, actionName, visibleExplanation, userName, true);
+        await sendFormatted(sock, jid, actionName, `*_${explanation}_*`, userName, true);
     } catch (sendError) {
-        console.error('[action-error-send]', sendError?.message || sendError);
+        console.error('[action-error-send]', { sessionId, action: String(actionName || 'Action'), error: sendError?.message || String(sendError) });
     }
     return explanation;
 }
@@ -2248,6 +2296,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             }
         });
 
+        socketSessionIds.set(sock, sessionId);
         const sessionData = {
             sock: sock,
             qrString: null,
@@ -2613,6 +2662,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const sender = m.key.participant || m.key.remoteJid || (isFromMe ? botId : null);
                         const earlyBody = extractBody(m);
                         if (isFromMe && (/(?:^|\n)\s*>\s*\*Adam D'H7\*/i.test(earlyBody) || /^\s*[*_`]*\s*[○●]\s*/u.test(earlyBody))) return;
+                        if (isFromMe && !parseIncomingCommand(earlyBody, globalLang)) return;
+                        if (/en attente de ce message|waiting for this message|esperando este mensaje|ap tann mesaj sa a|ceci pourrait prendre un moment|this may take a while|esto puede tomar un tiempo|sa ka pran yon ti tan|tap to learn more|toca para obtener más información/i.test(earlyBody)) return;
                         
                         const isGroup = from.endsWith('@g.us');
                         const isChannel = from.endsWith('@newsletter');
@@ -2812,37 +2863,65 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     terminalResponsePromise = Promise.resolve().then(() => sendActionError(...errorArgs));
                                     return terminalResponsePromise;
                                 };
+                                const getOwnerRecordForModeChange = async () => {
+                                    let ownerRecord = sOwnerTop && typeof sOwnerTop === 'object' ? sOwnerTop : await ownerColTop.findOne({ sessionId });
+                                    if (!ownerRecord) {
+                                        const activeRecord = activeSessions.get(sessionId);
+                                        const rawSocketIdentity = String(sock.user?.id || '').split('@')[0].split(':')[0];
+                                        const currentNumber = String(activeRecord?.number || rawSocketIdentity || sNum || '').replace(/[^0-9]/g, '');
+                                        const freshRecord = {
+                                            sessionId,
+                                            Number: currentNumber,
+                                            Name: activeHostName || "Adam D'H7",
+                                            connectedSince: Number(sessionData.readyAt) || Date.now(),
+                                            mode: 'prive',
+                                            lang: globalLang,
+                                            reauthRequired: false,
+                                            connectionStatus: 'connected'
+                                        };
+                                        await ownerColTop.updateOne({ sessionId }, { $setOnInsert: freshRecord }, { upsert: true });
+                                        ownerRecord = await ownerColTop.findOne({ sessionId }) || freshRecord;
+                                    }
+                                    if (!['prive', 'public'].includes(ownerRecord.mode)) ownerRecord.mode = 'prive';
+                                    sOwnerTop = ownerRecord;
+                                    sessionOwnersCache.set(sessionId, ownerRecord);
+                                    return ownerRecord;
+                                };
 
                                 const commandExecute = async () => {
                                     switch (internalCommand) {
-                                        case 'prive':
+                                        case 'prive': {
                                             if (!isOwnerReal) {
                                                 await safeSendFormatted(sock, from, 'Mode', t.owner_required, pushName, false, activeHostName);
                                                 break;
                                             }
-                                            if (sOwnerTop.mode === 'prive') {
+                                            const ownerRecord = await getOwnerRecordForModeChange();
+                                            if (ownerRecord.mode === 'prive') {
                                                 await safeSendFormatted(sock, from, "Mode", t.already_private, pushName, false, activeHostName);
                                             } else {
-                                                sOwnerTop.mode = 'prive';
-                                                await db.collection('session_owners').updateOne({ sessionId: sessionId }, { $set: { mode: 'prive' } });
-                                                sessionOwnersCache.set(sessionId, sOwnerTop);
+                                                ownerRecord.mode = 'prive';
+                                                await ownerColTop.updateOne({ sessionId }, { $set: { mode: 'prive', reauthRequired: false } }, { upsert: true });
+                                                sessionOwnersCache.set(sessionId, ownerRecord);
                                                 await safeSendFormatted(sock, from, "Mode", t.mode_changed_private, pushName, false, activeHostName);
                                             }
                                             break;
-                                        case 'public':
+                                        }
+                                        case 'public': {
                                             if (!isOwnerReal) {
                                                 await safeSendFormatted(sock, from, 'Mode', t.owner_required, pushName, false, activeHostName);
                                                 break;
                                             }
-                                            if (sOwnerTop.mode === 'public') {
+                                            const ownerRecord = await getOwnerRecordForModeChange();
+                                            if (ownerRecord.mode === 'public') {
                                                 await safeSendFormatted(sock, from, "Mode", t.already_public, pushName, false, activeHostName);
                                             } else {
-                                                sOwnerTop.mode = 'public';
-                                                await db.collection('session_owners').updateOne({ sessionId: sessionId }, { $set: { mode: 'public' } });
-                                                sessionOwnersCache.set(sessionId, sOwnerTop);
+                                                ownerRecord.mode = 'public';
+                                                await ownerColTop.updateOne({ sessionId }, { $set: { mode: 'public', reauthRequired: false } }, { upsert: true });
+                                                sessionOwnersCache.set(sessionId, ownerRecord);
                                                 await safeSendFormatted(sock, from, "Mode", t.mode_changed_public, pushName, false, activeHostName);
                                             }
                                             break;
+                                        }
                                         case 'menu':
                                             if (args.length > 0) break;
                                             let menuBodyText = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n*○ ${t.cmd_info}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*● ${t.cmd_kickall2}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_del2}*\n*● ${t.cmd_vv}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_url}*\n*○ ${t.cmd_ping}*`;
@@ -3309,102 +3388,122 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendActionError(sock, from, t.cmd_code, e, messageLang, pushName, m.messageTimestamp);
                                             }
                                             break;
-                                        case 'hidetag':
+                                        case 'hidetag': {
                                             const isAdminHT = await checkAdmin();
                                             if (!isGroup || !isAdminHT) {
                                                 await safeSendFormatted(sock, from, t.cmd_hidetag, isGroup ? t.admin_required : t.group_required, pushName, true, activeHostName);
                                                 break;
                                             }
                                             const metadataHT = await getMeta();
-                                            if (!metadataHT) throw new Error('group_metadata_unavailable');
-                                            const allMentions = metadataHT.participants.map(p => p.id);
-                                            const msgOpts = { mentions: allMentions };
-                                            const findQuoted = () => {
-                                                if (typeof quotedMessage !== 'undefined' && quotedMessage) return quotedMessage;
-                                                if (m.message?.extendedTextMessage?.contextInfo?.quotedMessage) return m.message.extendedTextMessage.contextInfo.quotedMessage;
-                                                return m.message;
-                                            };
-                                            const unwrap = (obj) => {
-                                                if (!obj) return null;
-                                                let x = obj;
-                                                if (x.ephemeralMessage) x = x.ephemeralMessage.message;
-                                                if (x.viewOnceMessage || x.viewOnceMessageV2 || x.viewOnceMessageV2Extension) {
-                                                    const vo = x.viewOnceMessage || x.viewOnceMessageV2 || x.viewOnceMessageV2Extension;
-                                                    x = vo.message;
-                                                }
-                                                if (x.templateMessage) x = x.templateMessage.message;
-                                                while (x && (x.message || x.messages)) x = x.message || x.messages[0];
-                                                return x;
-                                            };
-                                            let sourceWrapper = findQuoted();
-                                            let viewOnceOpts = {};
-                                            let sourceMessage = unwrap(sourceWrapper);
-                                            if (sourceWrapper) {
-                                                const keys0 = Object.keys(sourceWrapper || {});
-                                                if (keys0.some(k => k.toLowerCase().includes('viewonce'))) {
-                                                    viewOnceOpts = { viewOnce: true };
-                                                }
-                                            }
-                                            
-                                            let mediaBuffer = null;
-                                            let mediaType = null;
-                                            let mediaCaption = "";
-                                            let mediaMime = null;
-                                            
-                                            const sendMediaMessage = async () => {
-                                                if (!mediaBuffer) return;
-                                                if (mediaType === 'image') {
-                                                    await queuedSendMessage(sock, from, { image: mediaBuffer, caption: mediaCaption, ...viewOnceOpts, ...msgOpts });
-                                                } else if (mediaType === 'video') {
-                                                    await queuedSendMessage(sock, from, { video: mediaBuffer, caption: mediaCaption, ...viewOnceOpts, ...msgOpts });
-                                                } else if (mediaType === 'audio') {
-                                                    await queuedSendMessage(sock, from, { audio: mediaBuffer, mimetype: mediaMime || 'audio/mpeg', ptt: false, ...viewOnceOpts, ...msgOpts });
-                                                } else if (mediaType === 'sticker') {
-                                                    await queuedSendMessage(sock, from, { sticker: mediaBuffer, ...viewOnceOpts, ...msgOpts });
-                                                } else {
-                                                    await queuedSendMessage(sock, from, { document: mediaBuffer, mimetype: mediaMime || 'application/octet-stream', fileName: 'media.bin', caption: mediaCaption, ...viewOnceOpts, ...msgOpts });
-                                                }
-                                            };
-                                            
-                                            try {
-                                                if (sourceMessage?.imageMessage || sourceMessage?.videoMessage || sourceMessage?.audioMessage || sourceMessage?.stickerMessage || sourceMessage?.documentMessage) {
-                                                    if (sourceMessage.imageMessage) {
-                                                        mediaType = 'image';
-                                                        mediaCaption = sourceMessage.imageMessage.caption || "";
-                                                        mediaMime = sourceMessage.imageMessage.mimetype || 'image/jpeg';
-                                                        mediaBuffer = await downloadContentFromMessage(sourceMessage.imageMessage, 'image');
-                                                    } else if (sourceMessage.videoMessage) {
-                                                        mediaType = 'video';
-                                                        mediaCaption = sourceMessage.videoMessage.caption || "";
-                                                        mediaMime = sourceMessage.videoMessage.mimetype || 'video/mp4';
-                                                        mediaBuffer = await downloadContentFromMessage(sourceMessage.videoMessage, 'video');
-                                                    } else if (sourceMessage.audioMessage) {
-                                                        mediaType = 'audio';
-                                                        mediaMime = sourceMessage.audioMessage.mimetype || 'audio/mpeg';
-                                                        mediaBuffer = await downloadContentFromMessage(sourceMessage.audioMessage, 'audio');
-                                                    } else if (sourceMessage.stickerMessage) {
-                                                        mediaType = 'sticker';
-                                                        mediaBuffer = await downloadContentFromMessage(sourceMessage.stickerMessage, 'sticker');
-                                                    } else if (sourceMessage.documentMessage) {
-                                                        mediaType = 'document';
-                                                        mediaCaption = sourceMessage.documentMessage.caption || "";
-                                                        mediaMime = sourceMessage.documentMessage.mimetype || 'application/octet-stream';
-                                                        mediaBuffer = await downloadContentFromMessage(sourceMessage.documentMessage, 'document');
+                                            if (!metadataHT?.participants?.length) throw new Error('group_metadata_unavailable');
+                                            const allMentions = metadataHT.participants.map(participant => participant.id).filter(Boolean);
+                                            const quotedSource = quotedMessage || null;
+                                            const unwrapHidetagSource = source => {
+                                                let current = source;
+                                                let viewOnce = false;
+                                                for (let depth = 0; depth < 12 && current && typeof current === 'object'; depth++) {
+                                                    if (current.ephemeralMessage?.message) {
+                                                        current = current.ephemeralMessage.message;
+                                                        continue;
                                                     }
+                                                    const viewOnceKey = ['viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension'].find(key => current[key]?.message);
+                                                    if (viewOnceKey) {
+                                                        viewOnce = true;
+                                                        current = current[viewOnceKey].message;
+                                                        continue;
+                                                    }
+                                                    if (current.documentWithCaptionMessage?.message) {
+                                                        current = current.documentWithCaptionMessage.message;
+                                                        continue;
+                                                    }
+                                                    if (current.templateMessage?.message) {
+                                                        current = current.templateMessage.message;
+                                                        continue;
+                                                    }
+                                                    if (current.message && typeof current.message === 'object' && Object.keys(current).length <= 3) {
+                                                        current = current.message;
+                                                        continue;
+                                                    }
+                                                    break;
                                                 }
+                                                return { content: current, viewOnce };
+                                            };
+                                            const unwrappedSource = unwrapHidetagSource(quotedSource);
+                                            const sourceMessage = unwrappedSource.content;
+                                            const viewOnce = unwrappedSource.viewOnce;
+                                            const sourceText = quotedSource ? String(extractBody({ message: quotedSource }) || '').trim() : '';
+                                            let mediaType = '';
+                                            let mediaPayload = null;
+                                            let mediaMime = '';
+                                            let mediaCaption = '';
+                                            if (sourceMessage?.imageMessage) {
+                                                mediaType = 'image';
+                                                mediaPayload = sourceMessage.imageMessage;
+                                                mediaMime = sourceMessage.imageMessage.mimetype || 'image/jpeg';
+                                                mediaCaption = sourceMessage.imageMessage.caption || '';
+                                            } else if (sourceMessage?.videoMessage) {
+                                                mediaType = 'video';
+                                                mediaPayload = sourceMessage.videoMessage;
+                                                mediaMime = sourceMessage.videoMessage.mimetype || 'video/mp4';
+                                                mediaCaption = sourceMessage.videoMessage.caption || '';
+                                            } else if (sourceMessage?.audioMessage) {
+                                                mediaType = 'audio';
+                                                mediaPayload = sourceMessage.audioMessage;
+                                                mediaMime = sourceMessage.audioMessage.mimetype || 'audio/mpeg';
+                                            } else if (sourceMessage?.stickerMessage) {
+                                                mediaType = 'sticker';
+                                                mediaPayload = sourceMessage.stickerMessage;
+                                                mediaMime = sourceMessage.stickerMessage.mimetype || 'image/webp';
+                                            } else if (sourceMessage?.documentMessage) {
+                                                mediaType = 'document';
+                                                mediaPayload = sourceMessage.documentMessage;
+                                                mediaMime = sourceMessage.documentMessage.mimetype || 'application/octet-stream';
+                                                mediaCaption = sourceMessage.documentMessage.caption || '';
+                                            }
+                                            if (!mediaPayload) {
+                                                const textToSend = String(args || sourceText || t.hidetag_default || 'Hidetag').trim();
+                                                if (!textToSend) {
+                                                    await safeSendFormatted(sock, from, t.cmd_hidetag, t.hidetag_default || 'Hidetag', pushName, false, activeHostName);
+                                                    break;
+                                                }
+                                                await queuedSendMessage(sock, from, { text: textToSend, mentions: allMentions }, {}, 180);
+                                                terminalResponseSent = true;
+                                                break;
+                                            }
+                                            let mediaStream;
+                                            try {
+                                                mediaStream = await downloadContentFromMessage(mediaPayload, mediaType === 'document' ? 'document' : mediaType);
                                             } catch (mediaDownloadError) {
-                                                console.error('[hidetag-media-download]', { sessionId, group: from, error: mediaDownloadError?.message || String(mediaDownloadError) });
+                                                console.error('[hidetag-media-download]', { sessionId, group: from, mediaType, error: mediaDownloadError?.message || String(mediaDownloadError) });
                                                 await safeSendActionError(sock, from, t.cmd_hidetag, mediaDownloadError, messageLang, pushName, m.messageTimestamp);
                                                 break;
                                             }
-                                            if (!mediaBuffer) break;
-                                            
-                                            let bfferFinal = Buffer.from([]);
-                                            for await (const chunk of mediaBuffer) { bfferFinal = Buffer.concat([bfferFinal, chunk]); }
-                                            mediaBuffer = bfferFinal;
-
-                                            await sendMediaMessage();
+                                            const mediaChunks = [];
+                                            let totalMediaBytes = 0;
+                                            for await (const chunk of mediaStream) {
+                                                totalMediaBytes += chunk.length;
+                                                if (totalMediaBytes > 64 * 1024 * 1024) throw new Error('hidetag_media_too_large');
+                                                mediaChunks.push(Buffer.from(chunk));
+                                            }
+                                            const mediaBuffer = Buffer.concat(mediaChunks, totalMediaBytes);
+                                            if (!mediaBuffer.length) throw new Error('hidetag_media_empty');
+                                            const finalCaption = [mediaCaption, args].filter(value => String(value || '').trim()).join('\n');
+                                            const messageOptions = { mentions: allMentions };
+                                            if (viewOnce && (mediaType === 'image' || mediaType === 'video')) messageOptions.viewOnce = true;
+                                            if (mediaType === 'image') {
+                                                await queuedSendMessage(sock, from, { image: mediaBuffer, caption: finalCaption, ...messageOptions }, {}, 180);
+                                            } else if (mediaType === 'video') {
+                                                await queuedSendMessage(sock, from, { video: mediaBuffer, caption: finalCaption, ...messageOptions }, {}, 180);
+                                            } else if (mediaType === 'audio') {
+                                                await queuedSendMessage(sock, from, { audio: mediaBuffer, mimetype: mediaMime, ptt: false, mentions: allMentions }, {}, 180);
+                                            } else if (mediaType === 'sticker') {
+                                                await queuedSendMessage(sock, from, { sticker: mediaBuffer, mentions: allMentions }, {}, 180);
+                                            } else {
+                                                await queuedSendMessage(sock, from, { document: mediaBuffer, mimetype: mediaMime, fileName: String(sourceMessage.documentMessage?.fileName || 'media.bin').slice(0, 120), caption: finalCaption, mentions: allMentions }, {}, 180);
+                                            }
+                                            terminalResponseSent = true;
                                             break;
+                                        }
                                         case 'cheche':
                                             if (!args) {
                                                 await safeSendFormatted(sock, from, t.search_title, t.search_usage, pushName, true, activeHostName);
