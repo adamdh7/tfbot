@@ -590,6 +590,14 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             }
         }
         if (alternateDestinationJid === destinationJid) alternateDestinationJid = '';
+        if (sessionId && /@lid$/i.test(originalDestinationJid) && normalizePhoneCacheJid(alternateDestinationJid)) {
+            const resolvedPhoneJid = normalizePhoneCacheJid(alternateDestinationJid);
+            const resolvedPhoneSource = alternateDestinationResolution || 'lid_phone_mapping';
+            destinationJid = resolvedPhoneJid;
+            destinationResolution = `private_pn_preferred_from_lid_${resolvedPhoneSource}`;
+            alternateDestinationJid = originalDestinationJid;
+            alternateDestinationResolution = 'original_lid_fallback';
+        }
         console.info('[private-send-target]', {
             sessionId,
             originalDestinationJid,
@@ -3743,6 +3751,26 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     quotedMessage: receivedAuditDetails.quotedMessage,
                     timestamp: receivedDiagnostic.timestamp
                 });
+                if (receivedParsedCommand) {
+                    console.info('[command-recognized-on-receipt]', {
+                        sessionId,
+                        connectedAccountJid: sock.user?.id || null,
+                        upsertType,
+                        messageId: receivedId,
+                        senderName: receivedDiagnostic.senderName,
+                        senderJid: receivedSenderJid,
+                        senderIdentityCandidates: receivedSenderAliases,
+                        chatJid: receivedChat,
+                        chatType: receivedDiagnostic.chatType,
+                        fromMe: !!m?.key?.fromMe,
+                        messageText: receivedAuditDetails.messageText,
+                        command: receivedParsedCommand.command,
+                        internalCommand: receivedParsedCommand.internalCommand,
+                        argumentPreview: String(receivedParsedCommand.args || '').slice(0, 1000),
+                        stage: 'before_deduplication_policy_and_execution',
+                        action: 'recognized_not_yet_authorized_or_executed'
+                    });
+                }
 
                 if (m.messageStubType) {
                     console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'message_stub', messageStubType: m.messageStubType });
@@ -3882,8 +3910,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             }
                             const directPhone = normalizePhoneCacheJid(directPhoneCandidate?.value || '');
                             if (directPhone) {
-                                privateReplyTargetResolution = 'original_lid_preferred_with_pn_fallback_available';
-                                if (!isFromMe) senderJids.push(directPhone);
+                                if (!isFromMe) {
+                                    senderJids.push(directPhone);
+                                    from = directPhone;
+                                    privateReplyTargetResolution = `private_pn_preferred_${directPhoneCandidate?.source || 'lid_mapping'}`;
+                                } else {
+                                    privateReplyTargetResolution = 'original_lid_preserved_for_from_me';
+                                }
                             } else {
                                 privateReplyTargetResolution = 'original_lid_preferred_no_pn_mapping';
                             }
@@ -4148,6 +4181,25 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const bodyRaw = earlyBody;
                         const body = bodyRaw.trim();
 
+                        if (receivedParsedCommand) {
+                            console.info('[command-policy-pending]', {
+                                sessionId,
+                                messageId: msgId,
+                                senderName: sName,
+                                senderJid: sender,
+                                senderAliases: senderJids,
+                                incomingChatJid: rawFrom,
+                                replyTargetJid: from,
+                                replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid',
+                                command: receivedParsedCommand.command,
+                                internalCommand: receivedParsedCommand.internalCommand,
+                                isOwnerReal,
+                                isPublicMode,
+                                allowed,
+                                mode: botMode,
+                                stage: 'before_mode_permission_return'
+                            });
+                        }
                         console.info('[message-policy-evaluation]', {
                             sessionId,
                             connectedAccountJid: sock.user?.id || null,
@@ -4170,6 +4222,25 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             bodyPreview: body.slice(0, 240)
                         });
                         if (!allowed) {
+                            if (receivedParsedCommand) {
+                                console.warn('[command-blocked-by-policy]', {
+                                    sessionId,
+                                    messageId: msgId,
+                                    senderName: sName,
+                                    senderJid: sender,
+                                    senderAliases: senderJids,
+                                    incomingChatJid: rawFrom,
+                                    replyTargetJid: from,
+                                    command: receivedParsedCommand.command,
+                                    internalCommand: receivedParsedCommand.internalCommand,
+                                    isOwnerReal,
+                                    isPublicMode,
+                                    mode: botMode,
+                                    modeFields: { mode: sOwnerTop?.mode ?? null, Mode: sOwnerTop?.Mode ?? null, botMode: sOwnerTop?.botMode ?? null },
+                                    reason: 'mode_disallows_non_owner',
+                                    action: 'recognized_but_not_executed'
+                                });
+                            }
                             console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, senderAliases: senderJids, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', messageType, fromMe: isFromMe, isGroup, isChannel, isOwnerReal, botMode, isPublicMode, messageClassification: receivedClassification, detectedCommand: receivedParsedCommand?.command || null, detectedInternalCommand: receivedParsedCommand?.internalCommand || null, modeFields: { mode: sOwnerTop?.mode ?? null, Mode: sOwnerTop?.Mode ?? null, botMode: sOwnerTop?.botMode ?? null }, bodyLength: body.length, bodyPreview: body.slice(0, 240), action: 'not_processed_due_to_mode', reason: 'mode_disallows_non_owner' });
                             return;
                         }
