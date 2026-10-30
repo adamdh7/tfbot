@@ -719,26 +719,36 @@ function cacheRecentMessage(sessionId, message) {
     if (recentMsgsCache.length > 1000) recentMsgsCache.splice(0, recentMsgsCache.length - 1000);
 }
 
-function persistOutgoingRetryMessage(sessionId, jid, message) {
-    if (!db || !sessionId || !message?.key?.id || !message?.message) return;
+async function persistOutgoingRetryMessage(sessionId, jid, message, jidAliases = []) {
+    if (!db || !sessionId || !message?.key?.id || !message?.message) return false;
     const messageId = String(message.key.id);
     const remoteJid = String(message.key.remoteJid || jid || '');
+    const remoteJidAlt = String(message.key.remoteJidAlt || '');
+    const remoteJidAliases = [...new Set([remoteJid, remoteJidAlt, jid, ...(Array.isArray(jidAliases) ? jidAliases : [])].map(value => String(value || '').trim()).filter(Boolean))].slice(0, 8);
     const record = {
         _id: `${sessionId}:${messageId}`,
         sessionId,
         messageId,
         remoteJid,
+        remoteJidAlt,
+        remoteJidAliases,
         fromMe: true,
         message: message.message,
+        messageTimestamp: Number(message.messageTimestamp) || Math.floor(Date.now() / 1000),
         createdAt: new Date()
     };
-    db.collection('baileys_outgoing_messages').updateOne(
-        { _id: record._id },
-        { $set: record },
-        { upsert: true }
-    ).catch(error => {
+    try {
+        await promiseWithTimeout(db.collection('baileys_outgoing_messages').updateOne(
+            { _id: record._id },
+            { $set: record },
+            { upsert: true }
+        ), 5000, 'Baileys outgoing retry message persistence');
+        console.info('[message-retry-store-write-completed]', { sessionId, messageId, remoteJid, aliasCount: remoteJidAliases.length });
+        return true;
+    } catch (error) {
         console.warn('[message-retry-store-write-failed]', { sessionId, messageId, error: error?.message || String(error) });
-    });
+        return false;
+    }
 }
 
 function normalizeEchoText(value) {
@@ -994,7 +1004,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             }
             if (result?.message) {
                 cacheRecentMessage(sessionId, result);
-                persistOutgoingRetryMessage(sessionId, sentDestinationJid, result);
+                await persistOutgoingRetryMessage(sessionId, sentDestinationJid, result, [originalDestinationJid, destinationJid, alternateDestinationJid]);
             }
         }
         return result;
@@ -2061,6 +2071,61 @@ app.get('/sw.js', (req, res) => res.sendFile(path.join(__dirname, 'sw.js')));
 app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s Us Adam D’H7"));
 app.get('/ok', (req, res) => res.send('ok'));
 
+async function collectRuntimeLogSnapshot() {
+    const byId = new Map();
+    let databaseReadError = null;
+    try {
+        if (runtimeLogPersistenceCollection && runtimeLogPendingWrites.length) {
+            const flushWaitUntil = Date.now() + 1500;
+            while (runtimeLogPersistenceRunning && Date.now() < flushWaitUntil) {
+                await new Promise(resolve => setTimeout(resolve, 10));
+            }
+            if (!runtimeLogPersistenceRunning && runtimeLogPendingWrites.length) await flushRuntimeLogPersistence();
+        }
+        if (db) {
+            const persisted = await db.collection('server_runtime_logs')
+                .find({}, { projection: { at: 1, level: 1, text: 1, createdAt: 1 } })
+                .sort({ createdAt: -1, _id: -1 })
+                .limit(LOG_DASHBOARD_MAX_ENTRIES)
+                .toArray();
+            for (const item of persisted) {
+                const id = String(item._id);
+                byId.set(id, {
+                    id,
+                    at: String(item.at || item.createdAt?.toISOString?.() || ''),
+                    level: String(item.level || 'log'),
+                    text: String(item.text || '')
+                });
+            }
+        } else {
+            databaseReadError = 'MongoDB n’est pas encore connecté';
+        }
+    } catch (error) {
+        databaseReadError = String(error?.message || error || 'lecture MongoDB impossible').slice(0, 240);
+    }
+    for (const item of runtimeLogBuffer) byId.set(String(item.id), item);
+    const logs = Array.from(byId.values())
+        .sort((a, b) => String(a.at).localeCompare(String(b.at)) || String(a.id).localeCompare(String(b.id)))
+        .slice(-LOG_DASHBOARD_MAX_ENTRIES);
+    if (databaseReadError) {
+        logs.push({
+            id: `dashboard-read-error:${runtimeLogInstanceId}`,
+            at: new Date().toISOString(),
+            level: 'error',
+            text: `[runtime-log-dashboard] historique MongoDB indisponible: ${databaseReadError}`
+        });
+    }
+    if (!logs.length) {
+        logs.push({
+            id: `dashboard-empty:${runtimeLogInstanceId}`,
+            at: new Date().toISOString(),
+            level: 'warn',
+            text: '[runtime-log-dashboard] aucune entrée chargée; vérifier la connexion MongoDB et la persistance serveur'
+        });
+    }
+    return logs.slice(-LOG_DASHBOARD_MAX_ENTRIES);
+}
+
 app.get(LOG_DASHBOARD_PATH, async (req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
@@ -2088,30 +2153,14 @@ app.get(LOG_DASHBOARD_PATH, async (req, res) => {
     if (rate.count > 150) return res.status(429).type('text/plain').send('Trop de requêtes.');
 
     if (String(req.query?.format || '').toLowerCase() === 'json') {
-        const byId = new Map();
-        try {
-            if (db) {
-                const persisted = await db.collection('server_runtime_logs').find({}, { projection: { at: 1, level: 1, text: 1, createdAt: 1 } })
-                    .sort({ createdAt: -1, _id: -1 }).limit(LOG_DASHBOARD_MAX_ENTRIES).toArray();
-                for (const item of persisted) {
-                    byId.set(String(item._id), {
-                        id: String(item._id),
-                        at: String(item.at || item.createdAt?.toISOString?.() || ''),
-                        level: String(item.level || 'log'),
-                        text: String(item.text || '')
-                    });
-                }
-            }
-        } catch (error) {
-            originalConsoleWarn('[runtime-log-history-read-failed]', { error: error?.message || String(error), fallback: 'current_process_memory' });
-        }
-        for (const item of runtimeLogBuffer) byId.set(String(item.id), item);
-        const logs = Array.from(byId.values())
-            .sort((a, b) => String(a.at).localeCompare(String(b.at)) || String(a.id).localeCompare(String(b.id)))
-            .slice(-LOG_DASHBOARD_MAX_ENTRIES);
-        return res.json({ ok: true, count: logs.length, logs });
+        const logs = await collectRuntimeLogSnapshot();
+        return res.json({ ok: true, count: logs.length, logs, serverTime: new Date().toISOString() });
     }
 
+    const initialLogs = await collectRuntimeLogSnapshot();
+    const escapeLogHtml = value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;').replace(/'/g, '&#39;');
+    const initialRowsHtml = initialLogs.map(item => `<div class=\"log\"><span class=\"time\">${escapeLogHtml(String(item.at || '').replace('T', ' ').replace('Z', ''))}</span><span class=\"level ${escapeLogHtml(item.level || 'log')}\">${escapeLogHtml(String(item.level || 'log').toUpperCase())}</span><span class=\"message\">${escapeLogHtml(item.text || '')}</span></div>`).join('');
+    const initialLogsJson = JSON.stringify(initialLogs).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
     const html = `<!doctype html>
 <html lang="fr">
 <head>
@@ -2135,18 +2184,21 @@ body{min-height:100vh;min-height:100svh;overflow-x:hidden}
 </head>
 <body>
 <button id="copy" type="button" aria-label="Copier les logs" title="Copier les logs"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg></button>
-<main id="logs" aria-live="polite"></main>
+<main id="logs" aria-live="polite">${initialRowsHtml}</main>
 <script>
+window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
 (() => {
  const endpoint = location.pathname;
  const logsNode = document.getElementById('logs');
  const copyButton = document.getElementById('copy');
- let allLogs = [];
+ let allLogs = Array.isArray(window.__SERVER_LOG_SNAPSHOT__) ? window.__SERVER_LOG_SNAPSHOT__ : [];
+ let lastFetchError = '';
+ let initialRender = true;
  let requestRunning = false;
  let pollTimer = null;
  const textOf = value => String(value == null ? '' : value);
  function render(){
-   const wasAtBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 100;
+   const wasAtBottom = initialRender || window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 100;
    const fragment = document.createDocumentFragment();
    for(const item of allLogs){
      const row = document.createElement('div'); row.className = 'log';
@@ -2157,6 +2209,7 @@ body{min-height:100vh;min-height:100svh;overflow-x:hidden}
    }
    logsNode.replaceChildren(fragment);
    if(wasAtBottom) window.scrollTo(0, document.documentElement.scrollHeight);
+   initialRender = false;
  }
  async function load(){
    if(requestRunning) return;
@@ -2167,9 +2220,17 @@ body{min-height:100vh;min-height:100svh;overflow-x:hidden}
      const payload = await response.json();
      if(!payload || payload.ok !== true || !Array.isArray(payload.logs)) throw new Error('invalid_log_response');
      allLogs = payload.logs;
+     lastFetchError = '';
      render();
    }catch(error){
-     // Keep the last successful server snapshot visible during a temporary network interruption.
+     const detail = 'dashboard_fetch_failed: ' + textOf(error && error.message ? error.message : error).slice(0,180);
+     if(detail !== lastFetchError){
+       lastFetchError = detail;
+       allLogs = allLogs.filter(item => !String(item.id || '').startsWith('dashboard-client-error:'));
+       allLogs.push({id:'dashboard-client-error:' + Date.now(),at:new Date().toISOString(),level:'error',text:'[runtime-log-dashboard] ' + detail});
+       allLogs = allLogs.slice(-3000);
+       render();
+     }
    }finally{
      requestRunning = false;
    }
@@ -3456,16 +3517,18 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 try {
                     const stored = await db.collection('baileys_outgoing_messages').findOne(
                         { _id: `${sessionId}:${String(key.id)}` },
-                        { projection: { message: 1, remoteJid: 1, fromMe: 1 } }
+                        { projection: { message: 1, remoteJid: 1, remoteJidAlt: 1, remoteJidAliases: 1, fromMe: 1 } }
                     );
-                    if (stored?.message && stored.fromMe !== false && (!requestedChatJid || areEquivalentWhatsAppChatJids(sessionId, stored.remoteJid, requestedChatJid))) {
+                    const storedChatAliases = [...new Set([stored?.remoteJid, stored?.remoteJidAlt, ...(Array.isArray(stored?.remoteJidAliases) ? stored.remoteJidAliases : [])].map(value => String(value || '').trim()).filter(Boolean))];
+                    const storedChatMatches = !requestedChatJid || storedChatAliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, requestedChatJid));
+                    if (stored?.message && stored.fromMe !== false && storedChatMatches) {
                         const restoredMessage = fixBuffers(stored.message);
                         cacheRecentMessage(sessionId, { key: { id: key.id, remoteJid: stored.remoteJid || requestedChatJid || '', fromMe: true }, message: restoredMessage, messageTimestamp: Math.floor(Date.now() / 1000) });
                         console.info('[message-retry-store-hit]', { sessionId, messageId: String(key.id), chatMatch: !!requestedChatJid });
                         return restoredMessage;
                     }
                     if (stored?.message) {
-                        console.warn('[message-retry-chat-mismatch]', { sessionId, messageId: String(key.id), requestedChatJid: requestedChatJid || null, storedChatJid: stored.remoteJid || null });
+                        console.warn('[message-retry-chat-mismatch]', { sessionId, messageId: String(key.id), requestedChatJid: requestedChatJid || null, storedChatAliases });
                     }
                 } catch (error) {
                     console.warn('[message-retry-store-read-failed]', { sessionId, messageId: String(key.id), error: error?.message || String(error) });
@@ -3591,6 +3654,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             disconnectTime: null,
             connectedAt: null,
             lastPongAt: Date.now(),
+            lastSocketActivityAt: Date.now(),
             lastMessageAt: 0,
             wsPongMonitoring: !!(sock.ws && typeof sock.ws.on === 'function'),
             receivedPong: false
@@ -3605,10 +3669,26 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             const markSocketActivity = () => {
                 const liveSession = activeSessions.get(sessionId);
                 if (liveSession?.sock !== sock) return;
-                liveSession.lastPongAt = Date.now();
+                liveSession.lastSocketActivityAt = Date.now();
             };
             sock.ws.on('pong', markSocketPong);
             sock.ws.on('open', markSocketActivity);
+            sock.ws.on('message', markSocketActivity);
+            sock.ws.on('ping', markSocketActivity);
+            sock.ws.on('error', error => {
+                const liveSession = activeSessions.get(sessionId);
+                if (liveSession?.sock === sock) {
+                    liveSession.lastSocketErrorAt = Date.now();
+                    console.warn('[session-websocket-error]', { sessionId, error: error?.message || String(error) });
+                }
+            });
+            sock.ws.on('close', (code, reason) => {
+                const liveSession = activeSessions.get(sessionId);
+                if (liveSession?.sock === sock) {
+                    liveSession.lastSocketCloseAt = Date.now();
+                    console.warn('[session-websocket-close-event]', { sessionId, code: code ?? null, reason: String(reason || '').slice(0, 120) });
+                }
+            });
         }
 
         sock.ev.on('creds.update', saveCreds);
@@ -3815,6 +3895,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     currentSession.sock = sock;
                     currentSession.connectedAt = Date.now();
                     currentSession.lastPongAt = Date.now();
+                    currentSession.lastSocketActivityAt = Date.now();
                     currentSession.receivedPong = false;
                     currentSession.disconnectTime = null;
                     currentSession.reconnectAttempts = 0;
@@ -4293,7 +4374,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             for (const m of rawBatch) {
                 try {
                 const liveSessionForMessage = activeSessions.get(sessionId);
-                if (liveSessionForMessage?.sock === sock) liveSessionForMessage.lastMessageAt = Date.now();
+                if (liveSessionForMessage?.sock === sock) {
+                    liveSessionForMessage.lastMessageAt = Date.now();
+                    liveSessionForMessage.lastSocketActivityAt = Date.now();
+                }
                 const identityAliasCount = cacheMessageIdentityAliases(sessionId, m);
                 const receivedBody = extractBody(m);
                 const receivedAuditDetails = getMessageAuditDetails(m);
@@ -4301,7 +4385,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const receivedType = Object.keys(receivedContent || {})[0] || 'unknown';
                 const receivedChat = String(m?.key?.remoteJid || m?.key?.remoteJidAlt || 'unknown-chat');
                 const receivedId = String(m?.key?.id || 'missing-id');
-                if (m?.key?.fromMe && (isRecentOutgoingMessageId(sessionId, receivedId) || consumeOutgoingTextEcho(sessionId, m?.key?.remoteJid || receivedChat, receivedBody))) {
+                const receivedParsedCommand = String(receivedBody || '').trim()
+                    ? parseIncomingCommand(receivedBody, globalLang, getCommandParsingContext(m?.message))
+                    : null;
+                const recentOutgoingIdEcho = !!m?.key?.fromMe && isRecentOutgoingMessageId(sessionId, receivedId);
+                const outgoingTextEcho = !!m?.key?.fromMe && !receivedParsedCommand
+                    && consumeOutgoingTextEcho(sessionId, m?.key?.remoteJid || receivedChat, receivedBody);
+                if (recentOutgoingIdEcho || outgoingTextEcho) {
                     console.info('[message-ignored]', {
                         sessionId,
                         connectedAccountJid: sock.user?.id || null,
@@ -4309,8 +4399,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         chatJid: receivedChat,
                         fromMe: true,
                         messageType: receivedType,
-                        bodyPreview: String(receivedBody || '').replace(/[\r\n\t]+/g, ' ').slice(0, 180),
-                        reason: 'outgoing_bot_echo_prevented_from_reentering_command_dispatch'
+                        detectedCommand: receivedParsedCommand?.command || null,
+                        detectedInternalCommand: receivedParsedCommand?.internalCommand || null,
+                        reason: recentOutgoingIdEcho ? 'known_outgoing_message_id_echo' : 'known_outgoing_text_echo_without_command'
                     });
                     continue;
                 }
@@ -4321,7 +4412,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         ? (m?.key?.participant || m?.key?.participantAlt || m?.key?.participantPn || m?.key?.senderPn || receivedChat)
                         : (m?.key?.participant || m?.key?.remoteJid || m?.key?.remoteJidAlt || receivedChat);
                 const receivedSenderAliases = [...new Set([receivedSenderJid, m?.key?.participant, m?.key?.participantAlt, m?.key?.participantPn, m?.key?.senderPn, m?.key?.remoteJidAlt, m?.key?.fromMe ? sock.user?.id : null].filter(Boolean).map(String))];
-                const receivedParsedCommand = String(receivedBody || '').trim() ? parseIncomingCommand(receivedBody, globalLang, getCommandParsingContext(m?.message)) : null;
                 const receivedClassification = !String(receivedBody || '').trim()
                     ? 'no_text_or_caption'
                     : receivedParsedCommand
@@ -6175,16 +6265,22 @@ setInterval(async () => {
             scheduleSessionReconnect(sId, false, sess.format || 'pair');
             continue;
         }
-        const readyState = currentSocket.ws?.readyState;
-        const lastPongAt = Number(sess.lastPongAt || sess.connectedAt || sess.readyAt || now);
-        const pongExpired = sess.wsPongMonitoring && lastPongAt > 0 && now - lastPongAt > SESSION_WS_PONG_TIMEOUT_MS;
-        const socketClosed = readyState !== undefined && readyState !== 1;
+        const readyState = currentSocket.ws?.readyState ?? currentSocket.ws?._socket?.readyState ?? currentSocket.socket?.readyState;
+        const lastTransportActivityAt = Math.max(
+            Number(sess.lastPongAt || 0),
+            Number(sess.lastSocketActivityAt || 0),
+            Number(sess.lastMessageAt || 0),
+            Number(sess.connectedAt || sess.readyAt || 0)
+        );
+        const pongExpired = sess.wsPongMonitoring && lastTransportActivityAt > 0 && now - lastTransportActivityAt > SESSION_WS_PONG_TIMEOUT_MS;
+        const socketClosed = readyState !== undefined && readyState !== null && Number(readyState) !== 1;
         if (!socketClosed && !pongExpired) continue;
-        const reason = socketClosed ? 'websocket_not_open' : 'websocket_pong_timeout';
+        const reason = socketClosed ? 'websocket_not_open' : 'websocket_transport_idle_without_pong_or_message';
         console.warn('[session-health] stale socket detected', {
             sessionId: sId,
             readyState: readyState ?? null,
-            lastPongAgeMs: Math.max(0, now - lastPongAt),
+            lastTransportActivityAgeMs: Math.max(0, now - lastTransportActivityAt),
+            lastPongAgeMs: Math.max(0, now - Number(sess.lastPongAt || sess.connectedAt || sess.readyAt || now)),
             timeoutMs: SESSION_WS_PONG_TIMEOUT_MS,
             reason,
             action: 'recreate_socket_preserving_mongodb_auth'
@@ -6202,13 +6298,38 @@ setInterval(async () => {
 setInterval(async () => {
     if (!db || serverShuttingDown) return;
     for (const [sId, sess] of activeSessions.entries()) {
-        if (!sess?.sock || sess.status !== 'connecte') continue;
+        if (!sess?.sock || sess.status !== 'connecte' || sess.healthProbeRunning) continue;
+        const probeSocket = sess.sock;
+        sess.healthProbeRunning = true;
         try {
-            const groups = await sess.sock.groupFetchAllParticipating();
+            const groups = await promiseWithTimeout(probeSocket.groupFetchAllParticipating(), 45000, 'WhatsApp session health probe');
+            if (activeSessions.get(sId) !== sess || sess.sock !== probeSocket) continue;
             const nowTS = Date.now();
-            for (const jid in groups) groupMetadataCache.set(jid, { data: groups[jid], ts: nowTS });
+            for (const jid in groups || {}) groupMetadataCache.set(jid, { data: groups[jid], ts: nowTS });
+            sess.healthProbeFailures = 0;
+            sess.lastSuccessfulHealthProbeAt = nowTS;
+            sess.lastSocketActivityAt = nowTS;
+            console.debug('[session-health-probe-ok]', { sessionId: sId, groupCount: Object.keys(groups || {}).length });
         } catch (error) {
-            console.warn('[session-health-refresh-failed]', { sessionId: sId, error: error?.message || String(error) });
+            if (activeSessions.get(sId) !== sess || sess.sock !== probeSocket) continue;
+            sess.healthProbeFailures = Number(sess.healthProbeFailures || 0) + 1;
+            console.warn('[session-health-probe-failed]', {
+                sessionId: sId,
+                failures: sess.healthProbeFailures,
+                error: error?.message || String(error),
+                action: sess.healthProbeFailures >= 3 ? 'recreate_socket_preserving_mongodb_auth' : 'retry_on_next_probe'
+            });
+            if (sess.healthProbeFailures >= 3) {
+                sess.status = 'deconnecte';
+                sess.disconnectTime = Date.now();
+                sess.sock = null;
+                try { probeSocket.ev.removeAllListeners(); } catch (e) {}
+                try { if (probeSocket.ws && probeSocket.ws.readyState !== 3) probeSocket.ws.close(); } catch (e) {}
+                await releaseSessionRuntimeLock(sId);
+                scheduleSessionReconnect(sId, false, sess.format || 'pair');
+            }
+        } finally {
+            sess.healthProbeRunning = false;
         }
     }
 }, 240000);
@@ -6217,6 +6338,7 @@ async function shutdownServer(signal) {
     if (serverShuttingDown) return;
     serverShuttingDown = true;
     console.info('[server-shutdown-started]', { signal, processInstanceId, activeSessionCount: activeSessions.size });
+    try { await flushRuntimeLogPersistence(); } catch (logFlushError) { originalConsoleError('[runtime-log-final-flush-failed]', logFlushError?.message || String(logFlushError)); }
     for (const timer of reconnectTimers.values()) clearTimeout(timer);
     reconnectTimers.clear();
     for (const timer of sessionLockRetryTimers.values()) clearTimeout(timer);
