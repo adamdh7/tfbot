@@ -28,9 +28,9 @@ let runtimeLogSequence = 0;
 const runtimeLogInstanceId = `${Date.now()}-${process.pid}`;
 const runtimeLogStartedAt = new Date();
 const runtimeLogDeploymentId = String(process.env.LOG_DEPLOY_ID || process.env.RENDER_DEPLOY_ID || (process.env.RENDER_SERVICE_ID && process.env.RENDER_GIT_COMMIT ? `${process.env.RENDER_SERVICE_ID}:${process.env.RENDER_GIT_COMMIT}` : `${process.env.RENDER_SERVICE_ID || 'local'}:${process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId}`)).slice(0, 180);
-const TFBOT_CLUSTER_CODE_REVISION = 'r29-whatsapp-images-del3-format-svg-loader';
-const runtimeLogClusterId = (String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-30').slice(0, 180);
+const TFBOT_CLUSTER_CODE_REVISION = 'r32-router-selection-isolated-diagnostics';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-30')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
+const runtimeLogClusterId = TFBOT_CODE_RELEASE_ID;
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
 const runtimeLogSecrets = Object.entries(process.env)
     .filter(([key, value]) => /TOKEN|SECRET|PASSWORD|PASSWD|API.?KEY|MONGO_URI|URI$|CF_ACCOUNTS|TAVILY/i.test(key) && String(value || '').length >= 8)
@@ -433,7 +433,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'wa-render-domain-router-2026-10-30-r29';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-30-r31';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1735,43 +1735,64 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
     }, delayMs, sock);
 }
 
-async function queuedDeleteMessageWithAck(sock, jid, messageKey, delayMs = 120, timeoutMs = 3500) {
+async function queuedDeleteMessageWithAck(sock, jid, messageKey, delayMs = 120, timeoutMs = 6500) {
     if (!sock?.ev || typeof sock.ev.on !== 'function') throw new Error('whatsapp_delete_ack_listener_unavailable');
+    const destination = String(jid || '').trim();
+    const messageId = String(messageKey?.id || '').trim();
+    const remoteJid = String(messageKey?.remoteJid || destination).trim();
+    const participant = String(messageKey?.participant || messageKey?.participantPn || messageKey?.participantAlt || messageKey?.senderPn || '').trim();
+    if (!destination || !messageId || !remoteJid) throw new Error('whatsapp_delete_target_key_incomplete');
+    if (/@g\.us$/i.test(remoteJid) && !messageKey?.fromMe && !participant) throw new Error('whatsapp_group_delete_participant_missing');
+    const normalizedKey = {
+        ...messageKey,
+        remoteJid,
+        id: messageId,
+        fromMe: messageKey?.fromMe === true
+    };
+    if (participant) normalizedKey.participant = participant;
     let sentMessageId = '';
     let matchedUpdate = null;
     const earlyUpdates = [];
     let resolveAck;
     const ackPromise = new Promise(resolve => { resolveAck = resolve; });
+    const isServerAcknowledgement = update => {
+        if (update?.error) return true;
+        const status = Number(update?.status);
+        return Number.isFinite(status) && status >= 2 && status <= 5;
+    };
     const listener = updates => {
         for (const item of Array.isArray(updates) ? updates : []) {
             const updateId = String(item?.key?.id || '');
             if (!updateId) continue;
+            const update = item?.update || {};
             if (sentMessageId && updateId === sentMessageId) {
-                matchedUpdate = item?.update || {};
-                resolveAck(matchedUpdate);
+                if (isServerAcknowledgement(update)) {
+                    matchedUpdate = update;
+                    resolveAck(update);
+                }
             } else {
                 earlyUpdates.push(item);
-                if (earlyUpdates.length > 100) earlyUpdates.shift();
+                if (earlyUpdates.length > 150) earlyUpdates.shift();
             }
         }
     };
     sock.ev.on('messages.update', listener);
     try {
-        const sent = await queuedSendMessage(sock, jid, { delete: messageKey }, {}, delayMs);
+        const sent = await queuedSendMessage(sock, destination, { delete: normalizedKey }, {}, delayMs);
         sentMessageId = String(sent?.key?.id || '');
         if (!sentMessageId) throw new Error('whatsapp_delete_message_id_missing');
-        const early = earlyUpdates.find(item => String(item?.key?.id || '') === sentMessageId);
+        const early = earlyUpdates.find(item => String(item?.key?.id || '') === sentMessageId && isServerAcknowledgement(item?.update || {}));
         if (early) {
             matchedUpdate = early.update || {};
             resolveAck(matchedUpdate);
         }
-        const acknowledgement = matchedUpdate || await promiseWithTimeout(ackPromise, timeoutMs, 'WhatsApp delete acknowledgement');
+        const acknowledgement = matchedUpdate || await promiseWithTimeout(ackPromise, timeoutMs, 'WhatsApp server delete acknowledgement');
         const status = Number(acknowledgement?.status);
-        if (acknowledgement?.error || !Number.isFinite(status) || status < 1 || status > 4) {
+        if (acknowledgement?.error || !Number.isFinite(status) || status < 2 || status > 5) {
             const reason = acknowledgement?.error?.message || `status_${String(acknowledgement?.status ?? 'missing')}`;
             throw new Error(`whatsapp_delete_not_confirmed:${reason}`);
         }
-        return { sent, acknowledgement, confirmed: true };
+        return { sent, acknowledgement, confirmed: true, target: normalizedKey, acknowledgementStatus: status };
     } finally {
         try {
             if (typeof sock.ev.off === 'function') sock.ev.off('messages.update', listener);
@@ -3024,24 +3045,26 @@ function getWhatsAppMessageFormat(value) {
     const source = value?.message && typeof value.message === 'object' ? value.message : value;
     const content = unwrapMessageContent(source);
     if (!content || typeof content !== 'object') return '';
-    const ignored = new Set(['messageContextInfo', 'senderKeyDistributionMessage', 'protocolMessage']);
+    const ignored = new Set(['messageContextInfo', 'senderKeyDistributionMessage', 'protocolMessage', 'keepInChatMessage', 'messageHistoryBundle']);
     const key = Object.keys(content).find(item => !ignored.has(item));
     if (!key) return '';
     const groups = {
-        text: ['conversation', 'extendedTextMessage', 'buttonsResponseMessage', 'listResponseMessage', 'templateButtonReplyMessage', 'interactiveResponseMessage'],
+        text: ['conversation', 'extendedTextMessage', 'buttonsResponseMessage', 'listResponseMessage', 'templateButtonReplyMessage', 'interactiveResponseMessage', 'groupMentionMessage'],
         image: ['imageMessage'],
         video: ['videoMessage'],
-        audio: ['audioMessage'],
-        document: ['documentMessage'],
+        audio: ['audioMessage', 'ptvMessage'],
+        document: ['documentMessage', 'documentWithCaptionMessage'],
         sticker: ['stickerMessage'],
+        album: ['albumMessage'],
         location: ['locationMessage', 'liveLocationMessage'],
         contact: ['contactMessage', 'contactsArrayMessage'],
         poll: ['pollCreationMessage', 'pollCreationMessageV2', 'pollCreationMessageV3', 'pollUpdateMessage'],
         reaction: ['reactionMessage'],
-        event: ['eventMessage']
+        event: ['eventMessage'],
+        status: ['groupStatusMessage', 'statusMentionMessage', 'statusMentionMessageV2']
     };
     for (const [format, keys] of Object.entries(groups)) if (keys.includes(key)) return format;
-    if (/^(?:protocolMessage|senderKeyDistributionMessage|messageContextInfo)$/.test(key)) return '';
+    if (ignored.has(key)) return '';
     return key.replace(/Message(?:V\d+)?$/, '').replace(/V\d+$/, '').toLowerCase() || '';
 }
 
@@ -3466,12 +3489,15 @@ async function refreshTfbotActiveDomain(force = false) {
     if (!force && !tfbotCoordinatorSelectionCache && tfbotCoordinatorSelectionAt && nowMs - tfbotCoordinatorSelectionAt < TFBOT_ROUTER_COORDINATOR_CACHE_MS) return null;
     if (tfbotCoordinatorSelectionPromise) return tfbotCoordinatorSelectionPromise;
     tfbotCoordinatorSelectionPromise = (async () => {
+        let selectionPhase = 'initialize';
+        try {
         const checked = [];
         const previousHost = normalizeTfbotHost(tfbotCoordinatorSelectionCache?.host || '');
         const previousIndex = TFBOT_ROUTER_SERVING_DOMAINS.findIndex(item => item.host === previousHost);
         let selectedItem = null;
         if (previousIndex >= 0) {
             const currentDomain = TFBOT_ROUTER_SERVING_DOMAINS[previousIndex];
+            selectionPhase = 'probe-previous-domain';
             const currentHealth = await probeTfbotServingDomain(currentDomain);
             checked.push({ domain: currentDomain, health: currentHealth });
             if (currentHealth?.ok) selectedItem = { domain: currentDomain, health: currentHealth };
@@ -3482,10 +3508,11 @@ async function refreshTfbotActiveDomain(force = false) {
                 const index = (startIndex + offset) % TFBOT_ROUTER_SERVING_DOMAINS.length;
                 const domain = TFBOT_ROUTER_SERVING_DOMAINS[index];
                 if (domain.host === previousHost) continue;
-                const health = await probeTfbotServingDomain(domain);
-                checked.push({ domain, health });
-                if (health?.ok) {
-                    selectedItem = { domain, health };
+                selectionPhase = `probe-candidate:${domain.host}`;
+                const domainProbeResult = await probeTfbotServingDomain(domain);
+                checked.push({ domain, health: domainProbeResult });
+                if (domainProbeResult?.ok) {
+                    selectedItem = { domain, health: domainProbeResult };
                     break;
                 }
             }
@@ -3496,6 +3523,7 @@ async function refreshTfbotActiveDomain(force = false) {
             tfbotActiveDomainCache = null;
             tfbotCoordinatorSelectionAt = Date.now();
             tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
+            selectionPhase = 'persist-unavailable';
             await persistTfbotCoordinatorSelection(null, 'unavailable');
             if (previousIndex >= 0) {
                 const previousDomain = TFBOT_ROUTER_SERVING_DOMAINS[previousIndex];
@@ -3507,19 +3535,19 @@ async function refreshTfbotActiveDomain(force = false) {
         const selected = selectedItem.domain;
         const sameSelection = previousHost === selected.host && !!tfbotCoordinatorSelectionCache?.generation;
         const generation = sameSelection ? String(tfbotCoordinatorSelectionCache.generation) : crypto.randomUUID();
+        const selectedProbeResult = selectedItem.health;
         const result = {
             ...selected,
             checkedAt,
             generation,
             healthy: true,
-            workerActive: health.workerActive === true,
-            workerState: String(health.workerState || 'starting'),
+            workerActive: selectedProbeResult.workerActive === true,
+            workerState: String(selectedProbeResult.workerState || 'starting'),
             source: 'tfbot7-sequential-health-poll',
             selectedBy: TFBOT_COORDINATOR_HOST,
             healthyHosts: [selected.host],
             probeResults: checked.map(item => ({ host: item.domain.host, ok: !!item.health?.ok, workerState: item.health?.workerState || 'unreachable', checkedAt }))
         };
-        const health = selectedItem.health;
         let previousControl = null;
         if (previousIndex >= 0 && previousHost !== selected.host) {
             const previousDomain = TFBOT_ROUTER_SERVING_DOMAINS[previousIndex];
@@ -3536,10 +3564,12 @@ async function refreshTfbotActiveDomain(force = false) {
         tfbotCoordinatorSelectionAt = Date.now();
         tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
         tfbotCoordinatorActiveProbeAt = tfbotCoordinatorSelectionAt;
+        selectionPhase = 'persist-selected';
         await persistTfbotCoordinatorSelection(result, 'selected');
-        const alreadyActive = sameSelection && health.workerActive === true && health.activeHost === selected.host && health.generation === generation;
-        let control = { host: selected.host, unchanged: true, state: health.workerState || 'unknown' };
-        if (!alreadyActive && health.workerState !== 'starting') {
+        const alreadyActive = sameSelection && selectedProbeResult.workerActive === true && selectedProbeResult.activeHost === selected.host && selectedProbeResult.generation === generation;
+        let control = { host: selected.host, unchanged: true, state: selectedProbeResult.workerState || 'unknown' };
+        if (!alreadyActive && selectedProbeResult.workerState !== 'starting') {
+            selectionPhase = `activate-worker:${selected.host}`;
             const applied = await sendTfbotWorkerControl(selected, result);
             control = { host: selected.host, applied: !!applied, state: applied?.state || 'unconfirmed' };
             if (applied?.state) {
@@ -3556,7 +3586,18 @@ async function refreshTfbotActiveDomain(force = false) {
             selectionMode: 'sequential-first-healthy-only',
             controls: [previousControl, control].filter(Boolean)
         });
+        selectionPhase = 'complete';
         return result;
+        } catch (error) {
+            console.error('[tfbot-router-selection-failed]', {
+                phase: selectionPhase,
+                errorName: error?.name || 'Error',
+                error: String(error?.message || error).slice(0, 240),
+                stack: String(error?.stack || '').slice(0, 900),
+                releaseId: TFBOT_CODE_RELEASE_ID
+            });
+            throw error;
+        }
     })();
     try {
         return await tfbotCoordinatorSelectionPromise;
@@ -3693,12 +3734,12 @@ async function getHealthyClusterCandidates(excludedIds = []) {
         for (let index = 0; index < batch.length; index++) {
             const row = batch[index];
             const id = String(row._id || '');
-            const health = healthResults[index];
-            if (!health?.ok) {
+            const instanceProbeResult = healthResults[index];
+            if (!instanceProbeResult?.ok) {
                 await db.collection('cluster_instances').updateOne({ _id: id }, { $set: { lastKnownUnhealthyAt: new Date() } }).catch(() => {});
                 continue;
             }
-            candidates.push({ ...row, _id: id, health, local: id === TFBOT_CLUSTER_INSTANCE_ID });
+            candidates.push({ ...row, _id: id, health: instanceProbeResult, local: id === TFBOT_CLUSTER_INSTANCE_ID });
         }
     }
     if (!candidates.some(item => item._id === TFBOT_CLUSTER_INSTANCE_ID)) {
@@ -3742,8 +3783,8 @@ async function resolveClusterTargetForPairing(req) {
             const ownerRecord = await db.collection('cluster_instances').findOne({ _id: ownerId, leaseUntil: { $gt: new Date() } }).catch(() => null);
             const ownerUrl = String(ownerRecord?.url || owner.ownerInstanceUrl || '');
             const probeRecord = ownerRecord || { _id: ownerId, url: ownerUrl };
-            const health = await probeClusterInstance(probeRecord);
-            if (health?.ok) return { ...probeRecord, _id: ownerId, url: ownerUrl, local: false };
+            const ownerProbeResult = await probeClusterInstance(probeRecord);
+            if (ownerProbeResult?.ok) return { ...probeRecord, _id: ownerId, url: ownerUrl, local: false };
             if (await isSessionLockStillActive(sessionId)) return { unavailable: true, reason: 'assigned_instance_unreachable_session_lock_active', sessionId, ownerInstanceId: ownerId };
             console.warn('[cluster-session-owner-failover]', { sessionId, previousOwnerInstanceId: ownerId, action: 'reassign_only_after_session_and_account_locks_expire' });
             return selectLeastLoadedClusterInstance([ownerId]);
@@ -3928,8 +3969,8 @@ app.get(TFBOT_ROUTER_RESOLVE_PATH, async (req, res) => {
         res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
         return res.status(200).json({ ok: true, host: selected.host, url: selected.url, activeHost: selected.host, activeUrl: selected.url, checkedAt: selected.checkedAt, generation: selected.generation, healthy: selected.healthy, workerActive, workerState, source: selected.source, healthyHosts: selected.healthyHosts || [], retryAfterMs: workerActive ? 77000 : 2500, pollingIntervalMs: 77000 });
     } catch (error) {
-        console.error('[tfbot-router-resolve-failed]', { error: error?.message || String(error) });
-        return res.status(503).json({ ok: false, error: 'domain_resolution_failed', retryAfterMs: 5000 });
+        console.error('[tfbot-router-resolve-failed]', { errorName: error?.name || 'Error', error: error?.message || String(error), stack: String(error?.stack || '').slice(0, 900), releaseId: TFBOT_CODE_RELEASE_ID });
+        return res.status(503).json({ ok: false, error: 'domain_resolution_failed', retryAfterMs: 5000, releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION });
     }
 });
 
@@ -3943,8 +3984,8 @@ app.get(TFBOT_WORKER_POLL_PATH, async (req, res) => {
         res.setHeader('Cache-Control', 'no-store, max-age=0');
         return res.status(200).json({ ok: true, host: selected.host, url: selected.url, activeHost: selected.host, activeUrl: selected.url, generation: selected.generation, releaseId: TFBOT_CODE_RELEASE_ID, source: 'tfbot7-worker-poll', pollingIntervalMs: 77000 });
     } catch (error) {
-        console.error('[tfbot-worker-poll-response-failed]', { error: error?.message || String(error) });
-        return res.status(503).json({ ok: false, error: 'tfbot_worker_poll_unavailable', retryAfterMs: 77000 });
+        console.error('[tfbot-worker-poll-response-failed]', { errorName: error?.name || 'Error', error: error?.message || String(error), stack: String(error?.stack || '').slice(0, 900), releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION });
+        return res.status(503).json({ ok: false, error: 'tfbot_worker_poll_unavailable', retryAfterMs: 77000, releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION });
     }
 });
 
@@ -7530,6 +7571,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const receivedParsedCommand = String(receivedBody || '').trim()
                     ? parseIncomingCommand(receivedBody, globalLang, getCommandParsingContext(m?.message))
                     : null;
+                const receivedIsGroup = receivedChat.endsWith('@g.us');
+                if (receivedIsGroup && m?.key?.fromMe && m?.message) cacheRecentMessage(sessionId, m);
                 const recentOutgoingIdEcho = !!m?.key?.fromMe && isRecentOutgoingMessageId(sessionId, receivedId);
                 const outgoingTextEcho = !!m?.key?.fromMe && !receivedParsedCommand
                     && consumeOutgoingTextEcho(sessionId, m?.key?.remoteJid || receivedChat, receivedBody);
@@ -7547,7 +7590,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     });
                     continue;
                 }
-                const receivedIsGroup = receivedChat.endsWith('@g.us');
                 const receivedSenderJid = m?.key?.fromMe
                     ? (sock.user?.id || receivedChat)
                     : receivedIsGroup
@@ -7639,7 +7681,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         } else if (!(await canBotModerateGroup(receivedChat))) {
                                             console.warn('[del3-message-delete-skipped]', { sessionId, group: receivedChat, messageId: receivedId, format: earlyFormat, reason: 'bot_not_group_admin_or_group_metadata_unavailable' });
                                         } else {
-                                            await queuedDeleteMessageWithAck(sock, receivedChat, m.key, 120, 3500);
+                                            await queuedDeleteMessageWithAck(sock, receivedChat, m.key, 120, 6500);
                                             console.info('[del3-message-format-matched]', { sessionId, group: receivedChat, messageId: receivedId, format: earlyFormat, deleted: true, acknowledgementConfirmed: true, stage: 'before_empty_body_short_circuit' });
                                         }
                                     }
@@ -8130,7 +8172,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         let deletedByDel3 = false;
                                         try {
                                             if (await canBotModerateGroup(from)) {
-                                                await queuedDeleteMessageWithAck(sock, from, m.key, 120, 3500);
+                                                await queuedDeleteMessageWithAck(sock, from, m.key, 120, 6500);
                                                 deletedByDel3 = true;
                                             } else {
                                                 console.warn('[del3-message-delete-skipped]', { sessionId, group: from, messageId: msgId, format: incomingMessageFormat, reason: 'bot_not_group_admin_or_group_metadata_unavailable' });
@@ -8973,21 +9015,31 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 break;
                                             }
                                             await addDel3Rule(sessionId, from, del3Format, extractBody({ message: quotedMessage }));
-                                            const cachedDel3Quote = recentMsgsCache.find(entry => entry.sessionId === sessionId && entry.id === quoted.stanzaId && entry.from === from);
-                                            const quotedDel3Key = cachedDel3Quote?.key || { remoteJid: from, id: quoted.stanzaId, fromMe: !!quoted.fromMe, ...(quoted.participant ? { participant: quoted.participant } : {}) };
-                                            const quotedDel3Sender = cachedDel3Quote?.sender || quoted.participant || '';
-                                            const quotedDel3Aliases = [...new Set([quotedDel3Sender, quoted.participant, cachedDel3Quote?.participantAlt, cachedDel3Quote?.key?.participantAlt, cachedDel3Quote?.key?.participantPn, cachedDel3Quote?.key?.senderPn].filter(Boolean).map(String))];
+                                            const cachedDel3Quote = recentMsgsCache.find(entry => entry.sessionId === sessionId && entry.id === quoted.stanzaId && (entry.from === from || entry.chatAliases?.includes(from)));
+                                            const quotedDel3Sender = cachedDel3Quote?.sender || quoted.participant || quoted.participantPn || quoted.participantAlt || '';
+                                            const quotedDel3Participant = cachedDel3Quote?.key?.participant || quoted.participant || quoted.participantPn || quoted.participantAlt || quoted.senderPn || '';
+                                            const quotedDel3Key = {
+                                                ...(cachedDel3Quote?.key || {}),
+                                                remoteJid: cachedDel3Quote?.key?.remoteJid || quoted.remoteJid || from,
+                                                id: quoted.stanzaId,
+                                                fromMe: cachedDel3Quote ? !!cachedDel3Quote.fromMe : quoted.fromMe === true
+                                            };
+                                            if (quotedDel3Participant) quotedDel3Key.participant = quotedDel3Participant;
+                                            if (quoted.participantAlt) quotedDel3Key.participantAlt = quoted.participantAlt;
+                                            if (quoted.participantPn) quotedDel3Key.participantPn = quoted.participantPn;
+                                            if (quoted.senderPn) quotedDel3Key.senderPn = quoted.senderPn;
+                                            const quotedDel3Aliases = [...new Set([quotedDel3Sender, quoted.participant, quoted.participantPn, quoted.participantAlt, quoted.senderPn, cachedDel3Quote?.participantAlt, cachedDel3Quote?.key?.participantAlt, cachedDel3Quote?.key?.participantPn, cachedDel3Quote?.key?.senderPn].filter(Boolean).map(String))];
                                             const quotedDel3IsProtected = !!cachedDel3Quote?.fromMe || !!quotedDel3Key.fromMe || isProtectedWhatsAppTarget(quotedDel3Sender, sOwnerTop, botId, quotedDel3Aliases.join(' '));
                                             let selectedMessageDeleted = false;
                                             if (!quotedDel3IsProtected) {
                                                 try {
-                                                    await queuedDeleteMessageWithAck(sock, from, quotedDel3Key, 120, 3500);
+                                                    await queuedDeleteMessageWithAck(sock, from, quotedDel3Key, 120, 6500);
                                                     selectedMessageDeleted = true;
                                                 } catch (del3DeleteError) {
                                                     console.warn('[del3-selected-message-delete-failed]', { sessionId, group: from, messageId: quoted.stanzaId, format: del3Format, error: del3DeleteError?.message || String(del3DeleteError) });
                                                 }
                                             }
-                                            console.info('[del3-rule-activated]', { sessionId, group: from, format: del3Format, selectedMessageDeleted, quotedSenderProtected: quotedDel3IsProtected, action: 'delete_selected_message_and_future_messages_of_same_whatsapp_format_except_owner_and_bot' });
+                                            console.info('[del3-rule-activated]', { sessionId, group: from, format: del3Format, selectedMessageDeleted, quotedSenderProtected: quotedDel3IsProtected, quotedKeyAvailable: !!quotedDel3Key.id, quotedParticipantAvailable: !!quotedDel3Key.participant || !!quotedDel3Key.fromMe, action: 'delete_selected_message_after_server_ack_and_future_messages_of_same_whatsapp_format_except_owner_and_bot' });
                                             const del3ActivationText = quotedDel3IsProtected
                                                 ? t.del3_activated_protected
                                                 : selectedMessageDeleted
@@ -9845,7 +9897,8 @@ async function main() {
     });
     if (TFBOT_CLUSTER_ENABLED) {
         if (!TFBOT_CLUSTER_TOKEN) console.error('[tfbot-cluster-token-missing]', { host: TFBOT_CLUSTER_INSTANCE_HOST || null, action: 'keep_cluster_node_in_standby_without_mongodb_or_session_restore' });
-        httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
+        console.info('[tfbot-build-active]', { revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY });
+    httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
         if (TFBOT_CLUSTER_COORDINATOR_ONLY) {
             tfbotWorkerActive = false;
             tfbotWorkerState = 'coordinator';
