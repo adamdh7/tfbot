@@ -13,6 +13,8 @@ const LOG_DASHBOARD_PATH = (() => {
     return /^\/[A-Za-z0-9_./=-]{12,180}$/.test(normalized) ? normalized : '/adamdh7=modpas/adamdh7';
 })();
 const LOG_DASHBOARD_MAX_ENTRIES = Math.max(100, Math.min(5000, Number(process.env.LOG_DASHBOARD_MAX_ENTRIES || 3000)));
+const LOG_DASHBOARD_PAGE_LIMIT = Math.max(40, Math.min(300, Number(process.env.LOG_DASHBOARD_PAGE_LIMIT || 120)));
+const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(process.env.MESSAGE_QUEUE_TASK_TIMEOUT_MS || 45000)));
 const LOG_DASHBOARD_RETENTION_DAYS = Math.max(1, Math.min(30, Number(process.env.LOG_DASHBOARD_RETENTION_DAYS || 7)));
 const LOG_DASHBOARD_PERSIST_MAX_ENTRIES = Math.max(5000, Math.min(200000, Number(process.env.LOG_DASHBOARD_PERSIST_MAX_ENTRIES || 50000)));
 const runtimeLogBuffer = [];
@@ -659,25 +661,50 @@ async function processMessageQueue(queue) {
     try {
         while (queue.tasks.length > 0) {
             const task = queue.tasks.shift();
+            const startedAt = Date.now();
             try {
-                task.resolve(await task.execute());
-            } catch (e) {
-                task.reject(e);
+                const operation = Promise.resolve().then(() => task.execute());
+                const result = await promiseWithTimeout(operation, MESSAGE_QUEUE_TASK_TIMEOUT_MS, 'WhatsApp queued operation');
+                task.resolve(result);
+            } catch (error) {
+                const timedOut = /timed out/i.test(String(error?.message || error));
+                if (timedOut) {
+                    console.error('[message-queue-task-timeout]', {
+                        taskId: task.id,
+                        durationMs: Date.now() - startedAt,
+                        timeoutMs: MESSAGE_QUEUE_TASK_TIMEOUT_MS,
+                        remainingTasks: queue.tasks.length,
+                        action: 'release_queue_and_continue_next_task'
+                    });
+                } else {
+                    console.warn('[message-queue-task-failed]', {
+                        taskId: task.id,
+                        durationMs: Date.now() - startedAt,
+                        error: error?.message || String(error)
+                    });
+                }
+                task.reject(error);
             }
             const delay = Number.isFinite(task.delay) ? Math.max(0, task.delay) : 0;
             if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
         }
     } finally {
         queue.isSendingQueue = false;
-        if (queue.tasks.length > 0) processMessageQueue(queue);
+        if (queue.tasks.length > 0) setImmediate(() => processMessageQueue(queue));
     }
 }
 
 function queueMessage(executeFn, delayMs = 150, queueKey = null) {
     const queue = getMessageQueue(queueKey);
     return new Promise((resolve, reject) => {
-        queue.tasks.push({ execute: executeFn, delay: delayMs, resolve, reject });
-        processMessageQueue(queue);
+        if (queue.tasks.length >= 300) {
+            const error = new Error('whatsapp_message_queue_overloaded');
+            console.error('[message-queue-overloaded]', { pendingTasks: queue.tasks.length, action: 'reject_new_task_to_prevent_unbounded_backlog' });
+            reject(error);
+            return;
+        }
+        queue.tasks.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, execute: executeFn, delay: delayMs, resolve, reject });
+        void processMessageQueue(queue);
     });
 }
 
@@ -719,7 +746,7 @@ function cacheRecentMessage(sessionId, message) {
     if (recentMsgsCache.length > 1000) recentMsgsCache.splice(0, recentMsgsCache.length - 1000);
 }
 
-async function persistOutgoingRetryMessage(sessionId, jid, message, jidAliases = []) {
+async function persistOutgoingRetryMessage(sessionId, jid, message, jidAliases = [], accountPhone = '', accountJid = '') {
     if (!db || !sessionId || !message?.key?.id || !message?.message) return false;
     const messageId = String(message.key.id);
     const remoteJid = String(message.key.remoteJid || jid || '');
@@ -728,6 +755,8 @@ async function persistOutgoingRetryMessage(sessionId, jid, message, jidAliases =
     const record = {
         _id: `${sessionId}:${messageId}`,
         sessionId,
+        accountPhone: normalizePhoneNumber(accountPhone),
+        accountJid: String(accountJid || ''),
         messageId,
         remoteJid,
         remoteJidAlt,
@@ -1004,7 +1033,10 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             }
             if (result?.message) {
                 cacheRecentMessage(sessionId, result);
-                await persistOutgoingRetryMessage(sessionId, sentDestinationJid, result, [originalDestinationJid, destinationJid, alternateDestinationJid]);
+                const outgoingAccountPhone = normalizedJidNumber(sock.user?.id || sock.user?.phoneNumber || '');
+                const outgoingAccountJid = String(sock.user?.id || sock.user?.phoneNumber || '');
+                const outgoingAliases = [originalDestinationJid, destinationJid, alternateDestinationJid, result.key?.remoteJidAlt, result.key?.participant].filter(Boolean);
+                await persistOutgoingRetryMessage(sessionId, sentDestinationJid, result, outgoingAliases, outgoingAccountPhone, outgoingAccountJid);
             }
         }
         return result;
@@ -1081,6 +1113,7 @@ async function connectMongo() {
         await db.collection('processed_messages').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'processed_messages_expire_at_ttl' });
         await db.collection('baileys_outgoing_messages').createIndex({ createdAt: 1 }, { expireAfterSeconds: BAILEYS_RETRY_MESSAGE_TTL_SECONDS, name: 'baileys_retry_message_ttl' });
         await db.collection('baileys_outgoing_messages').createIndex({ sessionId: 1, remoteJid: 1, messageId: 1 }, { name: 'baileys_retry_message_lookup' });
+        await db.collection('baileys_outgoing_messages').createIndex({ accountPhone: 1, messageId: 1, createdAt: -1 }, { name: 'baileys_retry_message_account_lookup' });
         await db.collection('lid_phone_mappings').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'lid_phone_mappings_expire_at_ttl' });
         await db.collection('lid_phone_mappings').createIndex({ phone: 1 }, { name: 'lid_phone_mappings_phone_lookup' });
         await db.collection('user_preferences').createIndex({ sessionId: 1, sender: 1 }, { name: 'user_preferences_session_sender' });
@@ -2071,23 +2104,18 @@ app.get('/sw.js', (req, res) => res.sendFile(path.join(__dirname, 'sw.js')));
 app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s Us Adam D’H7"));
 app.get('/ok', (req, res) => res.send('ok'));
 
-async function collectRuntimeLogSnapshot() {
+async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIMIT) {
+    const limit = Math.max(20, Math.min(500, Number(requestedLimit) || LOG_DASHBOARD_PAGE_LIMIT));
     const byId = new Map();
     let databaseReadError = null;
     try {
-        if (runtimeLogPersistenceCollection && runtimeLogPendingWrites.length) {
-            const flushWaitUntil = Date.now() + 1500;
-            while (runtimeLogPersistenceRunning && Date.now() < flushWaitUntil) {
-                await new Promise(resolve => setTimeout(resolve, 10));
-            }
-            if (!runtimeLogPersistenceRunning && runtimeLogPendingWrites.length) await flushRuntimeLogPersistence();
-        }
         if (db) {
-            const persisted = await db.collection('server_runtime_logs')
+            const cursor = db.collection('server_runtime_logs')
                 .find({}, { projection: { at: 1, level: 1, text: 1, createdAt: 1 } })
                 .sort({ createdAt: -1, _id: -1 })
-                .limit(LOG_DASHBOARD_MAX_ENTRIES)
-                .toArray();
+                .limit(limit);
+            if (typeof cursor.maxTimeMS === 'function') cursor.maxTimeMS(1800);
+            const persisted = await cursor.toArray();
             for (const item of persisted) {
                 const id = String(item._id);
                 byId.set(id, {
@@ -2098,21 +2126,21 @@ async function collectRuntimeLogSnapshot() {
                 });
             }
         } else {
-            databaseReadError = 'MongoDB n’est pas encore connecté';
+            databaseReadError = 'MongoDB non connecté';
         }
     } catch (error) {
-        databaseReadError = String(error?.message || error || 'lecture MongoDB impossible').slice(0, 240);
+        databaseReadError = String(error?.message || error || 'lecture MongoDB impossible').slice(0, 180);
     }
-    for (const item of runtimeLogBuffer) byId.set(String(item.id), item);
+    for (const item of runtimeLogBuffer.slice(-limit)) byId.set(String(item.id), item);
     const logs = Array.from(byId.values())
         .sort((a, b) => String(a.at).localeCompare(String(b.at)) || String(a.id).localeCompare(String(b.id)))
-        .slice(-LOG_DASHBOARD_MAX_ENTRIES);
+        .slice(-limit);
     if (databaseReadError) {
         logs.push({
             id: `dashboard-read-error:${runtimeLogInstanceId}`,
             at: new Date().toISOString(),
             level: 'error',
-            text: `[runtime-log-dashboard] historique MongoDB indisponible: ${databaseReadError}`
+            text: `[runtime-log-dashboard] lecture historique impossible: ${databaseReadError}`
         });
     }
     if (!logs.length) {
@@ -2120,10 +2148,10 @@ async function collectRuntimeLogSnapshot() {
             id: `dashboard-empty:${runtimeLogInstanceId}`,
             at: new Date().toISOString(),
             level: 'warn',
-            text: '[runtime-log-dashboard] aucune entrée chargée; vérifier la connexion MongoDB et la persistance serveur'
+            text: '[runtime-log-dashboard] aucun log enregistré dans cette instance ou MongoDB'
         });
     }
-    return logs.slice(-LOG_DASHBOARD_MAX_ENTRIES);
+    return logs.slice(-limit);
 }
 
 app.get(LOG_DASHBOARD_PATH, async (req, res) => {
@@ -2153,14 +2181,21 @@ app.get(LOG_DASHBOARD_PATH, async (req, res) => {
     if (rate.count > 150) return res.status(429).type('text/plain').send('Trop de requêtes.');
 
     if (String(req.query?.format || '').toLowerCase() === 'json') {
-        const logs = await collectRuntimeLogSnapshot();
-        return res.json({ ok: true, count: logs.length, logs, serverTime: new Date().toISOString() });
+        const requestedLimit = Math.max(20, Math.min(500, Number(req.query?.limit) || LOG_DASHBOARD_PAGE_LIMIT));
+        const logs = await collectRuntimeLogSnapshot(requestedLimit);
+        return res.status(200).json({ ok: true, count: logs.length, logs, serverTime: new Date().toISOString() });
     }
 
-    const initialLogs = await collectRuntimeLogSnapshot();
-    const escapeLogHtml = value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;').replace(/'/g, '&#39;');
-    const initialRowsHtml = initialLogs.map(item => `<div class=\"log\"><span class=\"time\">${escapeLogHtml(String(item.at || '').replace('T', ' ').replace('Z', ''))}</span><span class=\"level ${escapeLogHtml(item.level || 'log')}\">${escapeLogHtml(String(item.level || 'log').toUpperCase())}</span><span class=\"message\">${escapeLogHtml(item.text || '')}</span></div>`).join('');
-    const initialLogsJson = JSON.stringify(initialLogs).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
+    const initialLogs = runtimeLogBuffer.slice(-Math.min(30, LOG_DASHBOARD_PAGE_LIMIT));
+    const firstPaintLogs = initialLogs.length ? initialLogs : [{
+        id: `dashboard-loading:${runtimeLogInstanceId}`,
+        at: new Date().toISOString(),
+        level: 'info',
+        text: '[runtime-log-dashboard] chargement des logs persistants du serveur…'
+    }];
+    const escapeLogHtml = value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const initialRowsHtml = firstPaintLogs.map(item => `<div class="log"><span class="time">${escapeLogHtml(String(item.at || '').replace('T', ' ').replace('Z', ''))}</span><span class="level ${escapeLogHtml(item.level || 'log')}">${escapeLogHtml(String(item.level || 'log').toUpperCase())}</span><span class="message">${escapeLogHtml(item.text || '')}</span></div>`).join('');
+    const initialLogsJson = JSON.stringify(firstPaintLogs).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
     const html = `<!doctype html>
 <html lang="fr">
 <head>
@@ -2176,7 +2211,7 @@ body{min-height:100vh;min-height:100svh;overflow-x:hidden}
 #copy{position:fixed;z-index:5;top:max(9px,env(safe-area-inset-top));right:max(9px,env(safe-area-inset-right));width:34px;height:34px;display:grid;place-items:center;padding:0;margin:0;border:0;background:transparent;color:#e5e5e5;opacity:.78;cursor:pointer}
 #copy:active{opacity:1}
 #copy svg{display:block;width:23px;height:23px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
-#logs{width:100%;padding:8px 8px max(16px,env(safe-area-inset-bottom));}
+#logs{width:100%;padding:8px 8px max(16px,env(safe-area-inset-bottom))}
 .log{display:grid;grid-template-columns:max-content max-content minmax(0,1fr);column-gap:9px;align-items:start;padding:3px 0;color:#d5d5d5;font-size:11px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
 .time{color:#777;white-space:nowrap}.level{color:#999;white-space:nowrap}.level.error,.level.fatal{color:#ff7777}.level.warn{color:#ffc477}.level.info{color:#91bdff}.level.debug,.level.trace{color:#777}.message{min-width:0;overflow-wrap:anywhere;white-space:pre-wrap;user-select:text}
 @media(max-width:560px){#logs{padding-left:6px;padding-right:6px}.log{grid-template-columns:max-content max-content minmax(0,1fr);column-gap:6px;font-size:10px}}
@@ -2184,7 +2219,7 @@ body{min-height:100vh;min-height:100svh;overflow-x:hidden}
 </head>
 <body>
 <button id="copy" type="button" aria-label="Copier les logs" title="Copier les logs"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg></button>
-<main id="logs" aria-live="polite">${initialRowsHtml}</main>
+<main id="logs" aria-live="off">${initialRowsHtml}</main>
 <script>
 window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
 (() => {
@@ -2196,11 +2231,12 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
  let initialRender = true;
  let requestRunning = false;
  let pollTimer = null;
+ const maxRows = ${LOG_DASHBOARD_PAGE_LIMIT};
  const textOf = value => String(value == null ? '' : value);
  function render(){
    const wasAtBottom = initialRender || window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 100;
    const fragment = document.createDocumentFragment();
-   for(const item of allLogs){
+   for(const item of allLogs.slice(-maxRows)){
      const row = document.createElement('div'); row.className = 'log';
      const time = document.createElement('span'); time.className = 'time'; time.textContent = textOf(item.at).replace('T',' ').replace('Z','');
      const level = document.createElement('span'); level.className = 'level ' + textOf(item.level); level.textContent = textOf(item.level).toUpperCase();
@@ -2215,11 +2251,11 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
    if(requestRunning) return;
    requestRunning = true;
    try{
-     const response = await fetch(endpoint + '?format=json&_=' + Date.now(), {cache:'no-store', credentials:'same-origin'});
+     const response = await fetch(endpoint + '?format=json&limit=' + maxRows + '&_=' + Date.now(), {cache:'no-store', credentials:'same-origin'});
      if(!response.ok) throw new Error('HTTP ' + response.status);
      const payload = await response.json();
      if(!payload || payload.ok !== true || !Array.isArray(payload.logs)) throw new Error('invalid_log_response');
-     allLogs = payload.logs;
+     allLogs = payload.logs.slice(-maxRows);
      lastFetchError = '';
      render();
    }catch(error){
@@ -2228,7 +2264,7 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
        lastFetchError = detail;
        allLogs = allLogs.filter(item => !String(item.id || '').startsWith('dashboard-client-error:'));
        allLogs.push({id:'dashboard-client-error:' + Date.now(),at:new Date().toISOString(),level:'error',text:'[runtime-log-dashboard] ' + detail});
-       allLogs = allLogs.slice(-3000);
+       allLogs = allLogs.slice(-maxRows);
        render();
      }
    }finally{
@@ -2236,7 +2272,7 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
    }
  }
  async function copyLogs(){
-   const content = allLogs.map(item => '[' + textOf(item.at) + '] ' + textOf(item.level).toUpperCase() + ' ' + textOf(item.text)).join('\n');
+   const content = allLogs.map(item => '[' + textOf(item.at) + '] ' + textOf(item.level).toUpperCase() + ' ' + textOf(item.text)).join('\\n');
    try{
      if(navigator.clipboard && navigator.clipboard.writeText){ await navigator.clipboard.writeText(content); }
      else{
@@ -2250,8 +2286,8 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
  }
  copyButton.addEventListener('click', copyLogs);
  document.addEventListener('visibilitychange', () => { if(!document.hidden) load(); });
- load();
- pollTimer = window.setInterval(load, 2000);
+ void load();
+ pollTimer = window.setInterval(load, 5000);
  window.addEventListener('pagehide', () => { if(pollTimer) window.clearInterval(pollTimer); });
 })();
 </script>
@@ -3515,20 +3551,31 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     return undefined;
                 }
                 try {
-                    const stored = await db.collection('baileys_outgoing_messages').findOne(
+                    const retryCollection = db.collection('baileys_outgoing_messages');
+                    const projection = { message: 1, remoteJid: 1, remoteJidAlt: 1, remoteJidAliases: 1, fromMe: 1, accountPhone: 1, sessionId: 1, messageTimestamp: 1 };
+                    let stored = await retryCollection.findOne(
                         { _id: `${sessionId}:${String(key.id)}` },
-                        { projection: { message: 1, remoteJid: 1, remoteJidAlt: 1, remoteJidAliases: 1, fromMe: 1 } }
+                        { projection }
                     );
+                    let lookupScope = 'same_session';
+                    const requestedAccountPhone = normalizedJidNumber(sock.user?.id || sock.user?.phoneNumber || '');
+                    if (!stored && requestedAccountPhone) {
+                        stored = await retryCollection.findOne(
+                            { accountPhone: requestedAccountPhone, messageId: String(key.id) },
+                            { projection, sort: { createdAt: -1 } }
+                        );
+                        if (stored) lookupScope = 'same_account_other_session';
+                    }
                     const storedChatAliases = [...new Set([stored?.remoteJid, stored?.remoteJidAlt, ...(Array.isArray(stored?.remoteJidAliases) ? stored.remoteJidAliases : [])].map(value => String(value || '').trim()).filter(Boolean))];
                     const storedChatMatches = !requestedChatJid || storedChatAliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, requestedChatJid));
                     if (stored?.message && stored.fromMe !== false && storedChatMatches) {
                         const restoredMessage = fixBuffers(stored.message);
-                        cacheRecentMessage(sessionId, { key: { id: key.id, remoteJid: stored.remoteJid || requestedChatJid || '', fromMe: true }, message: restoredMessage, messageTimestamp: Math.floor(Date.now() / 1000) });
-                        console.info('[message-retry-store-hit]', { sessionId, messageId: String(key.id), chatMatch: !!requestedChatJid });
+                        cacheRecentMessage(sessionId, { key: { id: key.id, remoteJid: stored.remoteJid || requestedChatJid || '', fromMe: true }, message: restoredMessage, messageTimestamp: stored.messageTimestamp || Math.floor(Date.now() / 1000) });
+                        console.info('[message-retry-store-hit]', { sessionId, messageId: String(key.id), chatMatch: !!requestedChatJid, lookupScope, storedSessionId: stored.sessionId || sessionId });
                         return restoredMessage;
                     }
                     if (stored?.message) {
-                        console.warn('[message-retry-chat-mismatch]', { sessionId, messageId: String(key.id), requestedChatJid: requestedChatJid || null, storedChatAliases });
+                        console.warn('[message-retry-chat-mismatch]', { sessionId, messageId: String(key.id), requestedChatJid: requestedChatJid || null, storedChatAliases, lookupScope });
                     }
                 } catch (error) {
                     console.warn('[message-retry-store-read-failed]', { sessionId, messageId: String(key.id), error: error?.message || String(error) });
@@ -5023,8 +5070,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const modeCandidates = [sOwnerTop?.mode, sOwnerTop?.Mode, sOwnerTop?.botMode].filter(value => value !== undefined && value !== null && String(value).trim() !== '').map(value => normalizeText(value));
                         const isPublicMode = modeCandidates.some(value => ['public', 'piblik', 'publico'].includes(value));
                         const botMode = modeCandidates.length ? [...new Set(modeCandidates)].join('|') : 'prive';
+                        const privateModeSafeCommands = new Set(['menu', 'info', 'alive', 'ping']);
                         const isReadOnlyMenuCommand = receivedParsedCommand?.internalCommand === 'menu';
-                        const allowed = !isChannel && (isPublicMode || isOwnerReal || isReadOnlyMenuCommand);
+                        const isPrivateModeSafeCommand = privateModeSafeCommands.has(receivedParsedCommand?.internalCommand || '');
+                        const allowed = !isChannel && (isPublicMode || isOwnerReal || isPrivateModeSafeCommand);
 
                         const bodyRaw = earlyBody;
                         const body = bodyRaw.trim();
@@ -5066,7 +5115,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             isPublicMode,
                             allowed,
                             isReadOnlyMenuCommand,
-                            authorizationReason: isPublicMode ? 'public_mode' : isOwnerReal ? 'owner' : isReadOnlyMenuCommand ? 'read_only_menu_allowed_in_private_mode' : 'private_mode_block',
+                            isPrivateModeSafeCommand,
+                            authorizationReason: isPublicMode ? 'public_mode' : isOwnerReal ? 'owner' : isPrivateModeSafeCommand ? 'read_only_command_allowed_in_private_mode' : 'private_mode_block',
                             mode: botMode,
                             bodyLength: body.length,
                             bodyPreview: body.slice(0, 240)
@@ -6302,7 +6352,7 @@ setInterval(async () => {
         const probeSocket = sess.sock;
         sess.healthProbeRunning = true;
         try {
-            const groups = await promiseWithTimeout(probeSocket.groupFetchAllParticipating(), 45000, 'WhatsApp session health probe');
+            const groups = await promiseWithTimeout(probeSocket.groupFetchAllParticipating(), 30000, 'WhatsApp session health probe');
             if (activeSessions.get(sId) !== sess || sess.sock !== probeSocket) continue;
             const nowTS = Date.now();
             for (const jid in groups || {}) groupMetadataCache.set(jid, { data: groups[jid], ts: nowTS });
@@ -6317,9 +6367,9 @@ setInterval(async () => {
                 sessionId: sId,
                 failures: sess.healthProbeFailures,
                 error: error?.message || String(error),
-                action: sess.healthProbeFailures >= 3 ? 'recreate_socket_preserving_mongodb_auth' : 'retry_on_next_probe'
+                action: sess.healthProbeFailures >= 2 ? 'recreate_socket_preserving_mongodb_auth' : 'retry_on_next_probe'
             });
-            if (sess.healthProbeFailures >= 3) {
+            if (sess.healthProbeFailures >= 2) {
                 sess.status = 'deconnecte';
                 sess.disconnectTime = Date.now();
                 sess.sock = null;
@@ -6332,7 +6382,7 @@ setInterval(async () => {
             sess.healthProbeRunning = false;
         }
     }
-}, 240000);
+}, 90000);
 
 async function shutdownServer(signal) {
     if (serverShuttingDown) return;
