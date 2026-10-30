@@ -335,6 +335,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
+const RUNTIME_FIX_BUILD = 'wa-signal-delivery-2026-10-30-r3';
 const PORT = process.env.PORT || 7000;
 const BOT_TIME_ZONE = process.env.BOT_TIME_ZONE || 'America/Santo_Domingo';
 const CHAT_CONTEXT_MAX_CHARS = Math.max(2500, Number(process.env.CHAT_CONTEXT_MAX_CHARS || 7000));
@@ -413,6 +414,11 @@ const reconnectTimers = new Map();
 const sessionStartPromises = new Map();
 const SESSION_HEALTH_CHECK_INTERVAL_MS = Math.max(15000, Number(process.env.SESSION_HEALTH_CHECK_INTERVAL_MS) || 30000);
 const SESSION_WS_PONG_TIMEOUT_MS = Math.max(60000, Number(process.env.SESSION_WS_PONG_TIMEOUT_MS) || 120000);
+const BAILEYS_RESET_GROUP_SENDER_KEY_MEMORY = !/^(?:0|false|off|no)$/i.test(String(process.env.BAILEYS_RESET_GROUP_SENDER_KEY_MEMORY ?? 'true').trim());
+const GROUP_METADATA_CACHE_TTL_MS = Math.max(30000, Number(process.env.GROUP_METADATA_CACHE_TTL_MS) || 300000);
+const GROUP_METADATA_FETCH_TIMEOUT_MS = Math.max(3000, Number(process.env.GROUP_METADATA_FETCH_TIMEOUT_MS) || 12000);
+const authWriteQueues = new Map();
+const groupMetadataFetchPromises = new Map();
 const sessionRuntimeLockTimers = new Map();
 const sessionLockRetryTimers = new Map();
 const accountRuntimeLockTimers = new Map();
@@ -560,7 +566,10 @@ function getRememberedLidForPhone(sessionId, phoneValue) {
 function phoneFromCachedGroupMetadata(sessionId, lidValue) {
     const lid = normalizeLidCacheKey(lidValue);
     if (!lid || !/@lid$/i.test(lid)) return null;
-    for (const [groupJid, cached] of groupMetadataCache.entries()) {
+    const sessionPrefix = `${String(sessionId || '')}:`;
+    for (const [cacheKey, cached] of groupMetadataCache.entries()) {
+        if (!cacheKey.startsWith(sessionPrefix)) continue;
+        const groupJid = cacheKey.slice(sessionPrefix.length);
         const participants = cached?.data?.participants;
         if (!Array.isArray(participants)) continue;
         for (const participant of participants) {
@@ -584,6 +593,78 @@ function promiseWithTimeout(promise, timeoutMs, label = 'operation') {
     return Promise.race([Promise.resolve(promise), timeoutPromise]).finally(() => {
         if (timeoutHandle) clearTimeout(timeoutHandle);
     });
+}
+
+function groupMetadataCacheKey(sessionId, groupJid) {
+    const session = String(sessionId || '').trim();
+    const group = String(groupJid || '').trim();
+    return session && group ? `${session}:${group}` : '';
+}
+
+function getCachedGroupMetadata(sessionId, groupJid, maxAgeMs = GROUP_METADATA_CACHE_TTL_MS) {
+    const key = groupMetadataCacheKey(sessionId, groupJid);
+    if (!key) return null;
+    const cached = groupMetadataCache.get(key);
+    if (!cached?.data) return null;
+    if (Date.now() - Number(cached.ts || 0) > maxAgeMs) {
+        groupMetadataCache.delete(key);
+        return null;
+    }
+    return cached.data;
+}
+
+function setCachedGroupMetadata(sessionId, groupJid, metadata) {
+    const key = groupMetadataCacheKey(sessionId, groupJid);
+    if (!key || !metadata || typeof metadata !== 'object') return false;
+    groupMetadataCache.set(key, { data: metadata, ts: Date.now() });
+    while (groupMetadataCache.size > 5000) groupMetadataCache.delete(groupMetadataCache.keys().next().value);
+    return true;
+}
+
+function invalidateCachedGroupMetadata(sessionId, groupJid) {
+    const key = groupMetadataCacheKey(sessionId, groupJid);
+    if (!key) return false;
+    return groupMetadataCache.delete(key);
+}
+
+async function getGroupMetadataCached(sessionId, sock, groupJid, forceRefresh = false) {
+    const group = String(groupJid || '').trim();
+    if (!group || !/@g\.us$/i.test(group) || !sock?.groupMetadata) return null;
+    if (!forceRefresh) {
+        const cached = getCachedGroupMetadata(sessionId, group);
+        if (cached) return cached;
+    }
+    const key = groupMetadataCacheKey(sessionId, group);
+    const pending = groupMetadataFetchPromises.get(key);
+    if (pending) return pending;
+    const fetchPromise = (async () => {
+        const metadata = await promiseWithTimeout(sock.groupMetadata(group), GROUP_METADATA_FETCH_TIMEOUT_MS, 'WhatsApp group metadata lookup');
+        if (metadata) setCachedGroupMetadata(sessionId, group, metadata);
+        return metadata || null;
+    })();
+    groupMetadataFetchPromises.set(key, fetchPromise);
+    try {
+        return await fetchPromise;
+    } catch (error) {
+        console.warn('[group-metadata-lazy-fetch-failed]', { sessionId, groupJid: group, error: error?.message || String(error) });
+        return null;
+    } finally {
+        if (groupMetadataFetchPromises.get(key) === fetchPromise) groupMetadataFetchPromises.delete(key);
+    }
+}
+
+async function flushAuthWritesForSession(sessionId) {
+    const key = String(sessionId || '');
+    for (let attempt = 0; attempt < 10; attempt++) {
+        const pending = authWriteQueues.get(key);
+        if (!pending) return;
+        await promiseWithTimeout(pending, 20000, 'Signal auth-store flush');
+        if (authWriteQueues.get(key) === pending) {
+            authWriteQueues.delete(key);
+            return;
+        }
+    }
+    throw new Error('signal_auth_store_queue_did_not_quiesce');
 }
 
 async function resolvePhoneForLid(sessionId, sock, lidValue) {
@@ -883,19 +964,71 @@ function consumeOutgoingTextEcho(sessionId, jid, text) {
 async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180) {
     return queueMessage(async () => {
         let sessionId = null;
+        let activeSession = null;
         for (const [id, session] of activeSessions.entries()) {
             if (session.sock === sock) {
                 sessionId = id;
+                activeSession = session;
                 break;
             }
         }
         const outgoingContent = content;
         const originalDestinationJid = String(jid || '').trim();
-        let destinationJid = originalDestinationJid;
-        let destinationResolution = /@lid$/i.test(originalDestinationJid) ? 'original_lid_preferred' : 'original_destination';
+        const ownPhoneJid = normalizePhoneCacheJid(sock.user?.id || sock.user?.phoneNumber || '');
+        let ownLidJid = normalizeLidCacheKey(sock.user?.lid || '');
+        if (!/@lid$/i.test(ownLidJid) && sessionId && ownPhoneJid) {
+            ownLidJid = normalizeLidCacheKey(getRememberedLidForPhone(sessionId, ownPhoneJid));
+        }
+        let destinationPhoneJid = normalizePhoneCacheJid(originalDestinationJid);
+        if (!destinationPhoneJid && sessionId && /@lid$/i.test(originalDestinationJid)) {
+            destinationPhoneJid = normalizePhoneCacheJid(getRememberedPhoneForLid(sessionId, originalDestinationJid));
+        }
+        let isSelfChatDestination = !!(ownPhoneJid && (
+            destinationPhoneJid === ownPhoneJid ||
+            (/@lid$/i.test(originalDestinationJid) && ownLidJid && normalizeLidCacheKey(originalDestinationJid) === ownLidJid)
+        ));
+        if (!isSelfChatDestination && ownPhoneJid && /@lid$/i.test(originalDestinationJid) && sessionId) {
+            try {
+                const resolvedSelfCheck = await resolvePhoneForLid(sessionId, sock, originalDestinationJid);
+                isSelfChatDestination = normalizePhoneCacheJid(resolvedSelfCheck?.phone || '') === ownPhoneJid;
+            } catch (selfCheckError) {
+                console.warn('[self-chat-identity-check-failed]', { sessionId, error: selfCheckError?.message || String(selfCheckError) });
+            }
+        }
+        if (isSelfChatDestination) {
+            console.info('[self-chat-pn-preferred]', {
+                sessionId,
+                destinationResolution: 'own_phone_jid_preferred_to_avoid_own_lid_signal_session_mismatch',
+                ownPhoneAvailable: !!ownPhoneJid,
+                originalDestinationType: /@lid$/i.test(originalDestinationJid) ? 'lid' : 'phone'
+            });
+        }
+        if (BAILEYS_RESET_GROUP_SENDER_KEY_MEMORY && /@g\.us$/i.test(originalDestinationJid)) {
+            const signalKeys = activeSession?.signalKeyStore || activeSession?.authState?.keys;
+            if (signalKeys && typeof signalKeys.set === 'function') {
+                await promiseWithTimeout(
+                    signalKeys.set({ 'sender-key-memory': { [originalDestinationJid]: null } }),
+                    12000,
+                    'Reset group sender-key distribution memory'
+                );
+                if (sessionId) await flushAuthWritesForSession(sessionId);
+                console.info('[group-sender-key-memory-reset]', {
+                    sessionId,
+                    groupJid: originalDestinationJid,
+                    action: 'force_fresh_sender_key_distribution_before_group_send',
+                    reason: 'repair_stale_device_sender_key_memory'
+                });
+            } else {
+                console.warn('[group-sender-key-memory-reset-unavailable]', { sessionId, groupJid: originalDestinationJid, reason: 'signal_key_store_not_attached' });
+            }
+        }
+        let destinationJid = isSelfChatDestination ? ownPhoneJid : originalDestinationJid;
+        let destinationResolution = isSelfChatDestination
+            ? 'self_chat_phone_jid_preferred'
+            : /@lid$/i.test(originalDestinationJid) ? 'original_lid_preferred' : 'original_destination';
         let alternateDestinationJid = '';
-        let alternateDestinationResolution = '';
-        if (sessionId && /@lid$/i.test(originalDestinationJid)) {
+        let alternateDestinationResolution = isSelfChatDestination ? 'self_chat_lid_fallback_disabled' : '';
+        if (!isSelfChatDestination && sessionId && /@lid$/i.test(originalDestinationJid)) {
             try {
                 const resolved = await resolvePhoneForLid(sessionId, sock, originalDestinationJid);
                 alternateDestinationJid = normalizePhoneCacheJid(resolved?.phone || getRememberedPhoneForLid(sessionId, originalDestinationJid));
@@ -903,7 +1036,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             } catch (resolveError) {
                 console.warn('[private-send-alternate-resolution-failed]', { sessionId, originalDestinationJid, error: resolveError?.message || String(resolveError) });
             }
-        } else if (sessionId && /@s\.whatsapp\.net$/i.test(originalDestinationJid)) {
+        } else if (!isSelfChatDestination && sessionId && /@s\.whatsapp\.net$/i.test(originalDestinationJid)) {
             try {
                 alternateDestinationJid = getRememberedLidForPhone(sessionId, originalDestinationJid);
                 if (!alternateDestinationJid) {
@@ -919,7 +1052,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             }
         }
         if (alternateDestinationJid === destinationJid) alternateDestinationJid = '';
-        if (sessionId && /@s\.whatsapp\.net$/i.test(originalDestinationJid) && /@lid$/i.test(alternateDestinationJid)) {
+        if (!isSelfChatDestination && sessionId && /@s\.whatsapp\.net$/i.test(originalDestinationJid) && /@lid$/i.test(alternateDestinationJid)) {
             const resolvedLidJid = normalizeLidCacheKey(alternateDestinationJid);
             const resolvedLidSource = alternateDestinationResolution || 'pn_lid_mapping';
             destinationJid = resolvedLidJid;
@@ -972,7 +1105,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             }
             if (!result) {
                 let retryTargetJid = alternateDestinationJid && alternateDestinationJid !== destinationJid ? alternateDestinationJid : '';
-                if (!retryTargetJid && /@lid$/i.test(originalDestinationJid)) {
+                if (!retryTargetJid && !isSelfChatDestination && /@lid$/i.test(originalDestinationJid)) {
                     try {
                         const resolved = await resolvePhoneForLid(sessionId, sock, originalDestinationJid);
                         const mappedPhone = normalizePhoneCacheJid(resolved?.phone || getRememberedPhoneForLid(sessionId, originalDestinationJid));
@@ -981,7 +1114,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                         console.warn('[private-send-retry-resolution-failed]', { sessionId, originalDestinationJid, error: resolveError?.message || String(resolveError) });
                     }
                 }
-                if (!retryTargetJid && /@s\.whatsapp\.net$/i.test(destinationJid) && transientSignalFailure) {
+                if (!retryTargetJid && !isSelfChatDestination && /@s\.whatsapp\.net$/i.test(destinationJid) && transientSignalFailure) {
                     retryTargetJid = getRememberedLidForPhone(sessionId, destinationJid);
                     if (!retryTargetJid) {
                         try {
@@ -1192,6 +1325,7 @@ async function acquireSessionRuntimeLock(sessionId) {
                         try { if (active.sock.ws) active.sock.ws.close(); } catch (e) {}
                         active.sock = null;
                     }
+                    await flushAuthWritesForSession(sessionId).catch(error => console.warn('[signal-auth-store-flush-on-lock-loss-failed]', { sessionId, error: error?.message || String(error) }));
                     activeSessions.delete(sessionId);
                     console.error('[session-runtime-lock-lost]', { sessionId, action: 'socket_closed_without_deleting_auth' });
                 } catch (error) {
@@ -1207,6 +1341,7 @@ async function acquireSessionRuntimeLock(sessionId) {
                             try { if (active.sock.ws) active.sock.ws.close(); } catch (e) {}
                             active.sock = null;
                         }
+                        await flushAuthWritesForSession(sessionId).catch(error => console.warn('[signal-auth-store-flush-on-lock-loss-failed]', { sessionId, error: error?.message || String(error) }));
                         activeSessions.delete(sessionId);
                         console.error('[session-runtime-lock-unverified]', { sessionId, action: 'socket_closed_to_prevent_concurrent_signal_state' });
                     }
@@ -1276,6 +1411,7 @@ async function acquireAccountRuntimeLock(sessionId, phoneValue) {
                 try { if (active.sock.ws) active.sock.ws.close(); } catch (e) {}
                 active.sock = null;
             }
+            await flushAuthWritesForSession(sessionId).catch(flushError => console.warn('[signal-auth-store-flush-on-account-lock-loss-failed]', { sessionId, error: flushError?.message || String(flushError) }));
             activeSessions.delete(sessionId);
             await releaseSessionRuntimeLock(sessionId);
         };
@@ -1340,23 +1476,26 @@ function scheduleSessionLockRetry(sessionId, autoExpire, format) {
 }
 
 async function useMongoAuthState(sessionId, expectExisting = false) {
+    await flushAuthWritesForSession(sessionId);
     const collection = db.collection('baileys_auth');
     const sessionKey = `auth-${sessionId}`;
     const credsId = `${sessionKey}-creds`;
     const credsDoc = await collection.findOne({ _id: credsId });
     if (expectExisting && !credsDoc) throw new Error('SessionNotExists');
     const creds = credsDoc ? fixBuffers(credsDoc.creds) : initAuthCreds();
-    let authWriteQueue = Promise.resolve();
     const migratedLegacyCategories = new Set();
     const queueAuthWrite = operation => {
-        const run = authWriteQueue.catch(() => {}).then(operation);
-        authWriteQueue = run.catch(() => {});
+        const previous = authWriteQueues.get(sessionId) || Promise.resolve();
+        const run = previous.catch(() => {}).then(operation);
+        const settled = run.catch(() => {});
+        authWriteQueues.set(sessionId, settled);
         return run;
     };
+    const flushAuthWrites = () => flushAuthWritesForSession(sessionId);
     const runBulkWriteWithFallback = async (operations, label) => {
         if (!operations.length) return;
         try {
-            await collection.bulkWrite(operations, { ordered: true });
+            await collection.bulkWrite(operations, { ordered: true, writeConcern: { w: 'majority', wtimeout: 10000 } });
             return;
         } catch (bulkError) {
             console.error('[auth-store-bulk-write]', { sessionId, label, error: bulkError?.message || String(bulkError) });
@@ -1365,7 +1504,7 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
         for (const operation of operations) {
             try {
                 if (operation.deleteOne) await collection.deleteOne(operation.deleteOne.filter);
-                else if (operation.updateOne) await collection.updateOne(operation.updateOne.filter, operation.updateOne.update, { upsert: true });
+                else if (operation.updateOne) await collection.updateOne(operation.updateOne.filter, operation.updateOne.update, { upsert: true, writeConcern: { w: 'majority', wtimeout: 10000 } });
             } catch (error) {
                 failures.push(error?.message || String(error));
             }
@@ -1436,7 +1575,7 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
             console.error('[auth-store-creds-write-failed]', { sessionId, error: error?.message || String(error) });
         }
     };
-    return { state: { creds, keys: keyStore }, saveCreds };
+    return { state: { creds, keys: keyStore }, saveCreds, flushAuthWrites };
 }
 async function deleteMongoSession(sessionId) {
     try {
@@ -3444,24 +3583,38 @@ async function sendFormatted(sock, from, type, text, pushName, isAI = false, hos
 async function cleanupSocket(sessionId) {
     const session = activeSessions.get(sessionId);
     const oldSocket = session?.sock;
-    if (!oldSocket) return;
-    const ws = oldSocket.ws;
-    try { oldSocket.ev.removeAllListeners(); } catch (e) {}
-    if (!ws || ws.readyState === 3) return;
-    await new Promise(resolve => {
-        let settled = false;
-        const finish = () => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            try { ws.removeListener('close', finish); } catch (e) {}
-            resolve();
-        };
-        const timer = setTimeout(finish, 5000);
-        if (typeof timer.unref === 'function') timer.unref();
-        try { ws.once('close', finish); } catch (e) {}
-        try { ws.close(); } catch (e) { finish(); }
-    });
+    if (oldSocket) {
+        const ws = oldSocket.ws;
+        try { oldSocket.ev.removeAllListeners(); } catch (e) {}
+        if (ws && ws.readyState !== 3) {
+            await new Promise(resolve => {
+                let settled = false;
+                const finish = () => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    try { ws.removeListener('close', finish); } catch (e) {}
+                    resolve();
+                };
+                const timer = setTimeout(finish, 5000);
+                if (typeof timer.unref === 'function') timer.unref();
+                try { ws.once('close', finish); } catch (e) {}
+                try { ws.close(); } catch (e) { finish(); }
+            });
+        }
+        if (session?.sock === oldSocket) session.sock = null;
+    }
+    const flush = session?.flushAuthWrites || session?.authState?.flushAuthWrites;
+    if (typeof flush === 'function') {
+        try {
+            await promiseWithTimeout(flush(), 20000, 'Flush Signal keys before socket replacement');
+            console.info('[signal-auth-store-flushed-before-reconnect]', { sessionId });
+        } catch (error) {
+            console.error('[signal-auth-store-flush-before-reconnect-failed]', { sessionId, error: error?.message || String(error), action: 'continue_reconnect_but_preserve_shared_write_queue' });
+        }
+    } else {
+        await flushAuthWritesForSession(sessionId).catch(error => console.warn('[signal-auth-store-flush-failed]', { sessionId, error: error?.message || String(error) }));
+    }
 }
 
 function startAdamBot(sessionId, autoExpire = false, format = 'pair', expectExisting = false) {
@@ -3517,11 +3670,16 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             retryCounterTtlMs: MSG_RETRY_COUNTER_TTL_MS,
             retryCounterLimit: MSG_RETRY_COUNTER_MAX_ENTRIES
         });
-        const sock = makeWASocket({
+        const baileysLogger = createDashboardPinoLogger({ level: baileysLogLevel, base: { sessionId, component: 'baileys' } });
+        const signalKeyStoreLogger = createDashboardPinoLogger({ level: signalStoreLogLevel, base: { sessionId, component: 'signal-key-store' } });
+        const cachedSignalKeyStore = makeCacheableSignalKeyStore(state.keys, signalKeyStoreLogger);
+        let sock;
+        sock = makeWASocket({
             version,
-            logger: createDashboardPinoLogger({ level: baileysLogLevel, base: { sessionId, component: 'baileys' } }),
+            logger: baileysLogger,
             printQRInTerminal: false,
-            auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, createDashboardPinoLogger({ level: signalStoreLogLevel, base: { sessionId, component: 'signal-key-store' } })) },
+            auth: { creds: state.creds, keys: cachedSignalKeyStore },
+            cachedGroupMetadata: async groupJid => getGroupMetadataCached(sessionId, sock, groupJid),
             browser: Browsers.ubuntu('Chrome'), 
             markOnlineOnConnect: false,
             generateHighQualityLinkPreview: true,
@@ -3649,6 +3807,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         const sessionData = {
             sock: sock,
             authState: state,
+            signalKeyStore: cachedSignalKeyStore,
+            flushAuthWrites: flushAuthWritesForSession.bind(null, sessionId),
             qrString: null,
             ownerJid: null,
             active: true,
@@ -3697,6 +3857,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             lastRefresh: Date.now(),
             reconnectAttempts: existingSessionRecord ? (existingSessionRecord.reconnectAttempts || 0) : 0,
             sock: sock,
+            signalKeyStore: cachedSignalKeyStore,
+            flushAuthWrites: flushAuthWritesForSession.bind(null, sessionId),
             qrString: null,
             disconnectTime: null,
             connectedAt: null,
@@ -3842,12 +4004,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 sessionData.active = true;
                 sessionData.readyAt = Date.now();
                 
-                sock.groupFetchAllParticipating()
-                    .then((groups) => {
-                        const nowTS = Date.now();
-                        for (const jid in groups) groupMetadataCache.set(jid, { data: groups[jid], ts: nowTS });
-                    })
-                    .catch(error => console.error('[group-metadata-prefetch]', { sessionId, error: error?.message || String(error) }));
+                console.info('[group-metadata-cache-ready]', {
+                    sessionId,
+                    strategy: 'lazy_session_scoped_cache',
+                    eagerGroupListFetch: false
+                });
                 
                 const currentBotNum = sock.user ? sock.user.id.split(':')[0] : null;
                 const currentBotName = sock.user ? sock.user.name || "Adam D'H7" : "Adam D'H7";
@@ -4104,7 +4265,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         const resolveGroupActionTarget = async (groupJid, target, metadata = null) => {
             const raw = String(target || '').trim();
             if (!raw) return '';
-            const meta = metadata || await sock.groupMetadata(groupJid).catch(() => null);
+            const meta = metadata || await getGroupMetadataCached(sessionId, sock, groupJid).catch(() => null);
             const participant = findActionParticipant(raw, meta);
             if (participant?.id) return normalizeActionJid(participant.id);
             if (/@lid$/i.test(raw)) {
@@ -4130,8 +4291,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             let metadataForAction = null;
             let planned = [];
             try {
-                metadataForAction = await sock.groupMetadata(jid).catch(() => null) || knownMetadata;
-                if (metadataForAction) groupMetadataCache.set(jid, { data: metadataForAction, ts: Date.now() });
+                metadataForAction = await getGroupMetadataCached(sessionId, sock, jid, true).catch(() => null) || knownMetadata;
+                if (metadataForAction) setCachedGroupMetadata(sessionId, jid, metadataForAction);
                 const inputValues = [...new Set((participants || []).map(value => String(value || '').trim()).filter(Boolean))];
                 for (const raw of inputValues) {
                     const participant = findActionParticipant(raw, metadataForAction);
@@ -4299,9 +4460,18 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         };
 
         const welcomeQueue = new Map();
+        sock.ev.on('groups.update', updates => {
+            for (const update of Array.isArray(updates) ? updates : []) {
+                const groupJid = String(update?.id || '').trim();
+                if (!groupJid) continue;
+                const cached = getCachedGroupMetadata(sessionId, groupJid, Number.MAX_SAFE_INTEGER);
+                if (cached) setCachedGroupMetadata(sessionId, groupJid, { ...cached, ...update });
+            }
+        });
         sock.ev.on('group-participants.update', async (update) => {
             try {
                 const { id: gjid, participants: newParts, action } = update;
+                invalidateCachedGroupMetadata(sessionId, gjid);
                 const isBienvenue = await getGroupSetting(sessionId, gjid, 'bienvenue');
                 if (action !== 'add' || !isBienvenue || !newParts || newParts.length === 0) return;
                 
@@ -4321,16 +4491,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     const welcomeTitle = tWelcome.welcome_title || "Bienvenue";
                     const welcomeTo = tWelcome.welcome_to || "Welcome to";
                     let gSubject = "le groupe";
-                    const cachedMeta = groupMetadataCache.get(gjid);
-                    if (cachedMeta && cachedMeta.data) {
-                        gSubject = cachedMeta.data.subject || gSubject;
-                    } else {
-                        try {
-                            const gmeta = await sock.groupMetadata(gjid);
-                            groupMetadataCache.set(gjid, { data: gmeta, ts: Date.now() });
-                            gSubject = gmeta.subject;
-                        } catch (e) {}
-                    }
+                    try {
+                        const gmeta = await getGroupMetadataCached(sessionId, sock, gjid);
+                        if (gmeta?.subject) gSubject = gmeta.subject;
+                    } catch (e) {}
                     
                     const ownerCol = db.collection('session_owners');
                     let sessionOwnerDoc = sessionOwnersCache.get(sessionId);
@@ -4923,12 +5087,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             try {
                                 const del2List = await getDel2Targets(sessionId, from);
                                 if (del2List.length) {
-                                    const cachedDel2Meta = groupMetadataCache.get(from);
-                                    let metadataDel2Match = cachedDel2Meta && Date.now() - cachedDel2Meta.ts < 240000 ? cachedDel2Meta.data : null;
-                                    if (!metadataDel2Match) {
-                                        metadataDel2Match = await sock.groupMetadata(from).catch(() => null);
-                                        if (metadataDel2Match) groupMetadataCache.set(from, { data: metadataDel2Match, ts: Date.now() });
-                                    }
+                                    let metadataDel2Match = getCachedGroupMetadata(sessionId, from, 240000);
+                                    if (!metadataDel2Match) metadataDel2Match = await getGroupMetadataCached(sessionId, sock, from);
                                     const senderParticipantDel2 = findActionParticipant(sender, metadataDel2Match) || senderJids.map(identity => findActionParticipant(identity, metadataDel2Match)).find(Boolean) || null;
                                     let del2Match = false;
                                     for (const target of del2List) {
@@ -4983,13 +5143,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
                         const getMeta = async () => {
                             try {
-                                const nowTsLocal = Date.now();
-                                const cached = groupMetadataCache.get(from);
-                                if (cached && (nowTsLocal - cached.ts < 240000)) return cached.data;
                                 if (isGroup && !from.endsWith('@s.whatsapp.net')) {
-                                    const meta = await sock.groupMetadata(from).catch(() => null);
+                                    const meta = await getGroupMetadataCached(sessionId, sock, from);
                                     if (meta) {
-                                        groupMetadataCache.set(from, { data: meta, ts: nowTsLocal });
                                         for (const participant of meta.participants || []) {
                                             const lidIds = [participant?.lid, participant?.id, participant?.idAlt, participant?.participantAlt].map(value => String(value || '').trim()).filter(value => /@lid$/i.test(normalizeLidCacheKey(value)));
                                             const phoneJid = [participant?.phoneNumber, participant?.phone, participant?.pn, participant?.participantPn, participant?.idAlt, participant?.participantAlt].map(normalizePhoneCacheJid).find(Boolean);
@@ -5542,9 +5698,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, internalCommand === 'kickall2' ? t.cmd_kickall2 : t.cmd_kickall, isGroup ? t.admin_required : t.group_required, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            const metadataKA = await sock.groupMetadata(from).catch(() => null) || await getMeta();
+                                            const metadataKA = await getGroupMetadataCached(sessionId, sock, from, true).catch(() => null) || await getMeta();
                                             if (!metadataKA || !Array.isArray(metadataKA.participants)) throw new Error('group_metadata_unavailable');
-                                            groupMetadataCache.set(from, { data: metadataKA, ts: Date.now() });
+                                            setCachedGroupMetadata(sessionId, from, metadataKA);
                                             const participantRecordsKA = metadataKA.participants.filter(participant => participant && (participant.id || participant.lid || participant.phoneNumber || participant.phone));
                                             const creatorRecordsKA = participantRecordsKA.filter(participant => isGroupCreatorParticipant(participant, metadataKA));
                                             const botRecordsKA = participantRecordsKA.filter(participant => isBotGroupParticipant(participant));
@@ -6308,81 +6464,45 @@ setInterval(async () => {
         if (activeSessions.get(sId) !== sess || !sess || sess.status !== 'connecte') continue;
         const currentSocket = sess.sock;
         if (!currentSocket) {
-            console.warn('[session-health] connected session has no socket', { sessionId: sId, action: 'schedule_reconnect_without_touching_auth' });
+            console.warn('[session-health] connected session has no socket', { sessionId: sId, action: 'flush_signal_store_then_schedule_reconnect' });
             sess.status = 'deconnecte';
             sess.disconnectTime = now;
+            await flushAuthWritesForSession(sId).catch(error => console.warn('[signal-auth-store-flush-failed]', { sessionId: sId, error: error?.message || String(error) }));
             await releaseSessionRuntimeLock(sId);
             scheduleSessionReconnect(sId, false, sess.format || 'pair');
             continue;
         }
         const readyState = currentSocket.ws?.readyState ?? currentSocket.ws?._socket?.readyState ?? currentSocket.socket?.readyState;
-        const lastTransportActivityAt = Math.max(
-            Number(sess.lastPongAt || 0),
-            Number(sess.lastSocketActivityAt || 0),
-            Number(sess.lastMessageAt || 0),
-            Number(sess.connectedAt || sess.readyAt || 0)
-        );
-        const pongExpired = sess.wsPongMonitoring && lastTransportActivityAt > 0 && now - lastTransportActivityAt > SESSION_WS_PONG_TIMEOUT_MS;
         const socketClosed = readyState !== undefined && readyState !== null && Number(readyState) !== 1;
+        // A quiet chat is not a dead socket. Only enforce a pong deadline after at
+        // least one real WebSocket pong has been observed from this socket.
+        const hasObservedPong = sess.wsPongMonitoring && sess.receivedPong === true;
+        const lastPongAt = Number(sess.lastPongAt || sess.connectedAt || sess.readyAt || now);
+        const pongAge = Math.max(0, now - lastPongAt);
+        const pongExpired = hasObservedPong && pongAge > SESSION_WS_PONG_TIMEOUT_MS;
         if (!socketClosed && !pongExpired) continue;
-        const reason = socketClosed ? 'websocket_not_open' : 'websocket_transport_idle_without_pong_or_message';
+        const reason = socketClosed ? 'websocket_not_open' : 'websocket_pong_timeout_after_observed_pongs';
         console.warn('[session-health] stale socket detected', {
             sessionId: sId,
             readyState: readyState ?? null,
-            lastTransportActivityAgeMs: Math.max(0, now - lastTransportActivityAt),
-            lastPongAgeMs: Math.max(0, now - Number(sess.lastPongAt || sess.connectedAt || sess.readyAt || now)),
+            lastPongAgeMs: pongAge,
+            lastSocketActivityAgeMs: Math.max(0, now - Number(sess.lastSocketActivityAt || sess.connectedAt || now)),
             timeoutMs: SESSION_WS_PONG_TIMEOUT_MS,
             reason,
-            action: 'recreate_socket_preserving_mongodb_auth'
+            action: 'flush_signal_store_then_recreate_socket_preserving_mongodb_auth'
         });
         sess.status = 'deconnecte';
         sess.disconnectTime = now;
-        sess.sock = null;
-        try { currentSocket.ev.removeAllListeners(); } catch (e) {}
-        try { if (currentSocket.ws && currentSocket.ws.readyState !== 3) currentSocket.ws.close(); } catch (e) {}
+        try {
+            await cleanupSocket(sId);
+        } catch (cleanupError) {
+            console.warn('[session-health-socket-cleanup-failed]', { sessionId: sId, error: cleanupError?.message || String(cleanupError) });
+        }
+        if (activeSessions.get(sId) === sess) sess.sock = null;
         await releaseSessionRuntimeLock(sId);
         scheduleSessionReconnect(sId, false, sess.format || 'pair');
     }
 }, SESSION_HEALTH_CHECK_INTERVAL_MS);
-
-setInterval(async () => {
-    if (!db || serverShuttingDown) return;
-    for (const [sId, sess] of activeSessions.entries()) {
-        if (!sess?.sock || sess.status !== 'connecte' || sess.healthProbeRunning) continue;
-        const probeSocket = sess.sock;
-        sess.healthProbeRunning = true;
-        try {
-            const groups = await promiseWithTimeout(probeSocket.groupFetchAllParticipating(), 30000, 'WhatsApp session health probe');
-            if (activeSessions.get(sId) !== sess || sess.sock !== probeSocket) continue;
-            const nowTS = Date.now();
-            for (const jid in groups || {}) groupMetadataCache.set(jid, { data: groups[jid], ts: nowTS });
-            sess.healthProbeFailures = 0;
-            sess.lastSuccessfulHealthProbeAt = nowTS;
-            sess.lastSocketActivityAt = nowTS;
-            console.debug('[session-health-probe-ok]', { sessionId: sId, groupCount: Object.keys(groups || {}).length });
-        } catch (error) {
-            if (activeSessions.get(sId) !== sess || sess.sock !== probeSocket) continue;
-            sess.healthProbeFailures = Number(sess.healthProbeFailures || 0) + 1;
-            console.warn('[session-health-probe-failed]', {
-                sessionId: sId,
-                failures: sess.healthProbeFailures,
-                error: error?.message || String(error),
-                action: sess.healthProbeFailures >= 2 ? 'recreate_socket_preserving_mongodb_auth' : 'retry_on_next_probe'
-            });
-            if (sess.healthProbeFailures >= 2) {
-                sess.status = 'deconnecte';
-                sess.disconnectTime = Date.now();
-                sess.sock = null;
-                try { probeSocket.ev.removeAllListeners(); } catch (e) {}
-                try { if (probeSocket.ws && probeSocket.ws.readyState !== 3) probeSocket.ws.close(); } catch (e) {}
-                await releaseSessionRuntimeLock(sId);
-                scheduleSessionReconnect(sId, false, sess.format || 'pair');
-            }
-        } finally {
-            sess.healthProbeRunning = false;
-        }
-    }
-}, 90000);
 
 async function shutdownServer(signal) {
     if (serverShuttingDown) return;
@@ -6402,6 +6522,11 @@ async function shutdownServer(signal) {
         if (session) {
             session.status = 'deconnecte';
             session.disconnectTime = Date.now();
+        }
+        try {
+            await flushAuthWritesForSession(sessionId);
+        } catch (authFlushError) {
+            console.warn('[server-shutdown-signal-auth-flush-failed]', { sessionId, error: authFlushError?.message || String(authFlushError) });
         }
     }
     const lockSessionIds = new Set([...sessionRuntimeLockTimers.keys(), ...sessionAccountRuntimeLocks.keys()]);
@@ -6425,6 +6550,14 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
 }
 
 async function main() {
+    console.info('[runtime-build]', {
+        build: RUNTIME_FIX_BUILD,
+        groupSenderKeyMemoryReset: BAILEYS_RESET_GROUP_SENDER_KEY_MEMORY,
+        passiveSocketHealth: true,
+        activeGroupFetchHealthProbe: false,
+        selfChatPhoneJidPreferred: true,
+        signalAuthWriteFlush: true
+    });
     await connectMongo();
     httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
     try {
