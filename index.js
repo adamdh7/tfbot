@@ -335,7 +335,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'wa-signal-delivery-2026-10-30-r6';
+const RUNTIME_FIX_BUILD = 'wa-command-grammar-2026-10-30-r7';
 const PORT = process.env.PORT || 7000;
 const BOT_TIME_ZONE = process.env.BOT_TIME_ZONE || 'America/Santo_Domingo';
 const CHAT_CONTEXT_MAX_CHARS = Math.max(2500, Number(process.env.CHAT_CONTEXT_MAX_CHARS || 7000));
@@ -3755,7 +3755,8 @@ function getCommandParsingContext(message) {
     const mediaKeys = ['imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'stickerMessage', 'albumMessage'];
     return {
         hasQuotedMessage: !!(contextInfo?.stanzaId || contextInfo?.quotedMessage),
-        hasMedia: mediaKeys.some(key => !!content?.[key])
+        hasMedia: mediaKeys.some(key => !!content?.[key]),
+        mentionedJid: Array.isArray(contextInfo?.mentionedJid) ? contextInfo.mentionedJid.map(value => String(value || '').trim()).filter(Boolean) : []
     };
 }
 
@@ -3767,6 +3768,21 @@ const commandsWithoutArguments = new Set([
 const commandsRequiringText = new Set(['ai', 'qr', 'imaj', 'cheche']);
 const commandsRequiringTarget = new Set(['add', 'kick', 'promote', 'demote', 'del2']);
 const commandsRequiringQuotedMessage = new Set(['del', 'vv']);
+
+function isValidTargetCommandArgument(value, context = {}) {
+    const args = String(value || '').trim();
+    if (!args) return !!context.hasQuotedMessage;
+    const mentionedJids = Array.isArray(context.mentionedJid) ? context.mentionedJid.filter(Boolean) : [];
+    const mentionSyntax = /^@[\p{L}\p{N}_.-]+(?:[\s,]+@[\p{L}\p{N}_.-]+)*$/u;
+    if (mentionSyntax.test(args)) {
+        const mentionCount = (args.match(/@/g) || []).length;
+        if (!mentionedJids.length || mentionedJids.length === mentionCount) return true;
+    }
+    if (/^@\+?\d{6,20}$/u.test(args)) return true;
+    if (!/^\+?[0-9][0-9\s().-]*$/.test(args)) return false;
+    const phoneNumber = normalizePhoneNumber(args);
+    return phoneNumber.length >= 6 && phoneNumber.length <= 20;
+}
 
 function parseIncomingCommand(body, language, context = {}) {
     let source = String(body || '').trim();
@@ -3780,11 +3796,11 @@ function parseIncomingCommand(body, language, context = {}) {
     const hasQuotedMessage = !!context?.hasQuotedMessage;
     if (commandsWithoutArguments.has(internalCommand) && args) return null;
     if (commandsRequiringText.has(internalCommand) && !args) return null;
-    if (commandsRequiringTarget.has(internalCommand) && !args && !hasQuotedMessage) return null;
+    if (commandsRequiringTarget.has(internalCommand) && !isValidTargetCommandArgument(args, context)) return null;
     if (commandsRequiringQuotedMessage.has(internalCommand) && !hasQuotedMessage) return null;
-    if (internalCommand === 'lang' && args && !['fr', 'en', 'es', 'ht'].includes(normalizeText(args))) return null;
+    if (internalCommand === 'lang' && args && !/^(?:fr|en|es|ht)$/i.test(args)) return null;
     if (internalCommand === 'code') {
-        if (!/^\+?[0-9\s().-]+$/.test(args)) return null;
+        if (!/^\+?[0-9][0-9\s().-]*$/.test(args)) return null;
         const phoneNumber = normalizePhoneNumber(args);
         if (phoneNumber.length < 6 || phoneNumber.length > 20) return null;
     }
@@ -4687,15 +4703,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const member = findActionParticipant(value, metadata);
                 return member ? preferredParticipantId(member) : value;
             }))];
-            const quotedSenderId = context.participant || quotedEntry?.key?.participant || quotedEntry?.sender || '';
-            if (quotedSenderId) {
-                const alternate = quotedEntry?.participantAlt || quotedEntry?.key?.participantAlt || quotedEntry?.key?.participantPn || quotedEntry?.key?.remoteJidAlt || '';
-                const member = findActionParticipant(alternate || quotedSenderId, metadata) || findActionParticipant(quotedSenderId, metadata);
-                return [member ? preferredParticipantId(member) : (alternate || quotedSenderId)];
-            }
             if (arg) {
                 const number = normalizePhoneNumber(arg);
-                const looksLikePhone = number.length >= 6 && /^[+\d()\s.-]+$/.test(String(arg).trim());
+                const looksLikePhone = number.length >= 6 && /^\+?[0-9][0-9\s().-]*$/.test(String(arg).trim());
                 if (looksLikePhone) {
                     const member = metadata?.participants?.find(item => normalizedJidNumber(item.id) === number || normalizedJidNumber(item.phoneNumber || item.phone || item.idAlt || '') === number);
                     return [member ? preferredParticipantId(member) : `${number}@s.whatsapp.net`];
@@ -4711,6 +4721,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     return name && normalizedArg && (name === normalizedArg || name.startsWith(normalizedArg) || normalizedArg.startsWith(name));
                 }).map(([jid]) => jid);
                 if (known.length) return [...new Set(known)];
+            }
+            const quotedSenderId = context.participant || quotedEntry?.key?.participant || quotedEntry?.sender || '';
+            if (quotedSenderId) {
+                const alternate = quotedEntry?.participantAlt || quotedEntry?.key?.participantAlt || quotedEntry?.key?.participantPn || quotedEntry?.key?.remoteJidAlt || '';
+                const member = findActionParticipant(alternate || quotedSenderId, metadata) || findActionParticipant(quotedSenderId, metadata);
+                return [member ? preferredParticipantId(member) : (alternate || quotedSenderId)];
             }
             if (currentBotJid && context.participant === currentBotJid) return [currentBotJid];
             return [];
