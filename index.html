@@ -213,6 +213,72 @@
             ht: { m: 'Nou detekte yon ansyen vèsyon entèfas la. Ouvri paj prensipal la pou relanse vèsyon aktyèl la.', b: 'Ouvri vèsyon aktyèl la' }
         };
         const text = translations[language] || translations.ht;
+        const coordinatorResolveUrl = 'https://tfbot7.onrender.com/__tfbot/router/resolve?refresh=1';
+        const allowedAppOrigins = [
+            'https://tf.bot.adamdh7.org',
+            'https://tfbot2.onrender.com',
+            'https://tfbot3.onrender.com',
+            'https://tfbot4.onrender.com',
+            'https://tfbot5.onrender.com',
+            'https://tfbot6.onrender.com'
+        ];
+        const savedOriginKey = 'tfbot.active-origin.v1';
+
+        function normalizeAllowedOrigin(value) {
+            try {
+                const parsed = new URL(String(value || ''));
+                const origin = parsed.origin.replace(/\/+$/, '');
+                return allowedAppOrigins.includes(origin) ? origin : '';
+            } catch (error) {
+                return '';
+            }
+        }
+
+        function getSavedOrigin() {
+            try { return normalizeAllowedOrigin(localStorage.getItem(savedOriginKey)); }
+            catch (error) { return ''; }
+        }
+
+        function saveOrigin(origin) {
+            try { localStorage.setItem(savedOriginKey, origin); } catch (error) {}
+        }
+
+        async function resolveActiveOrigin() {
+            const deadline = Date.now() + 60000;
+            let lastError = null;
+            while (Date.now() < deadline) {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(function() { controller.abort(); }, 25000);
+                try {
+                    const response = await fetch(coordinatorResolveUrl, {
+                        method: 'GET',
+                        cache: 'no-store',
+                        mode: 'cors',
+                        credentials: 'omit',
+                        headers: { 'Accept': 'application/json' },
+                        signal: controller.signal
+                    });
+                    if (!response.ok) throw new Error('coordinator_or_worker_unavailable');
+                    const payload = await response.json();
+                    const origin = normalizeAllowedOrigin(payload && (payload.activeUrl || payload.url));
+                    if (payload && payload.ok === true && origin && payload.workerActive === true && payload.workerState === 'active') {
+                        saveOrigin(origin);
+                        return origin;
+                    }
+                    if (payload && payload.ok === true && origin && ['starting', 'standby'].includes(String(payload.workerState || ''))) {
+                        await new Promise(function(resolve) { setTimeout(resolve, 1800); });
+                        continue;
+                    }
+                    throw new Error('active_worker_not_ready');
+                } catch (error) {
+                    lastError = error;
+                    await new Promise(function(resolve) { setTimeout(resolve, 2500); });
+                } finally {
+                    clearTimeout(timeoutId);
+                }
+            }
+            throw lastError || new Error('active_tfbot_timeout');
+        }
 
         document.addEventListener('DOMContentLoaded', function() {
             const ui = document.getElementById('u-ui');
@@ -222,11 +288,17 @@
             const frameLoading = document.getElementById('frame-loading');
             let frameLoaded = false;
             let appRequested = false;
+            let activeOrigin = '';
+            let retryCount = 0;
+            let loadTimeout = null;
+            let domainMonitorTimer = null;
+            let resolving = false;
 
             message.textContent = text.m;
             buttonText.textContent = text.b;
 
             const revealFrame = function() {
+                if (loadTimeout) clearTimeout(loadTimeout);
                 frameLoading.style.display = 'none';
                 frame.classList.add('ready');
             };
@@ -237,21 +309,98 @@
                 frame.style.display = 'none';
             };
 
-            const showApp = function() {
+            const loadOrigin = function(origin) {
+                const normalized = normalizeAllowedOrigin(origin);
+                if (!normalized) return false;
+                activeOrigin = normalized;
+                frameLoaded = false;
+                ui.style.display = 'none';
+                frame.style.display = 'block';
+                frame.classList.remove('ready');
+                frameLoading.style.display = 'block';
+                frame.src = normalized + '/';
+                if (loadTimeout) clearTimeout(loadTimeout);
+                loadTimeout = setTimeout(function() {
+                    if (!frameLoaded) retryWithCoordinator();
+                }, 45000);
+                return true;
+            };
+
+            const startDomainMonitor = function() {
+                if (domainMonitorTimer) return;
+                domainMonitorTimer = setInterval(async function() {
+                    if (!appRequested || resolving) return;
+                    try {
+                        const nextOrigin = await resolveActiveOrigin();
+                        if (nextOrigin && nextOrigin !== activeOrigin) loadOrigin(nextOrigin);
+                    } catch (error) {
+                        if (!frameLoaded) void retryWithCoordinator();
+                    }
+                }, 77000);
+            };
+
+            const retryWithCoordinator = async function() {
+                if (!appRequested || resolving || retryCount >= 2) return;
+                resolving = true;
+                retryCount++;
+                try {
+                    const nextOrigin = await resolveActiveOrigin();
+                    if (nextOrigin && nextOrigin !== activeOrigin) {
+                        loadOrigin(nextOrigin);
+                    } else if (retryCount >= 2) {
+                        const saved = getSavedOrigin();
+                        if (saved && saved !== activeOrigin) loadOrigin(saved);
+                        else showUpdate();
+                    } else {
+                        loadOrigin(nextOrigin || getSavedOrigin() || allowedAppOrigins[0]);
+                    }
+                } catch (error) {
+                    if (retryCount >= 2) {
+                        const saved = getSavedOrigin();
+                        if (saved && saved !== activeOrigin) loadOrigin(saved);
+                        else showUpdate();
+                    } else {
+                        setTimeout(function() { void retryWithCoordinator(); }, 6500);
+                    }
+                } finally {
+                    resolving = false;
+                }
+            };
+
+            const showApp = async function() {
                 appRequested = true;
                 ui.style.display = 'none';
                 frame.style.display = 'block';
                 frameLoading.style.display = 'block';
-                if (frameLoaded) revealFrame();
+                try {
+                    const origin = await resolveActiveOrigin();
+                    loadOrigin(origin);
+                    startDomainMonitor();
+                } catch (error) {
+                    const saved = getSavedOrigin();
+                    loadOrigin(saved || allowedAppOrigins[0]);
+                    startDomainMonitor();
+                    setTimeout(function() { void retryWithCoordinator(); }, 6500);
+                }
             };
 
             frame.addEventListener('load', function() {
                 frameLoaded = true;
-                if (appRequested) revealFrame();
+                revealFrame();
+            });
+
+            frame.addEventListener('error', function() {
+                if (!frameLoaded) void retryWithCoordinator();
+            });
+
+            document.getElementById('u-b').addEventListener('click', function(event) {
+                event.preventDefault();
+                retryCount = 0;
+                void showApp();
             });
 
             if (currPath === '/') {
-                showApp();
+                void showApp();
             } else {
                 const match = currPath.match(verRegex);
                 const appVersion = match ? match[1] : '1';
@@ -266,7 +415,7 @@
                         clearTimeout(timeoutId);
                         const found = source.match(/CACHE_NAME\s*=\s*['"](\d+)['"]/i) || source.match(/CACHE_NAME.*?(\d+)/i);
                         const currentVersion = found ? found[1] : '1';
-                        if (appVersion === currentVersion) showApp();
+                        if (appVersion === currentVersion) void showApp();
                         else showUpdate();
                     })
                     .catch(function() {
@@ -296,6 +445,6 @@
             <span id="u-b-txt"></span>
         </a>
     </div>
-    <iframe id="m-f" title="Bot (tfbot)" src="https://tf.bot.adamdh7.org/" allow="fullscreen; autoplay; clipboard-write; encrypted-media; picture-in-picture; storage-access-by-user-activation" referrerpolicy="strict-origin-when-cross-origin"></iframe>
+    <iframe id="m-f" title="Bot (tfbot)" allow="fullscreen; autoplay; clipboard-write; encrypted-media; picture-in-picture; storage-access-by-user-activation" referrerpolicy="strict-origin-when-cross-origin"></iframe>
 </body>
 </html>
