@@ -13,7 +13,7 @@ const LOG_DASHBOARD_PATH = (() => {
     return /^\/[A-Za-z0-9_./=-]{12,180}$/.test(normalized) ? normalized : '/adamdh7=modpas/adamdh7';
 })();
 const LOG_DASHBOARD_MAX_ENTRIES = Math.max(100, Math.min(5000, Number(process.env.LOG_DASHBOARD_MAX_ENTRIES || 3000)));
-const LOG_DASHBOARD_PAGE_LIMIT = Math.max(40, Math.min(300, Number(process.env.LOG_DASHBOARD_PAGE_LIMIT || 120)));
+const LOG_DASHBOARD_PAGE_LIMIT = Math.max(120, Math.min(500, Number(process.env.LOG_DASHBOARD_PAGE_LIMIT || 400)));
 const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(process.env.MESSAGE_QUEUE_TASK_TIMEOUT_MS || 45000)));
 const LOG_DASHBOARD_RETENTION_DAYS = Math.max(1, Math.min(30, Number(process.env.LOG_DASHBOARD_RETENTION_DAYS || 7)));
 const LOG_DASHBOARD_PERSIST_MAX_ENTRIES = Math.max(5000, Math.min(200000, Number(process.env.LOG_DASHBOARD_PERSIST_MAX_ENTRIES || 50000)));
@@ -187,7 +187,7 @@ function getSignalLogText(args) {
         if (typeof value === 'string') return value;
         if (value instanceof Error) return `${value.name}: ${value.message} ${String(value.stack || '').slice(0, 1200)}`;
         if (value && typeof value === 'object') {
-            const selected = [value.name, value.message, value.error?.name, value.error?.message, value.fromJid, value.remoteJid, value.msgId, value.messageId, value.id, value.retryCount]
+            const selected = [value.name, value.message, value.msg, value.err?.name, value.err?.message, value.err?.stack, value.error?.name, value.error?.message, value.key?.remoteJid, value.key?.remoteJidAlt, value.key?.participant, value.key?.participantAlt, value.key?.participantPn, value.key?.senderPn, value.fromJid, value.remoteJid, value.msgId, value.messageId, value.id, value.retryCount]
                 .filter(item => item !== undefined && item !== null && typeof item !== 'object');
             return selected.join(' ');
         }
@@ -209,14 +209,22 @@ function isSensitiveSignalLog(args) {
     return containsSignalKeyData(args) || /Closing open session in favor of incoming prekey bundle|Closing stale open session for new outgoing prekey bundle|Closing session:|Removing old closed session:|SessionEntry|ephemeralKeyPair|remoteIdentityKey|previousCounter|rootKey|pendingPreKey/i.test(value);
 }
 const signalDiagnosticTimes = new Map();
+const signalRecoveryCounters = new Map();
+const signalRecoveryCooldowns = new Map();
+const signalRecoveryTimers = new Map();
+const SIGNAL_RECOVERY_THRESHOLD = Math.max(2, Math.min(5, Number(process.env.SIGNAL_RECOVERY_THRESHOLD || 2)));
+const SIGNAL_RECOVERY_WINDOW_MS = Math.max(10000, Math.min(180000, Number(process.env.SIGNAL_RECOVERY_WINDOW_MS || 60000)));
+const SIGNAL_RECOVERY_COOLDOWN_MS = Math.max(60000, Math.min(3600000, Number(process.env.SIGNAL_RECOVERY_COOLDOWN_MS || 600000)));
 function isSignalDecryptionFailure(args) {
-    return /Failed to decrypt message with any known session|Session error:.*Bad MAC|Bad MAC|MessageCounterError|Key used already or never filled|SessionError:\s*No sessions|No sessions/i.test(getSignalLogText(args));
+    return /Failed to decrypt message|failed to decrypt message|Session error:.*Bad MAC|Bad MAC|MessageCounterError|Key used already or never filled|SessionError:\s*No sessions|No session found to decrypt message|No sessions|Chain closed|Decrypted message with closed session|calculateMAC|Cannot read properties of null \(reading ['\"]constructor['\"]\)/i.test(getSignalLogText(args));
 }
 function logSignalDecryptionFailure(args) {
     const raw = getSignalLogText(args);
     const now = Date.now();
     const kind = /MessageCounterError|Key used already or never filled/i.test(raw) ? 'message_counter_error'
-        : /SessionError:\s*No sessions|No sessions/i.test(raw) ? 'signal_session_missing'
+        : /Chain closed|Decrypted message with closed session/i.test(raw) ? 'signal_chain_closed'
+        : /calculateMAC|Cannot read properties of null \(reading ['\"]constructor['\"]\)/i.test(raw) ? 'signal_mac_buffer_invalid'
+        : /SessionError:\s*No sessions|No sessions|No session found to decrypt message/i.test(raw) ? 'signal_session_missing'
         : /Bad MAC/i.test(raw) ? 'bad_mac'
         : /Failed to decrypt message with any known session/i.test(raw) ? 'decrypt_failed'
         : 'signal_decryption_error';
@@ -232,6 +240,8 @@ function logSignalDecryptionFailure(args) {
     signalDiagnosticTimes.set(diagnosticKey, now);
     while (signalDiagnosticTimes.size > 500) signalDiagnosticTimes.delete(signalDiagnosticTimes.keys().next().value);
     const safeDetail = kind === 'message_counter_error' ? 'Signal message counter was out of sequence'
+        : kind === 'signal_chain_closed' ? 'The Signal session chain was closed and needs a targeted peer-session refresh'
+        : kind === 'signal_mac_buffer_invalid' ? 'A Signal session record contained invalid or missing MAC key material'
         : kind === 'signal_session_missing' ? 'No Signal session was available for this peer'
         : kind === 'bad_mac' ? 'Signal authentication check failed'
         : 'Baileys could not decrypt an incoming message';
@@ -307,6 +317,80 @@ const {
 const { MongoClient } = require('mongodb');
 const { Writable } = require('stream');
 
+function getSignalRecoveryPeerDetails(parsed) {
+    const key = parsed?.key && typeof parsed.key === 'object' ? parsed.key : {};
+    const remoteJid = String(key.remoteJid || key.remoteJidAlt || parsed?.fromJid || parsed?.remoteJid || '').trim();
+    const isGroup = /@g\.us$/i.test(remoteJid);
+    const participantCandidates = [key.participant, key.participantAlt, key.participantPn, key.senderPn].map(value => String(value || '').trim()).filter(Boolean);
+    const privateCandidates = [key.remoteJidAlt, key.senderPn, key.participantPn, remoteJid].map(value => String(value || '').trim()).filter(Boolean);
+    return {
+        remoteJid,
+        isGroup,
+        peerJid: isGroup ? (participantCandidates[0] || '') : (privateCandidates.find(value => /@(?:s\.whatsapp\.net|lid)$/i.test(value)) || ''),
+        aliases: [...new Set((isGroup ? participantCandidates : privateCandidates).filter(value => /@(?:s\.whatsapp\.net|lid)$/i.test(value)))],
+        messageId: String(key.id || parsed?.msgId || parsed?.messageId || '')
+    };
+}
+
+function scheduleSignalRecoveryFromLog(sessionId, parsed) {
+    if (!sessionId || !parsed || typeof parsed !== 'object' || serverShuttingDown) return;
+    const details = getSignalRecoveryPeerDetails(parsed);
+    if (!details.remoteJid || !details.peerJid) return;
+    const peerKey = `${sessionId}:${details.isGroup ? details.remoteJid : details.peerJid}:${details.isGroup ? details.peerJid : 'private'}`;
+    const now = Date.now();
+    const previous = signalRecoveryCounters.get(peerKey) || { count: 0, windowAt: now };
+    if (now - Number(previous.windowAt || 0) > SIGNAL_RECOVERY_WINDOW_MS) {
+        previous.count = 0;
+        previous.windowAt = now;
+    }
+    previous.count++;
+    signalRecoveryCounters.set(peerKey, previous);
+    while (signalRecoveryCounters.size > 2000) signalRecoveryCounters.delete(signalRecoveryCounters.keys().next().value);
+    if (previous.count < SIGNAL_RECOVERY_THRESHOLD) return;
+    const cooldownUntil = Number(signalRecoveryCooldowns.get(peerKey) || 0);
+    if (cooldownUntil > now || signalRecoveryTimers.has(peerKey)) return;
+    signalRecoveryCooldowns.set(peerKey, now + SIGNAL_RECOVERY_COOLDOWN_MS);
+    const timer = setTimeout(async () => {
+        signalRecoveryTimers.delete(peerKey);
+        const active = activeSessions.get(sessionId);
+        const sock = active?.sock;
+        if (!sock || active.status !== 'connecte' || serverShuttingDown) return;
+        try {
+            if (details.isGroup) {
+                const invalidated = await invalidateSenderKeyMemoryForParticipant(sessionId, details.peerJid, 'repeated_signal_decryption_failure', details.remoteJid);
+                if (!invalidated.changed) {
+                    const reset = await resetSessionGroupSenderKeyMemory(sessionId, 'repeated_signal_group_decryption_failure', details.remoteJid);
+                    console.warn('[signal-group-session-recovery]', { sessionId, groupJid: details.remoteJid, participant: details.peerJid, invalidatedEntries: invalidated.removed, groupResetCount: reset, messageId: details.messageId || null });
+                } else {
+                    console.warn('[signal-group-session-recovery]', { sessionId, groupJid: details.remoteJid, participant: details.peerJid, invalidatedEntries: invalidated.removed, messageId: details.messageId || null });
+                }
+            } else {
+                const repository = sock.signalRepository;
+                const aliases = [...new Set(details.aliases.concat(details.peerJid))].filter(value => /@(?:s\.whatsapp\.net|lid)$/i.test(value));
+                if (typeof repository?.deleteSession === 'function') {
+                    await promiseWithTimeout(repository.deleteSession(aliases), 12000, 'Targeted Signal peer-session recovery');
+                } else {
+                    const addresses = aliases.map(jid => {
+                        try { return repository?.jidToSignalProtocolAddress?.(jid) || jid; } catch (error) { return jid; }
+                    }).filter(Boolean);
+                    const updates = Object.fromEntries([...new Set(addresses)].map(address => [address, null]));
+                    if (!Object.keys(updates).length) throw new Error('signal_peer_address_unavailable');
+                    const keyStore = active.signalKeyStore || sock.authState?.keys;
+                    await promiseWithTimeout(keyStore.set({ session: updates }), 12000, 'Targeted Signal peer-session recovery');
+                }
+                await flushAuthWritesForSession(sessionId);
+                console.warn('[signal-private-session-recovery]', { sessionId, peer: details.peerJid, aliasCount: aliases.length, messageId: details.messageId || null, action: 'reset_only_affected_peer_session_keep_account_auth' });
+            }
+        } catch (error) {
+            console.error('[signal-targeted-session-recovery-failed]', { sessionId, peer: details.peerJid, groupJid: details.isGroup ? details.remoteJid : null, error: error?.message || String(error), action: 'preserve_all_other_signal_keys' });
+        } finally {
+            signalRecoveryCounters.delete(peerKey);
+        }
+    }, 250);
+    if (typeof timer.unref === 'function') timer.unref();
+    signalRecoveryTimers.set(peerKey, timer);
+}
+
 function createDashboardPinoLogger(options = {}) {
     const component = String(options?.base?.component || 'baileys').slice(0, 60);
     const sink = new Writable({
@@ -319,6 +403,7 @@ function createDashboardPinoLogger(options = {}) {
                     const diagnosticArgs = [parsed?.msg || parsed?.message || '', parsed];
                     if (isSignalDecryptionFailure(diagnosticArgs)) {
                         logSignalDecryptionFailure(diagnosticArgs);
+                        scheduleSignalRecoveryFromLog(String(options?.base?.sessionId || ''), parsed);
                         continue;
                     }
                     if (isSensitiveSignalLog(diagnosticArgs)) continue;
@@ -335,7 +420,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'wa-message-visibility-2026-10-30-r8';
+const RUNTIME_FIX_BUILD = 'wa-session-stability-2026-10-30-r14';
 const PORT = process.env.PORT || 7000;
 const BOT_TIME_ZONE = process.env.BOT_TIME_ZONE || 'America/Santo_Domingo';
 const CHAT_CONTEXT_MAX_CHARS = Math.max(2500, Number(process.env.CHAT_CONTEXT_MAX_CHARS || 7000));
@@ -415,23 +500,40 @@ const sessionStartPromises = new Map();
 const SESSION_HEALTH_CHECK_INTERVAL_MS = Math.max(15000, Number(process.env.SESSION_HEALTH_CHECK_INTERVAL_MS) || 30000);
 const SESSION_WS_PONG_TIMEOUT_MS = Math.max(60000, Number(process.env.SESSION_WS_PONG_TIMEOUT_MS) || 120000);
 const GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS = Math.max(60000, Number(process.env.GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS) || 6 * 60 * 60 * 1000);
-const GROUP_SENDER_KEY_RESET_EVERY_SEND = String(process.env.GROUP_SENDER_KEY_RESET_EVERY_SEND || 'true').trim().toLowerCase() !== 'false';
+const GROUP_SENDER_KEY_RESET_EVERY_SEND = String(process.env.GROUP_SENDER_KEY_RESET_EVERY_SEND || 'false').trim().toLowerCase() === 'true';
 const groupSenderKeyResetAt = new Map();
 const groupSenderKeyResetInFlight = new Map();
 const GROUP_METADATA_CACHE_TTL_MS = Math.max(30000, Number(process.env.GROUP_METADATA_CACHE_TTL_MS) || 300000);
+const GROUP_SETTINGS_CACHE_MAX_ENTRIES = Math.max(200, Math.min(20000, Number(process.env.GROUP_SETTINGS_CACHE_MAX_ENTRIES) || 4000));
+const ACTIVE_DEL2_CACHE_MAX_ENTRIES = Math.max(100, Math.min(10000, Number(process.env.ACTIVE_DEL2_CACHE_MAX_ENTRIES) || 2000));
+const SESSION_USER_CACHE_MAX_ENTRIES = Math.max(200, Math.min(10000, Number(process.env.SESSION_USER_CACHE_MAX_ENTRIES) || 2000));
 const LID_PHONE_MAPPING_FRESH_MS = Math.max(5000, Math.min(300000, Number(process.env.LID_PHONE_MAPPING_FRESH_MS) || 60000));
+const LID_PHONE_MAPPING_RETENTION_MS = Math.max(3600000, Math.min(30 * 24 * 60 * 60 * 1000, Number(process.env.LID_PHONE_MAPPING_RETENTION_MS) || 7 * 24 * 60 * 60 * 1000));
+const SESSION_PROFILE_RETENTION_MS = Math.max(24 * 60 * 60 * 1000, Math.min(90 * 24 * 60 * 60 * 1000, Number(process.env.SESSION_PROFILE_RETENTION_MS) || 30 * 24 * 60 * 60 * 1000));
+const SESSION_PROFILE_CACHE_TTL_MS = Math.max(60000, Math.min(6 * 60 * 60 * 1000, Number(process.env.SESSION_PROFILE_CACHE_TTL_MS) || 60 * 60 * 1000));
+const RECENT_MESSAGE_MEMORY_TTL_MS = Math.max(60000, Math.min(24 * 60 * 60 * 1000, Number(process.env.RECENT_MESSAGE_MEMORY_TTL_MS) || 60 * 60 * 1000));
+const CHAT_HISTORY_TTL_MS = Math.max(60000, Math.min(24 * 60 * 60 * 1000, Number(process.env.CHAT_HISTORY_TTL_MS) || 6 * 60 * 60 * 1000));
+const CHAT_HISTORY_MAX_ENTRIES = Math.max(50, Math.min(2000, Number(process.env.CHAT_HISTORY_MAX_ENTRIES) || 500));
+const REGISTERED_BOT_ACCOUNT_CACHE_TTL_MS = Math.max(5000, Math.min(60000, Number(process.env.REGISTERED_BOT_ACCOUNT_CACHE_TTL_MS) || 15000));
 const GROUP_METADATA_FETCH_TIMEOUT_MS = Math.max(3000, Number(process.env.GROUP_METADATA_FETCH_TIMEOUT_MS) || 12000);
 const authWriteQueues = new Map();
 const groupMetadataFetchPromises = new Map();
 const sessionRuntimeLockTimers = new Map();
+const sessionRuntimeLockTokens = new Map();
+const sessionRuntimeLockLeaseUntil = new Map();
+const sessionFenceClosureInFlight = new Set();
 const sessionLockRetryTimers = new Map();
 const accountRuntimeLockTimers = new Map();
 const sessionAccountRuntimeLocks = new Map();
+const sessionAccountRuntimeLockTokens = new Map();
+const sessionAccountRuntimeLockEntries = new Map();
+const sessionAccountRuntimeLockLeaseUntil = new Map();
 let serverShuttingDown = false;
 let httpServer = null;
 const processInstanceId = `${process.env.RENDER_INSTANCE_ID || process.env.HOSTNAME || 'render'}-${process.pid}-${typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : crypto.randomBytes(12).toString('hex')}`;
-const SESSION_RUNTIME_LOCK_LEASE_MS = Math.max(45000, Number(process.env.SESSION_RUNTIME_LOCK_LEASE_MS || 90000));
+const SESSION_RUNTIME_LOCK_LEASE_MS = Math.max(60000, Number(process.env.SESSION_RUNTIME_LOCK_LEASE_MS || 120000));
 const SESSION_RUNTIME_LOCK_RENEW_MS = Math.max(10000, Math.min(SESSION_RUNTIME_LOCK_LEASE_MS / 3, Number(process.env.SESSION_RUNTIME_LOCK_RENEW_MS || 20000)));
+const SESSION_RUNTIME_LOCK_SAFETY_MS = Math.max(5000, Math.min(30000, Number(process.env.SESSION_RUNTIME_LOCK_SAFETY_MS || 20000)));
 const BAILEYS_RETRY_MESSAGE_TTL_SECONDS = Math.max(3600, Number(process.env.BAILEYS_RETRY_MESSAGE_TTL_SECONDS || 604800));
 const PROCESSED_MESSAGE_RETENTION_MS = Math.max(60000, Number(process.env.PROCESSED_MESSAGE_RETENTION_MS || 86400000));
 let mongoClient;
@@ -443,6 +545,7 @@ const lidPhonePersistedKeys = new Map();
 const userProfilePersistenceCache = new Map();
 const lidPhonePersistingKeys = new Set();
 const chatHistories = new Map();
+const chatHistoryAccessTimes = new Map();
 const groupSettingsCache = new Map();
 const activeDel2UsersCache = new Map();
 const msgRetryCounterCache = new Map();
@@ -461,6 +564,13 @@ const outgoingMessageIdCache = new Map();
 const outgoingTextEchoCache = new Map();
 const OUTGOING_ECHO_TTL_MS = 120000;
 const fallbackMessageQueue = { tasks: [], isSendingQueue: false };
+const registeredBotAccountIdentitiesCache = { loadedAt: 0, numbers: new Set(), lids: new Set(), refreshPromise: null };
+
+function sanitizeSessionDisplayName(value) {
+    const name = String(value || '').replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim().slice(0, 100);
+    if (!name || /^(?:inconnu|unknown|undefined|null|n\/a)$/i.test(name)) return '';
+    return name;
+}
 
 function normalizeLidCacheKey(value) {
     return String(value || '').trim().replace(/:\d+@lid$/i, '@lid').toLowerCase();
@@ -471,6 +581,120 @@ function normalizePhoneCacheJid(value) {
     if (!/@s\.whatsapp\.net$/i.test(raw)) return '';
     const number = normalizePhoneNumber(raw.split('@')[0].split(':')[0]);
     return /^\d{6,20}$/.test(number) ? `${number}@s.whatsapp.net` : '';
+}
+
+async function getRegisteredBotAccountsExcept(sessionId, currentAccountNumber = '', currentAccountLids = []) {
+    const now = Date.now();
+    if ((!registeredBotAccountIdentitiesCache.loadedAt || now - registeredBotAccountIdentitiesCache.loadedAt > REGISTERED_BOT_ACCOUNT_CACHE_TTL_MS) && !registeredBotAccountIdentitiesCache.refreshPromise) {
+        registeredBotAccountIdentitiesCache.refreshPromise = (async () => {
+            const numbers = new Set();
+            const lids = new Set();
+            try {
+                if (db) {
+                    const docs = await db.collection('session_owners').find(
+                        {},
+                        { projection: { Number: 1, OwnerLid: 1, AccountJid: 1, sessionId: 1 } }
+                    ).limit(5000).toArray();
+                    for (const doc of docs) {
+                        const storedNumber = normalizePhoneNumber(doc?.Number || '');
+                        const accountNumber = getAuthenticatedPhoneNumber({ id: doc?.AccountJid || '' }, null);
+                        const number = /^\d{6,20}$/.test(storedNumber) ? storedNumber : accountNumber;
+                        if (number) numbers.add(number);
+                        const lid = normalizeLidCacheKey(doc?.OwnerLid || (/@lid$/i.test(String(doc?.AccountJid || '')) ? doc.AccountJid : ''));
+                        if (/@lid$/i.test(lid)) lids.add(lid);
+                    }
+                }
+            } catch (error) {
+                console.warn('[registered-bot-account-database-refresh-failed]', { sessionId, error: error?.message || String(error) });
+            }
+            for (const [otherSessionId, session] of activeSessions.entries()) {
+                if (otherSessionId === sessionId) continue;
+                const storedSessionNumber = normalizePhoneNumber(session?.number || '');
+                const authenticatedNumber = getAuthenticatedPhoneNumber(session?.sock?.user, session?.authState?.creds);
+                const number = /^\d{6,20}$/.test(storedSessionNumber) ? storedSessionNumber : authenticatedNumber;
+                if (number) numbers.add(number);
+                const lid = getAuthenticatedLid(session?.sock?.user, session?.authState?.creds);
+                if (/@lid$/i.test(lid)) lids.add(lid);
+            }
+            registeredBotAccountIdentitiesCache.numbers = numbers;
+            registeredBotAccountIdentitiesCache.lids = lids;
+            registeredBotAccountIdentitiesCache.loadedAt = Date.now();
+        })().catch(error => {
+            console.error('[registered-bot-account-cache-refresh-failed]', { sessionId, error: error?.message || String(error) });
+            registeredBotAccountIdentitiesCache.loadedAt = 0;
+        }).finally(() => {
+            registeredBotAccountIdentitiesCache.refreshPromise = null;
+        });
+    }
+    if (registeredBotAccountIdentitiesCache.refreshPromise) await registeredBotAccountIdentitiesCache.refreshPromise;
+    const ownNumber = normalizePhoneNumber(currentAccountNumber || '');
+    const ownLids = new Set((Array.isArray(currentAccountLids) ? currentAccountLids : [currentAccountLids]).map(normalizeLidCacheKey).filter(value => /@lid$/i.test(value)));
+    return {
+        numbers: new Set([...registeredBotAccountIdentitiesCache.numbers].filter(number => number && number !== ownNumber)),
+        lids: new Set([...registeredBotAccountIdentitiesCache.lids].filter(lid => lid && !ownLids.has(lid)))
+    };
+}
+function setBoundedMapEntry(map, key, value, maximum) {
+    if (!map || !key) return;
+    map.delete(key);
+    map.set(key, value);
+    const limit = Math.max(1, Number(maximum) || 1);
+    while (map.size > limit) map.delete(map.keys().next().value);
+}
+
+function setSessionChatHistory(historyKey, history) {
+    const key = String(historyKey || '');
+    if (!key) return;
+    const entries = Array.isArray(history) ? history.slice(-7) : [];
+    chatHistories.set(key, entries);
+    chatHistoryAccessTimes.set(key, Date.now());
+    while (chatHistories.size > CHAT_HISTORY_MAX_ENTRIES) {
+        let oldestKey = '';
+        let oldestTime = Infinity;
+        for (const [candidateKey, accessedAt] of chatHistoryAccessTimes.entries()) {
+            if (Number(accessedAt || 0) < oldestTime) {
+                oldestTime = Number(accessedAt || 0);
+                oldestKey = candidateKey;
+            }
+        }
+        if (!oldestKey) break;
+        chatHistoryAccessTimes.delete(oldestKey);
+        chatHistories.delete(oldestKey);
+    }
+}
+
+function cleanupSessionVolatileCaches(sessionId) {
+    const id = String(sessionId || '');
+    if (!id) return;
+    const sessionPrefix = `${id}:`;
+    const groupPrefix = `${id}:`;
+    for (const key of [...lidPhoneResolutionCache.keys()]) if (key.startsWith(sessionPrefix)) lidPhoneResolutionCache.delete(key);
+    for (const key of [...lidPhonePersistedKeys.keys()]) if (key.startsWith(sessionPrefix)) lidPhonePersistedKeys.delete(key);
+    for (const key of [...lidPhonePersistingKeys]) if (key.startsWith(sessionPrefix)) lidPhonePersistingKeys.delete(key);
+    for (const key of [...userProfilePersistenceCache.keys()]) if (key.startsWith(sessionPrefix)) userProfilePersistenceCache.delete(key);
+    for (const key of [...groupMetadataCache.keys()]) if (key.startsWith(groupPrefix)) groupMetadataCache.delete(key);
+    for (const key of [...groupMetadataFetchPromises.keys()]) if (key.startsWith(groupPrefix)) groupMetadataFetchPromises.delete(key);
+    for (const key of [...groupSenderKeyResetAt.keys()]) if (key.startsWith(groupPrefix)) groupSenderKeyResetAt.delete(key);
+    for (const key of [...groupSenderKeyResetInFlight.keys()]) if (key.startsWith(groupPrefix)) groupSenderKeyResetInFlight.delete(key);
+    for (const key of [...groupSettingsCache.keys()]) if (key.startsWith(`${id}_`)) groupSettingsCache.delete(key);
+    for (const key of [...activeDel2UsersCache.keys()]) if (key.startsWith(`${id}_`)) activeDel2UsersCache.delete(key);
+    for (const key of [...chatHistories.keys()]) if (key.startsWith(sessionPrefix)) chatHistories.delete(key);
+    for (const key of [...chatHistoryAccessTimes.keys()]) if (key.startsWith(sessionPrefix)) chatHistoryAccessTimes.delete(key);
+    for (const key of [...msgRetryCounterCache.keys()]) if (key.startsWith(`${id}:`)) msgRetryCounterCache.delete(key);
+    for (const key of [...msgRetryCounterExpiryCache.keys()]) if (key.startsWith(`${id}:`)) msgRetryCounterExpiryCache.delete(key);
+    for (const key of [...outgoingMessageCache]) if (key.startsWith(`${id}:`)) outgoingMessageCache.delete(key);
+    for (const key of [...outgoingMessageIdCache.keys()]) if (key.startsWith(`${id}:`)) outgoingMessageIdCache.delete(key);
+    for (const key of [...outgoingTextEchoCache.keys()]) if (key.startsWith(`${id}:`)) outgoingTextEchoCache.delete(key);
+    for (let index = recentMsgsCache.length - 1; index >= 0; index--) if (recentMsgsCache[index]?.sessionId === id) recentMsgsCache.splice(index, 1);
+    for (const key of [...processedLocalCache]) if (key.startsWith(`${id}:`)) processedLocalCache.delete(key);
+    for (const key of [...signalRecoveryCounters.keys()]) if (key.startsWith(`${id}:`)) signalRecoveryCounters.delete(key);
+    for (const key of [...signalRecoveryCooldowns.keys()]) if (key.startsWith(`${id}:`)) signalRecoveryCooldowns.delete(key);
+    for (const [key, timer] of [...signalRecoveryTimers.entries()]) {
+        if (!key.startsWith(`${id}:`)) continue;
+        clearTimeout(timer);
+        signalRecoveryTimers.delete(key);
+    }
+    registeredBotAccountIdentitiesCache.loadedAt = 0;
 }
 
 function rememberLidPhonePair(sessionId, first, second, source = 'message_key') {
@@ -491,13 +715,10 @@ function rememberLidPhonePair(sessionId, first, second, source = 'message_key') 
     }
     if (!sessionId || !lid || !phone) return false;
     const sessionKey = `${sessionId}:${lid}`;
-    const globalKey = `global:${lid}`;
     const currentSessionRecord = lidPhoneResolutionCache.get(sessionKey);
-    const currentGlobalRecord = lidPhoneResolutionCache.get(globalKey);
     const trustedSessionSources = new Set(['signal_lid_mapping', 'signal_pn_lid_mapping', 'lid_mapping_update', 'message_key', 'cached_group_metadata']);
     const trustedSessionEvidence = trustedSessionSources.has(source);
     const sessionConflict = !!(currentSessionRecord?.phone && currentSessionRecord.phone !== phone);
-    const globalConflict = !!(currentGlobalRecord?.phone && currentGlobalRecord.phone !== phone);
     if (sessionConflict && !trustedSessionEvidence) {
         console.warn('[lid-phone-map-session-conflict]', {
             sessionId,
@@ -522,18 +743,6 @@ function rememberLidPhonePair(sessionId, first, second, source = 'message_key') 
         });
     }
     lidPhoneResolutionCache.set(sessionKey, record);
-    if (!globalConflict) {
-        lidPhoneResolutionCache.set(globalKey, record);
-    } else {
-        console.warn('[lid-phone-map-global-conflict]', {
-            sessionId,
-            lid,
-            existingGlobalPhone: currentGlobalRecord.phone,
-            observedSessionPhone: phone,
-            source,
-            action: 'preserve_global_mapping_and_use_session_scoped_mapping'
-        });
-    }
     while (lidPhoneResolutionCache.size > 10000) lidPhoneResolutionCache.delete(lidPhoneResolutionCache.keys().next().value);
     const persistKey = `${sessionId}:${lid}`;
     const lastPersistedAt = Number(lidPhonePersistedKeys.get(persistKey) || 0);
@@ -545,16 +754,9 @@ function rememberLidPhonePair(sessionId, first, second, source = 'message_key') 
             const scopedId = `${sessionId}:${lid}`;
             await collection.updateOne(
                 { _id: scopedId },
-                { $set: { phone, lastSessionId: sessionId, sessionId, source, updatedAt: new Date(), expireAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) }, $setOnInsert: { createdAt: new Date(), scoped: true } },
+                { $set: { phone, lastSessionId: sessionId, sessionId, source, updatedAt: new Date(), expireAt: new Date(Date.now() + LID_PHONE_MAPPING_RETENTION_MS) }, $setOnInsert: { createdAt: new Date(), scoped: true } },
                 { upsert: true }
             );
-            if (!globalConflict) {
-                await collection.updateOne(
-                    { _id: lid },
-                    { $set: { phone, lastSessionId: sessionId, source, updatedAt: new Date(), expireAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) }, $setOnInsert: { createdAt: new Date() } },
-                    { upsert: true }
-                );
-            }
             lidPhonePersistedKeys.set(persistKey, Date.now());
             while (lidPhonePersistedKeys.size > 5000) lidPhonePersistedKeys.delete(lidPhonePersistedKeys.keys().next().value);
         })().catch(error => {
@@ -569,11 +771,12 @@ function rememberLidPhonePair(sessionId, first, second, source = 'message_key') 
 function getRememberedPhoneForLid(sessionId, lidValue) {
     const lid = normalizeLidCacheKey(lidValue);
     if (!lid || !/@lid$/i.test(lid)) return '';
-    const keys = sessionId ? [`${sessionId}:${lid}`, `global:${lid}`] : [`global:${lid}`];
+    if (!sessionId) return '';
+    const keys = [`${sessionId}:${lid}`];
     for (const key of keys) {
         const record = lidPhoneResolutionCache.get(key);
         if (!record) continue;
-        if (Date.now() - record.updatedAt > 30 * 24 * 60 * 60 * 1000) {
+        if (Date.now() - record.updatedAt > LID_PHONE_MAPPING_RETENTION_MS) {
             lidPhoneResolutionCache.delete(key);
             continue;
         }
@@ -593,7 +796,7 @@ function getRememberedLidForPhone(sessionId, phoneValue) {
         for (const [key, record] of lidPhoneResolutionCache.entries()) {
             if (!key.startsWith(prefix)) continue;
             if (normalizePhoneCacheJid(record?.phone) !== phone) continue;
-            if (now - Number(record?.updatedAt || 0) > 30 * 24 * 60 * 60 * 1000) {
+            if (now - Number(record?.updatedAt || 0) > LID_PHONE_MAPPING_RETENTION_MS) {
                 lidPhoneResolutionCache.delete(key);
                 continue;
             }
@@ -603,11 +806,8 @@ function getRememberedLidForPhone(sessionId, phoneValue) {
         matches.sort((a, b) => b.updatedAt - a.updatedAt);
         return matches[0]?.lid || '';
     };
-    if (sessionPrefix) {
-        const sessionMatch = collect(sessionPrefix);
-        if (sessionMatch) return sessionMatch;
-    }
-    return collect('global:');
+    if (!sessionPrefix) return '';
+    return collect(sessionPrefix);
 }
 
 function phoneFromCachedGroupMetadata(sessionId, lidValue) {
@@ -731,21 +931,16 @@ async function resolvePhoneForLid(sessionId, sock, lidValue) {
     } catch (error) {
         console.warn('[lid-phone-socket-resolution-failed]', { sessionId, lid, error: error?.message || String(error) });
     }
-    if (cached) {
-        const globalRecord = lidPhoneResolutionCache.get(`global:${lid}`);
-        return { phone: cached, source: sessionRecord?.source || globalRecord?.source || 'lid_phone_cache' };
-    }
+    if (cached) return { phone: cached, source: sessionRecord?.source || 'session_lid_phone_cache' };
     const groupMetadataResolution = phoneFromCachedGroupMetadata(sessionId, lid);
     if (groupMetadataResolution?.phone) return groupMetadataResolution;
     if (db) {
         try {
-            const scopedRecord = await promiseWithTimeout(db.collection('lid_phone_mappings').findOne({ _id: `${sessionId}:${lid}` }, { projection: { phone: 1, source: 1 } }), 1500, 'session-scoped LID-to-PN database lookup');
-            const legacyRecord = scopedRecord ? null : await promiseWithTimeout(db.collection('lid_phone_mappings').findOne({ _id: lid }, { projection: { phone: 1, source: 1 } }), 1500, 'LID-to-PN database lookup');
-            const record = scopedRecord || legacyRecord;
-            const persistedPhone = normalizePhoneCacheJid(record?.phone || '');
+            const scopedRecord = await promiseWithTimeout(db.collection('lid_phone_mappings').findOne({ _id: `${sessionId}:${lid}`, sessionId }, { projection: { phone: 1, source: 1 } }), 1500, 'session-scoped LID-to-PN database lookup');
+            const persistedPhone = normalizePhoneCacheJid(scopedRecord?.phone || '');
             if (persistedPhone) {
-                rememberLidPhonePair(sessionId, lid, persistedPhone, record?.source || 'mongo_lid_phone_mapping');
-                return { phone: persistedPhone, source: scopedRecord ? 'mongo_session_lid_phone_mapping' : 'mongo_lid_phone_mapping' };
+                rememberLidPhonePair(sessionId, lid, persistedPhone, scopedRecord?.source || 'mongo_session_lid_phone_mapping');
+                return { phone: persistedPhone, source: 'mongo_session_lid_phone_mapping' };
             }
         } catch (error) {
             console.warn('[lid-phone-database-resolution-failed]', { sessionId, lid, error: error?.message || String(error) });
@@ -771,7 +966,7 @@ async function resolveLidForPhone(sessionId, sock, phoneValue) {
     } catch (error) {
         console.warn('[pn-lid-socket-resolution-failed]', { sessionId, phone, error: error?.message || String(error) });
     }
-    return /@lid$/i.test(remembered) ? { lid: remembered, source: 'session_or_global_lid_cache' } : null;
+    return /@lid$/i.test(remembered) ? { lid: remembered, source: 'session_lid_cache' } : null;
 }
 
 function cacheMessageIdentityAliases(sessionId, message) {
@@ -886,6 +1081,13 @@ function cacheRecentMessage(sessionId, message) {
         ts: Number(message.messageTimestamp) || Math.floor(Date.now() / 1000),
         message: message.message
     };
+    const now = Date.now();
+    for (let index = recentMsgsCache.length - 1; index >= 0; index--) {
+        const cached = recentMsgsCache[index];
+        const cachedAt = Number(cached?.cachedAt || 0);
+        if (!cachedAt || now - cachedAt > RECENT_MESSAGE_MEMORY_TTL_MS) recentMsgsCache.splice(index, 1);
+    }
+    entry.cachedAt = now;
     const existingIndex = recentMsgsCache.findIndex(item => item.sessionId === sessionId && item.id === id);
     if (existingIndex >= 0) recentMsgsCache.splice(existingIndex, 1);
     recentMsgsCache.push(entry);
@@ -942,7 +1144,31 @@ function normalizeConnectionFormat(value, fallback = 'pair') {
 }
 
 function normalizedJidNumber(value) {
-    return normalizePhoneNumber(String(value || '').split('@')[0].split(':')[0]);
+    const raw = String(value || '').trim();
+    if (!raw || /@lid$/i.test(raw) || /@(?:g\.us|newsletter|broadcast|s\.whatsapp\.net-status)$/i.test(raw)) return '';
+    if (raw.includes('@') && !/@(?:s\.whatsapp\.net|c\.us)$/i.test(raw)) return '';
+    return normalizePhoneNumber(raw.split('@')[0].split(':')[0]);
+}
+
+function getAuthenticatedPhoneNumber(user, creds) {
+    const candidates = [user?.phoneNumber, user?.id, creds?.me?.id];
+    for (const candidate of candidates) {
+        const raw = String(candidate || '').trim();
+        if (!raw || /@lid$/i.test(raw)) continue;
+        if (raw.includes('@') && !/@(?:s\.whatsapp\.net|c\.us)$/i.test(raw)) continue;
+        const number = normalizedJidNumber(raw);
+        if (/^\d{6,20}$/.test(number)) return number;
+    }
+    return '';
+}
+
+function getAuthenticatedLid(user, creds) {
+    const candidates = [user?.lid, creds?.me?.lid, /@lid$/i.test(String(creds?.me?.id || '').trim()) ? creds.me.id : '', /@lid$/i.test(String(user?.id || '').trim()) ? user.id : ''];
+    for (const candidate of candidates) {
+        const lid = normalizeLidCacheKey(candidate);
+        if (/@lid$/i.test(lid)) return lid;
+    }
+    return '';
 }
 
 function normalizeOutgoingEchoJid(value) {
@@ -965,7 +1191,7 @@ function areEquivalentWhatsAppChatJids(sessionId, first, second) {
 }
 
 
-async function invalidateSenderKeyMemoryForParticipant(sessionId, participantJid, reason = 'identity_change') {
+async function invalidateSenderKeyMemoryForParticipant(sessionId, participantJid, reason = 'identity_change', onlyGroupJid = '') {
     const normalizedParticipant = normalizeOutgoingEchoJid(participantJid);
     if (!sessionId || !normalizedParticipant || !db) return { scanned: 0, changed: 0, removed: 0 };
     const active = activeSessions.get(sessionId);
@@ -979,23 +1205,27 @@ async function invalidateSenderKeyMemoryForParticipant(sessionId, participantJid
     const prefix = `auth-${sessionId}_key_sender-key-memory-`;
     const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const groupIds = new Set();
-    try {
-        const docs = await db.collection('baileys_auth').find(
-            { _id: { $regex: `^${escapedPrefix}` } },
-            { projection: { _id: 1 } }
-        ).limit(2000).toArray();
-        for (const doc of docs) {
-            const groupJid = String(doc?._id || '').slice(prefix.length);
+    if (onlyGroupJid && /@g\.us$/i.test(String(onlyGroupJid))) {
+        groupIds.add(String(onlyGroupJid));
+    } else {
+        try {
+            const docs = await db.collection('baileys_auth').find(
+                { _id: { $regex: `^${escapedPrefix}` } },
+                { projection: { _id: 1 } }
+            ).limit(2000).toArray();
+            for (const doc of docs) {
+                const groupJid = String(doc?._id || '').slice(prefix.length);
+                if (/@g\.us$/i.test(groupJid)) groupIds.add(groupJid);
+            }
+        } catch (error) {
+            console.warn('[sender-key-memory-enumeration-failed]', { sessionId, error: error?.message || String(error) });
+        }
+        const groupPrefix = `${sessionId}:`;
+        for (const cacheKey of groupMetadataCache.keys()) {
+            if (!cacheKey.startsWith(groupPrefix)) continue;
+            const groupJid = cacheKey.slice(groupPrefix.length);
             if (/@g\.us$/i.test(groupJid)) groupIds.add(groupJid);
         }
-    } catch (error) {
-        console.warn('[sender-key-memory-enumeration-failed]', { sessionId, error: error?.message || String(error) });
-    }
-    const groupPrefix = `${sessionId}:`;
-    for (const cacheKey of groupMetadataCache.keys()) {
-        if (!cacheKey.startsWith(groupPrefix)) continue;
-        const groupJid = cacheKey.slice(groupPrefix.length);
-        if (/@g\.us$/i.test(groupJid)) groupIds.add(groupJid);
     }
     let changedGroups = 0;
     let removedEntries = 0;
@@ -1072,7 +1302,7 @@ async function resetSessionGroupSenderKeyMemory(sessionId, reason = 'group_membe
     for (const groupJid of groupIds) {
         try {
             await promiseWithTimeout(keyStore.set({ 'sender-key-memory': { [groupJid]: null } }), 8000, 'Reset group sender-key memory');
-            groupSenderKeyResetAt.set(`${sessionId}:${groupJid}`, Date.now());
+            setBoundedMapEntry(groupSenderKeyResetAt, `${sessionId}:${groupJid}`, Date.now(), 5000);
             resetCount++;
         } catch (error) {
             console.warn('[sender-key-memory-group-reset-failed]', { sessionId, groupJid, reason, error: error?.message || String(error) });
@@ -1101,7 +1331,7 @@ async function resetGroupSenderKeyMemoryBeforeSend(sessionId, groupJid) {
         try {
             await promiseWithTimeout(keyStore.set({ 'sender-key-memory': { [normalizedGroupJid]: null } }), 8000, 'Initial group sender-key memory reset');
             await flushAuthWritesForSession(sessionId);
-            groupSenderKeyResetAt.set(cacheKey, Date.now());
+            setBoundedMapEntry(groupSenderKeyResetAt, cacheKey, Date.now(), 5000);
             while (groupSenderKeyResetAt.size > 10000) groupSenderKeyResetAt.delete(groupSenderKeyResetAt.keys().next().value);
             console.info(GROUP_SENDER_KEY_RESET_EVERY_SEND ? '[group-sender-key-memory-reset-before-every-send]' : '[group-sender-key-memory-cooldown-reset]', {
                 sessionId,
@@ -1356,9 +1586,11 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                     }
                     if (!retryTargetJid && db) {
                         try {
-                            const mappedRecord = await db.collection('lid_phone_mappings').findOne({ phone: normalizePhoneCacheJid(destinationJid) }, { projection: { _id: 1, phone: 1 } });
-                            const rememberedLid = normalizeLidCacheKey(mappedRecord?._id || '');
-                            if (rememberedLid && /@lid$/i.test(rememberedLid)) retryTargetJid = rememberedLid;
+                            const mappedRecord = await db.collection('lid_phone_mappings').findOne({ sessionId, phone: normalizePhoneCacheJid(destinationJid) }, { projection: { _id: 1, phone: 1, sessionId: 1 } });
+                            const scopedPrefix = `${sessionId}:`;
+                            const mappedId = String(mappedRecord?._id || '');
+                            const rememberedLid = mappedId.startsWith(scopedPrefix) ? normalizeLidCacheKey(mappedId.slice(scopedPrefix.length)) : '';
+                            if (mappedRecord?.sessionId === sessionId && rememberedLid && /@lid$/i.test(rememberedLid)) retryTargetJid = rememberedLid;
                         } catch (resolveError) {
                             console.warn('[private-send-reverse-lid-resolution-failed]', { sessionId, destinationJid, error: resolveError?.message || String(resolveError) });
                         }
@@ -1475,19 +1707,32 @@ async function connectMongo() {
         await db.collection('processed_messages').createIndex({ ts: 1 });
         await db.collection('processed_messages').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'processed_messages_expire_at_ttl' });
         await db.collection('baileys_outgoing_messages').createIndex({ createdAt: 1 }, { expireAfterSeconds: BAILEYS_RETRY_MESSAGE_TTL_SECONDS, name: 'baileys_retry_message_ttl' });
-        await db.collection('baileys_outgoing_messages').createIndex({ sessionId: 1, remoteJid: 1, messageId: 1 }, { name: 'baileys_retry_message_lookup' });
-        await db.collection('baileys_outgoing_messages').createIndex({ accountPhone: 1, messageId: 1, createdAt: -1 }, { name: 'baileys_retry_message_account_lookup' });
         await db.collection('lid_phone_mappings').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'lid_phone_mappings_expire_at_ttl' });
-        await db.collection('lid_phone_mappings').createIndex({ phone: 1 }, { name: 'lid_phone_mappings_phone_lookup' });
+        await db.collection('lid_phone_mappings').createIndex({ sessionId: 1, phone: 1 }, { name: 'lid_phone_mappings_session_phone_lookup' });
         await db.collection('user_preferences').createIndex({ sessionId: 1, sender: 1 }, { name: 'user_preferences_session_sender' });
         await db.collection('user_preferences').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'user_preferences_expire_at_ttl' });
         await db.collection('group_del2').createIndex({ sessionId: 1, gjid: 1, targetJid: 1 });
+        await db.collection('session_runtime_locks').createIndex({ leaseUntil: 1 }, { expireAfterSeconds: 0, name: 'session_runtime_locks_lease_ttl' });
+        await db.collection('session_account_runtime_locks').createIndex({ leaseUntil: 1 }, { expireAfterSeconds: 0, name: 'session_account_runtime_locks_lease_ttl' });
+        for (const [collectionName, indexName] of [
+            ['baileys_outgoing_messages', 'baileys_retry_message_lookup'],
+            ['baileys_outgoing_messages', 'baileys_retry_message_account_lookup'],
+            ['session_owners', 'session_owners_account_number_lookup'],
+            ['lid_phone_mappings', 'lid_phone_mappings_phone_lookup']
+        ]) {
+            try { await db.collection(collectionName).dropIndex(indexName); } catch (indexDropError) {
+                if (indexDropError?.codeName !== 'IndexNotFound' && indexDropError?.code !== 27) console.warn('[obsolete-index-cleanup-skipped]', { collectionName, indexName, error: indexDropError?.message || String(indexDropError) });
+            }
+        }
+        await db.collection('session_owners').createIndex({ Number: 1 }, { name: 'session_owners_account_number_lookup' });
+        await db.collection('session_owners').createIndex({ OwnerLid: 1 }, { name: 'session_owners_owner_lid_lookup' });
         try {
             const oldThreshold = Date.now() - PROCESSED_MESSAGE_RETENTION_MS;
             await db.collection('processed_messages').deleteMany({ ts: { $lt: oldThreshold }, expireAt: { $exists: false } });
-            const preferenceThreshold = Date.now() - 30 * 24 * 60 * 60 * 1000;
+            const preferenceThreshold = Date.now() - SESSION_PROFILE_RETENTION_MS;
             await db.collection('user_preferences').deleteMany({ updatedAt: { $type: 'number', $lt: preferenceThreshold }, expireAt: { $exists: false } });
-            await db.collection('lid_phone_mappings').deleteMany({ updatedAt: { $lt: new Date(preferenceThreshold) }, expireAt: { $exists: false } });
+            await db.collection('lid_phone_mappings').deleteMany({ updatedAt: { $lt: new Date(Date.now() - LID_PHONE_MAPPING_RETENTION_MS) } });
+            await db.collection('lid_phone_mappings').deleteMany({ sessionId: { $exists: false } });
         } catch (retentionCleanupError) {
             console.warn('[mongo-retention-initial-cleanup-failed]', retentionCleanupError?.message || String(retentionCleanupError));
         }
@@ -1524,153 +1769,413 @@ function fixBuffers(obj) {
     return obj;
 }
 
+async function assertSessionRuntimeOwnership(sessionId) {
+    if (sessionFenceClosureInFlight.has(sessionId)) throw new Error('session_runtime_lock_fenced');
+    const token = sessionRuntimeLockTokens.get(sessionId);
+    if (!token || !db) throw new Error('session_runtime_lock_missing');
+    const now = Date.now();
+    const sessionLock = await db.collection('session_runtime_locks').findOne(
+        { _id: sessionId, owner: processInstanceId, lockToken: token, leaseUntil: { $gt: new Date(now) } },
+        { projection: { leaseUntil: 1 } }
+    );
+    if (!sessionLock) throw new Error('session_runtime_lock_lost');
+    sessionRuntimeLockLeaseUntil.set(sessionId, new Date(sessionLock.leaseUntil).getTime());
+    const accountEntries = sessionAccountRuntimeLockEntries.get(sessionId) || (() => {
+        const accountKey = sessionAccountRuntimeLocks.get(sessionId);
+        const accountToken = sessionAccountRuntimeLockTokens.get(sessionId);
+        return accountKey && accountToken ? [{ key: accountKey, token: accountToken }] : [];
+    })();
+    let minimumAccountLease = Number.POSITIVE_INFINITY;
+    const activeForOwnership = activeSessions.get(sessionId);
+    if (activeForOwnership?.sock) {
+        const livePhone = getAuthenticatedPhoneNumber(activeForOwnership.sock.user, activeForOwnership.authState?.creds);
+        const liveLid = getAuthenticatedLid(activeForOwnership.sock.user, activeForOwnership.authState?.creds);
+        if ((livePhone || liveLid) && !sessionHasAccountRuntimeLocks(sessionId, [livePhone, liveLid])) throw new Error('account_runtime_lock_missing_or_incomplete');
+    }
+    for (const entry of accountEntries) {
+        if (!entry?.key || !entry?.token) throw new Error('account_runtime_lock_missing');
+        const accountLock = await db.collection('session_account_runtime_locks').findOne(
+            { _id: entry.key, owner: processInstanceId, sessionId, lockToken: entry.token, leaseUntil: { $gt: new Date(now) } },
+            { projection: { leaseUntil: 1 } }
+        );
+        if (!accountLock) throw new Error('account_runtime_lock_lost');
+        minimumAccountLease = Math.min(minimumAccountLease, new Date(accountLock.leaseUntil).getTime());
+    }
+    if (Number.isFinite(minimumAccountLease)) sessionAccountRuntimeLockLeaseUntil.set(sessionId, minimumAccountLease);
+    return true;
+}
+
+async function closeSessionSocketWithoutAuthFlush(sessionId, reason) {
+    if (!sessionId || sessionFenceClosureInFlight.has(sessionId)) return false;
+    sessionFenceClosureInFlight.add(sessionId);
+    const active = activeSessions.get(sessionId) || null;
+    const oldSocket = active?.sock || null;
+    const oldFormat = active?.format || 'pair';
+    try {
+        if (active && activeSessions.get(sessionId) === active) {
+            active.status = 'deconnecte';
+            active.disconnectTime = Date.now();
+            active.sock = null;
+            active.runtimeLockLostReason = String(reason || 'runtime_lock_lost').slice(0, 120);
+        }
+        if (oldSocket) {
+            try { oldSocket.ev.removeAllListeners(); } catch (e) {}
+            const ws = oldSocket.ws;
+            if (ws && ws.readyState !== 3) {
+                await new Promise(resolve => {
+                    let settled = false;
+                    const finish = () => {
+                        if (settled) return;
+                        settled = true;
+                        clearTimeout(timer);
+                        try { ws.removeListener('close', finish); } catch (e) {}
+                        resolve();
+                    };
+                    const timer = setTimeout(finish, 2500);
+                    if (typeof timer.unref === 'function') timer.unref();
+                    try { ws.once('close', finish); } catch (e) {}
+                    try { ws.close(); } catch (e) { finish(); }
+                });
+            }
+        }
+        console.error('[session-socket-fenced]', { sessionId, reason, authStatePreserved: true, staleAuthWritesBlocked: true, retryScheduled: !serverShuttingDown });
+        await releaseSessionRuntimeLock(sessionId);
+    } finally {
+        sessionFenceClosureInFlight.delete(sessionId);
+    }
+    if (!serverShuttingDown && activeSessions.has(sessionId)) scheduleSessionLockRetry(sessionId, false, oldFormat);
+    return true;
+}
+
 async function acquireSessionRuntimeLock(sessionId) {
     if (!db) throw new Error('mongo_not_connected');
     const now = new Date();
+    const currentToken = sessionRuntimeLockTokens.get(sessionId);
+    if (!currentToken) {
+        const activeWithoutToken = activeSessions.get(sessionId);
+        if (activeWithoutToken?.sock) {
+            await closeSessionSocketWithoutAuthFlush(sessionId, 'active_socket_missing_session_fencing_token');
+            return false;
+        }
+    }
+    if (currentToken) {
+        const existing = await db.collection('session_runtime_locks').findOne(
+            { _id: sessionId, owner: processInstanceId, lockToken: currentToken, leaseUntil: { $gt: now } },
+            { projection: { leaseUntil: 1 } }
+        ).catch(() => null);
+        if (existing) {
+            const leaseUntil = new Date(Date.now() + SESSION_RUNTIME_LOCK_LEASE_MS);
+            const renewed = await db.collection('session_runtime_locks').updateOne(
+                { _id: sessionId, owner: processInstanceId, lockToken: currentToken },
+                { $set: { leaseUntil, updatedAt: new Date() } }
+            );
+            if (renewed.matchedCount === 1) {
+                sessionRuntimeLockLeaseUntil.set(sessionId, leaseUntil.getTime());
+                return true;
+            }
+        }
+        const oldTimer = sessionRuntimeLockTimers.get(sessionId);
+        if (oldTimer) clearInterval(oldTimer);
+        sessionRuntimeLockTimers.delete(sessionId);
+        const currentSession = activeSessions.get(sessionId);
+        if (currentSession?.sock) {
+            await closeSessionSocketWithoutAuthFlush(sessionId, 'session_lock_token_unverifiable_during_reacquire');
+            return false;
+        }
+        sessionRuntimeLockTokens.delete(sessionId);
+        sessionRuntimeLockLeaseUntil.delete(sessionId);
+    }
+    if (sessionFenceClosureInFlight.has(sessionId)) return false;
+    const lockToken = crypto.randomUUID();
+    const leaseUntil = new Date(Date.now() + SESSION_RUNTIME_LOCK_LEASE_MS);
     try {
         const result = await db.collection('session_runtime_locks').updateOne(
-            { _id: sessionId, $or: [{ owner: processInstanceId }, { leaseUntil: { $lte: now } }, { leaseUntil: { $exists: false } }] },
-            { $set: { owner: processInstanceId, leaseUntil: new Date(Date.now() + SESSION_RUNTIME_LOCK_LEASE_MS), updatedAt: now } },
+            { _id: sessionId, $or: [{ leaseUntil: { $lte: now } }, { leaseUntil: { $exists: false } }] },
+            { $set: { owner: processInstanceId, lockToken, leaseUntil, updatedAt: now, acquiredAt: now } },
             { upsert: true }
         );
         if (result.matchedCount !== 1 && result.upsertedCount !== 1) return false;
-        if (!sessionRuntimeLockTimers.has(sessionId)) {
-            let failures = 0;
-            const timer = setInterval(async () => {
-                try {
-                    const heartbeat = await db.collection('session_runtime_locks').updateOne(
-                        { _id: sessionId, owner: processInstanceId },
-                        { $set: { leaseUntil: new Date(Date.now() + SESSION_RUNTIME_LOCK_LEASE_MS), updatedAt: new Date() } }
-                    );
-                    if (heartbeat.matchedCount === 1) {
-                        failures = 0;
-                        return;
-                    }
-                    clearInterval(timer);
-                    sessionRuntimeLockTimers.delete(sessionId);
-                    const active = activeSessions.get(sessionId);
-                    if (active?.sock) {
-                        active.status = 'runtime_lock_lost';
-                        try { active.sock.ev.removeAllListeners(); } catch (e) {}
-                        try { if (active.sock.ws) active.sock.ws.close(); } catch (e) {}
-                        active.sock = null;
-                    }
-                    await flushAuthWritesForSession(sessionId).catch(error => console.warn('[signal-auth-store-flush-on-lock-loss-failed]', { sessionId, error: error?.message || String(error) }));
-                    activeSessions.delete(sessionId);
-                    console.error('[session-runtime-lock-lost]', { sessionId, action: 'socket_closed_without_deleting_auth' });
-                } catch (error) {
-                    failures++;
-                    console.warn('[session-runtime-lock-heartbeat-failed]', { sessionId, failures, error: error?.message || String(error) });
-                    if (failures >= 3) {
-                        clearInterval(timer);
-                        sessionRuntimeLockTimers.delete(sessionId);
-                        const active = activeSessions.get(sessionId);
-                        if (active?.sock) {
-                            active.status = 'runtime_lock_unverified';
-                            try { active.sock.ev.removeAllListeners(); } catch (e) {}
-                            try { if (active.sock.ws) active.sock.ws.close(); } catch (e) {}
-                            active.sock = null;
-                        }
-                        await flushAuthWritesForSession(sessionId).catch(error => console.warn('[signal-auth-store-flush-on-lock-loss-failed]', { sessionId, error: error?.message || String(error) }));
-                        activeSessions.delete(sessionId);
-                        console.error('[session-runtime-lock-unverified]', { sessionId, action: 'socket_closed_to_prevent_concurrent_signal_state' });
-                    }
-                }
-            }, SESSION_RUNTIME_LOCK_RENEW_MS);
-            if (typeof timer.unref === 'function') timer.unref();
-            sessionRuntimeLockTimers.set(sessionId, timer);
-        }
-        return true;
     } catch (error) {
-        if (error?.code === 11000) return false;
-        throw error;
+        if (error?.code !== 11000) throw error;
+        return false;
     }
+    sessionRuntimeLockTokens.set(sessionId, lockToken);
+    sessionRuntimeLockLeaseUntil.set(sessionId, leaseUntil.getTime());
+    if (!sessionRuntimeLockTimers.has(sessionId)) {
+        let failures = 0;
+        let heartbeatRunning = false;
+        let timer;
+        timer = setInterval(async () => {
+            if (heartbeatRunning || serverShuttingDown) return;
+            heartbeatRunning = true;
+            try {
+                const nextLease = new Date(Date.now() + SESSION_RUNTIME_LOCK_LEASE_MS);
+                const heartbeat = await db.collection('session_runtime_locks').updateOne(
+                    { _id: sessionId, owner: processInstanceId, lockToken },
+                    { $set: { leaseUntil: nextLease, updatedAt: new Date() } }
+                );
+                if (heartbeat.matchedCount === 1) {
+                    failures = 0;
+                    sessionRuntimeLockLeaseUntil.set(sessionId, nextLease.getTime());
+                    return;
+                }
+                await closeSessionSocketWithoutAuthFlush(sessionId, 'session_lock_owned_by_another_runtime');
+            } catch (error) {
+                failures++;
+                console.warn('[session-runtime-lock-heartbeat-failed]', { sessionId, failures, error: error?.message || String(error) });
+                if (failures >= 3) await closeSessionSocketWithoutAuthFlush(sessionId, 'session_lock_heartbeat_unverified');
+            } finally {
+                heartbeatRunning = false;
+            }
+        }, SESSION_RUNTIME_LOCK_RENEW_MS);
+        if (typeof timer.unref === 'function') timer.unref();
+        sessionRuntimeLockTimers.set(sessionId, timer);
+    }
+    console.info('[session-runtime-lock-acquired]', { sessionId, processInstanceId, leaseMs: SESSION_RUNTIME_LOCK_LEASE_MS, fencingToken: shortLogHash(lockToken) });
+    return true;
+}
+
+function normalizeAccountRuntimeLockKey(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const number = normalizePhoneNumber(raw);
+    if (/^\d{6,20}$/.test(number) && (!raw.includes('@') || /@s\.whatsapp\.net$|@c\.us$/i.test(raw))) return number;
+    const lid = normalizeLidCacheKey(raw);
+    if (/@lid$/i.test(lid)) return `lid:${lid}`;
+    return '';
+}
+
+function getAccountRuntimeLockKeys(...identities) {
+    return [...new Set(identities.flat().map(normalizeAccountRuntimeLockKey).filter(Boolean))].sort();
+}
+
+function sessionHasAccountRuntimeLocks(sessionId, identities) {
+    const required = getAccountRuntimeLockKeys(identities || []);
+    if (!required.length) return true;
+    const heldEntries = sessionAccountRuntimeLockEntries.get(sessionId) || (() => {
+        const key = sessionAccountRuntimeLocks.get(sessionId);
+        const token = sessionAccountRuntimeLockTokens.get(sessionId);
+        return key && token ? [{ key, token }] : [];
+    })();
+    const held = new Set(heldEntries.map(entry => entry.key));
+    return required.every(key => held.has(key));
 }
 
 async function releaseAccountRuntimeLock(sessionId) {
     const timer = accountRuntimeLockTimers.get(sessionId);
     if (timer) clearInterval(timer);
     accountRuntimeLockTimers.delete(sessionId);
-    const accountPhone = sessionAccountRuntimeLocks.get(sessionId);
+    const entries = sessionAccountRuntimeLockEntries.get(sessionId) || (() => {
+        const key = sessionAccountRuntimeLocks.get(sessionId);
+        const token = sessionAccountRuntimeLockTokens.get(sessionId);
+        return key && token ? [{ key, token }] : [];
+    })();
+    sessionAccountRuntimeLockEntries.delete(sessionId);
     sessionAccountRuntimeLocks.delete(sessionId);
-    if (!db || !accountPhone) return;
-    try {
-        await db.collection('session_account_runtime_locks').deleteOne({ _id: accountPhone, owner: processInstanceId, sessionId });
-        console.info('[session-account-runtime-lock-released]', { sessionId, accountPhone });
-    } catch (error) {
-        console.warn('[session-account-runtime-lock-release-failed]', { sessionId, accountPhone, error: error?.message || String(error) });
+    sessionAccountRuntimeLockTokens.delete(sessionId);
+    sessionAccountRuntimeLockLeaseUntil.delete(sessionId);
+    if (!db || !entries.length) return;
+    for (const entry of entries) {
+        if (!entry?.key || !entry?.token) {
+            console.warn('[session-account-runtime-lock-release-skipped]', { sessionId, accountKey: entry?.key || null, reason: 'missing_fencing_token_leave_record_to_expire' });
+            continue;
+        }
+        try {
+            await db.collection('session_account_runtime_locks').deleteOne({
+                _id: entry.key,
+                owner: processInstanceId,
+                sessionId,
+                lockToken: entry.token
+            });
+            console.info('[session-account-runtime-lock-released]', { sessionId, accountKey: entry.key });
+        } catch (error) {
+            console.warn('[session-account-runtime-lock-release-failed]', { sessionId, accountKey: entry.key, error: error?.message || String(error) });
+        }
     }
 }
 
-async function acquireAccountRuntimeLock(sessionId, phoneValue) {
-    const accountPhone = normalizePhoneNumber(phoneValue);
-    if (!accountPhone) return { acquired: true, accountPhone: null, reason: 'account_phone_unavailable' };
-    if (!db) throw new Error('mongo_not_connected');
-    const now = new Date();
-    let result;
+async function expandAccountRuntimeLockAliases(sessionId, identityValues = []) {
+    const values = [...new Set((Array.isArray(identityValues) ? identityValues.flat(Infinity) : [identityValues]).map(value => String(value || '').trim()).filter(Boolean))];
+    const phones = [...new Set(values.map(value => {
+        const raw = String(value || '').trim();
+        if (/@/i.test(raw)) return normalizePhoneCacheJid(raw);
+        const number = normalizePhoneNumber(raw);
+        return /^\d{6,20}$/.test(number) ? `${number}@s.whatsapp.net` : '';
+    }).filter(Boolean))];
+    const lids = [...new Set(values.map(normalizeLidCacheKey).filter(value => /@lid$/i.test(value)))];
+    if (!db || (!phones.length && !lids.length)) return values;
+    const clauses = [];
+    for (const phoneJid of phones) {
+        const phone = normalizedJidNumber(phoneJid);
+        if (!phone) continue;
+        clauses.push({ Number: phone }, { number: phone }, { AccountJid: phoneJid }, { accountJid: phoneJid });
+    }
+    for (const lid of lids) clauses.push({ OwnerLid: lid }, { ownerLid: lid }, { AccountJid: lid }, { accountJid: lid });
+    if (!clauses.length) return values;
     try {
-        result = await db.collection('session_account_runtime_locks').updateOne(
-            { _id: accountPhone, $or: [{ owner: processInstanceId, sessionId }, { leaseUntil: { $lte: now } }, { leaseUntil: { $exists: false } }] },
-            { $set: { owner: processInstanceId, sessionId, leaseUntil: new Date(Date.now() + SESSION_RUNTIME_LOCK_LEASE_MS), updatedAt: now } },
-            { upsert: true }
-        );
-    } catch (error) {
-        if (error?.code !== 11000) throw error;
-        const holder = await db.collection('session_account_runtime_locks').findOne({ _id: accountPhone }, { projection: { owner: 1, sessionId: 1, leaseUntil: 1 } }).catch(() => null);
-        return { acquired: false, accountPhone, holderSessionId: holder?.sessionId || null, holderOwner: holder?.owner || null, leaseUntil: holder?.leaseUntil || null };
-    }
-    if (result.matchedCount !== 1 && result.upsertedCount !== 1) {
-        const holder = await db.collection('session_account_runtime_locks').findOne({ _id: accountPhone }, { projection: { owner: 1, sessionId: 1, leaseUntil: 1 } }).catch(() => null);
-        return { acquired: false, accountPhone, holderSessionId: holder?.sessionId || null, holderOwner: holder?.owner || null, leaseUntil: holder?.leaseUntil || null };
-    }
-    sessionAccountRuntimeLocks.set(sessionId, accountPhone);
-    if (!accountRuntimeLockTimers.has(sessionId)) {
-        let failures = 0;
-        let heartbeatRunning = false;
-        let timer;
-        const stopSocketForLockLoss = async (reason, error = null) => {
-            if (accountRuntimeLockTimers.get(sessionId) !== timer) return;
-            clearInterval(timer);
-            accountRuntimeLockTimers.delete(sessionId);
-            console.error('[session-account-runtime-lock-lost]', { sessionId, accountPhone, reason, error: error?.message || null, action: 'socket_closed_to_prevent_same_account_concurrency' });
-            const active = activeSessions.get(sessionId);
-            if (active?.sock) {
-                active.status = 'account_runtime_lock_lost';
-                active.disconnectTime = Date.now();
-                try { active.sock.ev.removeAllListeners(); } catch (e) {}
-                try { if (active.sock.ws) active.sock.ws.close(); } catch (e) {}
-                active.sock = null;
+        const records = await db.collection('session_owners').find(
+            { sessionId: { $ne: sessionId }, $or: clauses },
+            { projection: { Number: 1, number: 1, OwnerLid: 1, ownerLid: 1, AccountJid: 1, accountJid: 1 } }
+        ).limit(100).toArray();
+        for (const record of records) {
+            for (const candidate of [record?.Number, record?.number, record?.OwnerLid, record?.ownerLid, record?.AccountJid, record?.accountJid]) {
+                const candidateValue = String(candidate || '').trim();
+                if (candidateValue) values.push(candidateValue);
             }
-            await flushAuthWritesForSession(sessionId).catch(flushError => console.warn('[signal-auth-store-flush-on-account-lock-loss-failed]', { sessionId, error: flushError?.message || String(flushError) }));
-            activeSessions.delete(sessionId);
-            await releaseSessionRuntimeLock(sessionId);
-        };
-        timer = setInterval(async () => {
-            if (heartbeatRunning || serverShuttingDown) return;
-            heartbeatRunning = true;
-            try {
+        }
+        const mappingClauses = [];
+        if (phones.length) mappingClauses.push({ phone: { $in: phones } });
+        for (const lid of lids) {
+            const escapedLid = lid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            mappingClauses.push({ _id: { $regex: `:${escapedLid}$` } });
+        }
+        let mappingCount = 0;
+        if (mappingClauses.length) {
+            const mappings = await db.collection('lid_phone_mappings').find(
+                { expireAt: { $gt: new Date() }, $or: mappingClauses },
+                { projection: { _id: 1, phone: 1, sessionId: 1 } }
+            ).limit(200).toArray();
+            mappingCount = mappings.length;
+            for (const mapping of mappings) {
+                const phone = normalizePhoneCacheJid(mapping?.phone || '');
+                const mappingId = String(mapping?._id || '');
+                const separatorIndex = mappingId.lastIndexOf(':');
+                const lid = separatorIndex >= 0 ? normalizeLidCacheKey(mappingId.slice(separatorIndex + 1)) : '';
+                if (phone) values.push(phone);
+                if (/@lid$/i.test(lid)) values.push(lid);
+            }
+        }
+        console.info('[account-runtime-lock-aliases-expanded]', { sessionId, inputIdentityCount: phones.length + lids.length, matchedSessionRecords: records.length, matchedActiveLidMappings: mappingCount, lockIdentityCount: getAccountRuntimeLockKeys(values).length, sessionScopedMappingsUsedOnlyForAccountExclusivity: true });
+    } catch (error) {
+        console.warn('[account-runtime-lock-alias-expansion-failed]', { sessionId, error: error?.message || String(error), action: 'use_only_live_authenticated_identity_aliases' });
+    }
+    return [...new Set(values)];
+}
+
+async function acquireAccountRuntimeLock(sessionId, identityValue, identityAliases = []) {
+    const requestedKeys = getAccountRuntimeLockKeys(identityValue, identityAliases);
+    if (!requestedKeys.length) return { acquired: true, accountPhone: null, accountKeys: [], reason: 'account_identity_unavailable' };
+    if (!db) throw new Error('mongo_not_connected');
+
+    const previousEntries = sessionAccountRuntimeLockEntries.get(sessionId) || (() => {
+        const key = sessionAccountRuntimeLocks.get(sessionId);
+        const token = sessionAccountRuntimeLockTokens.get(sessionId);
+        return key && token ? [{ key, token }] : [];
+    })();
+    const previousByKey = new Map(previousEntries.map(entry => [entry.key, entry]));
+    const acquiredEntries = [];
+    const newlyAcquired = [];
+    const now = new Date();
+    const leaseUntil = new Date(Date.now() + SESSION_RUNTIME_LOCK_LEASE_MS);
+
+    const releaseNewlyAcquired = async () => {
+        for (const entry of newlyAcquired) {
+            await db.collection('session_account_runtime_locks').deleteOne({
+                _id: entry.key,
+                owner: processInstanceId,
+                sessionId,
+                lockToken: entry.token
+            }).catch(() => {});
+        }
+    };
+
+    for (const accountKey of requestedKeys) {
+        const previous = previousByKey.get(accountKey);
+        if (previous?.token) {
+            const existing = await db.collection('session_account_runtime_locks').findOne(
+                { _id: accountKey, owner: processInstanceId, sessionId, lockToken: previous.token, leaseUntil: { $gt: now } },
+                { projection: { leaseUntil: 1 } }
+            ).catch(() => null);
+            if (existing) {
+                const renewed = await db.collection('session_account_runtime_locks').updateOne(
+                    { _id: accountKey, owner: processInstanceId, sessionId, lockToken: previous.token, leaseUntil: { $gt: now } },
+                    { $set: { leaseUntil, updatedAt: new Date() } }
+                ).catch(() => null);
+                if (renewed?.matchedCount === 1) {
+                    acquiredEntries.push({ key: accountKey, token: previous.token, leaseUntil: leaseUntil.getTime() });
+                    continue;
+                }
+            }
+        }
+
+        const lockToken = crypto.randomUUID();
+        try {
+            const result = await db.collection('session_account_runtime_locks').updateOne(
+                { _id: accountKey, $or: [{ leaseUntil: { $lte: now } }, { leaseUntil: { $exists: false } }] },
+                { $set: { owner: processInstanceId, sessionId, lockToken, leaseUntil, updatedAt: now, acquiredAt: now } },
+                { upsert: true }
+            );
+            if (result.matchedCount !== 1 && result.upsertedCount !== 1) {
+                const holder = await db.collection('session_account_runtime_locks').findOne({ _id: accountKey }, { projection: { owner: 1, sessionId: 1, leaseUntil: 1 } }).catch(() => null);
+                await releaseNewlyAcquired();
+                return { acquired: false, accountPhone: requestedKeys[0], accountKeys: requestedKeys, conflictingKey: accountKey, holderSessionId: holder?.sessionId || null, holderOwner: holder?.owner || null, leaseUntil: holder?.leaseUntil || null };
+            }
+        } catch (error) {
+            if (error?.code !== 11000) {
+                await releaseNewlyAcquired();
+                throw error;
+            }
+            const holder = await db.collection('session_account_runtime_locks').findOne({ _id: accountKey }, { projection: { owner: 1, sessionId: 1, leaseUntil: 1 } }).catch(() => null);
+            await releaseNewlyAcquired();
+            return { acquired: false, accountPhone: requestedKeys[0], accountKeys: requestedKeys, conflictingKey: accountKey, holderSessionId: holder?.sessionId || null, holderOwner: holder?.owner || null, leaseUntil: holder?.leaseUntil || null };
+        }
+        const createdEntry = { key: accountKey, token: lockToken, leaseUntil: leaseUntil.getTime() };
+        acquiredEntries.push(createdEntry);
+        newlyAcquired.push(createdEntry);
+    }
+
+    const nextKeySet = new Set(requestedKeys);
+    for (const oldEntry of previousEntries) {
+        if (nextKeySet.has(oldEntry.key)) continue;
+        if (!oldEntry?.key || !oldEntry?.token) continue;
+        await db.collection('session_account_runtime_locks').deleteOne({
+            _id: oldEntry.key,
+            owner: processInstanceId,
+            sessionId,
+            lockToken: oldEntry.token
+        }).catch(() => {});
+    }
+
+    const oldTimer = accountRuntimeLockTimers.get(sessionId);
+    if (oldTimer) clearInterval(oldTimer);
+    accountRuntimeLockTimers.delete(sessionId);
+    sessionAccountRuntimeLockEntries.set(sessionId, acquiredEntries);
+    sessionAccountRuntimeLocks.set(sessionId, requestedKeys[0]);
+    sessionAccountRuntimeLockTokens.set(sessionId, acquiredEntries[0]?.token || '');
+    sessionAccountRuntimeLockLeaseUntil.set(sessionId, leaseUntil.getTime());
+
+    let failures = 0;
+    let heartbeatRunning = false;
+    const heartbeatEntries = acquiredEntries.map(entry => ({ key: entry.key, token: entry.token }));
+    const timer = setInterval(async () => {
+        if (heartbeatRunning || serverShuttingDown || sessionFenceClosureInFlight.has(sessionId)) return;
+        heartbeatRunning = true;
+        try {
+            const nextLease = new Date(Date.now() + SESSION_RUNTIME_LOCK_LEASE_MS);
+            for (const entry of heartbeatEntries) {
                 const heartbeat = await db.collection('session_account_runtime_locks').updateOne(
-                    { _id: accountPhone, owner: processInstanceId, sessionId },
-                    { $set: { leaseUntil: new Date(Date.now() + SESSION_RUNTIME_LOCK_LEASE_MS), updatedAt: new Date() } }
+                    { _id: entry.key, owner: processInstanceId, sessionId, lockToken: entry.token, leaseUntil: { $gt: new Date() } },
+                    { $set: { leaseUntil: nextLease, updatedAt: new Date() } }
                 );
-                if (heartbeat.matchedCount === 1) {
-                    failures = 0;
+                if (heartbeat.matchedCount !== 1) {
+                    await closeSessionSocketWithoutAuthFlush(sessionId, 'account_lock_owned_by_another_runtime');
                     return;
                 }
-                await stopSocketForLockLoss('lock_owned_by_another_runtime');
-            } catch (error) {
-                failures++;
-                console.warn('[session-account-runtime-lock-heartbeat-failed]', { sessionId, accountPhone, failures, error: error?.message || String(error) });
-                if (failures >= 3) await stopSocketForLockLoss('heartbeat_unverified', error);
-            } finally {
-                heartbeatRunning = false;
             }
-        }, SESSION_RUNTIME_LOCK_RENEW_MS);
-        if (typeof timer.unref === 'function') timer.unref();
-        accountRuntimeLockTimers.set(sessionId, timer);
-    }
-    console.info('[session-account-runtime-lock-acquired]', { sessionId, accountPhone, processInstanceId, leaseMs: SESSION_RUNTIME_LOCK_LEASE_MS });
-    return { acquired: true, accountPhone, reason: 'account_lock_acquired' };
+            failures = 0;
+            sessionAccountRuntimeLockLeaseUntil.set(sessionId, nextLease.getTime());
+        } catch (error) {
+            failures++;
+            console.warn('[session-account-runtime-lock-heartbeat-failed]', { sessionId, accountKeyCount: heartbeatEntries.length, failures, error: error?.message || String(error) });
+            if (failures >= 3) await closeSessionSocketWithoutAuthFlush(sessionId, 'account_lock_heartbeat_unverified');
+        } finally {
+            heartbeatRunning = false;
+        }
+    }, SESSION_RUNTIME_LOCK_RENEW_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+    accountRuntimeLockTimers.set(sessionId, timer);
+    console.info('[session-account-runtime-lock-acquired]', { sessionId, accountKeyCount: requestedKeys.length, accountKeyHashes: requestedKeys.map(shortLogHash), processInstanceId, leaseMs: SESSION_RUNTIME_LOCK_LEASE_MS, fencingTokens: acquiredEntries.map(entry => shortLogHash(entry.token)) });
+    return { acquired: true, accountPhone: requestedKeys[0], accountKeys: requestedKeys, reason: 'account_locks_acquired' };
 }
 
 async function releaseSessionRuntimeLock(sessionId) {
@@ -1681,9 +2186,17 @@ async function releaseSessionRuntimeLock(sessionId) {
     if (retryTimer) clearTimeout(retryTimer);
     sessionLockRetryTimers.delete(sessionId);
     await releaseAccountRuntimeLock(sessionId);
+    const lockToken = sessionRuntimeLockTokens.get(sessionId);
+    sessionRuntimeLockTokens.delete(sessionId);
+    sessionRuntimeLockLeaseUntil.delete(sessionId);
     if (!db) return;
+    if (!lockToken) {
+        console.warn('[session-runtime-lock-release-skipped]', { sessionId, reason: 'missing_fencing_token_leave_record_to_expire' });
+        return;
+    }
     try {
-        await db.collection('session_runtime_locks').deleteOne({ _id: sessionId, owner: processInstanceId });
+        const filter = { _id: sessionId, owner: processInstanceId, lockToken };
+        await db.collection('session_runtime_locks').deleteOne(filter);
     } catch (error) {
         console.warn('[session-runtime-lock-release-failed]', { sessionId, error: error?.message || String(error) });
     }
@@ -1691,7 +2204,7 @@ async function releaseSessionRuntimeLock(sessionId) {
 
 function scheduleSessionLockRetry(sessionId, autoExpire, format) {
     if (serverShuttingDown || sessionLockRetryTimers.has(sessionId)) return;
-    const delay = Math.min(60000, SESSION_RUNTIME_LOCK_RENEW_MS + 5000) + Math.floor(Math.random() * 3000);
+    const delay = SESSION_RUNTIME_LOCK_LEASE_MS + 1000 + Math.floor(Math.random() * 5000);
     const timer = setTimeout(async () => {
         sessionLockRetryTimers.delete(sessionId);
         try {
@@ -1716,7 +2229,10 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
     const migratedLegacyCategories = new Set();
     const queueAuthWrite = operation => {
         const previous = authWriteQueues.get(sessionId) || Promise.resolve();
-        const run = previous.catch(() => {}).then(operation);
+        const run = previous.catch(() => {}).then(async () => {
+            await assertSessionRuntimeOwnership(sessionId);
+            return operation();
+        });
         const settled = run.catch(() => {});
         authWriteQueues.set(sessionId, settled);
         return run;
@@ -1779,7 +2295,16 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
             const prefix = `${sessionKey}_key_${type}-`;
             const dbIds = ids.map(id => `${prefix}${id}`);
             const docs = await collection.find({ _id: { $in: dbIds } }).toArray();
-            for (const doc of docs) result[doc._id.substring(prefix.length)] = fixBuffers(doc.data);
+            for (const doc of docs) {
+                const keyId = doc._id.substring(prefix.length);
+                const restored = fixBuffers(doc.data);
+                if (type === 'session' && (!restored || (!Buffer.isBuffer(restored) && !(restored instanceof Uint8Array)) || restored.length === 0)) {
+                    await collection.deleteOne({ _id: doc._id });
+                    console.warn('[signal-auth-invalid-session-record-pruned]', { sessionId, keyHash: shortLogHash(keyId), reason: 'session_record_is_not_a_nonempty_serialized_buffer', scope: 'single_peer_session_only' });
+                    continue;
+                }
+                result[keyId] = restored;
+            }
             return result;
         }),
         set: async data => queueAuthWrite(async () => {
@@ -1813,8 +2338,20 @@ async function deleteMongoSession(sessionId) {
         const collection = db.collection('baileys_auth');
         const sessionKey = `auth-${sessionId}`;
         await collection.deleteMany({ _id: { $regex: `^${sessionKey}` } });
-        await db.collection('session_owners').deleteMany({ sessionId });
+        await Promise.all([
+            db.collection('session_owners').deleteMany({ sessionId }),
+            db.collection('user_preferences').deleteMany({ sessionId }),
+            db.collection('processed_messages').deleteMany({ sessionId }),
+            db.collection('baileys_outgoing_messages').deleteMany({ sessionId }),
+            db.collection('lid_phone_mappings').deleteMany({ sessionId }),
+            db.collection('lid_phone_mappings').deleteMany({ _id: { $regex: `^${String(sessionId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:` } }),
+            db.collection('group_settings').deleteMany({ sessionId }),
+            db.collection('group_del2').deleteMany({ sessionId })
+        ]);
         sessionOwnersCache.delete(sessionId);
+        activeSessions.delete(sessionId);
+        cleanupSessionVolatileCaches(sessionId);
+        console.info('[session-data-cleanup-completed]', { sessionId, removed: ['auth', 'owner', 'user_preferences', 'processed_messages', 'outgoing_retry_messages', 'lid_mappings', 'group_settings', 'group_del2'], localVolatileCachesCleared: true });
     } catch (error) {
         console.error('[session-delete-failed]', { sessionId, error: error?.message || String(error) });
         throw error;
@@ -1834,6 +2371,22 @@ async function renameMongoSession(oldSessionId, newSessionId) {
             await collection.updateOne({ _id: newId }, { $setOnInsert: documentData }, { upsert: true });
         }
         await collection.deleteMany({ _id: { $regex: `^${oldKey}` } });
+        const ownerDoc = await db.collection('session_owners').findOne({ sessionId: oldSessionId });
+        if (ownerDoc) {
+            const { _id: ignoredOwnerId, ...ownerFields } = ownerDoc;
+            await db.collection('session_owners').updateOne({ sessionId: newSessionId }, { $set: { ...ownerFields, sessionId: newSessionId } }, { upsert: true });
+            await db.collection('session_owners').deleteOne({ sessionId: oldSessionId });
+            sessionOwnersCache.set(newSessionId, { ...ownerFields, sessionId: newSessionId });
+        }
+        await db.collection('user_preferences').updateMany({ sessionId: oldSessionId }, { $set: { sessionId: newSessionId } });
+        await db.collection('group_settings').updateMany({ sessionId: oldSessionId }, { $set: { sessionId: newSessionId } });
+        await db.collection('group_del2').updateMany({ sessionId: oldSessionId }, { $set: { sessionId: newSessionId } });
+        await db.collection('processed_messages').deleteMany({ sessionId: oldSessionId });
+        await db.collection('baileys_outgoing_messages').deleteMany({ sessionId: oldSessionId });
+        await db.collection('lid_phone_mappings').deleteMany({ sessionId: oldSessionId });
+        cleanupSessionVolatileCaches(oldSessionId);
+        sessionOwnersCache.delete(oldSessionId);
+        registeredBotAccountIdentitiesCache.loadedAt = 0;
     } catch (error) {
         console.error('[session-rename-failed]', { oldSessionId, newSessionId, error: error?.message || String(error) });
         throw error;
@@ -1842,11 +2395,15 @@ async function renameMongoSession(oldSessionId, newSessionId) {
 
 async function getGroupSetting(sessionId, gjid, key) {
     const cacheKey = `${sessionId}_${gjid}_${key}`;
-    if (groupSettingsCache.has(cacheKey)) return groupSettingsCache.get(cacheKey);
+    if (groupSettingsCache.has(cacheKey)) {
+        const cachedValue = groupSettingsCache.get(cacheKey);
+        setBoundedMapEntry(groupSettingsCache, cacheKey, cachedValue, GROUP_SETTINGS_CACHE_MAX_ENTRIES);
+        return cachedValue;
+    }
     try {
         const doc = await db.collection('group_settings').findOne({ sessionId, gjid });
         const val = doc ? doc[key] : null;
-        groupSettingsCache.set(cacheKey, val);
+        setBoundedMapEntry(groupSettingsCache, cacheKey, val, GROUP_SETTINGS_CACHE_MAX_ENTRIES);
         return val;
     } catch (error) {
         console.error('[group-setting-read-failed]', { sessionId, group: gjid, setting: key, error: error?.message || String(error) });
@@ -1857,7 +2414,7 @@ async function getGroupSetting(sessionId, gjid, key) {
 async function setGroupSetting(sessionId, gjid, key, value) {
     const cacheKey = `${sessionId}_${gjid}_${key}`;
     await db.collection('group_settings').updateOne({ sessionId, gjid }, { $set: { [key]: value } }, { upsert: true });
-    groupSettingsCache.set(cacheKey, value);
+    setBoundedMapEntry(groupSettingsCache, cacheKey, value, GROUP_SETTINGS_CACHE_MAX_ENTRIES);
 }
 
 async function getDel2Targets(sessionId, gjid) {
@@ -1867,7 +2424,7 @@ async function getDel2Targets(sessionId, gjid) {
         const col = db.collection('group_del2');
         const docs = await col.find({ sessionId, gjid }).toArray();
         const list = docs.map(d => d.targetJid);
-        activeDel2UsersCache.set(cacheKey, list);
+        setBoundedMapEntry(activeDel2UsersCache, cacheKey, list, ACTIVE_DEL2_CACHE_MAX_ENTRIES);
         return list;
     } catch (error) {
         console.error('[del2-targets-read-failed]', { sessionId, group: gjid, error: error?.message || String(error) });
@@ -1882,7 +2439,7 @@ async function addDel2Target(sessionId, gjid, targetJid) {
         const current = await getDel2Targets(sessionId, gjid);
         if (!current.includes(targetJid)) {
             current.push(targetJid);
-            activeDel2UsersCache.set(`${sessionId}_${gjid}`, current);
+            setBoundedMapEntry(activeDel2UsersCache, `${sessionId}_${gjid}`, current, ACTIVE_DEL2_CACHE_MAX_ENTRIES);
         }
     } catch (error) {
         console.error('[del2-target-add-failed]', { sessionId, group: gjid, target: targetJid, error: error?.message || String(error) });
@@ -1898,7 +2455,7 @@ async function removeDel2Target(sessionId, gjid, targetJid) {
         const index = current.indexOf(targetJid);
         if (index > -1) {
             current.splice(index, 1);
-            activeDel2UsersCache.set(`${sessionId}_${gjid}`, current);
+            setBoundedMapEntry(activeDel2UsersCache, `${sessionId}_${gjid}`, current, ACTIVE_DEL2_CACHE_MAX_ENTRIES);
         }
     } catch (error) {
         console.error('[del2-target-remove-failed]', { sessionId, group: gjid, target: targetJid, error: error?.message || String(error) });
@@ -2563,7 +3120,13 @@ app.get(LOG_DASHBOARD_PATH, async (req, res) => {
         text: '[runtime-log-dashboard] chargement des logs persistants du serveur…'
     }];
     const escapeLogHtml = value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    const initialRowsHtml = firstPaintLogs.map(item => `<div class="log"><span class="time">${escapeLogHtml(String(item.at || '').replace('T', ' ').replace('Z', ''))}</span><span class="level ${escapeLogHtml(item.level || 'log')}">${escapeLogHtml(String(item.level || 'log').toUpperCase())}</span><span class="message">${escapeLogHtml(item.text || '')}</span></div>`).join('');
+    const initialRowsHtml = firstPaintLogs.map(item => {
+        const id = escapeLogHtml(item.id || '');
+        const date = escapeLogHtml(String(item.at || '').replace('T', ' ').replace('Z', ''));
+        const level = escapeLogHtml(String(item.level || 'log').toUpperCase());
+        const text = escapeLogHtml(item.text || '');
+        return `<article class="log" data-id="${id}"><header class="meta"><em class="level ${escapeLogHtml(item.level || 'log')}">${level}</em><span class="separator">;</span><time class="date">${date}</time><button class="copy-log" type="button" aria-label="Copier ce log"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg></button></header><pre class="message">${text}</pre></article>`;
+    }).join('');
     const initialLogsJson = JSON.stringify(firstPaintLogs).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
     const html = `<!doctype html>
 <html lang="fr">
@@ -2573,91 +3136,143 @@ app.get(LOG_DASHBOARD_PATH, async (req, res) => {
 <meta name="color-scheme" content="dark">
 <title></title>
 <style>
-:root{color-scheme:dark;background:#000;color:#d8d8d8;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
+:root{color-scheme:dark;background:#000;color:#dedede;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{margin:0;padding:0;width:100%;min-height:100%;background:#000;color:#d8d8d8}
+html,body{margin:0;padding:0;width:100%;min-height:100%;background:#000;color:#dedede}
 body{min-height:100vh;min-height:100svh;overflow-x:hidden}
-#copy{position:fixed;z-index:5;top:max(9px,env(safe-area-inset-top));right:max(9px,env(safe-area-inset-right));width:34px;height:34px;display:grid;place-items:center;padding:0;margin:0;border:0;background:transparent;color:#e5e5e5;opacity:.78;cursor:pointer}
-#copy:active{opacity:1}
-#copy svg{display:block;width:23px;height:23px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
-#logs{width:100%;padding:8px 8px max(16px,env(safe-area-inset-bottom))}
-.log{display:grid;grid-template-columns:max-content max-content minmax(0,1fr);column-gap:9px;align-items:start;padding:3px 0;color:#d5d5d5;font-size:11px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
-.time{color:#777;white-space:nowrap}.level{color:#999;white-space:nowrap}.level.error,.level.fatal{color:#ff7777}.level.warn{color:#ffc477}.level.info{color:#91bdff}.level.debug,.level.trace{color:#777}.message{min-width:0;overflow-wrap:anywhere;white-space:pre-wrap;user-select:text}
-@media(max-width:560px){#logs{padding-left:6px;padding-right:6px}.log{grid-template-columns:max-content max-content minmax(0,1fr);column-gap:6px;font-size:10px}}
+#logs{width:100%;padding:7px 8px max(22px,env(safe-area-inset-bottom))}
+.log{position:relative;width:100%;padding:8px 2px 10px;border-bottom:1px solid #171717;color:#dedede;white-space:normal;overflow-wrap:anywhere}
+.meta{display:flex;align-items:center;gap:6px;min-height:19px;padding-right:34px;font-size:11px;line-height:1.45}
+.level{font-weight:800;font-style:italic;white-space:nowrap;color:#e8e8e8}
+.level.error,.level.fatal{color:#ff7777}.level.warn{color:#ffc477}.level.info{color:#e8e8e8}.level.debug,.level.trace{color:#aaa}
+.separator{font-style:normal;color:#ddd}
+.date{font-style:italic;color:#bdbdbd;white-space:nowrap}
+.message{display:block;margin:4px 32px 0 0;padding:0;color:#d7d7d7;font-size:11px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-family:inherit;user-select:text}
+.copy-log{position:absolute;top:5px;right:0;width:27px;height:27px;display:grid;place-items:center;border:0;padding:0;margin:0;background:transparent;color:#fff;opacity:.72;cursor:pointer}
+.copy-log:active{opacity:1}.copy-log svg{display:block;width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+#jump{position:fixed;z-index:8;right:max(12px,env(safe-area-inset-right));bottom:max(14px,env(safe-area-inset-bottom));width:42px;height:42px;display:none;place-items:center;padding:0;border:0;border-radius:0;background:transparent;color:#fff;cursor:pointer;opacity:.96}
+#jump.visible{display:grid}#jump svg{width:27px;height:27px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+@media(max-width:560px){#logs{padding-left:6px;padding-right:6px}.meta{font-size:10px}.message{font-size:10px}.log{padding-top:7px;padding-bottom:9px}}
 </style>
 </head>
 <body>
-<button id="copy" type="button" aria-label="Copier les logs" title="Copier les logs"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg></button>
 <main id="logs" aria-live="off">${initialRowsHtml}</main>
+<button id="jump" type="button" aria-label="Aller aux nouveaux logs ou en bas"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v15M6 13l6 6 6-6"/></svg></button>
 <script>
 window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
 (() => {
  const endpoint = location.pathname;
  const logsNode = document.getElementById('logs');
- const copyButton = document.getElementById('copy');
+ const jumpButton = document.getElementById('jump');
  let allLogs = Array.isArray(window.__SERVER_LOG_SNAPSHOT__) ? window.__SERVER_LOG_SNAPSHOT__ : [];
  let lastFetchError = '';
- let initialRender = true;
  let requestRunning = false;
  let pollTimer = null;
+ let following = true;
+ let firstUnseenId = '';
+ let jumpAction = 'unseen';
+ let hasRendered = false;
  const maxRows = ${LOG_DASHBOARD_PAGE_LIMIT};
+ const clientBufferLimit = 1600;
  const textOf = value => String(value == null ? '' : value);
- function render(){
-   const wasAtBottom = initialRender || window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 100;
-   const fragment = document.createDocumentFragment();
-   for(const item of allLogs.slice(-maxRows)){
-     const row = document.createElement('div'); row.className = 'log';
-     const time = document.createElement('span'); time.className = 'time'; time.textContent = textOf(item.at).replace('T',' ').replace('Z','');
-     const level = document.createElement('span'); level.className = 'level ' + textOf(item.level); level.textContent = textOf(item.level).toUpperCase();
-     const message = document.createElement('span'); message.className = 'message'; message.textContent = textOf(item.text);
-     row.append(time, level, message); fragment.appendChild(row);
-   }
-   logsNode.replaceChildren(fragment);
-   if(wasAtBottom) window.scrollTo(0, document.documentElement.scrollHeight);
-   initialRender = false;
+ const levelClass = value => textOf(value).toLowerCase().replace(/[^a-z0-9_-]/g,'');
+ function atBottom(){return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 90;}
+ function rowFor(id){return [...logsNode.querySelectorAll('.log')].find(row => row.dataset.id === id) || null;}
+ function visibleAnchor(){
+   const rows = logsNode.querySelectorAll('.log');
+   for(const row of rows){const box=row.getBoundingClientRect();if(box.bottom>0)return {id:row.dataset.id,top:box.top};}
+   return null;
  }
- async function load(){
-   if(requestRunning) return;
-   requestRunning = true;
-   try{
-     const response = await fetch(endpoint + '?format=json&limit=' + maxRows + '&_=' + Date.now(), {cache:'no-store', credentials:'same-origin'});
-     if(!response.ok) throw new Error('HTTP ' + response.status);
-     const payload = await response.json();
-     if(!payload || payload.ok !== true || !Array.isArray(payload.logs)) throw new Error('invalid_log_response');
-     allLogs = payload.logs.slice(-maxRows);
-     lastFetchError = '';
-     render();
-   }catch(error){
-     const detail = 'dashboard_fetch_failed: ' + textOf(error && error.message ? error.message : error).slice(0,180);
-     if(detail !== lastFetchError){
-       lastFetchError = detail;
-       allLogs = allLogs.filter(item => !String(item.id || '').startsWith('dashboard-client-error:'));
-       allLogs.push({id:'dashboard-client-error:' + Date.now(),at:new Date().toISOString(),level:'error',text:'[runtime-log-dashboard] ' + detail});
-       allLogs = allLogs.slice(-maxRows);
-       render();
-     }
-   }finally{
-     requestRunning = false;
-   }
+ function setJumpVisible(visible){jumpButton.classList.toggle('visible',!!visible);}
+ function copyText(item){
+   return textOf(item.level).toUpperCase() + ' ; ' + textOf(item.at).replace('T',' ').replace('Z','') + '\\n' + textOf(item.text);
  }
- async function copyLogs(){
-   const content = allLogs.map(item => '[' + textOf(item.at) + '] ' + textOf(item.level).toUpperCase() + ' ' + textOf(item.text)).join('\\n');
+ function makeRow(item){
+   const row=document.createElement('article');row.className='log';row.dataset.id=textOf(item.id);
+   const meta=document.createElement('header');meta.className='meta';
+   const level=document.createElement('em');level.className='level '+levelClass(item.level);level.textContent=textOf(item.level).toUpperCase();
+   const separator=document.createElement('span');separator.className='separator';separator.textContent=';';
+   const date=document.createElement('time');date.className='date';date.textContent=textOf(item.at).replace('T',' ').replace('Z','');
+   const copy=document.createElement('button');copy.className='copy-log';copy.type='button';copy.setAttribute('aria-label','Copier ce log');
+   copy.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg>';
+   copy.addEventListener('click',()=>copyOne(item,copy));
+   meta.append(level,separator,date,copy);
+   const content=document.createElement('pre');content.className='message';content.textContent=textOf(item.text);
+   row.append(meta,content);
+   return row;
+ }
+ async function copyOne(item,button){
+   const value=copyText(item);
    try{
-     if(navigator.clipboard && navigator.clipboard.writeText){ await navigator.clipboard.writeText(content); }
-     else{
-       const area = document.createElement('textarea'); area.value = content; area.setAttribute('readonly','');
-       area.style.position = 'fixed'; area.style.opacity = '0'; document.body.appendChild(area); area.select();
-       document.execCommand('copy'); area.remove();
-     }
-     copyButton.style.opacity = '1';
-     window.setTimeout(() => { copyButton.style.opacity = '.78'; }, 700);
+     if(navigator.clipboard&&navigator.clipboard.writeText)await navigator.clipboard.writeText(value);
+     else{const area=document.createElement('textarea');area.value=value;area.setAttribute('readonly','');area.style.position='fixed';area.style.opacity='0';document.body.appendChild(area);area.select();document.execCommand('copy');area.remove();}
+     button.style.opacity='1';window.setTimeout(()=>{button.style.opacity='.72';},650);
    }catch(error){}
  }
- copyButton.addEventListener('click', copyLogs);
- document.addEventListener('visibilitychange', () => { if(!document.hidden) load(); });
+ function render(nextLogs, initial=false){
+   const oldIds=new Set(allLogs.map(item=>textOf(item.id)));
+   const incoming=(Array.isArray(nextLogs)?nextLogs:[]).filter(item=>!textOf(item.id).startsWith('dashboard-loading:'));
+   const merged=new Map(allLogs.map(item=>[textOf(item.id),item]));
+   for(const item of incoming)merged.set(textOf(item.id),item);
+   const next=Array.from(merged.values()).sort((a,b)=>textOf(a.at).localeCompare(textOf(b.at))||textOf(a.id).localeCompare(textOf(b.id))).slice(-clientBufferLimit);
+   const added=next.filter(item=>!oldIds.has(textOf(item.id))&&!textOf(item.id).startsWith('dashboard-loading:'));
+   const wasAtBottom=initial||!hasRendered||following||atBottom();
+   const anchor=wasAtBottom?null:visibleAnchor();
+   if(!wasAtBottom&&added.length&&!firstUnseenId)firstUnseenId=textOf(added[0].id);
+   allLogs=next;
+   const fragment=document.createDocumentFragment();
+   for(const item of allLogs)fragment.appendChild(makeRow(item));
+   logsNode.replaceChildren(fragment);
+   hasRendered=true;
+   if(wasAtBottom){
+     following=true;firstUnseenId='';jumpAction='unseen';setJumpVisible(false);
+     window.scrollTo(0,document.documentElement.scrollHeight);
+   }else{
+     following=false;
+     if(anchor){const restored=rowFor(anchor.id);if(restored){const nextTop=restored.getBoundingClientRect().top;window.scrollBy(0,nextTop-anchor.top);}}
+     setJumpVisible(true);
+   }
+ }
+ async function load(){
+   if(requestRunning)return;
+   requestRunning=true;
+   try{
+     const response=await fetch(endpoint+'?format=json&limit='+maxRows+'&_='+Date.now(),{cache:'no-store',credentials:'same-origin'});
+     if(!response.ok)throw new Error('HTTP '+response.status);
+     const payload=await response.json();
+     if(!payload||payload.ok!==true||!Array.isArray(payload.logs))throw new Error('invalid_log_response');
+     lastFetchError='';render(payload.logs,false);
+   }catch(error){
+     const detail='dashboard_fetch_failed: '+textOf(error&&error.message?error.message:error).slice(0,180);
+     if(detail!==lastFetchError){
+       lastFetchError=detail;
+       const existing=allLogs.filter(item=>!textOf(item.id).startsWith('dashboard-client-error:'));
+       existing.push({id:'dashboard-client-error:'+Date.now(),at:new Date().toISOString(),level:'error',text:'[runtime-log-dashboard] '+detail});
+       render(existing,false);
+     }
+   }finally{requestRunning=false;}
+ }
+ jumpButton.addEventListener('click',()=>{
+   if(jumpAction==='unseen'&&firstUnseenId){
+     const target=rowFor(firstUnseenId);
+     if(target){target.scrollIntoView({block:'start',behavior:'smooth'});jumpAction='bottom';return;}
+   }
+   window.scrollTo({top:document.documentElement.scrollHeight,behavior:'smooth'});
+   jumpAction='unseen';firstUnseenId='';following=true;setJumpVisible(false);
+ });
+ let scrollFrame=0;
+ window.addEventListener('scroll',()=>{
+   if(scrollFrame)return;
+   scrollFrame=window.requestAnimationFrame(()=>{
+     scrollFrame=0;
+     if(atBottom()){following=true;firstUnseenId='';jumpAction='unseen';setJumpVisible(false);}
+     else{following=false;setJumpVisible(true);}
+   });
+ },{passive:true});
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden)void load();});
  void load();
- pollTimer = window.setInterval(load, 5000);
- window.addEventListener('pagehide', () => { if(pollTimer) window.clearInterval(pollTimer); });
+ pollTimer=window.setInterval(load,5000);
+ window.addEventListener('pagehide',()=>{if(pollTimer)window.clearInterval(pollTimer);});
 })();
 </script>
 </body>
@@ -3874,6 +4489,9 @@ function startAdamBot(sessionId, autoExpire = false, format = 'pair', expectExis
 
 async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair', expectExisting = false) {
     try {
+        const pendingLockRetry = sessionLockRetryTimers.get(sessionId);
+        if (pendingLockRetry) clearTimeout(pendingLockRetry);
+        sessionLockRetryTimers.delete(sessionId);
         const lockAcquired = await acquireSessionRuntimeLock(sessionId);
         if (!lockAcquired) throw new Error('session_runtime_lock_owned_elsewhere');
         const pendingTimer = reconnectTimers.get(sessionId);
@@ -3881,9 +4499,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         reconnectTimers.delete(sessionId);
         await cleanupSocket(sessionId);
         const { state, saveCreds } = await useMongoAuthState(sessionId, expectExisting);
-        const credentialPhone = normalizePhoneNumber(String(state.creds?.me?.id || '').split('@')[0].split(':')[0]);
-        if (credentialPhone) {
-            const accountLockResult = await acquireAccountRuntimeLock(sessionId, credentialPhone);
+        const credentialPhone = getAuthenticatedPhoneNumber(null, state.creds);
+        const credentialLid = getAuthenticatedLid(null, state.creds);
+        const credentialAccountIdentity = credentialPhone || credentialLid;
+        if (credentialAccountIdentity) {
+            const credentialLockAliases = await expandAccountRuntimeLockAliases(sessionId, [credentialPhone, credentialLid]);
+            const accountLockResult = await acquireAccountRuntimeLock(sessionId, credentialAccountIdentity, credentialLockAliases);
             if (!accountLockResult.acquired) {
                 await releaseSessionRuntimeLock(sessionId);
                 if (accountLockResult.holderSessionId === sessionId) throw new Error('account_runtime_lock_owned_elsewhere');
@@ -3891,6 +4512,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             }
         }
         const { version } = await fetchLatestBaileysVersion();
+        await assertSessionRuntimeOwnership(sessionId);
 
         let globalLang = 'en';
         let initialOwnerDoc = null;
@@ -3943,8 +4565,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     const found = recentMsgsCache[i];
                     if (found.sessionId !== sessionId || found.id !== key?.id || !found.fromMe) continue;
                     const recentChatAliases = [...new Set([found.from, ...(Array.isArray(found.chatAliases) ? found.chatAliases : []), found.key?.remoteJidAlt, found.key?.participantAlt, found.key?.participantPn].map(value => String(value || '').trim()).filter(Boolean))];
-                    if (requestedChatJid && !recentChatAliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, requestedChatJid))) continue;
+                    const recentChatMatches = !requestedChatJid || recentChatAliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, requestedChatJid));
+                    if (!recentChatMatches && !(key?.fromMe === true && found.fromMe === true)) continue;
                     exactRecentMessage = found;
+                    if (!recentChatMatches) console.warn('[message-retry-cache-hit-exact-session-id-alias-fallback]', { sessionId, messageId: key.id, requestedChatJid, storedChatAliases: recentChatAliases, lookupScope: 'same_session_memory' });
                     break;
                 }
                 if (exactRecentMessage) {
@@ -3962,25 +4586,21 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         { _id: `${sessionId}:${String(key.id)}` },
                         { projection }
                     );
-                    let lookupScope = 'same_session';
-                    const requestedAccountPhone = normalizedJidNumber(sock.user?.id || sock.user?.phoneNumber || '');
-                    if (!stored && requestedAccountPhone) {
-                        stored = await retryCollection.findOne(
-                            { accountPhone: requestedAccountPhone, messageId: String(key.id) },
-                            { projection, sort: { createdAt: -1 } }
-                        );
-                        if (stored) lookupScope = 'same_account_other_session';
-                    }
+                    const lookupScope = 'same_session';
                     const storedChatAliases = [...new Set([stored?.remoteJid, stored?.remoteJidAlt, ...(Array.isArray(stored?.remoteJidAliases) ? stored.remoteJidAliases : [])].map(value => String(value || '').trim()).filter(Boolean))];
                     const storedChatMatches = !requestedChatJid || storedChatAliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, requestedChatJid));
-                    if (stored?.message && stored.fromMe !== false && storedChatMatches) {
+                    if (stored?.message && stored.sessionId === sessionId && stored.fromMe === true && key?.fromMe === true) {
                         const restoredMessage = fixBuffers(stored.message);
                         cacheRecentMessage(sessionId, { key: { id: key.id, remoteJid: stored.remoteJid || requestedChatJid || '', remoteJidAlt: stored.remoteJidAlt || '', fromMe: true }, message: restoredMessage, messageTimestamp: stored.messageTimestamp || Math.floor(Date.now() / 1000) });
-                        console.info('[message-retry-store-hit]', { sessionId, messageId: String(key.id), chatMatch: !!requestedChatJid, lookupScope, storedSessionId: stored.sessionId || sessionId });
+                        if (storedChatMatches) {
+                            console.info('[message-retry-store-hit]', { sessionId, messageId: String(key.id), chatMatch: !!requestedChatJid, lookupScope, storedSessionId: stored.sessionId });
+                        } else {
+                            console.warn('[message-retry-store-hit-exact-session-id-alias-fallback]', { sessionId, messageId: String(key.id), requestedChatJid: requestedChatJid || null, storedChatAliases, lookupScope, action: 'return_exact_from_me_message_id_from_same_session_only' });
+                        }
                         return restoredMessage;
                     }
                     if (stored?.message) {
-                        console.warn('[message-retry-chat-mismatch]', { sessionId, messageId: String(key.id), requestedChatJid: requestedChatJid || null, storedChatAliases, lookupScope });
+                        console.warn('[message-retry-chat-mismatch]', { sessionId, messageId: String(key.id), requestedChatJid: requestedChatJid || null, storedChatAliases, lookupScope, storedSessionMatch: stored.sessionId === sessionId, storedFromMe: stored.fromMe === true });
                     }
                 } catch (error) {
                     console.warn('[message-retry-store-read-failed]', { sessionId, messageId: String(key.id), error: error?.message || String(error) });
@@ -4094,16 +4714,17 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         };
 
         const existingSessionRecord = activeSessions.get(sessionId);
-        const restoredNumber = state.creds?.me?.id ? String(state.creds.me.id).split(':')[0].split('@')[0] : null;
+        const restoredNumber = getAuthenticatedPhoneNumber(null, state.creds) || null;
         activeSessions.set(sessionId, {
             id: sessionId,
-            number: existingSessionRecord?.number || restoredNumber || null,
+            number: restoredNumber || null,
             format: connectionFormat,
             status: 'initialisation',
             createdAt: existingSessionRecord ? existingSessionRecord.createdAt : Date.now(),
             lastRefresh: Date.now(),
             reconnectAttempts: existingSessionRecord ? (existingSessionRecord.reconnectAttempts || 0) : 0,
             sock: sock,
+            authState: state,
             signalKeyStore: cachedSignalKeyStore,
             flushAuthWrites: flushAuthWritesForSession.bind(null, sessionId),
             qrString: null,
@@ -4261,9 +4882,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             if (connection === 'open') {
                 const openingSession = activeSessions.get(sessionId);
                 if (!openingSession || openingSession.sock !== sock || openingSession.status === 'opening' || openingSession.status === 'connecte') return;
-                const openedAccountPhone = normalizePhoneNumber(String(sock.user?.id || '').split('@')[0].split(':')[0]);
-                if (openedAccountPhone && !sessionAccountRuntimeLocks.has(sessionId)) {
-                    const openedAccountLock = await acquireAccountRuntimeLock(sessionId, openedAccountPhone);
+                const openedAccountPhone = getAuthenticatedPhoneNumber(sock.user, state.creds);
+                const openedAccountLid = getAuthenticatedLid(sock.user, state.creds);
+                const openedAccountIdentity = openedAccountPhone || openedAccountLid;
+                const openedAccountLockKey = normalizeAccountRuntimeLockKey(openedAccountIdentity);
+                if (openedAccountLockKey && !sessionHasAccountRuntimeLocks(sessionId, [openedAccountPhone, openedAccountLid])) {
+                    const openedLockAliases = await expandAccountRuntimeLockAliases(sessionId, [openedAccountPhone, openedAccountLid]);
+                    const openedAccountLock = await acquireAccountRuntimeLock(sessionId, openedAccountIdentity, openedLockAliases);
                     if (!openedAccountLock.acquired) {
                         console.error('[session-account-duplicate-blocked]', { sessionId, connectedAccountJid: sock.user?.id || null, accountPhone: openedAccountPhone, holderSessionId: openedAccountLock.holderSessionId, holderOwner: openedAccountLock.holderOwner, leaseUntil: openedAccountLock.leaseUntil || null, action: 'close_duplicate_socket' });
                         openingSession.status = 'duplicate_account';
@@ -4271,13 +4896,20 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         openingSession.sock = null;
                         try { sock.ev.removeAllListeners(); } catch (e) {}
                         try { if (sock.ws) sock.ws.close(); } catch (e) {}
+                        await flushAuthWritesForSession(sessionId).catch(error => console.warn('[duplicate-session-auth-flush-failed]', { sessionId, error: error?.message || String(error) }));
+                        await db.collection('session_owners').updateOne(
+                            { sessionId },
+                            { $set: { connectionStatus: 'duplicate_account', duplicateAccountOf: openedAccountLock.holderSessionId || null, duplicateAccountDetectedAt: new Date() } },
+                            { upsert: true }
+                        ).catch(error => console.warn('[duplicate-session-owner-marker-failed]', { sessionId, error: error?.message || String(error) }));
                         await releaseSessionRuntimeLock(sessionId);
                         return;
                     }
                 }
+                await assertSessionRuntimeOwnership(sessionId);
                 openingSession.status = 'opening';
                 console.info('[whatsapp] connection open', { sessionId, number: sock.user ? sock.user.id.split(':')[0] : null, accountRuntimeLockHeld: !!sessionAccountRuntimeLocks.get(sessionId) });
-                const botId = sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id;
+                const botId = String(sock.user?.id || '').replace(/:\d+(?=@)/, '');
                 sessionData.ownerJid = botId;
                 sessionData.active = true;
                 sessionData.readyAt = Date.now();
@@ -4288,94 +4920,95 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     eagerGroupListFetch: false
                 });
                 
-                const currentBotNum = sock.user ? sock.user.id.split(':')[0] : null;
-                const currentBotName = sock.user ? sock.user.name || "Adam D'H7" : "Adam D'H7";
-                if (currentBotNum) {
-                    for (const [oId, oSess] of activeSessions.entries()) {
-                        if (oId !== sessionId && oSess.number === currentBotNum) {
+                const currentBotNum = getAuthenticatedPhoneNumber(sock.user, state.creds);
+                const currentBotLid = getAuthenticatedLid(sock.user, state.creds);
+                const currentBotAccountJid = currentBotNum ? `${currentBotNum}@s.whatsapp.net` : currentBotLid || String(sock.user?.id || '');
+                const currentBotName = sanitizeSessionDisplayName(sock.user?.name);
+                if (currentBotNum || /@lid$/i.test(currentBotLid)) {
+                    for (const [otherSessionId, otherSession] of activeSessions.entries()) {
+                        const storedOtherNumber = normalizePhoneNumber(otherSession?.number || '');
+                        const otherNumber = /^\d{6,20}$/.test(storedOtherNumber) ? storedOtherNumber : getAuthenticatedPhoneNumber(otherSession?.sock?.user, otherSession?.authState?.creds);
+                        const otherLid = getAuthenticatedLid(otherSession?.sock?.user, otherSession?.authState?.creds);
+                        if (otherSessionId !== sessionId && ((currentBotNum && otherNumber === currentBotNum) || (currentBotLid && otherLid === currentBotLid))) {
                             try {
-                                if (oSess.sock) {
-                                    oSess.sock.ev.removeAllListeners();
-                                    if (oSess.sock.ws) oSess.sock.ws.close();
+                                if (otherSession.sock) {
+                                    otherSession.sock.ev.removeAllListeners();
+                                    if (otherSession.sock.ws) otherSession.sock.ws.close();
                                 }
-                            } catch(e){}
-                            const oldTimer = reconnectTimers.get(oId);
+                            } catch (e) {}
+                            otherSession.status = 'duplicate_account';
+                            otherSession.disconnectTime = Date.now();
+                            otherSession.sock = null;
+                            try {
+                                const oldFlush = otherSession.flushAuthWrites || otherSession.authState?.flushAuthWrites;
+                                if (typeof oldFlush === 'function') await promiseWithTimeout(oldFlush(), 20000, 'Flush duplicate account Signal keys');
+                                else await flushAuthWritesForSession(otherSessionId);
+                            } catch (flushError) {
+                                console.error('[duplicate-session-auth-flush-failed]', { sessionId: otherSessionId, error: flushError?.message || String(flushError), action: 'preserve_mongodb_auth_documents_without_overwrite' });
+                            }
+                            const oldTimer = reconnectTimers.get(otherSessionId);
                             if (oldTimer) clearTimeout(oldTimer);
-                            reconnectTimers.delete(oId);
-                            await releaseSessionRuntimeLock(oId);
-                            activeSessions.delete(oId);
-                            console.warn('[whatsapp] duplicate live socket closed without logout; stored auth data preserved', { replacedSessionId: oId, activeSessionId: sessionId });
+                            reconnectTimers.delete(otherSessionId);
+                            await db.collection('session_owners').updateOne(
+                                { sessionId: otherSessionId },
+                                { $set: { connectionStatus: 'duplicate_account', duplicateAccountOf: sessionId, duplicateAccountDetectedAt: new Date(), duplicateAccountIdentityHash: shortLogHash(currentBotAccountJid) } },
+                                { upsert: true }
+                            ).catch(error => console.warn('[duplicate-session-owner-marker-failed]', { sessionId: otherSessionId, error: error?.message || String(error) }));
+                            await releaseSessionRuntimeLock(otherSessionId);
+                            activeSessions.delete(otherSessionId);
+                            cleanupSessionVolatileCaches(otherSessionId);
+                            console.warn('[whatsapp-duplicate-live-socket-closed]', { replacedSessionId: otherSessionId, activeSessionId: sessionId, ownerRecordsPreserved: true, automaticRestoreDisabledForDuplicate: true });
                         }
                     }
-
                     const ownerCol = db.collection('session_owners');
-                    const duplicates = await ownerCol.find({ Number: currentBotNum }).sort({ connectedSince: -1 }).toArray();
-                    if (duplicates.length > 1) {
-                        const toDeleteIds = duplicates.slice(1).map(d => d._id);
-                        await ownerCol.deleteMany({ _id: { $in: toDeleteIds } });
-                    }
-
                     const now = Date.now();
-                    const existingRecord = await ownerCol.findOne({ sessionId: sessionId });
-                    let finalRecord = existingRecord;
-                    if (!existingRecord) {
-                        const matchingBackup = await ownerCol.findOne({ Number: currentBotNum });
-                        if (matchingBackup) {
-                            const { _id: ignoredBackupId, ...backupFields } = matchingBackup;
-                            finalRecord = {
-                                ...backupFields,
-                                sessionId: sessionId,
-                                Number: currentBotNum,
-                                format: connectionFormat,
-                                Format: connectionFormat,
-                                connectedSince: now,
-                                reauthRequired: false,
-                                connectionStatus: 'connected',
-                                lastAuthFailure: null
-                            };
-                            if (currentBotName) {
-                                finalRecord.Name = currentBotName;
-                            }
-                            await ownerCol.updateOne(
-                                { sessionId: sessionId },
-                                { $set: finalRecord },
-                                { upsert: true }
-                            );
-                            if (matchingBackup.sessionId !== sessionId) {
-                                await ownerCol.deleteOne({ _id: matchingBackup._id });
-                            }
-                        } else {
-                            const newOwner = { sessionId: sessionId, Number: currentBotNum, Name: currentBotName, format: connectionFormat, Format: connectionFormat, connectedSince: now, mode: 'prive', lang: globalLang, reauthRequired: false, connectionStatus: 'connected' };
-                            await ownerCol.updateOne(
-                                { sessionId: sessionId },
-                                { $set: newOwner },
-                                { upsert: true }
-                            );
-                            finalRecord = newOwner;
-                        }
-                    } else {
-                        const updateData = {};
-                        if (!existingRecord.Number) updateData.Number = currentBotNum;
-                        if (currentBotName && existingRecord.Name !== currentBotName) updateData.Name = currentBotName;
-                        if (!existingRecord.mode) updateData.mode = 'prive';
-                        if (!existingRecord.lang) updateData.lang = globalLang;
-                        if (normalizeConnectionFormat(existingRecord.format || existingRecord.Format || connectionFormat) !== connectionFormat || !existingRecord.format) updateData.format = connectionFormat;
-                        if (existingRecord.Format !== connectionFormat) updateData.Format = connectionFormat;
-                        if (!existingRecord.connectedSince) updateData.connectedSince = now;
-                        if (existingRecord.reauthRequired) updateData.reauthRequired = false;
-                        if (existingRecord.connectionStatus !== 'connected') updateData.connectionStatus = 'connected';
-                        if (existingRecord.lastAuthFailure) updateData.lastAuthFailure = null;
-                        if (Object.keys(updateData).length > 0) {
-                            await ownerCol.updateOne({ sessionId: sessionId }, { $set: updateData });
-                            Object.assign(finalRecord, updateData);
-                        }
-                    }
+                    const existingRecord = await ownerCol.findOne({ sessionId });
+                    const accountRebound = !!(existingRecord?.Number && currentBotNum && normalizePhoneNumber(existingRecord.Number) !== currentBotNum);
+                    const updateData = {
+                        sessionId,
+                        AccountJid: currentBotAccountJid || existingRecord?.AccountJid || null,
+                        format: connectionFormat,
+                        Format: connectionFormat,
+                        connectedSince: Number(existingRecord?.connectedSince || 0) || now,
+                        reauthRequired: false,
+                        connectionStatus: 'connected',
+                        lastAuthFailure: null
+                    };
+                    if (currentBotNum) updateData.Number = currentBotNum;
+                    if (/@lid$/i.test(currentBotLid)) updateData.OwnerLid = currentBotLid;
+                    if (!existingRecord?.mode) updateData.mode = 'prive';
+                    if (!existingRecord?.lang) updateData.lang = globalLang;
+                    if (currentBotName) updateData.Name = currentBotName;
+                    if (accountRebound) console.warn('[session-owner-account-rebound]', { sessionId, action: 'bind_owner_record_to_current_session_auth_only', staleNameCleared: !currentBotName, staleLidCleared: !currentBotLid });
+                    const ownerUnset = { duplicateAccountOf: '', duplicateAccountDetectedAt: '', duplicateAccountIdentityHash: '' };
+                    if (accountRebound && !currentBotName) ownerUnset.Name = '';
+                    if (accountRebound && !currentBotLid) ownerUnset.OwnerLid = '';
+                    const ownerUpdateOperation = { $set: updateData, $setOnInsert: { createdAt: new Date(now) } };
+                    if (Object.keys(ownerUnset).length) ownerUpdateOperation.$unset = ownerUnset;
+                    await ownerCol.updateOne({ sessionId }, ownerUpdateOperation, { upsert: true });
+                    const finalRecord = { ...(existingRecord || {}), ...updateData };
+                    for (const field of Object.keys(ownerUnset)) delete finalRecord[field];
                     sessionOwnersCache.set(sessionId, finalRecord);
+                    const openedSession = activeSessions.get(sessionId);
+                    if (openedSession) {
+                        openedSession.number = currentBotNum || null;
+                        openedSession.ownerJid = currentBotAccountJid || openedSession.ownerJid || null;
+                    }
+                    if (currentBotName && currentBotAccountJid) {
+                        await promiseWithTimeout(db.collection('user_preferences').updateOne(
+                            { sessionId, sender: currentBotAccountJid },
+                            { $set: { Name: currentBotName, pushName: currentBotName, displayName: currentBotName, number: currentBotNum || '', updatedAt: now, expireAt: new Date(now + SESSION_PROFILE_RETENTION_MS) }, $setOnInsert: { createdAt: new Date(now), lang: finalRecord.lang || globalLang } },
+                            { upsert: true }
+                        ), 2000, 'persist authenticated session owner name');
+                        userProfilePersistenceCache.set(`${sessionId}:${currentBotAccountJid}`, { name: currentBotName, number: currentBotNum || '', at: now });
+                    }
+                    registeredBotAccountIdentitiesCache.loadedAt = 0;
+                    console.info('[session-owner-bound]', { sessionId, accountNumberAvailable: !!currentBotNum, ownerNameSaved: !!currentBotName, ownLidAvailable: /@lid$/i.test(currentBotLid), identitySource: 'authenticated_socket_credentials', crossSessionOwnerLookup: false, duplicateOwnerRecordDeletion: false });
                 }
 
                 const currentSession = activeSessions.get(sessionId);
                 if (currentSession) {
-                    currentSession.number = sock.user ? sock.user.id.split(':')[0] : null;
+                    currentSession.number = currentBotNum || null;
                     currentSession.status = 'connecte';
                     currentSession.format = connectionFormat;
                     currentSession.sock = sock;
@@ -4791,6 +5424,23 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         });
 
         sock.ev.on('messages.upsert', async (up) => {
+            try {
+                if (activeSessions.get(sessionId)?.sock !== sock) return;
+                const liveAccountPhone = getAuthenticatedPhoneNumber(sock.user, state.creds);
+                const liveAccountLid = getAuthenticatedLid(sock.user, state.creds);
+                const liveAccountIdentity = liveAccountPhone || liveAccountLid;
+                const liveAccountLockKey = normalizeAccountRuntimeLockKey(liveAccountIdentity);
+                if (liveAccountLockKey && !sessionHasAccountRuntimeLocks(sessionId, [liveAccountPhone, liveAccountLid])) {
+                    const liveLockAliases = await expandAccountRuntimeLockAliases(sessionId, [liveAccountPhone, liveAccountLid]);
+                    const accountLock = await acquireAccountRuntimeLock(sessionId, liveAccountIdentity, liveLockAliases);
+                    if (!accountLock.acquired) throw new Error('account_runtime_lock_not_owned');
+                }
+                await assertSessionRuntimeOwnership(sessionId);
+            } catch (ownershipError) {
+                console.error('[message-upsert-blocked-without-exclusive-session-lock]', { sessionId, error: ownershipError?.message || String(ownershipError), action: 'close_socket_and_preserve_signal_auth' });
+                await closeSessionSocketWithoutAuthFlush(sessionId, 'message_upsert_without_exclusive_runtime_lock');
+                return;
+            }
             const upsertType = String(up?.type || '');
             const rawBatch = Array.isArray(up?.messages) ? up.messages : [];
             console.info('[messages-upsert-batch]', {
@@ -5151,7 +5801,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const rawFrom = String(m.key.remoteJid || m.key.remoteJidAlt || m.key.participant || '');
                         const isFromMe = !!m.key.fromMe;
                         const pushName = String(m.pushName || 'Inconnu');
-                        const botId = sock.user?.id ? (sock.user.id.includes(':') ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : sock.user.id) : null;
+                        const botId = sock.user?.id ? String(sock.user.id).replace(/:\d+(?=@)/, '') : null;
                         const rawChatIsGroup = rawFrom.endsWith('@g.us');
                         const rawChatIsChannel = rawFrom.endsWith('@newsletter');
                         const sender = isFromMe ? botId : rawChatIsGroup
@@ -5274,38 +5924,111 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const senderNumbers = [...new Set(senderJids.filter(identity => !/@lid(?:$|:)/i.test(String(identity || ''))).map(normalizedJidNumber).filter(Boolean))];
                         const sNum = senderNumbers[0] || '';
                         const ownerNumber = normalizePhoneNumber(sOwnerTop?.Number || '');
-                        const botNumber = normalizedJidNumber(botId);
-                        const sessionNumber = normalizePhoneNumber(activeSessions.get(sessionId)?.number || '');
-                        const ownerNumberCandidates = [...new Set([ownerNumber, botNumber, sessionNumber, normalizedJidNumber(sock.user?.id), normalizedJidNumber(sock.user?.phoneNumber), normalizedJidNumber(state.creds?.me?.id)].filter(value => /^\d{6,20}$/.test(String(value || ''))))];
-                        const ownLidCandidates = [...new Set([sock.user?.lid, state.creds?.me?.lid, state.creds?.me?.id].map(value => normalizeLidCacheKey(value)).filter(value => /@lid$/i.test(value)))];
+                        const authenticatedAccountNumber = getAuthenticatedPhoneNumber(sock.user, state.creds);
+                        const ownerNumberCandidates = authenticatedAccountNumber ? [authenticatedAccountNumber] : [];
+                        const authenticatedOwnLid = getAuthenticatedLid(sock.user, state.creds);
+                        const ownLidCandidates = authenticatedOwnLid ? [authenticatedOwnLid] : [];
                         const senderMatchesOwnLid = senderJids.some(jid => ownLidCandidates.includes(normalizeLidCacheKey(jid)));
                         const privateChatMatchesOwnLid = !isGroup && ownLidCandidates.includes(normalizeLidCacheKey(rawFrom));
-                        const senderMatchesOwnerPhone = senderNumbers.some(number => ownerNumberCandidates.includes(number));
-                        const isOwnerReal = !!isFromMe || senderJids.some(jid => jid === botId) || senderMatchesOwnerPhone || senderMatchesOwnLid || privateChatMatchesOwnLid;
+                        const senderMatchesOwnerPhone = !!authenticatedAccountNumber && senderNumbers.includes(authenticatedAccountNumber);
+                        const otherBotIdentities = !isFromMe ? await getRegisteredBotAccountsExcept(sessionId, authenticatedAccountNumber, ownLidCandidates) : { numbers: new Set(), lids: new Set() };
+                        const foreignBotSenderNumbers = !isFromMe ? senderNumbers.filter(number => otherBotIdentities.numbers.has(number)) : [];
+                        const foreignBotSenderLids = !isFromMe ? senderJids.map(normalizeLidCacheKey).filter(jid => /@lid$/i.test(jid) && otherBotIdentities.lids.has(jid)) : [];
+                        if (foreignBotSenderNumbers.length || foreignBotSenderLids.length) {
+                            console.info('[message-ignored-foreign-bot-session]', { sessionId, messageId: msgId, chatJid: from, foreignBotNumberMatch: foreignBotSenderNumbers.length > 0, foreignBotLidMatch: foreignBotSenderLids.length > 0, action: 'another_session_bot_identity_cannot_trigger_this_session' });
+                            return;
+                        }
+                        const senderMatchesAuthenticatedAccount = !!authenticatedAccountNumber && senderNumbers.includes(authenticatedAccountNumber);
+                        const isOwnerReal = !!isFromMe || senderMatchesAuthenticatedAccount || senderMatchesOwnLid || privateChatMatchesOwnLid;
                         const sName = pushName;
-                        const socketOwnerName = String(sock.user?.name || '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, 100);
-                        if (isOwnerReal && socketOwnerName && sOwnerTop && normalizePersonName(sOwnerTop.Name || '') !== normalizePersonName(socketOwnerName)) {
-                            sOwnerTop = { ...sOwnerTop, Name: socketOwnerName };
+                        const socketOwnerName = sanitizeSessionDisplayName(sock.user?.name);
+                        const incomingDisplayName = sanitizeSessionDisplayName(pushName);
+                        const ownerObservedName = isOwnerReal ? (socketOwnerName || incomingDisplayName) : '';
+                        if (ownerNumber && authenticatedAccountNumber && ownerNumber !== authenticatedAccountNumber) {
+                            console.warn('[session-owner-number-mismatch]', { sessionId, action: 'ignore_stale_owner_number_and_use_current_authenticated_credentials' });
+                        }
+                        const storedOwnerName = sanitizeSessionDisplayName(sOwnerTop?.Name || '');
+                        const ownerNameChanged = !!ownerObservedName && ownerObservedName !== storedOwnerName;
+                        const ownerPhoneChanged = !!authenticatedAccountNumber && normalizePhoneNumber(sOwnerTop?.Number || '') !== authenticatedAccountNumber;
+                        const ownerLidChanged = !!ownLidCandidates[0] && normalizeLidCacheKey(sOwnerTop?.OwnerLid || '') !== ownLidCandidates[0];
+                        if (isOwnerReal && (!sOwnerTop || ownerNameChanged || ownerPhoneChanged || ownerLidChanged)) {
+                            const ownerUpdate = { sessionId, AccountJid: botId || sock.user?.id || null, updatedAt: new Date() };
+                            if (ownLidCandidates[0]) ownerUpdate.OwnerLid = ownLidCandidates[0];
+                            if (authenticatedAccountNumber) ownerUpdate.Number = authenticatedAccountNumber;
+                            if (ownerNameChanged) {
+                                ownerUpdate.Name = ownerObservedName;
+                                ownerUpdate.nameUpdatedAt = new Date();
+                            }
+                            await promiseWithTimeout(db.collection('session_owners').updateOne(
+                                { sessionId },
+                                { $set: ownerUpdate, $setOnInsert: { createdAt: new Date(), mode: 'prive', lang: globalLang } },
+                                { upsert: true }
+                            ), 1500, 'persist current session owner identity');
+                            sOwnerTop = { ...(sOwnerTop || {}), ...ownerUpdate };
                             sessionOwnersCache.set(sessionId, sOwnerTop);
-                            void db.collection('session_owners').updateOne({ sessionId }, { $set: { Name: socketOwnerName, nameUpdatedAt: new Date() } }).catch(error => {
-                                console.warn('[session-owner-name-refresh-failed]', { sessionId, error: error?.message || String(error) });
-                            });
-                            activeHostName = socketOwnerName;
+                            registeredBotAccountIdentitiesCache.loadedAt = 0;
+                        }
+                        if (isOwnerReal && ownerObservedName) {
+                            activeHostName = ownerObservedName;
+                            const ownerProfileJid = authenticatedAccountNumber
+                                ? `${authenticatedAccountNumber}@s.whatsapp.net`
+                                : ownLidCandidates[0] || botId || rawFrom;
+                            if (ownerProfileJid) {
+                                const ownerProfileKey = `${sessionId}:${ownerProfileJid}`;
+                                const ownerProfileNow = Date.now();
+                                const cachedOwnerProfile = userProfilePersistenceCache.get(ownerProfileKey);
+                                const ownerProfileChanged = !cachedOwnerProfile || cachedOwnerProfile.name !== ownerObservedName || cachedOwnerProfile.number !== (authenticatedAccountNumber || '');
+                                const ownerProfileRefreshDue = cachedOwnerProfile && ownerProfileNow - Number(cachedOwnerProfile.at || 0) >= 12 * 60 * 60 * 1000;
+                                if (ownerProfileChanged || ownerProfileRefreshDue) {
+                                    try {
+                                        await promiseWithTimeout(db.collection('user_preferences').updateOne(
+                                            { sessionId, sender: ownerProfileJid },
+                                            { $set: { Name: ownerObservedName, pushName: ownerObservedName, displayName: ownerObservedName, number: authenticatedAccountNumber || '', updatedAt: ownerProfileNow, expireAt: new Date(ownerProfileNow + SESSION_PROFILE_RETENTION_MS) }, $setOnInsert: { createdAt: new Date(ownerProfileNow), lang: globalLang } },
+                                            { upsert: true }
+                                        ), 1500, 'persist owner profile name');
+                                        userProfilePersistenceCache.set(ownerProfileKey, { name: ownerObservedName, number: authenticatedAccountNumber || '', at: ownerProfileNow });
+                                        while (userProfilePersistenceCache.size > 5000) userProfilePersistenceCache.delete(userProfilePersistenceCache.keys().next().value);
+                                    } catch (ownerProfileError) {
+                                        userProfilePersistenceCache.delete(ownerProfileKey);
+                                        console.warn('[session-owner-profile-persist-failed]', { sessionId, error: ownerProfileError?.message || String(ownerProfileError) });
+                                    }
+                                }
+                            }
+                            if (ownerNameChanged || !storedOwnerName) console.info('[session-owner-name-persisted]', { sessionId, nameAvailable: true, nameSource: socketOwnerName ? 'authenticated_socket_profile' : 'owner_message_push_name', sessionScoped: true });
                         }
 
-                        const earlyIncomingName = isOwnerReal
-                            ? (socketOwnerName || String(sOwnerTop?.Name || activeHostName || '').trim())
-                            : String(pushName || '').replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim().slice(0, 80);
-                        const earlyProfileNumber = isOwnerReal
-                            ? (ownerNumber || botNumber || sessionNumber)
-                            : (senderNumbers.find(number => !ownerNumberCandidates.includes(number)) || sNum);
+                        const earlyProfileNumber = isOwnerReal ? authenticatedAccountNumber : (senderNumbers.find(number => number !== authenticatedAccountNumber) || sNum);
                         const earlyProfileJid = earlyProfileNumber ? `${earlyProfileNumber}@s.whatsapp.net` : normalizeLidCacheKey(sender || rawFrom || 'unknown');
-                        if (!isChannel && earlyIncomingName && !/^inconnu$/i.test(earlyIncomingName)) {
+                        const earlyAliases = [...new Set([earlyProfileJid, sender, ...(isFromMe ? [botId] : senderJids), rawFrom].filter(Boolean).map(String))];
+                        let cachedProfileName = '';
+                        for (const alias of earlyAliases) {
+                            const candidateName = sanitizeSessionDisplayName(userInfo.get(alias)?.pseudo);
+                            if (candidateName) { cachedProfileName = candidateName; break; }
+                        }
+                        let earlyIncomingName = isOwnerReal
+                            ? (ownerObservedName || sanitizeSessionDisplayName(sOwnerTop?.Name || activeHostName))
+                            : (incomingDisplayName || cachedProfileName);
+                        if (!isChannel && !earlyIncomingName && earlyAliases.length) {
+                            try {
+                                const savedProfile = await promiseWithTimeout(db.collection('user_preferences').findOne(
+                                    { sessionId, sender: { $in: earlyAliases } },
+                                    { projection: { Name: 1, pushName: 1, displayName: 1, number: 1 }, sort: { updatedAt: -1 } }
+                                ), 900, 'session-scoped user display-name lookup');
+                                earlyIncomingName = sanitizeSessionDisplayName(savedProfile?.Name || savedProfile?.displayName || savedProfile?.pushName);
+                                if (earlyIncomingName) {
+                                    const restoredProfile = { pseudo: earlyIncomingName, number: savedProfile?.number || earlyProfileNumber || '', lang: globalLang, updatedAt: Date.now() };
+                                    for (const alias of earlyAliases) userInfo.set(alias, restoredProfile);
+                                    console.info('[user-profile-name-restored]', { sessionId, messageId: msgId, nameFound: true, lookupScope: 'same_session_only' });
+                                }
+                            } catch (profileLookupError) {
+                                console.warn('[user-profile-name-lookup-failed]', { sessionId, messageId: msgId, error: profileLookupError?.message || String(profileLookupError) });
+                            }
+                        }
+                        if (!isChannel && earlyIncomingName) {
                             const earlyProfile = { pseudo: earlyIncomingName, number: earlyProfileNumber || normalizedJidNumber(earlyProfileJid), lang: globalLang, updatedAt: Date.now() };
-                            const earlyAliases = [...new Set([earlyProfileJid, sender, ...(isFromMe ? [botId] : senderJids)].filter(Boolean).map(String))];
                             for (const alias of earlyAliases) {
                                 userInfo.set(alias, earlyProfile);
-                                if (userInfo.size > 4000) userInfo.delete(userInfo.keys().next().value);
+                                if (userInfo.size > SESSION_USER_CACHE_MAX_ENTRIES) userInfo.delete(userInfo.keys().next().value);
                             }
                             const earlyCacheKey = `${sessionId}:${earlyProfileJid}`;
                             const earlyNow = Date.now();
@@ -5313,15 +6036,17 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             if (!earlyPrior || earlyPrior.name !== earlyIncomingName || earlyPrior.number !== earlyProfile.number || earlyNow - earlyPrior.at >= 12 * 60 * 60 * 1000) {
                                 userProfilePersistenceCache.set(earlyCacheKey, { name: earlyIncomingName, number: earlyProfile.number, at: earlyNow });
                                 while (userProfilePersistenceCache.size > 5000) userProfilePersistenceCache.delete(userProfilePersistenceCache.keys().next().value);
-                                console.info('[user-profile-refresh-queued]', { sessionId, senderKey: earlyProfileJid, displayName: earlyIncomingName, numberKnown: !!earlyProfile.number, action: 'persist_without_blocking_message_processing' });
-                                void Promise.resolve().then(() => db.collection('user_preferences').updateOne(
-                                    { sessionId, sender: earlyProfileJid },
-                                    { $set: { pushName: earlyIncomingName, displayName: earlyIncomingName, number: earlyProfile.number, updatedAt: earlyNow, expireAt: new Date(earlyNow + 30 * 24 * 60 * 60 * 1000) }, $setOnInsert: { createdAt: new Date(earlyNow) } },
-                                    { upsert: true }
-                                )).catch(earlyProfileError => {
+                                try {
+                                    await promiseWithTimeout(db.collection('user_preferences').updateOne(
+                                        { sessionId, sender: earlyProfileJid },
+                                        { $set: { Name: earlyIncomingName, pushName: earlyIncomingName, displayName: earlyIncomingName, number: earlyProfile.number, updatedAt: earlyNow, expireAt: new Date(earlyNow + SESSION_PROFILE_RETENTION_MS) }, $setOnInsert: { createdAt: new Date(earlyNow), lang: globalLang } },
+                                        { upsert: true }
+                                    ), 1500, 'persist first observed session-scoped profile name');
+                                    console.info('[user-profile-name-persisted]', { sessionId, senderKey: earlyProfileJid, retentionMs: SESSION_PROFILE_RETENTION_MS, sessionScoped: true });
+                                } catch (earlyProfileError) {
                                     userProfilePersistenceCache.delete(earlyCacheKey);
-                                    console.warn('[user-profile-first-message-refresh-failed]', { sessionId, senderKey: earlyProfileJid, error: earlyProfileError?.message || String(earlyProfileError) });
-                                });
+                                    console.warn('[user-profile-first-message-refresh-failed]', { sessionId, senderKey: earlyProfileJid, error: earlyProfileError?.message || String(earlyProfileError), action: 'continue_with_session_local_name' });
+                                }
                             }
                         }
 
@@ -5584,9 +6309,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         }
                         console.info('[message-policy-allowed]', { sessionId, upsertType, messageId: msgId, chatJid: from, senderJid: sender, messageType, isGroup, isChannel, isOwnerReal, isPublicMode, botMode });
                         
-                        const profileNameFromMessage = String(pushName || '').replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim().slice(0, 80);
-                        const validIncomingDisplayName = profileNameFromMessage && !/^inconnu$/i.test(profileNameFromMessage) ? profileNameFromMessage : '';
-                        const canonicalProfileNumber = isOwnerReal ? (ownerNumber || botNumber || sessionNumber) : (senderNumbers.find(number => !ownerNumberCandidates.includes(number)) || sNum);
+                        const validIncomingDisplayName = earlyIncomingName || incomingDisplayName;
+                        const canonicalProfileNumber = isOwnerReal ? authenticatedAccountNumber : (senderNumbers.find(number => number !== authenticatedAccountNumber) || sNum);
                         const canonicalProfileJid = canonicalProfileNumber ? `${canonicalProfileNumber}@s.whatsapp.net` : normalizeLidCacheKey(sender || from || 'unknown');
                         const languageCacheKey = canonicalProfileJid || sender || from || 'unknown';
                         const preferenceAliases = [...new Set([languageCacheKey, sender, ...(isFromMe ? [botId] : senderJids), ...(!isFromMe ? [from] : [])].filter(Boolean).map(value => String(value).trim()))];
@@ -5616,7 +6340,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         }
                         for (const alias of preferenceAliases) {
                             userLanguageCache.set(alias, messageLang);
-                            if (userLanguageCache.size > 4000) userLanguageCache.delete(userLanguageCache.keys().next().value);
+                            if (userLanguageCache.size > SESSION_USER_CACHE_MAX_ENTRIES) userLanguageCache.delete(userLanguageCache.keys().next().value);
                         }
 
                         const tIgnore = translations[messageLang] || translations.ht;
@@ -5627,14 +6351,14 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         }
 
                         const profileDisplayName = isOwnerReal
-                            ? (socketOwnerName || String(sOwnerTop?.Name || activeHostName || pushName).trim())
-                            : (validIncomingDisplayName || String(userInfo.get(canonicalProfileJid)?.pseudo || pushName || 'Inconnu').trim());
+                            ? (ownerObservedName || sanitizeSessionDisplayName(sOwnerTop?.Name || activeHostName) || 'Inconnu')
+                            : (validIncomingDisplayName || sanitizeSessionDisplayName(userInfo.get(canonicalProfileJid)?.pseudo) || 'Inconnu');
                         const profilePhone = canonicalProfileNumber || normalizedJidNumber(canonicalProfileJid);
                         const profileRecord = { pseudo: profileDisplayName, number: profilePhone, lang: messageLang, updatedAt: Date.now() };
                         const profileAliases = [...new Set([canonicalProfileJid, sender, ...(isFromMe ? [botId] : senderJids), ...(!isFromMe ? senderJids : [])].filter(Boolean).map(String))];
                         for (const alias of profileAliases) {
                             userInfo.set(alias, profileRecord);
-                            if (userInfo.size > 4000) userInfo.delete(userInfo.keys().next().value);
+                            if (userInfo.size > SESSION_USER_CACHE_MAX_ENTRIES) userInfo.delete(userInfo.keys().next().value);
                         }
                         if (validIncomingDisplayName || isOwnerReal && socketOwnerName) {
                             const storedProfileName = isOwnerReal ? socketOwnerName || profileDisplayName : validIncomingDisplayName;
@@ -5646,14 +6370,16 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             if (profileChanged || profileRefreshDue) {
                                 userProfilePersistenceCache.set(profileStateKey, { name: storedProfileName, number: profilePhone, at: nowForProfile });
                                 while (userProfilePersistenceCache.size > 5000) userProfilePersistenceCache.delete(userProfilePersistenceCache.keys().next().value);
-                                void Promise.resolve().then(() => promiseWithTimeout(db.collection('user_preferences').updateOne(
-                                    { sessionId, sender: canonicalProfileJid },
-                                    { $set: { pushName: storedProfileName, displayName: storedProfileName, number: profilePhone, lang: messageLang, updatedAt: nowForProfile, expireAt: new Date(nowForProfile + 30 * 24 * 60 * 60 * 1000) }, $setOnInsert: { createdAt: new Date(nowForProfile) } },
-                                    { upsert: true }
-                                ), 1200, 'user profile persistence')).catch(profilePersistError => {
+                                try {
+                                    await promiseWithTimeout(db.collection('user_preferences').updateOne(
+                                        { sessionId, sender: canonicalProfileJid },
+                                        { $set: { Name: storedProfileName, pushName: storedProfileName, displayName: storedProfileName, number: profilePhone, lang: messageLang, updatedAt: nowForProfile, expireAt: new Date(nowForProfile + SESSION_PROFILE_RETENTION_MS) }, $setOnInsert: { createdAt: new Date(nowForProfile) } },
+                                        { upsert: true }
+                                    ), 1500, 'user profile persistence');
+                                } catch (profilePersistError) {
                                     userProfilePersistenceCache.delete(profileStateKey);
-                                    console.warn('[user-profile-refresh-failed]', { sessionId, senderKey: canonicalProfileJid, error: profilePersistError?.message || String(profilePersistError), action: 'continue_message_processing' });
-                                });
+                                    console.warn('[user-profile-refresh-failed]', { sessionId, senderKey: canonicalProfileJid, error: profilePersistError?.message || String(profilePersistError), action: 'continue_with_session_local_profile' });
+                                }
                             }
                         }
 
@@ -6226,16 +6952,17 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             }
                                             const historyKey = `${sessionId}:${from}`;
                                             let history = chatHistories.get(historyKey) || [];
+                                            chatHistoryAccessTimes.set(historyKey, Date.now());
                                             history.push({ role: 'user', content: promptText });
-                                            chatHistories.set(historyKey, history);
-                                            const userInfoObj = userInfo.get(sender) || { pseudo: pushName, number: sender ? sender.split('@')[0].split(':')[0].replace(/[^0-9]/g, '') : '', lang: globalLang };
+                                            setSessionChatHistory(historyKey, history);
+                                            const userInfoObj = userInfo.get(sender) || { pseudo: pushName, number: sNum || '', lang: globalLang };
                                             const messagesForAI = buildAIMessages(history, userInfoObj, messageLang, m.messageTimestamp);
                                             try {
                                                 const aiResponseText = clipLongText(await callCloudflareAI(chatModel, messagesForAI, Number(process.env.AI_MAX_OUTPUT_TOKENS || 6000)), Number(process.env.AI_MAX_RESPONSE_CHARS || 12000));
                                                 if (isCancelled) return;
                                                 history.push({ role: 'assistant', content: aiResponseText });
                                                 if (history.length > 7) history = history.slice(-7);
-                                                chatHistories.set(historyKey, history);
+                                                setSessionChatHistory(historyKey, history);
                                                 await safeSendFormatted(sock, from, t.ai_title, aiResponseText, pushName, true, activeHostName);
                                                 terminalResponseSent = true;
                                             } catch (e) {
@@ -6247,7 +6974,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             if (['fr', 'en', 'es', 'ht'].includes(langCode)) {
                                                 messageLang = langCode;
                                                 userLanguageCache.set(languageCacheKey, messageLang);
-                                                userInfo.set(sender, { pseudo: pushName, number: sNum, lang: messageLang });
+                                                userInfo.set(sender, { pseudo: sanitizeSessionDisplayName(pushName) || earlyIncomingName || 'Inconnu', number: sNum, lang: messageLang, updatedAt: Date.now() });
                                                 await db.collection('user_preferences').updateOne(
                                                     { sessionId, sender: languageCacheKey },
                                                     { $set: { lang: messageLang, updatedAt: Date.now(), expireAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) }, $setOnInsert: { createdAt: new Date() } },
@@ -6535,6 +7262,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
                                                 const historyKey = `${sessionId}:${from}`;
                                                 let historyS = chatHistories.get(historyKey) || [];
+                                                chatHistoryAccessTimes.set(historyKey, Date.now());
                                                 historyS.push({ role: 'user', content: clipLongText(searchQuery, AI_MAX_INPUT_CHARS) });
                                                 if (historyS.length > 7) historyS = historyS.slice(-7);
                                                 const userInfoObj = userInfo.get(sender) || { pseudo: pushName, number: sNum, lang: globalLang };
@@ -6545,7 +7273,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 if (isCancelled) return;
                                                 historyS.push({ role: 'assistant', content: searchAIResponse });
                                                 if (historyS.length > 7) historyS = historyS.slice(-7);
-                                                chatHistories.set(historyKey, historyS);
+                                                setSessionChatHistory(historyKey, historyS);
                                                 await safeSendFormatted(sock, from, t.search_title, searchAIResponse, pushName, true, activeHostName);
                                                 terminalResponseSent = true;
                                             } catch (e) {
@@ -6626,6 +7354,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         }
         if (String(err?.message || '').startsWith('duplicate_account_runtime_lock_owned_elsewhere:')) {
             const holderSessionId = String(err.message).split(':').slice(1).join(':') || null;
+            await db.collection('session_owners').updateOne(
+                { sessionId },
+                { $set: { connectionStatus: 'duplicate_account', duplicateAccountOf: holderSessionId, duplicateAccountDetectedAt: new Date() } },
+                { upsert: true }
+            ).catch(error => console.warn('[duplicate-session-owner-marker-failed]', { sessionId, error: error?.message || String(error) }));
             const duplicateSession = activeSessions.get(sessionId);
             if (duplicateSession) {
                 duplicateSession.status = 'duplicate_account';
@@ -6672,23 +7405,69 @@ async function loadExistingSessions() {
             console.error('[session-restore-invalid-creds-preserved]', { sessionId, action: 'stored auth data was not deleted' });
             continue;
         }
-        const rawIdentity = String(credentials.me.id || '').split('@')[0].split(':')[0];
-        const number = rawIdentity.replace(/[^0-9]/g, '');
-        candidates.push({ sessionId, number, timestampFromId: Number(sessionId.match(/^session_(\d+)/)?.[1] || 0) });
+        const number = getAuthenticatedPhoneNumber(null, credentials);
+        const lid = getAuthenticatedLid(null, credentials);
+        candidates.push({ sessionId, number, lid, timestampFromId: Number(sessionId.match(/^session_(\d+)/)?.[1] || 0) });
     }
     const ownerDocs = candidates.length
         ? await db.collection('session_owners').find({ sessionId: { $in: candidates.map(item => item.sessionId) } }).toArray()
         : [];
     const owners = new Map(ownerDocs.map(owner => [owner.sessionId, owner]));
-    const restorableCandidates = candidates.filter(candidate => !owners.get(candidate.sessionId)?.reauthRequired);
+    const restorableCandidates = candidates.filter(candidate => {
+        const owner = owners.get(candidate.sessionId) || {};
+        return !owner.reauthRequired && !owner.duplicateAccountOf && owner.connectionStatus !== 'duplicate_account';
+    });
+    const parent = restorableCandidates.map((_, index) => index);
+    const findRoot = index => {
+        let root = index;
+        while (parent[root] !== root) root = parent[root];
+        while (parent[index] !== index) {
+            const next = parent[index];
+            parent[index] = root;
+            index = next;
+        }
+        return root;
+    };
+    const unite = (left, right) => {
+        const leftRoot = findRoot(left);
+        const rightRoot = findRoot(right);
+        if (leftRoot !== rightRoot) parent[rightRoot] = leftRoot;
+    };
+    const firstByIdentity = new Map();
+    for (let index = 0; index < restorableCandidates.length; index++) {
+        const candidate = restorableCandidates[index];
+        const owner = owners.get(candidate.sessionId) || {};
+        const ownerNumber = normalizePhoneNumber(owner.Number || owner.number || '');
+        const ownerAccountPhone = getAuthenticatedPhoneNumber({ id: owner.AccountJid || owner.accountJid || '' }, null);
+        const ownerLid = normalizeLidCacheKey(owner.OwnerLid || owner.ownerLid || '');
+        const ownerAccountLid = normalizeLidCacheKey(owner.AccountJid || owner.accountJid || '');
+        const ownerMatchesCredential = !!(
+            (candidate.number && (ownerNumber === candidate.number || ownerAccountPhone === candidate.number)) ||
+            (candidate.lid && (ownerLid === candidate.lid || ownerAccountLid === candidate.lid))
+        );
+        const identityKeys = new Set();
+        if (candidate.number) identityKeys.add(`pn:${candidate.number}`);
+        if (candidate.lid) identityKeys.add(`lid:${candidate.lid}`);
+        if (ownerMatchesCredential) {
+            if (/^\d{6,20}$/.test(ownerNumber)) identityKeys.add(`pn:${ownerNumber}`);
+            if (/^\d{6,20}$/.test(ownerAccountPhone)) identityKeys.add(`pn:${ownerAccountPhone}`);
+            if (/@lid$/i.test(ownerLid)) identityKeys.add(`lid:${ownerLid}`);
+            if (/@lid$/i.test(ownerAccountLid)) identityKeys.add(`lid:${ownerAccountLid}`);
+        }
+        for (const identityKey of identityKeys) {
+            const previousIndex = firstByIdentity.get(identityKey);
+            if (previousIndex !== undefined) unite(index, previousIndex);
+            else firstByIdentity.set(identityKey, index);
+        }
+    }
     const groups = new Map();
-    for (const candidate of restorableCandidates) {
-        const identity = candidate.number || candidate.sessionId;
-        if (!groups.has(identity)) groups.set(identity, []);
-        groups.get(identity).push(candidate);
+    for (let index = 0; index < restorableCandidates.length; index++) {
+        const root = findRoot(index);
+        if (!groups.has(root)) groups.set(root, []);
+        groups.get(root).push(restorableCandidates[index]);
     }
     const sessionsToRestore = [];
-    for (const [identity, group] of groups.entries()) {
+    for (const group of groups.values()) {
         group.sort((a, b) => {
             const aOwner = owners.get(a.sessionId);
             const bOwner = owners.get(b.sessionId);
@@ -6701,7 +7480,7 @@ async function loadExistingSessions() {
         const storedOwner = owners.get(selectedSession.sessionId);
         sessionsToRestore.push({ sessionId: selectedSession.sessionId, format: normalizeConnectionFormat(storedOwner?.format || storedOwner?.Format || 'pair') });
         for (const duplicate of group.slice(1)) {
-            console.warn('[session-restore-duplicate-skipped-preserved]', { number: identity, keptSessionId: group[0].sessionId, preservedSessionId: duplicate.sessionId });
+            console.warn('[session-restore-duplicate-skipped-preserved]', { identityCount: group.length, keptSessionId: selectedSession.sessionId, preservedSessionId: duplicate.sessionId, accountIdentityDetailsRedacted: true });
         }
     }
     for (const restoredSession of sessionsToRestore) {
@@ -6720,15 +7499,45 @@ setInterval(async () => {
     try {
         const now = Date.now();
         const threshold = now - PROCESSED_MESSAGE_RETENTION_MS;
-        const preferenceThreshold = now - 30 * 24 * 60 * 60 * 1000;
+        const preferenceThreshold = now - SESSION_PROFILE_RETENTION_MS;
         await db.collection('processed_messages').deleteMany({ ts: { $lt: threshold } });
         await db.collection('user_preferences').deleteMany({ updatedAt: { $type: 'number', $lt: preferenceThreshold }, expireAt: { $exists: false } });
-        await db.collection('lid_phone_mappings').deleteMany({ updatedAt: { $lt: new Date(preferenceThreshold) }, expireAt: { $exists: false } });
+        await db.collection('lid_phone_mappings').deleteMany({ updatedAt: { $lt: new Date(now - LID_PHONE_MAPPING_RETENTION_MS) } });
+        await db.collection('lid_phone_mappings').deleteMany({ sessionId: { $exists: false } });
         for (const [key, value] of userProfilePersistenceCache.entries()) {
-            if (now - Number(value?.at || 0) > 30 * 24 * 60 * 60 * 1000) userProfilePersistenceCache.delete(key);
+            if (now - Number(value?.at || 0) > SESSION_PROFILE_CACHE_TTL_MS) userProfilePersistenceCache.delete(key);
         }
         for (const [key, value] of lidPhonePersistedKeys.entries()) {
-            if (now - Number(value || 0) > 30 * 24 * 60 * 60 * 1000) lidPhonePersistedKeys.delete(key);
+            if (now - Number(value || 0) > SESSION_PROFILE_CACHE_TTL_MS) lidPhonePersistedKeys.delete(key);
+        }
+        for (const [key, value] of lidPhoneResolutionCache.entries()) {
+            if (now - Number(value?.updatedAt || 0) > LID_PHONE_MAPPING_RETENTION_MS) lidPhoneResolutionCache.delete(key);
+        }
+        for (let index = recentMsgsCache.length - 1; index >= 0; index--) {
+            if (now - Number(recentMsgsCache[index]?.cachedAt || 0) > RECENT_MESSAGE_MEMORY_TTL_MS) recentMsgsCache.splice(index, 1);
+        }
+        for (const [key, value] of groupMetadataCache.entries()) {
+            if (now - Number(value?.ts || 0) > GROUP_METADATA_CACHE_TTL_MS) groupMetadataCache.delete(key);
+        }
+        for (const [key, value] of groupSenderKeyResetAt.entries()) {
+            if (now - Number(value || 0) > 24 * 60 * 60 * 1000) groupSenderKeyResetAt.delete(key);
+        }
+        for (const [key, value] of outgoingMessageIdCache.entries()) {
+            if (now - Number(value || 0) > OUTGOING_ECHO_TTL_MS) outgoingMessageIdCache.delete(key);
+        }
+        for (const [key, value] of outgoingTextEchoCache.entries()) {
+            if (now - Number(value || 0) > OUTGOING_ECHO_TTL_MS) outgoingTextEchoCache.delete(key);
+        }
+        for (const [key, lastAccess] of chatHistoryAccessTimes.entries()) {
+            if (now - Number(lastAccess || 0) > CHAT_HISTORY_TTL_MS) {
+                chatHistoryAccessTimes.delete(key);
+                chatHistories.delete(key);
+            }
+        }
+        if (registeredBotAccountIdentitiesCache.loadedAt && now - registeredBotAccountIdentitiesCache.loadedAt > REGISTERED_BOT_ACCOUNT_CACHE_TTL_MS) {
+            registeredBotAccountIdentitiesCache.loadedAt = 0;
+            registeredBotAccountIdentitiesCache.numbers.clear();
+            registeredBotAccountIdentitiesCache.lids.clear();
         }
     } catch (e) {
         console.error('[maintenance]', e?.message || e);
@@ -6752,8 +7561,6 @@ setInterval(async () => {
         }
         const readyState = currentSocket.ws?.readyState ?? currentSocket.ws?._socket?.readyState ?? currentSocket.socket?.readyState;
         const socketClosed = readyState !== undefined && readyState !== null && Number(readyState) !== 1;
-        // A quiet chat is not a dead socket. Only enforce a pong deadline after at
-        // least one real WebSocket pong has been observed from this socket.
         const hasObservedPong = sess.wsPongMonitoring && sess.receivedPong === true;
         const lastPongAt = Number(sess.lastPongAt || sess.connectedAt || sess.readyAt || now);
         const pongAge = Math.max(0, now - lastPongAt);
@@ -6791,11 +7598,11 @@ async function shutdownServer(signal) {
     reconnectTimers.clear();
     for (const timer of sessionLockRetryTimers.values()) clearTimeout(timer);
     sessionLockRetryTimers.clear();
-    for (const [sessionId, session] of activeSessions.entries()) {
-        if (session?.sock) {
-            try { session.sock.ev.removeAllListeners(); } catch (e) {}
-            try { if (session.sock.ws) session.sock.ws.close(); } catch (e) {}
-            session.sock = null;
+    for (const [sessionId, session] of [...activeSessions.entries()]) {
+        try {
+            await cleanupSocket(sessionId);
+        } catch (cleanupError) {
+            console.warn('[server-shutdown-socket-cleanup-failed]', { sessionId, error: cleanupError?.message || String(cleanupError) });
         }
         if (session) {
             session.status = 'deconnecte';
@@ -6812,6 +7619,8 @@ async function shutdownServer(signal) {
     if (db) {
         try { await db.collection('session_runtime_locks').deleteMany({ owner: processInstanceId }); } catch (error) { console.warn('[server-shutdown-session-lock-cleanup-failed]', error?.message || String(error)); }
         try { await db.collection('session_account_runtime_locks').deleteMany({ owner: processInstanceId }); } catch (error) { console.warn('[server-shutdown-account-lock-cleanup-failed]', error?.message || String(error)); }
+        try { await db.collection('session_runtime_locks').deleteMany({ leaseUntil: { $lte: new Date() } }); } catch (error) { console.warn('[server-shutdown-expired-session-lock-cleanup-failed]', error?.message || String(error)); }
+        try { await db.collection('session_account_runtime_locks').deleteMany({ leaseUntil: { $lte: new Date() } }); } catch (error) { console.warn('[server-shutdown-expired-account-lock-cleanup-failed]', error?.message || String(error)); }
     }
     if (httpServer) await new Promise(resolve => {
         try { httpServer.close(() => resolve()); } catch (e) { resolve(); }
@@ -6836,6 +7645,18 @@ async function main() {
         privateLidMappedPhonePrimary: true,
         passiveSocketHealth: true,
         activeGroupFetchHealthProbe: false,
+        exclusiveAccountRuntimeLocks: true,
+        accountLockIncludesPnAndLidAliases: true,
+        accountLockExpandsKnownSessionAliases: true,
+        accountLockUsesRecentPnlidMappings: true,
+        duplicateSessionsSkippedOnRestore: true,
+        activeSocketWithoutFencingTokenIsClosed: true,
+        invalidSignalSessionRecordPruning: 'single_session_key_only',
+        lockLeaseMs: SESSION_RUNTIME_LOCK_LEASE_MS,
+        lockRenewMs: SESSION_RUNTIME_LOCK_RENEW_MS,
+        authWritesFencedByRuntimeLock: true,
+        retryStoreExactSessionIdFallback: true,
+        targetedSignalPeerRecovery: true,
         selfChatPhonePreferred: false,
         lidPhoneMappingFreshMs: LID_PHONE_MAPPING_FRESH_MS,
         sessionScopedLidMappings: true,
