@@ -198,6 +198,8 @@ const CLOUDFLARE_STATE_COLLECTION = 'bot_runtime_state';
 const CLOUDFLARE_ROTATION_DOCUMENT_ID = 'cloudflare_ai_account_rotation';
 const reconnectTimers = new Map();
 const sessionStartPromises = new Map();
+const SESSION_HEALTH_CHECK_INTERVAL_MS = Math.max(15000, Number(process.env.SESSION_HEALTH_CHECK_INTERVAL_MS) || 30000);
+const SESSION_WS_PONG_TIMEOUT_MS = Math.max(60000, Number(process.env.SESSION_WS_PONG_TIMEOUT_MS) || 120000);
 const sessionRuntimeLockTimers = new Map();
 const sessionLockRetryTimers = new Map();
 const accountRuntimeLockTimers = new Map();
@@ -515,6 +517,7 @@ function persistOutgoingRetryMessage(sessionId, jid, message) {
         sessionId,
         messageId,
         remoteJid,
+        fromMe: true,
         message: message.message,
         createdAt: new Date()
     };
@@ -553,6 +556,16 @@ function normalizeOutgoingEchoJid(value) {
     const phoneJid = normalizePhoneCacheJid(raw);
     if (phoneJid) return phoneJid;
     return raw.toLowerCase();
+}
+
+function areEquivalentWhatsAppChatJids(sessionId, first, second) {
+    const left = String(first || '').trim();
+    const right = String(second || '').trim();
+    if (!left || !right) return false;
+    if (normalizeOutgoingEchoJid(left) === normalizeOutgoingEchoJid(right)) return true;
+    const leftPhone = normalizePhoneCacheJid(left) || getRememberedPhoneForLid(sessionId, left);
+    const rightPhone = normalizePhoneCacheJid(right) || getRememberedPhoneForLid(sessionId, right);
+    return !!leftPhone && !!rightPhone && leftPhone === rightPhone;
 }
 
 function rememberOutgoingMessageId(sessionId, messageId) {
@@ -2911,7 +2924,26 @@ function resolveCommand(command, language) {
     return null;
 }
 
-function parseIncomingCommand(body, language) {
+function getCommandParsingContext(message) {
+    const content = unwrapMessageContent(message);
+    const contextInfo = getMessageContextInfo(message);
+    const mediaKeys = ['imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'stickerMessage', 'albumMessage'];
+    return {
+        hasQuotedMessage: !!(contextInfo?.stanzaId || contextInfo?.quotedMessage),
+        hasMedia: mediaKeys.some(key => !!content?.[key])
+    };
+}
+
+const commandsWithoutArguments = new Set([
+    'prive', 'public', 'menu', 'info', 'alive', 'ping', 'qrbot', 'lien', 'tagall',
+    'kickall', 'kickall2', 'ferme', 'ouvert', 'bienvenue', 'nolien', 'nolien2',
+    'del', 'vv', 'url', 'sites'
+]);
+const commandsRequiringText = new Set(['ai', 'qr', 'imaj', 'cheche']);
+const commandsRequiringTarget = new Set(['add', 'kick', 'promote', 'demote', 'del2']);
+const commandsRequiringQuotedMessage = new Set(['del', 'vv']);
+
+function parseIncomingCommand(body, language, context = {}) {
     let source = String(body || '').trim();
     source = source.replace(/^[*`_\s]*(?:[○●]\s*)?/u, '').replace(/^[.!/]+\s*/u, '').trim();
     const match = source.match(/^([\p{L}\p{N}_-]+)[*`_]*(?:(?:\s+|[:：,]\s*)([\s\S]*)|$)/u);
@@ -2920,6 +2952,17 @@ function parseIncomingCommand(body, language) {
     const args = String(match[2] || '').trim();
     const internalCommand = resolveCommand(command, language);
     if (!internalCommand) return null;
+    const hasQuotedMessage = !!context?.hasQuotedMessage;
+    if (commandsWithoutArguments.has(internalCommand) && args) return null;
+    if (commandsRequiringText.has(internalCommand) && !args) return null;
+    if (commandsRequiringTarget.has(internalCommand) && !args && !hasQuotedMessage) return null;
+    if (commandsRequiringQuotedMessage.has(internalCommand) && !hasQuotedMessage) return null;
+    if (internalCommand === 'lang' && args && !['fr', 'en', 'es', 'ht'].includes(normalizeText(args))) return null;
+    if (internalCommand === 'code') {
+        if (!/^\+?[0-9\s().-]+$/.test(args)) return null;
+        const phoneNumber = normalizePhoneNumber(args);
+        if (phoneNumber.length < 6 || phoneNumber.length > 20) return null;
+    }
     let parsedArgs = args;
     if (internalCommand === 'ai') {
         const aiPrefixes = new Set(['ai', 'ia', 'asistan', 'iu', 'tfasistan']);
@@ -3029,42 +3072,41 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             syncFullHistory: false,
             keepAliveIntervalMs: 15000,
                         getMessage: async (key) => {
+                const requestedChatJid = String(key?.remoteJid || '').trim();
                 let exactRecentMessage = null;
-                let sameIdRecentMessage = null;
                 for (let i = recentMsgsCache.length - 1; i >= 0; i--) {
                     const found = recentMsgsCache[i];
-                    if (found.sessionId !== sessionId || found.id !== key.id) continue;
-                    if (!sameIdRecentMessage) sameIdRecentMessage = found;
-                    if (!key.remoteJid || found.from === key.remoteJid) {
-                        exactRecentMessage = found;
-                        break;
-                    }
+                    if (found.sessionId !== sessionId || found.id !== key?.id || !found.fromMe) continue;
+                    if (requestedChatJid && !areEquivalentWhatsAppChatJids(sessionId, found.from, requestedChatJid)) continue;
+                    exactRecentMessage = found;
+                    break;
                 }
                 if (exactRecentMessage) {
-                    console.debug('[message-retry-cache-hit]', { sessionId, messageId: key.id, match: 'exact_chat' });
+                    console.debug('[message-retry-cache-hit]', { sessionId, messageId: key.id, match: requestedChatJid ? 'exact_chat_or_known_alias' : 'outgoing_message_id' });
                     return exactRecentMessage.message;
                 }
-                if (sameIdRecentMessage) {
-                    console.info('[message-retry-cache-hit]', { sessionId, messageId: key.id, requestedChatJid: key.remoteJid || null, cachedChatJid: sameIdRecentMessage.from || null, match: 'same_session_message_id' });
-                    return sameIdRecentMessage.message;
-                }
                 if (!key?.id || !db) {
-                    console.info('[message-retry-cache-miss]', { sessionId, messageId: key?.id || null, requestedChatJid: key?.remoteJid || null, databaseAvailable: !!db });
+                    console.info('[message-retry-cache-miss]', { sessionId, messageId: key?.id || null, requestedChatJid: requestedChatJid || null, databaseAvailable: !!db });
                     return undefined;
                 }
                 try {
-                    const query = { _id: `${sessionId}:${String(key.id)}` };
-                    if (key.remoteJid) query.remoteJid = key.remoteJid;
-                    let stored = await db.collection('baileys_outgoing_messages').findOne(query, { projection: { message: 1, remoteJid: 1 } });
-                    if (!stored && key.remoteJid) stored = await db.collection('baileys_outgoing_messages').findOne({ _id: `${sessionId}:${String(key.id)}` }, { projection: { message: 1, remoteJid: 1 } });
-                    if (stored?.message) {
+                    const stored = await db.collection('baileys_outgoing_messages').findOne(
+                        { _id: `${sessionId}:${String(key.id)}` },
+                        { projection: { message: 1, remoteJid: 1, fromMe: 1 } }
+                    );
+                    if (stored?.message && stored.fromMe !== false && (!requestedChatJid || areEquivalentWhatsAppChatJids(sessionId, stored.remoteJid, requestedChatJid))) {
                         const restoredMessage = fixBuffers(stored.message);
-                        cacheRecentMessage(sessionId, { key: { id: key.id, remoteJid: stored.remoteJid || key.remoteJid || '', fromMe: true }, message: restoredMessage, messageTimestamp: Math.floor(Date.now() / 1000) });
+                        cacheRecentMessage(sessionId, { key: { id: key.id, remoteJid: stored.remoteJid || requestedChatJid || '', fromMe: true }, message: restoredMessage, messageTimestamp: Math.floor(Date.now() / 1000) });
+                        console.info('[message-retry-store-hit]', { sessionId, messageId: String(key.id), chatMatch: !!requestedChatJid });
                         return restoredMessage;
+                    }
+                    if (stored?.message) {
+                        console.warn('[message-retry-chat-mismatch]', { sessionId, messageId: String(key.id), requestedChatJid: requestedChatJid || null, storedChatJid: stored.remoteJid || null });
                     }
                 } catch (error) {
                     console.warn('[message-retry-store-read-failed]', { sessionId, messageId: String(key.id), error: error?.message || String(error) });
                 }
+                console.info('[message-retry-cache-miss]', { sessionId, messageId: String(key.id), requestedChatJid: requestedChatJid || null, databaseAvailable: true });
                 return undefined;
             }
         });
@@ -3182,25 +3224,59 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             reconnectAttempts: existingSessionRecord ? (existingSessionRecord.reconnectAttempts || 0) : 0,
             sock: sock,
             qrString: null,
-            disconnectTime: null
+            disconnectTime: null,
+            connectedAt: null,
+            lastPongAt: Date.now(),
+            lastMessageAt: 0,
+            wsPongMonitoring: !!(sock.ws && typeof sock.ws.on === 'function'),
+            receivedPong: false
         });
+        if (sock.ws && typeof sock.ws.on === 'function') {
+            const markSocketPong = () => {
+                const liveSession = activeSessions.get(sessionId);
+                if (liveSession?.sock !== sock) return;
+                liveSession.receivedPong = true;
+                liveSession.lastPongAt = Date.now();
+            };
+            const markSocketActivity = () => {
+                const liveSession = activeSessions.get(sessionId);
+                if (liveSession?.sock !== sock) return;
+                liveSession.lastPongAt = Date.now();
+            };
+            sock.ws.on('pong', markSocketPong);
+            sock.ws.on('ping', markSocketActivity);
+            sock.ws.on('open', markSocketActivity);
+        }
 
         sock.ev.on('creds.update', saveCreds);
         sock.ev.on('messages.update', updates => {
             if (!Array.isArray(updates)) return;
-            for (const item of updates.slice(0, 50)) {
+            const hydratedMessages = [];
+            for (const item of updates.slice(0, 100)) {
                 const update = item?.update || {};
                 const status = update.status;
                 const error = update.error;
-                if (status === undefined && !error) continue;
-                console.info('[whatsapp-message-status-update]', {
-                    sessionId,
-                    messageId: item?.key?.id || null,
-                    chatJid: item?.key?.remoteJid || null,
-                    fromMe: !!item?.key?.fromMe,
-                    status: status ?? null,
-                    errorName: error?.name || error?.constructor?.name || null,
-                    errorMessage: String(error?.message || '').replace(/[\r\n\t]+/g, ' ').slice(0, 180) || null
+                if (status !== undefined || error) {
+                    console.info('[whatsapp-message-status-update]', {
+                        sessionId,
+                        messageId: item?.key?.id || null,
+                        chatJid: item?.key?.remoteJid || null,
+                        fromMe: !!item?.key?.fromMe,
+                        status: status ?? null,
+                        errorName: error?.name || error?.constructor?.name || null,
+                        errorMessage: String(error?.message || '').replace(/[\r\n\t]+/g, ' ').slice(0, 180) || null
+                    });
+                }
+                if (item?.key?.id && update.message && typeof update.message === 'object') {
+                    const hydrated = { ...item, ...update, key: item.key, message: update.message };
+                    if (String(extractBody(hydrated) || '').trim()) hydratedMessages.push(hydrated);
+                }
+            }
+            if (hydratedMessages.length) {
+                setImmediate(() => {
+                    if (activeSessions.get(sessionId)?.sock !== sock || serverShuttingDown) return;
+                    console.info('[message-content-hydrated-from-update]', { sessionId, messageCount: hydratedMessages.length, action: 'redispatch_readable_content' });
+                    sock.ev.emit('messages.upsert', { type: 'notify', messages: hydratedMessages });
                 });
             }
         });
@@ -3374,6 +3450,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     currentSession.status = 'connecte';
                     currentSession.format = connectionFormat;
                     currentSession.sock = sock;
+                    currentSession.connectedAt = Date.now();
+                    currentSession.lastPongAt = Date.now();
+                    currentSession.receivedPong = false;
                     currentSession.disconnectTime = null;
                     currentSession.reconnectAttempts = 0;
                     const reconnectTimer = reconnectTimers.get(sessionId);
@@ -3820,7 +3899,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     const unsupportedChat = String(entry?.key?.remoteJid || entry?.key?.remoteJidAlt || 'unknown-chat');
                     const unsupportedGroup = unsupportedChat.endsWith('@g.us');
                     const unsupportedBody = String(unsupportedAudit.messageText || '');
-                    const unsupportedCommand = unsupportedBody.trim() ? parseIncomingCommand(unsupportedBody, globalLang) : null;
+                    const unsupportedCommand = unsupportedBody.trim() ? parseIncomingCommand(unsupportedBody, globalLang, getCommandParsingContext(entry?.message)) : null;
                     console.info('[message-received-not-processed]', {
                         sessionId,
                         connectedAccountJid: sock.user?.id || null,
@@ -3850,6 +3929,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
             for (const m of rawBatch) {
                 try {
+                const liveSessionForMessage = activeSessions.get(sessionId);
+                if (liveSessionForMessage?.sock === sock) liveSessionForMessage.lastMessageAt = Date.now();
                 const identityAliasCount = cacheMessageIdentityAliases(sessionId, m);
                 const receivedBody = extractBody(m);
                 const receivedAuditDetails = getMessageAuditDetails(m);
@@ -3877,7 +3958,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         ? (m?.key?.participant || m?.key?.participantAlt || m?.key?.participantPn || m?.key?.senderPn || receivedChat)
                         : (m?.key?.participant || m?.key?.remoteJid || m?.key?.remoteJidAlt || receivedChat);
                 const receivedSenderAliases = [...new Set([receivedSenderJid, m?.key?.participant, m?.key?.participantAlt, m?.key?.participantPn, m?.key?.senderPn, m?.key?.remoteJidAlt, m?.key?.fromMe ? sock.user?.id : null].filter(Boolean).map(String))];
-                const receivedParsedCommand = String(receivedBody || '').trim() ? parseIncomingCommand(receivedBody, globalLang) : null;
+                const receivedParsedCommand = String(receivedBody || '').trim() ? parseIncomingCommand(receivedBody, globalLang, getCommandParsingContext(m?.message)) : null;
                 const receivedClassification = !String(receivedBody || '').trim()
                     ? 'no_text_or_caption'
                     : receivedParsedCommand
@@ -3939,6 +4020,20 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     quotedMessage: receivedAuditDetails.quotedMessage,
                     timestamp: receivedDiagnostic.timestamp
                 });
+                if (!String(receivedBody || '').trim() && !receivedParsedCommand) {
+                    cacheRecentMessage(sessionId, m);
+                    console.info('[message-awaiting-readable-content]', {
+                        sessionId,
+                        messageId: receivedId,
+                        chatJid: receivedChat,
+                        upsertType,
+                        messageType: receivedType,
+                        messageKeys: Object.keys(m?.message || {}),
+                        action: 'not_claimed_or_deduplicated_allow_later_decrypted_content',
+                        credentialsDeleted: false
+                    });
+                    continue;
+                }
                 if (receivedParsedCommand) {
                     console.info('[command-recognized-on-receipt]', {
                         sessionId,
@@ -4002,6 +4097,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     messageClassification: receivedClassification,
                     detectedCommand: receivedParsedCommand?.command || null
                 });
+                const messageTimestampForDedupe = Number(m.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m.messageTimestamp);
+                const messageAgeForDedupe = Number.isFinite(messageTimestampForDedupe) && messageTimestampForDedupe > 0 ? Math.floor(Date.now() / 1000) - messageTimestampForDedupe : null;
+                if (upsertType === 'append' && messageAgeForDedupe !== null && messageAgeForDedupe > 120) {
+                    cacheRecentMessage(sessionId, m);
+                    console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: receivedChat, messageAgeSeconds: messageAgeForDedupe, reason: 'stale_history_append_not_claimed' });
+                    continue;
+                }
                 const msgCacheKey = `${sessionId}:${receivedChat}:${msgId}`;
                 if (m.key.fromMe && consumeOutgoingTextEcho(sessionId, m.key.remoteJid || '', extractBody(m))) {
                     console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'outgoing_text_echo' });
@@ -4091,14 +4193,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             detectedCommand: receivedParsedCommand?.command || null,
                             detectedInternalCommand: receivedParsedCommand?.internalCommand || null
                         });
-                        const timestampNow = Math.floor(Date.now() / 1000);
-                        const messageTimestampSeconds = Number(m.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m.messageTimestamp);
-                        const messageAgeSeconds = Number.isFinite(messageTimestampSeconds) && messageTimestampSeconds > 0 ? timestampNow - messageTimestampSeconds : null;
-                        if (upsertType === 'append' && messageAgeSeconds !== null && messageAgeSeconds > 120) {
-                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: m.key.remoteJid || m.key.remoteJidAlt || null, messageAgeSeconds, reason: 'stale_history_append' });
-                            return;
-                        }
-
                         const rawFrom = String(m.key.remoteJid || m.key.remoteJidAlt || m.key.participant || '');
                         const isFromMe = !!m.key.fromMe;
                         const pushName = String(m.pushName || 'Inconnu');
@@ -4610,7 +4704,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             }
                         }
 
-                        const parsedCommand = receivedParsedCommand || parseIncomingCommand(body, messageLang);
+                        const parsedCommand = receivedParsedCommand || parseIncomingCommand(body, messageLang, getCommandParsingContext(m?.message));
                         if (!parsedCommand) {
                             console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, senderAliases: senderJids, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', messageType, messageLang, messageClassification: 'text_not_recognized_as_command', detectedCommand: null, isPublicMode, botMode, bodyLength: body.length, bodyPreview: body.slice(0, 240), action: 'message_logged_no_command_executed', reason: 'not_a_recognized_command', expected: 'Use an explicit recognized command; plain text is not sent to AI.' });
                             return;
@@ -5535,7 +5629,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 });
                 } catch (messageDispatchError) {
                     const failedBody = String(extractBody(m) || '');
-                    const failedCommand = failedBody.trim() ? parseIncomingCommand(failedBody, globalLang) : null;
+                    const failedCommand = failedBody.trim() ? parseIncomingCommand(failedBody, globalLang, getCommandParsingContext(m?.message)) : null;
                     console.error('[message-pre-dispatch-failed]', {
                         sessionId,
                         connectedAccountJid: sock.user?.id || null,
@@ -5689,33 +5783,53 @@ setInterval(async () => {
 }, 60000);
 
 setInterval(async () => {
-    if (!db) return;
+    if (!db || serverShuttingDown) return;
+    const now = Date.now();
     for (const [sId, sess] of activeSessions.entries()) {
-        if (!sess?.sock) continue;
-        const readyState = sess.sock.ws?.readyState;
-        if (sess.status === 'connecte' && readyState !== undefined && readyState !== 1) {
-            console.warn('[session-health] connected status has a closed websocket', { sessionId: sId, readyState });
-            try {
-                sess.status = 'deconnecte';
-                sess.disconnectTime = Date.now();
-                sess.sock.ev.removeAllListeners();
-                if (sess.sock.ws) sess.sock.ws.close();
-                sess.sock = null;
-            } catch (e) {
-                sess.sock = null;
-            }
+        if (activeSessions.get(sId) !== sess || !sess || sess.status !== 'connecte') continue;
+        const currentSocket = sess.sock;
+        if (!currentSocket) {
+            console.warn('[session-health] connected session has no socket', { sessionId: sId, action: 'schedule_reconnect_without_touching_auth' });
+            sess.status = 'deconnecte';
+            sess.disconnectTime = now;
             await releaseSessionRuntimeLock(sId);
             scheduleSessionReconnect(sId, false, sess.format || 'pair');
             continue;
         }
-        if (sess.status === 'connecte' && sess.sock) {
-            try {
-                const groups = await sess.sock.groupFetchAllParticipating();
-                const nowTS = Date.now();
-                for (const jid in groups) groupMetadataCache.set(jid, { data: groups[jid], ts: nowTS });
-            } catch (error) {
-                console.warn('[session-health-refresh-failed]', { sessionId: sId, error: error?.message || String(error) });
-            }
+        const readyState = currentSocket.ws?.readyState;
+        const lastPongAt = Number(sess.lastPongAt || sess.connectedAt || sess.readyAt || now);
+        const pongExpired = sess.wsPongMonitoring && sess.receivedPong && now - lastPongAt > SESSION_WS_PONG_TIMEOUT_MS;
+        const socketClosed = readyState !== undefined && readyState !== 1;
+        if (!socketClosed && !pongExpired) continue;
+        const reason = socketClosed ? 'websocket_not_open' : 'websocket_pong_timeout';
+        console.warn('[session-health] stale socket detected', {
+            sessionId: sId,
+            readyState: readyState ?? null,
+            lastPongAgeMs: Math.max(0, now - lastPongAt),
+            timeoutMs: SESSION_WS_PONG_TIMEOUT_MS,
+            reason,
+            action: 'recreate_socket_preserving_mongodb_auth'
+        });
+        sess.status = 'deconnecte';
+        sess.disconnectTime = now;
+        sess.sock = null;
+        try { currentSocket.ev.removeAllListeners(); } catch (e) {}
+        try { if (currentSocket.ws && currentSocket.ws.readyState !== 3) currentSocket.ws.close(); } catch (e) {}
+        await releaseSessionRuntimeLock(sId);
+        scheduleSessionReconnect(sId, false, sess.format || 'pair');
+    }
+}, SESSION_HEALTH_CHECK_INTERVAL_MS);
+
+setInterval(async () => {
+    if (!db || serverShuttingDown) return;
+    for (const [sId, sess] of activeSessions.entries()) {
+        if (!sess?.sock || sess.status !== 'connecte') continue;
+        try {
+            const groups = await sess.sock.groupFetchAllParticipating();
+            const nowTS = Date.now();
+            for (const jid in groups) groupMetadataCache.set(jid, { data: groups[jid], ts: nowTS });
+        } catch (error) {
+            console.warn('[session-health-refresh-failed]', { sessionId: sId, error: error?.message || String(error) });
         }
     }
 }, 240000);
