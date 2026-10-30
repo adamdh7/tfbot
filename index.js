@@ -226,7 +226,7 @@ const signalRecoveryCooldowns = new Map();
 const signalRecoveryTimers = new Map();
 const SIGNAL_RECOVERY_THRESHOLD = Math.max(2, Math.min(5, Number(process.env.SIGNAL_RECOVERY_THRESHOLD || 2)));
 const SIGNAL_RECOVERY_WINDOW_MS = Math.max(10000, Math.min(180000, Number(process.env.SIGNAL_RECOVERY_WINDOW_MS || 60000)));
-const SIGNAL_RECOVERY_COOLDOWN_MS = Math.max(60000, Math.min(3600000, Number(process.env.SIGNAL_RECOVERY_COOLDOWN_MS || 600000)));
+const SIGNAL_RECOVERY_COOLDOWN_MS = Math.max(60000, Math.min(3600000, Number(process.env.SIGNAL_RECOVERY_COOLDOWN_MS || 120000)));
 function isSignalDecryptionFailure(args) {
     return /Failed to decrypt message|failed to decrypt message|Session error:.*Bad MAC|Bad MAC|MessageCounterError|Key used already or never filled|SessionError:\s*No sessions|No session found to decrypt message|No sessions|Chain closed|Decrypted message with closed session|calculateMAC|Cannot read properties of null \(reading ['\"]constructor['\"]\)/i.test(getSignalLogText(args));
 }
@@ -514,6 +514,7 @@ let tfbotCoordinatorSelectionAt = 0;
 let tfbotCoordinatorActiveProbeAt = 0;
 let tfbotCoordinatorSelectionPromise = null;
 let tfbotCoordinatorPublicRefreshAt = 0;
+let tfbotCoordinatorResolveProbeAt = 0;
 let tfbotCoordinatorStorageReady = false;
 const BOT_TIME_ZONE = process.env.BOT_TIME_ZONE || 'America/Santo_Domingo';
 const CHAT_CONTEXT_MAX_CHARS = Math.max(2500, Number(process.env.CHAT_CONTEXT_MAX_CHARS || 7000));
@@ -1732,6 +1733,51 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         }
         return result;
     }, delayMs, sock);
+}
+
+async function queuedDeleteMessageWithAck(sock, jid, messageKey, delayMs = 120, timeoutMs = 3500) {
+    if (!sock?.ev || typeof sock.ev.on !== 'function') throw new Error('whatsapp_delete_ack_listener_unavailable');
+    let sentMessageId = '';
+    let matchedUpdate = null;
+    const earlyUpdates = [];
+    let resolveAck;
+    const ackPromise = new Promise(resolve => { resolveAck = resolve; });
+    const listener = updates => {
+        for (const item of Array.isArray(updates) ? updates : []) {
+            const updateId = String(item?.key?.id || '');
+            if (!updateId) continue;
+            if (sentMessageId && updateId === sentMessageId) {
+                matchedUpdate = item?.update || {};
+                resolveAck(matchedUpdate);
+            } else {
+                earlyUpdates.push(item);
+                if (earlyUpdates.length > 100) earlyUpdates.shift();
+            }
+        }
+    };
+    sock.ev.on('messages.update', listener);
+    try {
+        const sent = await queuedSendMessage(sock, jid, { delete: messageKey }, {}, delayMs);
+        sentMessageId = String(sent?.key?.id || '');
+        if (!sentMessageId) throw new Error('whatsapp_delete_message_id_missing');
+        const early = earlyUpdates.find(item => String(item?.key?.id || '') === sentMessageId);
+        if (early) {
+            matchedUpdate = early.update || {};
+            resolveAck(matchedUpdate);
+        }
+        const acknowledgement = matchedUpdate || await promiseWithTimeout(ackPromise, timeoutMs, 'WhatsApp delete acknowledgement');
+        const status = Number(acknowledgement?.status);
+        if (acknowledgement?.error || !Number.isFinite(status) || status < 1 || status > 4) {
+            const reason = acknowledgement?.error?.message || `status_${String(acknowledgement?.status ?? 'missing')}`;
+            throw new Error(`whatsapp_delete_not_confirmed:${reason}`);
+        }
+        return { sent, acknowledgement, confirmed: true };
+    } finally {
+        try {
+            if (typeof sock.ev.off === 'function') sock.ev.off('messages.update', listener);
+            else if (typeof sock.ev.removeListener === 'function') sock.ev.removeListener('messages.update', listener);
+        } catch (error) {}
+    }
 }
 
 function getMessageRetryCount(key) {
@@ -3466,6 +3512,8 @@ async function refreshTfbotActiveDomain(force = false) {
             checkedAt,
             generation,
             healthy: true,
+            workerActive: health.workerActive === true,
+            workerState: String(health.workerState || 'starting'),
             source: 'tfbot7-sequential-health-poll',
             selectedBy: TFBOT_COORDINATOR_HOST,
             healthyHosts: [selected.host],
@@ -3494,6 +3542,10 @@ async function refreshTfbotActiveDomain(force = false) {
         if (!alreadyActive && health.workerState !== 'starting') {
             const applied = await sendTfbotWorkerControl(selected, result);
             control = { host: selected.host, applied: !!applied, state: applied?.state || 'unconfirmed' };
+            if (applied?.state) {
+                result.workerState = String(applied.state);
+                result.workerActive = applied.state === 'active';
+            }
         }
         console.info('[tfbot-router-selection-updated]', {
             activeHost: selected.host,
@@ -3853,20 +3905,31 @@ app.get(TFBOT_ROUTER_RESOLVE_PATH, async (req, res) => {
         const force = (privateRefresh && refreshRequested) || publicRefreshAllowed || !tfbotCoordinatorSelectionCache;
         if (publicRefreshAllowed && !privateRefresh) tfbotCoordinatorPublicRefreshAt = Date.now();
         let selected = await refreshTfbotActiveDomain(force);
-        let selectedHealth = selected ? await probeTfbotServingDomain(selected) : null;
-        if (selected && !selectedHealth) {
-            selected = await refreshTfbotActiveDomain(true);
-            selectedHealth = selected ? await probeTfbotServingDomain(selected) : null;
+        if (!selected) return res.status(503).json({ ok: false, error: 'no_ready_domain_selection_available', retryAfterMs: 5000, pollingIntervalMs: 77000 });
+        let workerActive = selected.workerActive === true;
+        let workerState = String(selected.workerState || 'starting');
+        if (!workerActive && Date.now() - tfbotCoordinatorResolveProbeAt >= 4000) {
+            tfbotCoordinatorResolveProbeAt = Date.now();
+            const selectedHealth = await probeTfbotServingDomain(selected);
+            if (selectedHealth) {
+                workerActive = selectedHealth.workerActive === true;
+                workerState = String(selectedHealth.workerState || workerState);
+                const refreshedSelection = { ...selected, workerActive, workerState, statusCheckedAt: new Date() };
+                tfbotCoordinatorSelectionCache = refreshedSelection;
+                tfbotActiveDomainCache = refreshedSelection;
+                selected = refreshedSelection;
+            } else {
+                return res.status(503).json({ ok: false, error: 'selected_worker_not_responding_yet', activeHost: selected.host, retryAfterMs: 4000, pollingIntervalMs: 77000 });
+            }
         }
-        if (!selected || !selectedHealth) return res.status(503).json({ ok: false, error: 'no_ready_domain_selection_available', retryAfterMs: 5000 });
         res.setHeader('Cache-Control', 'no-store, max-age=0');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Headers', 'Accept, X-TFBOT-Cluster-Token');
         res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
-        return res.status(200).json({ ok: true, host: selected.host, url: selected.url, activeHost: selected.host, activeUrl: selected.url, checkedAt: selected.checkedAt, generation: selected.generation, healthy: selected.healthy, workerActive: selectedHealth.workerActive === true, workerState: selectedHealth.workerState, source: selected.source, healthyHosts: selected.healthyHosts || [], pollingIntervalMs: 77000 });
+        return res.status(200).json({ ok: true, host: selected.host, url: selected.url, activeHost: selected.host, activeUrl: selected.url, checkedAt: selected.checkedAt, generation: selected.generation, healthy: selected.healthy, workerActive, workerState, source: selected.source, healthyHosts: selected.healthyHosts || [], retryAfterMs: workerActive ? 77000 : 2500, pollingIntervalMs: 77000 });
     } catch (error) {
         console.error('[tfbot-router-resolve-failed]', { error: error?.message || String(error) });
-        return res.status(503).json({ ok: false, error: 'domain_resolution_failed' });
+        return res.status(503).json({ ok: false, error: 'domain_resolution_failed', retryAfterMs: 5000 });
     }
 });
 
@@ -4500,6 +4563,7 @@ const translations = {
     del3_activated_delete_failed: "Del3 est activé pour le format {format}, mais WhatsApp n’a pas confirmé la suppression du message sélectionné. Les prochains messages de ce format seront supprimés, sauf ceux de l’hôte et du bot.",
     del3_deactivated: "La règle del3 du format {format} est désactivée. Les prochains messages de ce format ne seront plus supprimés automatiquement.",
     del3_usage: "Pour activer del3, réponds directement à un message du groupe avec del3. Le bot détecte son format WhatsApp (texte, image, vidéo, audio, document, sticker, etc.).",
+    del3_bot_admin_required: "Le bot doit être administrateur du groupe pour activer del3 et supprimer les messages. Ajoute-le comme administrateur, puis réessaie.",
     pending_msg: "En attente de chargement",
     msg_unloaded: "Message non chargé",
     take_time: "Ceci pourrait prendre un peu de temps",
@@ -4551,6 +4615,7 @@ const translations = {
     del3_activated_delete_failed: "Del3 is enabled for {format}, but WhatsApp did not confirm deletion of the selected message. Future messages in this format will be deleted, except the host’s and bot’s messages.",
     del3_deactivated: "The del3 rule for {format} is disabled. New messages in this format will no longer be deleted automatically.",
     del3_usage: "To enable del3, reply directly to a group message with del3. The bot detects its WhatsApp format (text, image, video, audio, document, sticker, etc.).",
+    del3_bot_admin_required: "The bot must be a group administrator to enable del3 and delete messages. Make it an admin, then try again.",
     pending_msg: "Waiting for this message",
     msg_unloaded: "Message not loaded",
     take_time: "This may take a while",
@@ -4602,6 +4667,7 @@ const translations = {
     del3_activated_delete_failed: "Del3 está activado para el formato {format}, pero WhatsApp no confirmó la eliminación del mensaje seleccionado. Los próximos mensajes de este formato se eliminarán, excepto los del anfitrión y del bot.",
     del3_deactivated: "La regla del3 para el formato {format} está desactivada. Los nuevos mensajes de este formato ya no se eliminarán automáticamente.",
     del3_usage: "Para activar del3, responde directamente a un mensaje del grupo con del3. El bot detectará su formato de WhatsApp (texto, imagen, vídeo, audio, documento, sticker, etc.).",
+    del3_bot_admin_required: "El bot debe ser administrador del grupo para activar del3 y eliminar mensajes. Hazlo administrador y vuelve a intentarlo.",
     pending_msg: "Esperando este mensaje",
     msg_unloaded: "Mensaje no cargado",
     take_time: "Esto puede tomar un tiempo",
@@ -4653,6 +4719,7 @@ const translations = {
     del3_activated_delete_failed: "Del3 aktive pou fòma {format}, men WhatsApp pa konfime efasman mesaj ou te chwazi a. Pwochen mesaj ki gen menm fòma a ap efase, sof mesaj hòt la ak bot la.",
     del3_deactivated: "Règ del3 pou fòma {format} dezaktive. Nouvo mesaj ki gen fòma sa a pap efase otomatikman ankò.",
     del3_usage: "Pou aktive del3, reponn dirèkteman yon mesaj nan gwoup la ak del3. Bot la ap detekte fòma WhatsApp la (tèks, imaj, videyo, odyo, dokiman, sticker, elatriye).",
+    del3_bot_admin_required: "Bot la dwe administratè gwoup la pou aktive del3 epi efase mesaj yo. Mete li kòm administratè, epi eseye ankò.",
     pending_msg: "Ap tann mesaj sa a",
     msg_unloaded: "Mesaj pa chaje",
     take_time: "Sa ka pran yon ti tan",
@@ -6700,7 +6767,19 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 }
                 if (item?.key?.id && update.message && typeof update.message === 'object') {
                     const hydrated = { ...item, ...update, key: item.key, message: update.message };
-                    if (String(extractBody(hydrated) || '').trim()) hydratedMessages.push(hydrated);
+                    const hydratedBody = String(extractBody(hydrated) || '').trim();
+                    const hydratedFormat = getWhatsAppMessageFormat(hydrated);
+                    if (hydratedBody || hydratedFormat) {
+                        hydratedMessages.push(hydrated);
+                        console.info('[message-update-hydration-accepted]', {
+                            sessionId,
+                            messageId: item.key.id,
+                            chatJid: item.key.remoteJid || null,
+                            format: hydratedFormat || null,
+                            hasBody: !!hydratedBody,
+                            action: 'redispatch_hydrated_text_or_media_even_without_caption'
+                        });
+                    }
                 }
             }
             if (hydratedMessages.length) {
@@ -7076,6 +7155,17 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         ].filter(Boolean).map(String);
 
         const isBotGroupParticipant = participant => participantMatchesIdentities(participant, getBotIdentityAliases());
+
+        const canBotModerateGroup = async groupJid => {
+            try {
+                const metadata = await getGroupMetadataCached(sessionId, sock, groupJid);
+                const botParticipant = Array.isArray(metadata?.participants) ? metadata.participants.find(isBotGroupParticipant) : null;
+                return !!botParticipant && isAdminParticipantForPolicy(botParticipant);
+            } catch (error) {
+                console.warn('[del3-bot-admin-check-failed]', { sessionId, group: groupJid, error: error?.message || String(error) });
+                return false;
+            }
+        };
 
         const isGroupCreatorParticipant = (participant, metadata) => {
             const creatorAliases = [metadata?.owner, metadata?.ownerPn].filter(Boolean).map(String);
@@ -7493,6 +7583,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     pushName: String(m?.pushName || 'Inconnu').slice(0, 80),
                     messageType: receivedType,
                     messageKeys: Object.keys(m?.message || {}),
+                    messageStubType: m?.messageStubType ?? null,
+                    messageStubParameters: Array.isArray(m?.messageStubParameters) ? m.messageStubParameters.slice(0, 5) : null,
                     bodyPreview: String(receivedBody || '').replace(/[\r\n\t]+/g, ' ').slice(0, 240),
                     bodyLength: receivedAuditDetails.bodyLength,
                     bodyTruncated: receivedAuditDetails.bodyTruncated,
@@ -7526,6 +7618,37 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     timestamp: receivedDiagnostic.timestamp
                 });
                 if (!String(receivedBody || '').trim() && !receivedParsedCommand) {
+                    if (receivedIsGroup && !m?.key?.fromMe && receivedType !== 'unknown' && receivedType !== 'protocolMessage' && receivedType !== 'senderKeyDistributionMessage') {
+                        try {
+                            const earlyFormat = getWhatsAppMessageFormat(m);
+                            if (earlyFormat) {
+                                const earlyRules = await getDel3Rules(sessionId, receivedChat);
+                                if (earlyRules.some(rule => rule.format === earlyFormat)) {
+                                    const receivedTimestamp = Number(m?.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m?.messageTimestamp) || 0;
+                                    const appendAgeSeconds = receivedTimestamp > 0 ? Math.max(0, Math.floor(Date.now() / 1000) - receivedTimestamp) : 0;
+                                    const isFreshMessage = upsertType !== 'append' || !receivedTimestamp || appendAgeSeconds <= 180;
+                                    if (isFreshMessage) {
+                                        let ownerRecordForDel3 = sessionOwnersCache.get(sessionId) || null;
+                                        if (!ownerRecordForDel3 && db) {
+                                            ownerRecordForDel3 = await db.collection('session_owners').findOne({ sessionId }).catch(() => null);
+                                            if (ownerRecordForDel3) sessionOwnersCache.set(sessionId, ownerRecordForDel3);
+                                        }
+                                        const earlyIsProtected = isProtectedWhatsAppTarget(receivedSenderJid, ownerRecordForDel3, sock.user?.id || '', receivedSenderAliases.join(' '));
+                                        if (earlyIsProtected) {
+                                            console.info('[del3-message-protected]', { sessionId, group: receivedChat, messageId: receivedId, format: earlyFormat, reason: 'host_or_bot' });
+                                        } else if (!(await canBotModerateGroup(receivedChat))) {
+                                            console.warn('[del3-message-delete-skipped]', { sessionId, group: receivedChat, messageId: receivedId, format: earlyFormat, reason: 'bot_not_group_admin_or_group_metadata_unavailable' });
+                                        } else {
+                                            await queuedDeleteMessageWithAck(sock, receivedChat, m.key, 120, 3500);
+                                            console.info('[del3-message-format-matched]', { sessionId, group: receivedChat, messageId: receivedId, format: earlyFormat, deleted: true, acknowledgementConfirmed: true, stage: 'before_empty_body_short_circuit' });
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (earlyDel3Error) {
+                            console.warn('[del3-message-delete-failed]', { sessionId, group: receivedChat, messageId: receivedId, messageType: receivedType, error: earlyDel3Error?.message || String(earlyDel3Error), stage: 'before_empty_body_short_circuit' });
+                        }
+                    }
                     cacheRecentMessage(sessionId, m);
                     console.info('[message-awaiting-readable-content]', {
                         sessionId,
@@ -7998,7 +8121,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             bodyTruncated: String(earlyBody || '').length > 12000
                         });
 
-                        if (isGroup && sender && sender !== botId && !isFromMe && !isOwnerReal) {
+                        if (isGroup && sender && sender !== from && sender !== botId && !isFromMe && !isOwnerReal && !isProtectedWhatsAppTarget(sender, sOwnerTop, botId, senderJids.join(' '))) {
                             try {
                                 const incomingMessageFormat = getWhatsAppMessageFormat(m);
                                 if (incomingMessageFormat) {
@@ -8006,8 +8129,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     if (del3Rules.some(rule => rule.format === incomingMessageFormat)) {
                                         let deletedByDel3 = false;
                                         try {
-                                            await queuedSendMessage(sock, from, { delete: m.key }, {}, 120);
-                                            deletedByDel3 = true;
+                                            if (await canBotModerateGroup(from)) {
+                                                await queuedDeleteMessageWithAck(sock, from, m.key, 120, 3500);
+                                                deletedByDel3 = true;
+                                            } else {
+                                                console.warn('[del3-message-delete-skipped]', { sessionId, group: from, messageId: msgId, format: incomingMessageFormat, reason: 'bot_not_group_admin_or_group_metadata_unavailable' });
+                                            }
                                         } catch (del3DeleteError) {
                                             console.warn('[del3-message-delete-failed]', { sessionId, group: from, messageId: msgId, format: incomingMessageFormat, error: del3DeleteError?.message || String(del3DeleteError) });
                                         }
@@ -8840,15 +8967,21 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, t.cmd_del3, t.del3_deactivated.replace('{format}', del3Format), pushName, false, activeHostName);
                                                 break;
                                             }
+                                            if (!(await canBotModerateGroup(from))) {
+                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_bot_admin_required, pushName, true, activeHostName);
+                                                console.warn('[del3-rule-activation-blocked]', { sessionId, group: from, format: del3Format, reason: 'bot_not_group_admin_or_group_metadata_unavailable' });
+                                                break;
+                                            }
                                             await addDel3Rule(sessionId, from, del3Format, extractBody({ message: quotedMessage }));
                                             const cachedDel3Quote = recentMsgsCache.find(entry => entry.sessionId === sessionId && entry.id === quoted.stanzaId && entry.from === from);
                                             const quotedDel3Key = cachedDel3Quote?.key || { remoteJid: from, id: quoted.stanzaId, fromMe: !!quoted.fromMe, ...(quoted.participant ? { participant: quoted.participant } : {}) };
                                             const quotedDel3Sender = cachedDel3Quote?.sender || quoted.participant || '';
-                                            const quotedDel3IsProtected = !!cachedDel3Quote?.fromMe || !!quotedDel3Key.fromMe || isProtectedWhatsAppTarget(quotedDel3Sender, sOwnerTop, botId);
+                                            const quotedDel3Aliases = [...new Set([quotedDel3Sender, quoted.participant, cachedDel3Quote?.participantAlt, cachedDel3Quote?.key?.participantAlt, cachedDel3Quote?.key?.participantPn, cachedDel3Quote?.key?.senderPn].filter(Boolean).map(String))];
+                                            const quotedDel3IsProtected = !!cachedDel3Quote?.fromMe || !!quotedDel3Key.fromMe || isProtectedWhatsAppTarget(quotedDel3Sender, sOwnerTop, botId, quotedDel3Aliases.join(' '));
                                             let selectedMessageDeleted = false;
                                             if (!quotedDel3IsProtected) {
                                                 try {
-                                                    await queuedSendMessage(sock, from, { delete: quotedDel3Key }, {}, 120);
+                                                    await queuedDeleteMessageWithAck(sock, from, quotedDel3Key, 120, 3500);
                                                     selectedMessageDeleted = true;
                                                 } catch (del3DeleteError) {
                                                     console.warn('[del3-selected-message-delete-failed]', { sessionId, group: from, messageId: quoted.stanzaId, format: del3Format, error: del3DeleteError?.message || String(del3DeleteError) });
@@ -9720,7 +9853,7 @@ async function main() {
             const savedSelection = await db.collection('cluster_router').findOne({ _id: TFBOT_ROUTER_STATE_ID }).catch(() => null);
             const savedDomain = TFBOT_ROUTER_DOMAIN_BY_HOST.get(normalizeTfbotHost(savedSelection?.activeHost || ''));
             if (savedDomain && String(savedSelection?.releaseId || '') === TFBOT_CODE_RELEASE_ID && savedSelection?.generation) {
-                tfbotCoordinatorSelectionCache = { ...savedDomain, generation: String(savedSelection.generation), healthy: true, source: 'tfbot7-persisted-selection', selectedBy: TFBOT_COORDINATOR_HOST, healthyHosts: [savedDomain.host] };
+                tfbotCoordinatorSelectionCache = { ...savedDomain, generation: String(savedSelection.generation), healthy: true, workerActive: false, workerState: 'starting', source: 'tfbot7-persisted-selection', selectedBy: TFBOT_COORDINATOR_HOST, healthyHosts: [savedDomain.host] };
                 tfbotCoordinatorSelectionAt = Date.now() - TFBOT_ROUTER_COORDINATOR_CACHE_MS;
             } else if (savedDomain && savedSelection?.activeHost) {
                 await sendTfbotWorkerControl(savedDomain, { host: '', generation: crypto.randomUUID() });

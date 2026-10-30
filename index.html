@@ -20,6 +20,7 @@
     <meta name="twitter:image" content="https://adamdh7.org/asset/nwa.png">
     <link rel="icon" href="https://adamdh7.org/asset/nwa.png" type="image/png">
     <link rel="apple-touch-icon" href="https://adamdh7.org/asset/nwa.png">
+    <link rel="preload" as="image" href="https://adamdh7.org/asset/nwa.png">
     <link rel="manifest" href="/manifest.json">
     <style>
         * {
@@ -42,7 +43,7 @@
             overscroll-behavior: none;
             scrollbar-width: none;
         }
-        html::-webkit-scrollbar, body::-webkit-scrollbar, #u-ui::-webkit-scrollbar {
+        html::-webkit-scrollbar, body::-webkit-scrollbar {
             display: none;
         }
         #m-f {
@@ -66,166 +67,28 @@
             position: fixed;
             inset: 0;
             z-index: 9000;
-            display: block;
-            background: #000000;
-        }
-        #frame-loading .loading-svg {
-            position: absolute;
-            left: 50%;
-            top: 50%;
-            width: 42px;
-            height: 42px;
-            margin: -21px 0 0 -21px;
-            display: block;
-            animation: tfbot-loading-spin .8s linear infinite;
-        }
-        #frame-loading .loading-svg circle {
-            fill: none;
-            stroke: rgba(255,255,255,.2);
-            stroke-width: 3;
-        }
-        #frame-loading .loading-svg path {
-            fill: none;
-            stroke: #ffffff;
-            stroke-width: 3;
-            stroke-linecap: round;
-        }
-        #frame-loading::after {
-            content: 'Connexion au serveur…';
-            position: absolute;
-            left: 0;
-            right: 0;
-            top: calc(50% + 34px);
-            color: #a1a1aa;
-            font-size: 13px;
-            text-align: center;
-            letter-spacing: .2px;
-        }
-        @keyframes tfbot-loading-spin {
-            to { transform: rotate(360deg); }
-        }
-        #u-ui {
-            display: none;
-            position: fixed;
-            inset: 0;
-            width: 100%;
-            height: 100%;
-            height: 100dvh;
-            min-height: 0;
-            overflow: auto;
-            scrollbar-width: none;
-            background: #000000;
-            color: #ffffff;
-            z-index: 9999;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            text-align: center;
-            padding: max(18px, env(safe-area-inset-top)) clamp(16px, 5vw, 30px) max(18px, env(safe-area-inset-bottom));
-            overscroll-behavior: none;
-        }
-        .header {
             display: flex;
-            flex-direction: column;
             align-items: center;
-            margin-bottom: clamp(20px, 4vh, 40px);
-            width: 100%;
-            flex: 0 0 auto;
+            justify-content: center;
+            background: #000000;
+            opacity: 1;
+            visibility: visible;
+            transition: opacity .18s ease, visibility .18s ease;
         }
-        .logo-area {
-            width: clamp(60px, 15vw, 80px);
-            height: clamp(60px, 15vw, 80px);
-            border-radius: 20px;
-            overflow: hidden;
-            margin-bottom: 12px;
-            background: #111111;
-            -webkit-touch-callout: none;
+        #frame-loading.hidden {
+            opacity: 0;
+            visibility: hidden;
             pointer-events: none;
         }
-        .logo-area img {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-            pointer-events: none;
-            -webkit-touch-callout: none;
+        #frame-loading img {
+            display: block;
+            width: clamp(76px, 22vw, 112px);
+            height: clamp(76px, 22vw, 112px);
+            object-fit: contain;
             -webkit-user-drag: none;
+            -webkit-touch-callout: none;
             user-select: none;
-        }
-        .status-badge {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
-            max-width: 100%;
-            background: #1c1c1e;
-            padding: 9px 16px;
-            border-radius: 20px;
-            font-size: clamp(12px, 3.5vw, 14px);
-            line-height: 1.4;
-            font-weight: 600;
-            color: #ffffff;
-            border: 0;
             pointer-events: none;
-            overflow-wrap: anywhere;
-        }
-        #u-m {
-            width: 100%;
-            max-width: 600px;
-            font-size: clamp(15px, 4vw, 18px);
-            line-height: 1.7;
-            margin: 0 0 clamp(25px, 5vh, 40px);
-            color: #e5e5ea;
-            font-weight: 400;
-            overflow-wrap: anywhere;
-        }
-        #u-b {
-            background: #2c2c2e;
-            color: #ffffff;
-            padding: 14px 28px;
-            border-radius: 24px;
-            text-decoration: none;
-            font-size: clamp(15px, 4.5vw, 18px);
-            font-weight: 600;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 12px;
-            border: 0;
-            cursor: pointer;
-        }
-        #u-b:active {
-            background: #3a3a3c;
-        }
-        #u-b svg {
-            width: 24px;
-            height: 24px;
-            fill: currentColor;
-        }
-        @media (max-height: 560px) {
-            #u-ui {
-                justify-content: flex-start;
-            }
-            .header {
-                margin-top: 6px;
-                margin-bottom: 16px;
-            }
-            #u-m {
-                margin-bottom: 18px;
-            }
-        }
-        @media (hover: hover) and (pointer: fine) {
-            #u-ui {
-                scrollbar-width: thin;
-                scrollbar-color: #555555 #111111;
-            }
-            #u-ui::-webkit-scrollbar {
-                display: block;
-                width: 8px;
-            }
-            #u-ui::-webkit-scrollbar-thumb {
-                background: #555555;
-                border-radius: 8px;
-            }
         }
     </style>
     <script>
@@ -233,22 +96,14 @@
         document.addEventListener('dblclick', function(event) { event.preventDefault(); });
         document.addEventListener('contextmenu', function(event) { event.preventDefault(); });
 
-        let currPath = window.location.pathname;
         const verRegex = /^\/[vV]=?(\d+)\/?$/;
-        if (currPath !== '/' && !verRegex.test(currPath)) {
+        if (window.location.pathname !== '/' && verRegex.test(window.location.pathname)) {
             try { window.history.replaceState({ view: 'home' }, '', '/'); } catch (error) {}
-            currPath = '/';
+        } else if (window.location.pathname !== '/') {
+            try { window.history.replaceState({ view: 'home' }, '', '/'); } catch (error) {}
         }
 
-        const language = String(navigator.language || 'ht').slice(0, 2).toLowerCase();
-        const translations = {
-            fr: { m: "Une ancienne version de l’interface a été détectée. Ouvrez la page principale pour relancer la version actuelle.", b: 'Ouvrir la version actuelle' },
-            en: { m: 'An older interface version was detected. Open the main page to launch the current version.', b: 'Open current version' },
-            es: { m: 'Se detectó una versión antigua de la interfaz. Abra la página principal para iniciar la versión actual.', b: 'Abrir versión actual' },
-            ht: { m: 'Nou detekte yon ansyen vèsyon entèfas la. Ouvri paj prensipal la pou relanse vèsyon aktyèl la.', b: 'Ouvri vèsyon aktyèl la' }
-        };
-        const text = translations[language] || translations.ht;
-        const coordinatorResolveUrl = 'https://tfbot7.onrender.com/__tfbot/router/resolve?refresh=1';
+        const coordinatorResolveUrl = 'https://tfbot7.onrender.com/__tfbot/router/resolve';
         const allowedAppOrigins = [
             'https://tf.bot.adamdh7.org',
             'https://tfbot2.onrender.com',
@@ -257,7 +112,6 @@
             'https://tfbot5.onrender.com',
             'https://tfbot6.onrender.com'
         ];
-        const savedOriginKey = 'tfbot.active-origin.v1';
 
         function normalizeAllowedOrigin(value) {
             try {
@@ -269,231 +123,127 @@
             }
         }
 
-        function getSavedOrigin() {
-            try { return normalizeAllowedOrigin(localStorage.getItem(savedOriginKey)); }
-            catch (error) { return ''; }
-        }
-
-        function saveOrigin(origin) {
-            try { localStorage.setItem(savedOriginKey, origin); } catch (error) {}
-        }
-
         async function resolveActiveOrigin() {
-            const deadline = Date.now() + 18000;
-            let lastError = null;
-            while (Date.now() < deadline) {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(function() { controller.abort(); }, 4500);
-                try {
-                    const response = await fetch(coordinatorResolveUrl, {
-                        method: 'GET',
-                        cache: 'no-store',
-                        mode: 'cors',
-                        credentials: 'omit',
-                        headers: { 'Accept': 'application/json' },
-                        signal: controller.signal
-                    });
-                    if (!response.ok) throw new Error('coordinator_or_worker_unavailable');
-                    const payload = await response.json();
-                    const origin = normalizeAllowedOrigin(payload && (payload.activeUrl || payload.url));
-                    if (payload && payload.ok === true && origin && payload.workerActive === true && payload.workerState === 'active') {
-                        saveOrigin(origin);
-                        return origin;
-                    }
-                    if (payload && payload.ok === true && origin && ['starting', 'standby'].includes(String(payload.workerState || ''))) {
-                        await new Promise(function(resolve) { setTimeout(resolve, 500); });
-                        continue;
-                    }
-                    throw new Error('active_worker_not_ready');
-                } catch (error) {
-                    lastError = error;
-                    await new Promise(function(resolve) { setTimeout(resolve, 700); });
-                } finally {
-                    clearTimeout(timeoutId);
+            const controller = new AbortController();
+            const timeoutId = setTimeout(function() { controller.abort(); }, 5000);
+            try {
+                const response = await fetch(coordinatorResolveUrl, {
+                    method: 'GET',
+                    cache: 'no-store',
+                    mode: 'cors',
+                    credentials: 'omit',
+                    redirect: 'follow',
+                    headers: { 'Accept': 'application/json' },
+                    signal: controller.signal
+                });
+                const payload = await response.json().catch(function() { return null; });
+                if (!response.ok) {
+                    const failure = new Error(String(payload?.error || 'coordinator_unavailable'));
+                    failure.retryAfterMs = Number(payload?.retryAfterMs || 5000);
+                    throw failure;
                 }
+                const origin = normalizeAllowedOrigin(payload && (payload.activeUrl || payload.url));
+                if (payload?.ok === true && origin && payload.workerActive === true && payload.workerState === 'active') return origin;
+                const waiting = new Error('active_worker_not_ready');
+                waiting.retryAfterMs = Number(payload?.retryAfterMs || 2500);
+                throw waiting;
+            } finally {
+                clearTimeout(timeoutId);
             }
-            throw lastError || new Error('active_tfbot_timeout');
         }
 
         document.addEventListener('DOMContentLoaded', function() {
-            const ui = document.getElementById('u-ui');
-            const message = document.getElementById('u-m');
-            const buttonText = document.getElementById('u-b-txt');
             const frame = document.getElementById('m-f');
-            const frameLoading = document.getElementById('frame-loading');
+            const splash = document.getElementById('frame-loading');
+            let activeOrigin = '';
             let frameLoaded = false;
             let activeOriginConfirmed = false;
-            let appRequested = false;
-            let activeOrigin = '';
-            let retryCount = 0;
-            let loadTimeout = null;
-            let domainMonitorTimer = null;
             let resolving = false;
+            let retryTimer = null;
+            let loadTimer = null;
+            let monitorTimer = null;
 
-            message.textContent = text.m;
-            buttonText.textContent = text.b;
+            const showSplash = function() {
+                splash.classList.remove('hidden');
+                frame.classList.remove('ready');
+            };
 
             const revealFrame = function() {
-                if (!activeOriginConfirmed) return;
-                if (loadTimeout) clearTimeout(loadTimeout);
-                frameLoading.style.display = 'none';
+                if (!frameLoaded || !activeOriginConfirmed) return;
+                if (loadTimer) clearTimeout(loadTimer);
+                splash.classList.add('hidden');
                 frame.classList.add('ready');
             };
 
-            const showUpdate = function() {
-                frameLoading.style.display = 'none';
-                ui.style.display = 'flex';
-                frame.style.display = 'none';
-            };
-
-            const loadOrigin = function(origin) {
-                const normalized = normalizeAllowedOrigin(origin);
-                if (!normalized) return false;
-                activeOrigin = normalized;
-                activeOriginConfirmed = false;
+            const startFrameLoad = function(origin) {
+                activeOrigin = origin;
                 frameLoaded = false;
-                ui.style.display = 'none';
-                frame.style.display = 'block';
+                activeOriginConfirmed = false;
+                showSplash();
                 frame.classList.remove('ready');
-                frameLoading.style.display = 'block';
-                frame.src = normalized + '/';
-                if (loadTimeout) clearTimeout(loadTimeout);
-                loadTimeout = setTimeout(function() {
-                    if (!frameLoaded) retryWithCoordinator();
-                }, 18000);
-                return true;
+                frame.src = origin + '/';
+                if (loadTimer) clearTimeout(loadTimer);
+                loadTimer = setTimeout(function() {
+                    if (!frameLoaded) {
+                        frame.removeAttribute('src');
+                        showSplash();
+                        scheduleResolve(1200);
+                    }
+                }, 20000);
             };
 
-            const confirmOrigin = function(origin) {
-                const normalized = normalizeAllowedOrigin(origin);
-                if (!normalized) return;
-                if (normalized !== activeOrigin) loadOrigin(normalized);
+            const applyCoordinatorSelection = function(origin) {
+                if (!origin) return;
+                if (origin !== activeOrigin || !frame.hasAttribute('src')) startFrameLoad(origin);
                 activeOriginConfirmed = true;
-                if (frameLoaded) revealFrame();
+                revealFrame();
             };
 
-            const startDomainMonitor = function() {
-                if (domainMonitorTimer) return;
-                domainMonitorTimer = setInterval(async function() {
-                    if (!appRequested || resolving) return;
-                    try {
-                        const nextOrigin = await resolveActiveOrigin();
-                        if (nextOrigin) confirmOrigin(nextOrigin);
-                    } catch (error) {
-                        if (!frameLoaded) void retryWithCoordinator();
-                    }
-                }, 77000);
-            };
+            function scheduleResolve(delay) {
+                if (retryTimer) clearTimeout(retryTimer);
+                retryTimer = setTimeout(function() { void resolveAndApply(); }, Math.max(250, Number(delay) || 1200));
+            }
 
-            const retryWithCoordinator = async function() {
-                if (!appRequested || resolving || retryCount >= 2) return;
+            const resolveAndApply = async function() {
+                if (resolving) return;
                 resolving = true;
-                retryCount++;
                 try {
-                    const nextOrigin = await resolveActiveOrigin();
-                    if (nextOrigin) {
-                        confirmOrigin(nextOrigin);
-                    } else if (retryCount >= 2) {
-                        const saved = getSavedOrigin();
-                        if (saved) confirmOrigin(saved);
-                        else showUpdate();
-                    } else {
-                        const fallback = getSavedOrigin() || allowedAppOrigins[0];
-                        loadOrigin(fallback);
-                    }
+                    const selectedOrigin = await resolveActiveOrigin();
+                    applyCoordinatorSelection(selectedOrigin);
                 } catch (error) {
-                    if (retryCount >= 2) {
-                        const saved = getSavedOrigin();
-                        if (saved) confirmOrigin(saved);
-                        else showUpdate();
-                    } else {
-                        setTimeout(function() { void retryWithCoordinator(); }, 1200);
-                    }
+                    if (!frameLoaded || !activeOriginConfirmed) showSplash();
+                    scheduleResolve(error?.retryAfterMs || 2500);
                 } finally {
                     resolving = false;
                 }
             };
 
-            const showApp = function() {
-                appRequested = true;
-                ui.style.display = 'none';
-                frame.style.display = 'block';
-                frameLoading.style.display = 'block';
-                const saved = getSavedOrigin();
-                loadOrigin(saved || allowedAppOrigins[0]);
-                startDomainMonitor();
-                if (resolving) return;
-                resolving = true;
-                resolveActiveOrigin().then(function(origin) {
-                    if (origin) confirmOrigin(origin);
-                }).catch(function() {
-                    setTimeout(function() { void retryWithCoordinator(); }, 900);
-                }).finally(function() {
-                    resolving = false;
-                });
-            };
-
             frame.addEventListener('load', function() {
+                if (!activeOrigin || !frame.hasAttribute('src')) return;
                 frameLoaded = true;
                 revealFrame();
             });
 
             frame.addEventListener('error', function() {
-                if (!frameLoaded) void retryWithCoordinator();
+                frameLoaded = false;
+                activeOriginConfirmed = false;
+                showSplash();
+                scheduleResolve(1000);
             });
 
-            document.getElementById('u-b').addEventListener('click', function(event) {
-                event.preventDefault();
-                retryCount = 0;
-                void showApp();
-            });
+            monitorTimer = setInterval(function() {
+                void resolveAndApply();
+            }, 77000);
 
-            if (currPath === '/') {
-                void showApp();
-            } else {
-                const match = currPath.match(verRegex);
-                const appVersion = match ? match[1] : '1';
-                const controller = new AbortController();
-                const timeoutId = setTimeout(function() { controller.abort(); }, 7000);
-                fetch('https://bot.adamdh7.org/sw.js', { signal: controller.signal, cache: 'no-store' })
-                    .then(function(response) {
-                        if (!response.ok) throw new Error('version_check_failed');
-                        return response.text();
-                    })
-                    .then(function(source) {
-                        clearTimeout(timeoutId);
-                        const found = source.match(/CACHE_NAME\s*=\s*['"](\d+)['"]/i) || source.match(/CACHE_NAME.*?(\d+)/i);
-                        const currentVersion = found ? found[1] : '1';
-                        if (appVersion === currentVersion) void showApp();
-                        else showUpdate();
-                    })
-                    .catch(function() {
-                        clearTimeout(timeoutId);
-                        showUpdate();
-                    });
-            }
-
+            showSplash();
+            frame.removeAttribute('src');
             if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).catch(function() {});
+            void resolveAndApply();
         });
     </script>
 </head>
 <body>
-    <div id="frame-loading" aria-hidden="true"><svg class="loading-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40"><circle cx="20" cy="20" r="16"></circle><path d="M20 4a16 16 0 0 1 16 16"></path></svg></div>
-    <div id="u-ui">
-        <div class="header">
-            <div class="logo-area" aria-hidden="true">
-                <img src="https://adamdh7.org/asset/nwa.png" alt="" draggable="false" oncontextmenu="return false" onerror="this.src='https://via.placeholder.com/80/ffffff/000000?text=A'">
-            </div>
-            <div class="status-badge">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
-                <span>It’s Us Adam D’H7</span>
-            </div>
-        </div>
-        <p id="u-m"></p>
-        <a id="u-b" href="https://bot.adamdh7.org/" rel="noopener noreferrer">
-            <span id="u-b-txt"></span>
-        </a>
-    </div>
+    <div id="frame-loading" aria-hidden="true"><img src="https://adamdh7.org/asset/nwa.png" alt="" draggable="false"></div>
     <iframe id="m-f" title="Bot (tfbot)" allow="fullscreen; autoplay; clipboard-write; encrypted-media; picture-in-picture; storage-access-by-user-activation" referrerpolicy="strict-origin-when-cross-origin"></iframe>
 </body>
 </html>
