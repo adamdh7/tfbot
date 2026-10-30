@@ -28,7 +28,7 @@ let runtimeLogSequence = 0;
 const runtimeLogInstanceId = `${Date.now()}-${process.pid}`;
 const runtimeLogStartedAt = new Date();
 const runtimeLogDeploymentId = String(process.env.LOG_DEPLOY_ID || process.env.RENDER_DEPLOY_ID || (process.env.RENDER_SERVICE_ID && process.env.RENDER_GIT_COMMIT ? `${process.env.RENDER_SERVICE_ID}:${process.env.RENDER_GIT_COMMIT}` : `${process.env.RENDER_SERVICE_ID || 'local'}:${process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId}`)).slice(0, 180);
-const TFBOT_CLUSTER_CODE_REVISION = 'r27-single-writer-fast-iframe';
+const TFBOT_CLUSTER_CODE_REVISION = 'r28-whatsapp-text-del3-format';
 const runtimeLogClusterId = (String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-30').slice(0, 180);
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-30')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
@@ -433,7 +433,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'wa-render-domain-router-2026-10-30-r27';
+const RUNTIME_FIX_BUILD = 'wa-render-domain-router-2026-10-30-r28';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -2139,7 +2139,7 @@ async function connectMongo(options = {}) {
         await db.collection('user_preferences').createIndex({ sessionId: 1, sender: 1 }, { name: 'user_preferences_session_sender' });
         await db.collection('user_preferences').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'user_preferences_expire_at_ttl' });
         await db.collection('group_del2').createIndex({ sessionId: 1, gjid: 1, targetJid: 1 });
-        await db.collection('group_del3').createIndex({ sessionId: 1, gjid: 1, fingerprint: 1 });
+        await db.collection('group_del3').createIndex({ sessionId: 1, gjid: 1, messageFormat: 1 }, { name: 'group_del3_format_lookup' });
         await db.collection('session_runtime_locks').createIndex({ leaseUntil: 1 }, { expireAfterSeconds: 0, name: 'session_runtime_locks_lease_ttl' });
         await db.collection('session_account_runtime_locks').createIndex({ leaseUntil: 1 }, { expireAfterSeconds: 0, name: 'session_account_runtime_locks_lease_ttl' });
         await db.collection('cluster_instances').createIndex({ status: 1, leaseUntil: 1, activeSessionCount: 1 }, { name: 'cluster_instances_candidate_lookup' });
@@ -2974,37 +2974,57 @@ async function removeDel2Target(sessionId, gjid, targetJid) {
     }
 }
 
-function createDel3Fingerprint(value) {
-    const normalized = String(value || '').normalize('NFKC').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').replace(/\s+/g, ' ').trim();
-    return normalized ? crypto.createHash('sha256').update(normalized).digest('hex') : '';
+function getWhatsAppMessageFormat(value) {
+    const source = value?.message && typeof value.message === 'object' ? value.message : value;
+    const content = unwrapMessageContent(source);
+    if (!content || typeof content !== 'object') return '';
+    const ignored = new Set(['messageContextInfo', 'senderKeyDistributionMessage', 'protocolMessage']);
+    const key = Object.keys(content).find(item => !ignored.has(item));
+    if (!key) return '';
+    const groups = {
+        text: ['conversation', 'extendedTextMessage', 'buttonsResponseMessage', 'listResponseMessage', 'templateButtonReplyMessage', 'interactiveResponseMessage'],
+        image: ['imageMessage'],
+        video: ['videoMessage'],
+        audio: ['audioMessage'],
+        document: ['documentMessage'],
+        sticker: ['stickerMessage'],
+        location: ['locationMessage', 'liveLocationMessage'],
+        contact: ['contactMessage', 'contactsArrayMessage'],
+        poll: ['pollCreationMessage', 'pollCreationMessageV2', 'pollCreationMessageV3', 'pollUpdateMessage'],
+        reaction: ['reactionMessage'],
+        event: ['eventMessage']
+    };
+    for (const [format, keys] of Object.entries(groups)) if (keys.includes(key)) return format;
+    if (/^(?:protocolMessage|senderKeyDistributionMessage|messageContextInfo)$/.test(key)) return '';
+    return key.replace(/Message(?:V\d+)?$/, '').replace(/V\d+$/, '').toLowerCase() || '';
 }
 
 async function getDel3Rules(sessionId, gjid) {
     const cacheKey = `${sessionId}_${gjid}`;
     if (activeDel3RulesCache.has(cacheKey)) return activeDel3RulesCache.get(cacheKey);
     const docs = await db.collection('group_del3').find({ sessionId, gjid, active: true }).toArray();
-    const rules = docs.map(doc => ({ fingerprint: doc.fingerprint, sampleText: doc.sampleText || '' })).filter(rule => rule.fingerprint);
+    const rules = docs.map(doc => ({ format: String(doc.messageFormat || '').trim(), sampleText: doc.sampleText || '' })).filter(rule => rule.format);
     setBoundedMapEntry(activeDel3RulesCache, cacheKey, rules, ACTIVE_DEL2_CACHE_MAX_ENTRIES);
     return rules;
 }
 
-async function addDel3Rule(sessionId, gjid, fingerprint, sampleText) {
+async function addDel3Rule(sessionId, gjid, messageFormat, sampleText) {
     const now = new Date();
     await db.collection('group_del3').updateOne(
-        { sessionId, gjid, fingerprint },
+        { sessionId, gjid, messageFormat },
         { $set: { active: true, sampleText: String(sampleText || '').slice(0, 500), updatedAt: now }, $setOnInsert: { createdAt: now } },
         { upsert: true }
     );
     const rules = await getDel3Rules(sessionId, gjid);
-    const next = rules.filter(rule => rule.fingerprint !== fingerprint);
-    next.push({ fingerprint, sampleText: String(sampleText || '').slice(0, 500) });
+    const next = rules.filter(rule => rule.format !== messageFormat);
+    next.push({ format: messageFormat, sampleText: String(sampleText || '').slice(0, 500) });
     setBoundedMapEntry(activeDel3RulesCache, `${sessionId}_${gjid}`, next, ACTIVE_DEL2_CACHE_MAX_ENTRIES);
 }
 
-async function removeDel3Rule(sessionId, gjid, fingerprint) {
-    await db.collection('group_del3').deleteMany({ sessionId, gjid, fingerprint });
+async function removeDel3Rule(sessionId, gjid, messageFormat) {
+    await db.collection('group_del3').deleteMany({ sessionId, gjid, messageFormat });
     const rules = await getDel3Rules(sessionId, gjid);
-    const next = rules.filter(rule => rule.fingerprint !== fingerprint);
+    const next = rules.filter(rule => rule.format !== messageFormat);
     setBoundedMapEntry(activeDel3RulesCache, `${sessionId}_${gjid}`, next, ACTIVE_DEL2_CACHE_MAX_ENTRIES);
 }
 
@@ -4450,7 +4470,7 @@ const translations = {
     cmd_ai: "ia", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "chercher",
     cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "lien", cmd_tagall: "tagtout",
     cmd_hidetag: "hidetag", cmd_kick: "expulse", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
-    cmd_kickall: "expulsetout", cmd_kickall2: "expulsetout2", cmd_kickall3: "expulsetout3", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
+    cmd_kickall: "expulsetout", cmd_kickall2: "expulsetout2", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
     cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Connecté depuis", days: "jour(s)", hours: "heure(s)", minutes: "minute(s)", seconds: "seconde(s)",
     enabled: "activé", disabled: "désactivé", welcome_on: "Bienvenue activée", welcome_off: "Bienvenue désactivée", nolien_on: "Nolien activé", nolien_off: "Nolien désactivé", nolien2_on: "Nolien2 activé", nolien2_off: "Nolien2 désactivé",
@@ -4475,13 +4495,9 @@ const translations = {
     disconnect_sys_msg: "Vous avez été déconnecté. Une suppression totale des données et sessions a été initiée via le système.",
     del2_activated: "La modération stricte a été activée pour @{user}. Tous les messages de cet utilisateur seront supprimés de manière instantanée.",
     del2_deactivated: "La modération stricte a été désactivée pour @{user}.",
-    del3_activated: "La suppression des variantes de ce message est activée dans ce groupe.",
-    del3_deactivated: "La suppression des variantes de ce message est désactivée.",
-    del3_usage: "Réponds à un message texte ou à une légende avec del3.",
-    kickall3_confirm: "Action irréversible : réponds exactement kickall3 CONFIRM pour continuer.",
-    kickall3_complete: "Tous les membres supprimables ont été retirés. Le bot quitte maintenant le groupe.",
-    kickall3_partial: "Opération arrêtée : certains membres n’ont pas pu être retirés. Les étapes suivantes n’ont pas été lancées.",
-    kickall3_creator_protected: "{count} créateur(s) du groupe protégé(s).",
+    del3_activated: "La suppression du format de message sélectionné est activée dans ce groupe.",
+    del3_deactivated: "La suppression du format de message sélectionné est désactivée.",
+    del3_usage: "Réponds à un message avec del3 pour sélectionner son format WhatsApp.",
     pending_msg: "En attente de chargement",
     msg_unloaded: "Message non chargé",
     take_time: "Ceci pourrait prendre un peu de temps",
@@ -4497,13 +4513,13 @@ const translations = {
     group_required: "Cette commande doit être utilisée dans un groupe WhatsApp.",
     admin_required: "Cette commande nécessite les droits d’administrateur du groupe.",
     command_error: "La commande a échoué. Réessaie et vérifie les droits du bot.",
-    info_text: "*● IA & RECHERCHE*\n*○ ia* : Interroger l'Intelligence Artificielle pour des réponses textuelles.\n*○ lang* : Modifier la langue.\n*○ image* : Générer une image numérique.\n*○ chercher* : Effectuer des recherches web.\n\n*● UTILITAIRES & SYSTEME*\n*○ menu* : Afficher l'arborescence.\n*○ qrbot* : Initier une sous-session via code QR.\n*○ qr* : Convertir texte/lien en code QR.\n*○ code* : Générer code d'autorisation.\n*○ lien* : Obtenir lien officiel.\n*○ sit* : Consulter les sites.\n*○ info* : Informations explicatives.\n\n*● LOGISTIQUE DE GROUPE*\n*○ tagtout* : Mentionner tous les membres.\n*○ hidetag* : Diffuser un message secrètement.\n*○ expulse* : Retirer un membre.\n*○ add* : Ajouter un numéro.\n*○ promote* : Élever membre au rang admin.\n*○ demote* : Rétrograder un admin.\n*○ expulsetout* : Expulsion globale.\n*○ expulsetout3 CONFIRM* : Retirer les membres, admins et propriétaire avant que le bot quitte.\n*○ del3* : Supprimer ce texte et ses variantes normalisées dans le groupe.\n*○ ferme* : Restreindre l'envoi de messages.\n*○ ouvert* : Autoriser l'envoi de messages."
+    info_text: "*● IA & RECHERCHE*\n*○ ia* : Interroger l'Intelligence Artificielle pour des réponses textuelles.\n*○ lang* : Modifier la langue.\n*○ image* : Générer une image numérique.\n*○ chercher* : Effectuer des recherches web.\n\n*● UTILITAIRES & SYSTEME*\n*○ menu* : Afficher l'arborescence.\n*○ qrbot* : Initier une sous-session via code QR.\n*○ qr* : Convertir texte/lien en code QR.\n*○ code* : Générer code d'autorisation.\n*○ lien* : Obtenir lien officiel.\n*○ sit* : Consulter les sites.\n*○ info* : Informations explicatives.\n\n*● LOGISTIQUE DE GROUPE*\n*○ tagtout* : Mentionner tous les membres.\n*○ hidetag* : Diffuser un message secrètement.\n*○ expulse* : Retirer un membre.\n*○ add* : Ajouter un numéro.\n*○ promote* : Élever membre au rang admin.\n*○ demote* : Rétrograder un admin.\n*○ expulsetout* : Expulsion globale.\n*○ del3* : Supprimer les messages du même format WhatsApp, sauf ceux de l’hôte et du bot.\n*○ ferme* : Restreindre l'envoi de messages.\n*○ ouvert* : Autoriser l'envoi de messages."
   },
   en: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "search",
     cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "link", cmd_tagall: "tagall",
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
-    cmd_kickall: "kickall", cmd_kickall2: "kickall2", cmd_kickall3: "kickall3", cmd_ferme: "close", cmd_ouvert: "open", cmd_bienvenue: "welcome",
+    cmd_kickall: "kickall", cmd_kickall2: "kickall2", cmd_ferme: "close", cmd_ouvert: "open", cmd_bienvenue: "welcome",
     cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Connected for", days: "day(s)", hours: "hour(s)", minutes: "minute(s)", seconds: "second(s)",
     enabled: "enabled", disabled: "disabled", welcome_on: "Welcome enabled", welcome_off: "Welcome disabled", nolien_on: "No link enabled", nolien_off: "No link disabled", nolien2_on: "Strict no link enabled", nolien2_off: "Strict no link disabled",
@@ -4528,13 +4544,9 @@ const translations = {
     disconnect_sys_msg: "You have been disconnected. A total deletion of data and sessions has been initiated via the system.",
     del2_activated: "Strict moderation has been activated for @{user}. All incoming messages from this user will be deleted immediately.",
     del2_deactivated: "Strict moderation has been deactivated for @{user}.",
-    del3_activated: "Deletion of matching text variants is now enabled in this group.",
-    del3_deactivated: "Deletion of matching text variants is now disabled.",
-    del3_usage: "Reply to a text message or caption with del3.",
-    kickall3_confirm: "Irreversible action: send exactly kickall3 CONFIRM to continue.",
-    kickall3_complete: "All removable members have been removed. The bot is leaving the group now.",
-    kickall3_partial: "Stopped: some members could not be removed. Later stages were not started.",
-    kickall3_creator_protected: "{count} group creator(s) protected.",
+    del3_activated: "Deletion of the selected WhatsApp message format is now enabled in this group.",
+    del3_deactivated: "Deletion of the selected WhatsApp message format is now disabled.",
+    del3_usage: "Reply to a message with del3 to select its WhatsApp format.",
     pending_msg: "Waiting for this message",
     msg_unloaded: "Message not loaded",
     take_time: "This may take a while",
@@ -4550,13 +4562,13 @@ const translations = {
     group_required: "This command must be used in a WhatsApp group.",
     admin_required: "This command requires group administrator permissions.",
     command_error: "The command failed. Try again and check the bot permissions.",
-    info_text: "*● AI & SEARCH*\n*○ ai* : Query AI for detailed text responses.\n*○ lang* : Modify configuration language.\n*○ image* : Generate a digital image.\n*○ search* : Perform web searches.\n\n*● UTILITIES & SYSTEM*\n*○ menu* : View full menu.\n*○ qrbot* : Initiate session via QR code.\n*○ qr* : Convert text/link to QR code.\n*○ code* : Generate code.\n*○ link* : Obtain official link.\n*○ sit* : Consult official sites.\n*○ info* : Information.\n\n*● GROUP LOGISTICS*\n*○ tagall* : Mention all members.\n*○ hidetag* : Broadcast secret mention.\n*○ kick* : Remove a member.\n*○ add* : Add phone number.\n*○ promote* : Elevate member to admin.\n*○ demote* : Demote admin.\n*○ kickall* : Global expulsion.\n*○ kickall3 CONFIRM* : Remove removable members, admins and owner before the bot leaves.\n*○ del3* : Delete this text and normalized variants in the group.\n*○ close* : Restrict messages.\n*○ open* : Allow messages."
+    info_text: "*● AI & SEARCH*\n*○ ai* : Query AI for detailed text responses.\n*○ lang* : Modify configuration language.\n*○ image* : Generate a digital image.\n*○ search* : Perform web searches.\n\n*● UTILITIES & SYSTEM*\n*○ menu* : View full menu.\n*○ qrbot* : Initiate session via QR code.\n*○ qr* : Convert text/link to QR code.\n*○ code* : Generate code.\n*○ link* : Obtain official link.\n*○ sit* : Consult official sites.\n*○ info* : Information.\n\n*● GROUP LOGISTICS*\n*○ tagall* : Mention all members.\n*○ hidetag* : Broadcast secret mention.\n*○ kick* : Remove a member.\n*○ add* : Add phone number.\n*○ promote* : Elevate member to admin.\n*○ demote* : Demote admin.\n*○ kickall* : Global expulsion.\n*○ del3* : Delete messages of the selected WhatsApp format, except the owner and the bot.\n*○ close* : Restrict messages.\n*○ open* : Allow messages."
   },
   es: {
     cmd_ai: "ia", cmd_lang: "lang", cmd_imaj: "imagen", cmd_cheche: "buscar",
     cmd_menu: "menú", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "código", cmd_lien: "enlace", cmd_tagall: "etiquetartodo",
     cmd_hidetag: "hidetag", cmd_kick: "expulsar", cmd_add: "añadir", cmd_promote: "promover", cmd_demote: "degradar",
-    cmd_kickall: "borrartodo", cmd_kickall2: "borrartodo2", cmd_kickall3: "borrartodo3", cmd_ferme: "cerrar", cmd_ouvert: "abrir", cmd_bienvenue: "bienvenida",
+    cmd_kickall: "borrartodo", cmd_kickall2: "borrartodo2", cmd_ferme: "cerrar", cmd_ouvert: "abrir", cmd_bienvenue: "bienvenida",
     cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Conectado por", days: "día(s)", hours: "hora(s)", minutes: "minuto(s)", seconds: "segundo(s)",
     enabled: "activado", disabled: "desactivado", welcome_on: "Bienvenida activada", welcome_off: "Bienvenida desactivada", nolien_on: "Sin enlaces activado", nolien_off: "Sin enlaces desactivado", nolien2_on: "Sin enlaces estricto activado", nolien2_off: "Sin enlaces estricto desactivado",
@@ -4581,13 +4593,9 @@ const translations = {
     disconnect_sys_msg: "Ha sido desconectado. Se ha iniciado una eliminación total de datos y sesiones a través del sistema.",
     del2_activated: "Se ha activado la moderación estricta para @{user}. Todos los mensajes entrantes de este usuario serán eliminados de inmediato.",
     del2_deactivated: "Se ha desactivado la moderación estricta para @{user}.",
-    del3_activated: "La eliminación de variantes de este mensaje está activada en este grupo.",
-    del3_deactivated: "La eliminación de variantes de este mensaje está desactivada.",
-    del3_usage: "Responde a un mensaje de texto o a un pie de foto con del3.",
-    kickall3_confirm: "Acción irreversible: escribe exactamente kickall3 CONFIRM para continuar.",
-    kickall3_complete: "Se han eliminado todos los miembros que se pueden retirar. El bot sale del grupo ahora.",
-    kickall3_partial: "Operación detenida: no se pudo retirar a algunos miembros. No se iniciaron las siguientes etapas.",
-    kickall3_creator_protected: "{count} creador(es) del grupo protegido(s).",
+    del3_activated: "La eliminación del formato de mensaje seleccionado está activada en este grupo.",
+    del3_deactivated: "La eliminación del formato de mensaje seleccionado está desactivada.",
+    del3_usage: "Responde a un mensaje con del3 para seleccionar su formato de WhatsApp.",
     pending_msg: "Esperando este mensaje",
     msg_unloaded: "Mensaje no cargado",
     take_time: "Esto puede tomar un tiempo",
@@ -4603,13 +4611,13 @@ const translations = {
     group_required: "Este comando debe usarse en un grupo de WhatsApp.",
     admin_required: "Este comando requiere permisos de administrador del grupo.",
     command_error: "El comando falló. Inténtalo de nuevo y comprueba los permisos del bot.",
-    info_text: "*● IA & BÚSQUEDA*\n*○ ia* : Consultar la IA para respuestas.\n*○ lang* : Modificar idioma.\n*○ imagen* : Generar imagen digital.\n*○ buscar* : Búsquedas web.\n\n*● UTILIDADES Y SISTEMA*\n*○ menú* : Ver menú completo.\n*○ qrbot* : Iniciar sesión vía código QR.\n*○ qr* : Convertir texto/enlace a código QR.\n*○ código* : Generar código.\n*○ enlace* : Obtener enlace oficial.\n*○ sit* : Consultar sitios oficiales.\n*○ info* : Información.\n\n*● LOGÍSTICA DE GRUPO*\n*○ etiquetartodo* : Mencionar a todos.\n*○ hidetag* : Mencionar en secreto.\n*○ expulsar* : Eliminar miembro.\n*○ añadir* : Añadir número.\n*○ promover* : Promover a admin.\n*○ degradar* : Degradar admin.\n*○ borrartodo* : Expulsión global.\n*○ borrartodo3 CONFIRM* : Retirar miembros, administradores y propietario antes de que salga el bot.\n*○ del3* : Eliminar este texto y sus variantes normalizadas en el grupo.\n*○ cerrar* : Restringir mensajes.\n*○ abrir* : Permitir mensajes."
+    info_text: "*● IA & BÚSQUEDA*\n*○ ia* : Consultar la IA para respuestas.\n*○ lang* : Modificar idioma.\n*○ imagen* : Generar imagen digital.\n*○ buscar* : Búsquedas web.\n\n*● UTILIDADES Y SISTEMA*\n*○ menú* : Ver menú completo.\n*○ qrbot* : Iniciar sesión vía código QR.\n*○ qr* : Convertir texto/enlace a código QR.\n*○ código* : Generar código.\n*○ enlace* : Obtener enlace oficial.\n*○ sit* : Consultar sitios oficiales.\n*○ info* : Información.\n\n*● LOGÍSTICA DE GRUPO*\n*○ etiquetartodo* : Mencionar a todos.\n*○ hidetag* : Mencionar en secreto.\n*○ expulsar* : Eliminar miembro.\n*○ añadir* : Añadir número.\n*○ promover* : Promover a admin.\n*○ degradar* : Degradar admin.\n*○ borrartodo* : Expulsión global.\n*○ del3* : Eliminar mensajes del mismo formato de WhatsApp, excepto los del propietario y el bot.\n*○ cerrar* : Restringir mensajes.\n*○ abrir* : Permitir mensajes."
   },
   ht: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "imaj", cmd_cheche: "cheche",
     cmd_menu: "meni", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "kòd", cmd_lien: "lyen", cmd_tagall: "tout",
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
-    cmd_kickall: "siptout", cmd_kickall2: "siptout2", cmd_kickall3: "siptout3", cmd_ferme: "fèmen", cmd_ouvri: "ouvri", cmd_bienvenue: "byenveni",
+    cmd_kickall: "siptout", cmd_kickall2: "siptout2", cmd_ferme: "fèmen", cmd_ouvri: "ouvri", cmd_bienvenue: "byenveni",
     cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Konekte depi", days: "jou", hours: "èdtan", minutes: "minit", seconds: "segonn",
     enabled: "aktive", disabled: "dezaktive", welcome_on: "Byenveni aktive", welcome_off: "Byenveni dezaktive", nolien_on: "Nolyen aktive", nolien_off: "Nolyen dezaktive", nolien2_on: "Nolyen2 aktive", nolien2_off: "Nolyen2 dezaktive",
@@ -4634,13 +4642,9 @@ const translations = {
     disconnect_sys_msg: "Ou dekonekte. Yon efasman total done ak sesyon yo te inisye atravè sistèm nan.",
     del2_activated: "Modération estrik aktive pou @{user}. Tout mesaj moun sa a voye ap siprime touswit.",
     del2_deactivated: "Modération estrik dezaktive pou @{user}.",
-    del3_activated: "Efase mesaj ki gen menm varyasyon tèks sa a aktive nan gwoup la.",
-    del3_deactivated: "Efase mesaj ki gen menm varyasyon tèks sa a dezaktive.",
-    del3_usage: "Reponn yon mesaj tèks oswa yon lejann ak del3.",
-    kickall3_confirm: "Aksyon sa a pa ka ranvèse: voye egzakteman kickall3 CONFIRM pou kontinye.",
-    kickall3_complete: "Tout manm ki ka retire yo retire. Bot la ap kite gwoup la kounye a.",
-    kickall3_partial: "Operasyon an kanpe: gen manm ki pa t kapab retire. Lòt etap yo pa te kòmanse.",
-    kickall3_creator_protected: "{count} kreyatè gwoup pwoteje.",
+    del3_activated: "Efase mesaj ki gen menm fòma WhatsApp sa a aktive nan gwoup la.",
+    del3_deactivated: "Efase mesaj ki gen menm fòma WhatsApp sa a dezaktive.",
+    del3_usage: "Reponn yon mesaj ak del3 pou chwazi fòma WhatsApp li.",
     pending_msg: "Ap tann mesaj sa a",
     msg_unloaded: "Mesaj pa chaje",
     take_time: "Sa ka pran yon ti tan",
@@ -4656,7 +4660,7 @@ const translations = {
     group_required: "Ou dwe itilize kòmand sa a nan yon gwoup WhatsApp.",
     admin_required: "Kòmand sa a mande dwa administratè gwoup la.",
     command_error: "Kòmand lan echwe. Eseye ankò epi verifye dwa bot la.",
-    info_text: "*● IA & RECHÈCH*\n*○ ai* : Poze IA kesyon pou jwenn repons text.\n*○ lang* : Modifye lang kreyòl la.\n*○ imaj* : Jenere imaj nimerik.\n*○ cheche* : Fè rechèch sou entènèt.\n\n*● ITILITE AK SISTÈM*\n*○ meni* : Wè tout kòmand yo.\n*○ qrbot* : Inisye sesyon avèk QR.\n*○ qr* : Konvèti tèks oswa lyen nan kòd QR.\n*○ kòd* : Jenere kòd otorizasyon.\n*○ lyen* : Jwenn lyen ofisyèl.\n*○ sit* : Konsilte sit ofisyèl yo.\n*○ info* : Enfòmasyon.\n\n*● LOJISTIK GWOUP*\n*○ tout* : Mansyone tout moun.\n*○ hidetag* : Voye mesaj an sekrè.\n*○ kick* : Retire yon manm.\n*○ add* : Ajoute nimewo.\n*○ promote* : Mete yon moun admin.\n*○ demote* : Desann yon admin.\n*○ siptout* : Mete tout moun deyò.\n*○ siptout3 CONFIRM* : Retire manm, admin ak pwopriyetè anvan bot la kite.\n*○ del3* : Efase tèks sa a ak varyasyon nòmalize li yo nan gwoup la.\n*○ fèmen* : Restrenn voye mesaj.\n*○ ouvri* : Pèmèt tout mesaj."
+    info_text: "*● IA & RECHÈCH*\n*○ ai* : Poze IA kesyon pou jwenn repons text.\n*○ lang* : Modifye lang kreyòl la.\n*○ imaj* : Jenere imaj nimerik.\n*○ cheche* : Fè rechèch sou entènèt.\n\n*● ITILITE AK SISTÈM*\n*○ meni* : Wè tout kòmand yo.\n*○ qrbot* : Inisye sesyon avèk QR.\n*○ qr* : Konvèti tèks oswa lyen nan kòd QR.\n*○ kòd* : Jenere kòd otorizasyon.\n*○ lyen* : Jwenn lyen ofisyèl.\n*○ sit* : Konsilte sit ofisyèl yo.\n*○ info* : Enfòmasyon.\n\n*● LOJISTIK GWOUP*\n*○ tout* : Mansyone tout moun.\n*○ hidetag* : Voye mesaj an sekrè.\n*○ kick* : Retire yon manm.\n*○ add* : Ajoute nimewo.\n*○ promote* : Mete yon moun admin.\n*○ demote* : Desann yon admin.\n*○ siptout* : Mete tout moun deyò.\n*○ del3* : Efase mesaj ki gen menm fòma WhatsApp la, sof mesaj mèt la ak bot la.\n*○ fèmen* : Restrenn voye mesaj.\n*○ ouvri* : Pèmèt tout mesaj."
   }
 };
 
@@ -4706,6 +4710,7 @@ function splitCaptionBodies(type, text, userName, maxChars = MAX_WHATSAPP_CAPTIO
 }
 
 async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, sendOptions = {}) {
+    const deliveryImageBuffer = imageBuffer && imageBuffer === adamLogoBuffer ? null : imageBuffer;
     const bodies = splitCaptionBodies(type, text, userName);
     let lastResult = null;
     for (const body of bodies) {
@@ -4714,14 +4719,14 @@ async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, 
         if (Array.isArray(sendOptions.mentions) && sendOptions.mentions.length) {
             options.mentions = sendOptions.mentions.filter(mention => body.includes(`@${String(mention).split('@')[0]}`));
         }
-        const content = imageBuffer
-            ? { image: imageBuffer, caption, ...options }
+        const content = deliveryImageBuffer
+            ? { image: deliveryImageBuffer, caption, ...options }
             : { text: caption, ...options };
         try {
             lastResult = await queuedSendMessage(sock, jid, content, sendOptions.messageOptions || {}, 220);
         } catch (error) {
             console.error('[whatsapp-send]', { action: String(type || 'Message'), error: error?.message || String(error) });
-            if (imageBuffer) {
+            if (deliveryImageBuffer) {
                 try {
                     lastResult = await queuedSendMessage(sock, jid, { text: caption, ...options }, sendOptions.messageOptions || {}, 180);
                     continue;
@@ -5959,16 +5964,16 @@ function waitForSessionQr(sessionId, timeoutMs = 60000, initialQr = '') {
 
 const commandMaps = {
   fr: {
-    "ia": "ai", "lang": "lang", "image": "imaj", "chercher": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "lien": "lien", "tagtout": "tagall", "hidetag": "hidetag", "expulse": "kick", "add": "add", "promote": "promote", "demote": "demote", "expulsetout": "kickall", "expulsetout2": "kickall2", "expulsetout3": "kickall3", "ferme": "ferme", "ouvert": "ouvert", "bienvenue": "bienvenue", "nolien": "nolien", "nolien2": "nolien2", "del": "del", "del2": "del2", "del3": "del3", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "prive": "prive", "public": "public"
+    "ia": "ai", "lang": "lang", "image": "imaj", "chercher": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "lien": "lien", "tagtout": "tagall", "hidetag": "hidetag", "expulse": "kick", "add": "add", "promote": "promote", "demote": "demote", "expulsetout": "kickall", "expulsetout2": "kickall2", "ferme": "ferme", "ouvert": "ouvert", "bienvenue": "bienvenue", "nolien": "nolien", "nolien2": "nolien2", "del": "del", "del2": "del2", "del3": "del3", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "prive": "prive", "public": "public"
   },
   en: {
-    "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "kickall2": "kickall2", "kickall3": "kickall3", "close": "ferme", "open": "ouvert", "welcome": "bienvenue",     "nolink": "nolien", "nolink2": "nolien2", "del": "del", "del2": "del2", "del3": "del3", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "private": "prive", "public": "public"
+    "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "kickall2": "kickall2", "close": "ferme", "open": "ouvert", "welcome": "bienvenue",     "nolink": "nolien", "nolink2": "nolien2", "del": "del", "del2": "del2", "del3": "del3", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "private": "prive", "public": "public"
   },
   es: {
-    "ia": "ai", "lang": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promover": "promote", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "borrartodo2": "kickall2", "borrartodo3": "kickall3", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "del": "del", "del2": "del2", "del3": "del3", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "privado": "prive", "publico": "public"
+    "ia": "ai", "lang": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promover": "promote", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "borrartodo2": "kickall2", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "del": "del", "del2": "del2", "del3": "del3", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "privado": "prive", "publico": "public"
   },
   ht: {
-    "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "siptout2": "kickall2", "siptout3": "kickall3", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "del": "del", "del2": "del2", "del3": "del3", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "prive": "prive", "piblik": "public"
+    "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "siptout2": "kickall2", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "del": "del", "del2": "del2", "del3": "del3", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "prive": "prive", "piblik": "public"
   }
 };
 
@@ -6089,7 +6094,7 @@ function redactActionError(error) {
 function getCommandActionTitle(translationsForLanguage, command) {
     const keys = {
         ai: 'ai_title', cheche: 'search_title', imaj: 'imaj_title', lang: 'lang_title',
-        nolien: 'cmd_nolien', nolien2: 'cmd_nolien2', kickall: 'cmd_kickall', kickall2: 'cmd_kickall2', kickall3: 'cmd_kickall3', del3: 'cmd_del3',
+        nolien: 'cmd_nolien', nolien2: 'cmd_nolien2', kickall: 'cmd_kickall', kickall2: 'cmd_kickall2', del3: 'cmd_del3',
         tagall: 'cmd_tagall', hidetag: 'cmd_hidetag', qrbot: 'cmd_qrbot', qr: 'cmd_qr', code: 'cmd_code',
         lien: 'cmd_lien', sites: 'cmd_sites', url: 'cmd_url', bienvenue: 'cmd_bienvenue',
         ferme: 'cmd_ferme', ouvert: 'cmd_ouvert', kick: 'cmd_kick', add: 'cmd_add', promote: 'cmd_promote', demote: 'cmd_demote'
@@ -6183,7 +6188,6 @@ const canonicalCommandAliases = {
     promote: 'promote', promouvoir: 'promote', promover: 'promote', demote: 'demote', degradar: 'demote',
     kickall: 'kickall', expulsetout: 'kickall', borrartodo: 'kickall', siptout: 'kickall',
     kickall2: 'kickall2', expulsetout2: 'kickall2', borrartodo2: 'kickall2', siptout2: 'kickall2',
-    kickall3: 'kickall3', expulsetout3: 'kickall3', borrartodo3: 'kickall3', siptout3: 'kickall3',
     close: 'ferme', ferme: 'ferme', cerrar: 'ferme', fèmen: 'ferme', open: 'ouvert', ouvert: 'ouvert', abrir: 'ouvert', ouvri: 'ouvert',
     welcome: 'bienvenue', bienvenue: 'bienvenue', bienvenida: 'bienvenue', byenveni: 'bienvenue',
     nolink: 'nolien', nolien: 'nolien', nolyen: 'nolien', sinenlace: 'nolien',
@@ -6259,7 +6263,7 @@ function parseIncomingCommand(body, language, context = {}) {
     if (commandsRequiringText.has(internalCommand) && !args) return null;
     if (commandsRequiringTarget.has(internalCommand) && !isValidTargetCommandArgument(args, context)) return null;
     if (commandsRequiringQuotedMessage.has(internalCommand) && !hasQuotedMessage) return null;
-    if (internalCommand === 'kickall3' && !/^confirm$/i.test(args)) return null;
+    
     if (internalCommand === 'lang' && args && !/^(?:fr|en|es|ht)$/i.test(args)) return null;
     if (internalCommand === 'code') {
         if (!/^\+?[0-9][0-9\s().-]*$/.test(args)) return null;
@@ -6280,7 +6284,7 @@ function parseIncomingCommand(body, language, context = {}) {
 }
 
 async function sendFormatted(sock, from, type, text, pushName, isAI = false, hostName = "Adam D'H7", sendOptions = {}) {
-    return sendImageCaptioned(sock, from, adamLogoBuffer, type, text, pushName || 'Inconnu', sendOptions);
+    return sendImageCaptioned(sock, from, null, type, text, pushName || 'Inconnu', sendOptions);
 }
 
 async function cleanupSocket(sessionId) {
@@ -7986,21 +7990,21 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             bodyTruncated: String(earlyBody || '').length > 12000
                         });
 
-                        if (isGroup && sender && sender !== botId) {
+                        if (isGroup && sender && sender !== botId && !isFromMe && !isOwnerReal) {
                             try {
-                                const incomingFingerprint = createDel3Fingerprint(receivedBody || earlyBody || '');
-                                if (incomingFingerprint) {
+                                const incomingMessageFormat = getWhatsAppMessageFormat(m);
+                                if (incomingMessageFormat) {
                                     const del3Rules = await getDel3Rules(sessionId, from);
-                                    if (del3Rules.some(rule => rule.fingerprint === incomingFingerprint)) {
+                                    if (del3Rules.some(rule => rule.format === incomingMessageFormat)) {
                                         let deletedByDel3 = false;
                                         try {
-                                            await queuedSendMessage(sock, from, { delete: m.key }, {}, 180);
+                                            await queuedSendMessage(sock, from, { delete: m.key }, {}, 120);
                                             deletedByDel3 = true;
                                         } catch (del3DeleteError) {
-                                            console.warn('[del3-message-delete-failed]', { sessionId, group: from, messageId: msgId, error: del3DeleteError?.message || String(del3DeleteError) });
+                                            console.warn('[del3-message-delete-failed]', { sessionId, group: from, messageId: msgId, format: incomingMessageFormat, error: del3DeleteError?.message || String(del3DeleteError) });
                                         }
-                                        console.info('[del3-message-variant-matched]', { sessionId, group: from, messageId: msgId, fingerprint: incomingFingerprint.slice(0, 16), deleted: deletedByDel3 });
-                                        return;
+                                        console.info('[del3-message-format-matched]', { sessionId, group: from, messageId: msgId, format: incomingMessageFormat, deleted: deletedByDel3 });
+                                        if (deletedByDel3) return;
                                     }
                                 }
                             } catch (del3MatchError) {
@@ -8346,10 +8350,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             : internalCommand === 'kickall2'
                                                 ? Math.max(120000, Number(process.env.KICKALL2_MAX_TIMEOUT_MS || 1200000))
                                                 : internalCommand === 'kickall'
-                                                    ? Math.max(180000, Number(process.env.KICKALL_MAX_TIMEOUT_MS || 1200000))
-                                                    : internalCommand === 'kickall3'
-                                                        ? Math.max(180000, Number(process.env.KICKALL3_MAX_TIMEOUT_MS || 1800000))
-                                                        : 120000;
+                                                    ? Math.max(180000, Number(process.env.KICKALL_MAX_TIMEOUT_MS || 1200000)): 120000;
                                 const timeoutExecute = new Promise((_, reject) => {
                                     timeoutId = setTimeout(() => {
                                         isCancelled = true;
@@ -8442,7 +8443,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             break;
                                         case 'menu':
                                             if (args.length > 0) break;
-                                            let menuBodyText = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n*○ ${t.cmd_info}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*● ${t.cmd_kickall2}*\n*● ${t.cmd_kickall3} CONFIRM*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_del2}*\n*● ${t.cmd_del3}*\n*● ${t.cmd_vv}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_url}*\n*○ ${t.cmd_ping}*`;
+                                            let menuBodyText = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n*○ ${t.cmd_info}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*● ${t.cmd_kickall2}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_del2}*\n*● ${t.cmd_del3}*\n*● ${t.cmd_vv}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_url}*\n*○ ${t.cmd_ping}*`;
                                             await safeSendFormatted(sock, from, t.menu_title, menuBodyText, pushName, false, activeHostName);
                                             break;
                                         case 'info':
@@ -8694,99 +8695,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 }
                                             }
                                             break;
-                                        case 'kickall3':
-                                            if (!isGroup) {
-                                                await safeSendFormatted(sock, from, t.cmd_kickall3, t.group_required, pushName, true, activeHostName);
-                                                break;
-                                            }
-                                            if (!isOwnerReal) {
-                                                await safeSendFormatted(sock, from, t.cmd_kickall3, t.owner_required, pushName, true, activeHostName);
-                                                break;
-                                            }
-                                            if (!await checkAdmin()) {
-                                                await safeSendFormatted(sock, from, t.cmd_kickall3, t.admin_required, pushName, true, activeHostName);
-                                                break;
-                                            }
-                                            if (!/^confirm$/i.test(String(args || '').trim())) {
-                                                await safeSendFormatted(sock, from, t.cmd_kickall3, t.kickall3_confirm, pushName, true, activeHostName);
-                                                break;
-                                            }
-                                            const metadataKA3 = await getGroupMetadataCached(sessionId, sock, from, true).catch(() => null) || await getMeta();
-                                            if (!metadataKA3 || !Array.isArray(metadataKA3.participants)) throw new Error('group_metadata_unavailable');
-                                            setCachedGroupMetadata(sessionId, from, metadataKA3);
-                                            const participantsKA3 = metadataKA3.participants.filter(participant => participant && (participant.id || participant.lid || participant.phoneNumber || participant.phone));
-                                            const botParticipantsKA3 = participantsKA3.filter(participant => isBotGroupParticipant(participant));
-                                            const creatorParticipantsKA3 = participantsKA3.filter(participant => isGroupCreatorParticipant(participant, metadataKA3));
-                                            const ownerIdentitiesKA3 = [...new Set([
-                                                ...senderJids,
-                                                ...(sOwnerTop?.Number ? [`${normalizePhoneNumber(sOwnerTop.Number)}@s.whatsapp.net`] : []),
-                                                ...(sOwnerTop?.OwnerLid ? [normalizeLidCacheKey(sOwnerTop.OwnerLid)] : [])
-                                            ].filter(Boolean))];
-                                            const ownerParticipantsKA3 = participantsKA3.filter(participant => !botParticipantsKA3.includes(participant) && !creatorParticipantsKA3.includes(participant) && participantMatchesIdentities(participant, ownerIdentitiesKA3));
-                                            const adminParticipantsKA3 = participantsKA3.filter(participant => isAdminParticipantForPolicy(participant) && !botParticipantsKA3.includes(participant) && !creatorParticipantsKA3.includes(participant) && !ownerParticipantsKA3.includes(participant));
-                                            const ordinaryParticipantsKA3 = participantsKA3.filter(participant => !isAdminParticipantForPolicy(participant) && !botParticipantsKA3.includes(participant) && !creatorParticipantsKA3.includes(participant) && !ownerParticipantsKA3.includes(participant));
-                                            const identifiersKA3 = records => [...new Set(records.map(participant => participant.id || participant.lid || participant.phoneNumber || participant.phone).filter(Boolean))];
-                                            const participantStillPresentKA3 = (participant, metadata) => (metadata?.participants || []).some(candidate => participantMatchesIdentities(candidate, participantAliases(participant)));
-                                            const runRemovalStageKA3 = async (stage, records, allowOwner = false) => {
-                                                if (!records.length) return true;
-                                                const targets = identifiersKA3(records);
-                                                let succeeded = false;
-                                                if (!allowOwner) {
-                                                    succeeded = await safeGroupUpdate(from, targets, 'remove', metadataKA3, false, false);
-                                                } else {
-                                                    succeeded = true;
-                                                    for (const participant of records) {
-                                                        const candidates = actionParticipantCandidates(participant, false, metadataKA3.addressingMode);
-                                                        let removed = false;
-                                                        for (const candidate of candidates) {
-                                                            try {
-                                                                const result = await queueMessage(() => sock.groupParticipantsUpdate(from, [candidate], 'remove'), 180, sock);
-                                                                if (!groupUpdateFailures(result).length) {
-                                                                    removed = true;
-                                                                    break;
-                                                                }
-                                                            } catch (ownerRemovalError) {
-                                                                console.warn('[kickall3-owner-candidate-failed]', { sessionId, group: from, error: ownerRemovalError?.message || String(ownerRemovalError) });
-                                                            }
-                                                        }
-                                                        if (!removed) succeeded = false;
-                                                    }
-                                                }
-                                                if (!succeeded) return false;
-                                                await sleep(1400);
-                                                const refreshed = await getGroupMetadataCached(sessionId, sock, from, true).catch(() => null);
-                                                if (!refreshed || !Array.isArray(refreshed.participants)) return false;
-                                                setCachedGroupMetadata(sessionId, from, refreshed);
-                                                const remaining = records.filter(participant => participantStillPresentKA3(participant, refreshed));
-                                                console.info('[kickall3-stage-verified]', { sessionId, group: from, stage, requested: records.length, remaining: remaining.length, completed: remaining.length === 0 });
-                                                return remaining.length === 0;
-                                            };
-                                            console.warn('[kickall3-started]', { sessionId, group: from, ordinaryMembers: ordinaryParticipantsKA3.length, admins: adminParticipantsKA3.length, sessionOwners: ownerParticipantsKA3.length, protectedCreators: creatorParticipantsKA3.length, botLeavesLast: true });
-                                            if (!await runRemovalStageKA3('ordinary_members', ordinaryParticipantsKA3)) {
-                                                await safeSendFormatted(sock, from, t.cmd_kickall3, t.kickall3_partial, pushName, true, activeHostName);
-                                                break;
-                                            }
-                                            if (!await runRemovalStageKA3('admins', adminParticipantsKA3)) {
-                                                await safeSendFormatted(sock, from, t.cmd_kickall3, t.kickall3_partial, pushName, true, activeHostName);
-                                                break;
-                                            }
-                                            if (!await runRemovalStageKA3('session_owner', ownerParticipantsKA3, true)) {
-                                                await safeSendFormatted(sock, from, t.cmd_kickall3, t.kickall3_partial, pushName, true, activeHostName);
-                                                break;
-                                            }
-                                            const verifyFinalKA3 = await getGroupMetadataCached(sessionId, sock, from, true).catch(() => null);
-                                            if (!verifyFinalKA3 || !Array.isArray(verifyFinalKA3.participants)) throw new Error('group_metadata_unavailable_before_bot_leave');
-                                            const botStillPresentKA3 = verifyFinalKA3.participants.some(participant => isBotGroupParticipant(participant));
-                                            const nonBotNonCreatorRemainingKA3 = verifyFinalKA3.participants.filter(participant => !isBotGroupParticipant(participant) && !isGroupCreatorParticipant(participant, verifyFinalKA3));
-                                            if (nonBotNonCreatorRemainingKA3.length) {
-                                                console.error('[kickall3-final-verification-blocked]', { sessionId, group: from, remainingCount: nonBotNonCreatorRemainingKA3.length, action: 'bot_not_leaving_until_removal_stages_verified' });
-                                                await safeSendFormatted(sock, from, t.cmd_kickall3, t.kickall3_partial, pushName, true, activeHostName);
-                                                break;
-                                            }
-                                            await safeSendFormatted(sock, from, t.cmd_kickall3, `${t.kickall3_complete}${creatorParticipantsKA3.length ? ` (${t.kickall3_creator_protected.replace('{count}', String(creatorParticipantsKA3.length))})` : ''}`, pushName, false, activeHostName);
-                                            if (botStillPresentKA3) await sock.groupLeave(from);
-                                            console.warn('[kickall3-bot-left-last]', { sessionId, group: from, botWasPresent: botStillPresentKA3, protectedCreatorCount: creatorParticipantsKA3.length });
-                                            break;
                                         case 'ferme':
                                             const isAdminF = await checkAdmin();
                                             if (!isGroup || !isAdminF) {
@@ -8913,43 +8821,33 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, t.cmd_del3, t.del3_usage, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            const del3QuotedText = String(extractBody({ message: quotedMessage }) || '').trim();
-                                            const del3Fingerprint = createDel3Fingerprint(del3QuotedText);
-                                            if (!del3Fingerprint) {
+                                            const del3Format = getWhatsAppMessageFormat({ message: quotedMessage });
+                                            if (!del3Format) {
                                                 await safeSendFormatted(sock, from, t.cmd_del3, t.del3_usage, pushName, true, activeHostName);
                                                 break;
                                             }
                                             const currentDel3Rules = await getDel3Rules(sessionId, from);
-                                            if (currentDel3Rules.some(rule => rule.fingerprint === del3Fingerprint)) {
-                                                await removeDel3Rule(sessionId, from, del3Fingerprint);
-                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_deactivated, pushName, false, activeHostName);
+                                            if (currentDel3Rules.some(rule => rule.format === del3Format)) {
+                                                await removeDel3Rule(sessionId, from, del3Format);
+                                                await safeSendFormatted(sock, from, t.cmd_del3, `${t.del3_deactivated} (${del3Format})`, pushName, false, activeHostName);
                                                 break;
                                             }
-                                            await addDel3Rule(sessionId, from, del3Fingerprint, del3QuotedText);
-                                            const del3Candidates = new Map();
+                                            await addDel3Rule(sessionId, from, del3Format, extractBody({ message: quotedMessage }));
                                             const cachedDel3Quote = recentMsgsCache.find(entry => entry.sessionId === sessionId && entry.id === quoted.stanzaId && entry.from === from);
-                                            if (cachedDel3Quote?.key) del3Candidates.set(String(cachedDel3Quote.id), cachedDel3Quote.key);
-                                            else {
-                                                const quotedDeleteKey = { remoteJid: from, id: quoted.stanzaId, fromMe: false };
-                                                if (quoted.participant) quotedDeleteKey.participant = quoted.participant;
-                                                del3Candidates.set(String(quoted.stanzaId), quotedDeleteKey);
-                                            }
-                                            for (const cachedVariant of recentMsgsCache) {
-                                                if (cachedVariant.sessionId !== sessionId || cachedVariant.from !== from || cachedVariant.id === msgId || !cachedVariant.key) continue;
-                                                if (createDel3Fingerprint(extractBody({ message: cachedVariant.message })) === del3Fingerprint) del3Candidates.set(String(cachedVariant.id), cachedVariant.key);
-                                            }
-                                            let del3DeletedCount = 0;
-                                            const del3DeleteErrors = [];
-                                            for (const [variantId, variantKey] of del3Candidates) {
+                                            const quotedDel3Key = cachedDel3Quote?.key || { remoteJid: from, id: quoted.stanzaId, fromMe: !!quoted.fromMe, ...(quoted.participant ? { participant: quoted.participant } : {}) };
+                                            const quotedDel3Sender = cachedDel3Quote?.sender || quoted.participant || '';
+                                            const quotedDel3IsProtected = !!cachedDel3Quote?.fromMe || !!quotedDel3Key.fromMe || isProtectedWhatsAppTarget(quotedDel3Sender, sOwnerTop, botId);
+                                            let selectedMessageDeleted = false;
+                                            if (!quotedDel3IsProtected) {
                                                 try {
-                                                    await queuedSendMessage(sock, from, { delete: variantKey }, {}, 180);
-                                                    del3DeletedCount++;
+                                                    await queuedSendMessage(sock, from, { delete: quotedDel3Key }, {}, 120);
+                                                    selectedMessageDeleted = true;
                                                 } catch (del3DeleteError) {
-                                                    del3DeleteErrors.push({ messageId: variantId, error: del3DeleteError?.message || String(del3DeleteError) });
+                                                    console.warn('[del3-selected-message-delete-failed]', { sessionId, group: from, messageId: quoted.stanzaId, format: del3Format, error: del3DeleteError?.message || String(del3DeleteError) });
                                                 }
                                             }
-                                            console.info('[del3-rule-activated]', { sessionId, group: from, fingerprint: del3Fingerprint.slice(0, 16), recentVariantsFound: del3Candidates.size, recentVariantsDeleted: del3DeletedCount, deleteFailures: del3DeleteErrors.length });
-                                            await safeSendFormatted(sock, from, t.cmd_del3, `${t.del3_activated} (${del3DeletedCount})`, pushName, false, activeHostName);
+                                            console.info('[del3-rule-activated]', { sessionId, group: from, format: del3Format, selectedMessageDeleted, quotedSenderProtected: quotedDel3IsProtected, action: 'delete_future_messages_of_same_whatsapp_format_except_owner_and_bot' });
+                                            await safeSendFormatted(sock, from, t.cmd_del3, `${t.del3_activated} (${del3Format})`, pushName, false, activeHostName);
                                             break;
                                         case 'vv':
                                             if (!quotedMessage) break;
