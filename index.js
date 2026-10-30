@@ -25,6 +25,8 @@ let runtimeLogPersistenceRunning = false;
 let runtimeLogPruneCounter = 0;
 let runtimeLogSequence = 0;
 const runtimeLogInstanceId = `${Date.now()}-${process.pid}`;
+const runtimeLogStartedAt = new Date();
+const runtimeLogDeploymentId = String(process.env.LOG_DEPLOY_ID || process.env.RENDER_DEPLOY_ID || (process.env.RENDER_SERVICE_ID && process.env.RENDER_GIT_COMMIT ? `${process.env.RENDER_SERVICE_ID}:${process.env.RENDER_GIT_COMMIT}` : `${process.env.RENDER_SERVICE_ID || 'local'}:${process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId}`)).slice(0, 180);
 const runtimeLogSecrets = Object.entries(process.env)
     .filter(([key, value]) => /TOKEN|SECRET|PASSWORD|PASSWD|API.?KEY|MONGO_URI|URI$|CF_ACCOUNTS|TAVILY/i.test(key) && String(value || '').length >= 8)
     .map(([, value]) => String(value));
@@ -169,6 +171,7 @@ function recordRuntimeLog(level, args) {
         runtimeLogPendingWrites.push({
             _id: id,
             instance: runtimeLogInstanceId,
+            deploymentId: runtimeLogDeploymentId,
             sequence,
             at,
             createdAt: new Date(at),
@@ -420,7 +423,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'wa-session-stability-2026-10-30-r14';
+const RUNTIME_FIX_BUILD = 'wa-session-stability-2026-10-30-r15';
 const PORT = process.env.PORT || 7000;
 const BOT_TIME_ZONE = process.env.BOT_TIME_ZONE || 'America/Santo_Domingo';
 const CHAT_CONTEXT_MAX_CHARS = Math.max(2500, Number(process.env.CHAT_CONTEXT_MAX_CHARS || 7000));
@@ -1700,10 +1703,11 @@ async function connectMongo() {
         await mongoClient.connect();
         db = mongoClient.db('dh7bot');
         const runtimeLogsCollection = db.collection('server_runtime_logs');
-        await runtimeLogsCollection.createIndex({ createdAt: -1, _id: -1 }, { name: 'server_runtime_logs_created_desc' });
+        await runtimeLogsCollection.createIndex({ deploymentId: 1, createdAt: -1, _id: -1 }, { name: 'server_runtime_logs_deployment_created_desc' });
+        const removedPreviousDeployLogs = await runtimeLogsCollection.deleteMany({ deploymentId: { $ne: runtimeLogDeploymentId } });
         await runtimeLogsCollection.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'server_runtime_logs_expire_at_ttl' });
         attachRuntimeLogPersistence(runtimeLogsCollection);
-        console.info('[runtime-log-persistence-ready]', { collection: 'server_runtime_logs', retentionDays: LOG_DASHBOARD_RETENTION_DAYS, maxEntries: LOG_DASHBOARD_PERSIST_MAX_ENTRIES, dashboardHistoryLimit: LOG_DASHBOARD_MAX_ENTRIES });
+        console.info('[runtime-log-persistence-ready]', { collection: 'server_runtime_logs', deploymentId: runtimeLogDeploymentId, deploymentStartedAt: runtimeLogStartedAt.toISOString(), removedPreviousDeployLogCount: Number(removedPreviousDeployLogs?.deletedCount || 0), retentionDays: LOG_DASHBOARD_RETENTION_DAYS, maxEntries: LOG_DASHBOARD_PERSIST_MAX_ENTRIES, dashboardHistoryLimit: LOG_DASHBOARD_MAX_ENTRIES });
         await db.collection('processed_messages').createIndex({ ts: 1 });
         await db.collection('processed_messages').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'processed_messages_expire_at_ttl' });
         await db.collection('baileys_outgoing_messages').createIndex({ createdAt: 1 }, { expireAfterSeconds: BAILEYS_RETRY_MESSAGE_TTL_SECONDS, name: 'baileys_retry_message_ttl' });
@@ -3037,7 +3041,7 @@ async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIM
     try {
         if (db) {
             const cursor = db.collection('server_runtime_logs')
-                .find({}, { projection: { at: 1, level: 1, text: 1, createdAt: 1 } })
+                .find({ deploymentId: runtimeLogDeploymentId }, { projection: { at: 1, level: 1, text: 1, createdAt: 1, deploymentId: 1 } })
                 .sort({ createdAt: -1, _id: -1 })
                 .limit(limit);
             if (typeof cursor.maxTimeMS === 'function') cursor.maxTimeMS(1800);
@@ -3132,61 +3136,78 @@ app.get(LOG_DASHBOARD_PATH, async (req, res) => {
 <html lang="fr">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <title></title>
 <style>
-:root{color-scheme:dark;background:#000;color:#dedede;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
+:root{color-scheme:dark;background:#000;color:#fff;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{margin:0;padding:0;width:100%;min-height:100%;background:#000;color:#dedede}
-body{min-height:100vh;min-height:100svh;overflow-x:hidden}
-#logs{width:100%;padding:7px 8px max(22px,env(safe-area-inset-bottom))}
-.log{position:relative;width:100%;padding:8px 2px 10px;border-bottom:1px solid #171717;color:#dedede;white-space:normal;overflow-wrap:anywhere}
+html,body{margin:0;padding:0;width:100%;min-height:100%;background:#000;color:#fff;overscroll-behavior:none;overscroll-behavior-x:none}
+body{min-height:100vh;min-height:100svh;overflow-x:hidden;touch-action:pan-y}
+#logs{width:100%;padding:52px 8px max(22px,env(safe-area-inset-bottom));overscroll-behavior:none}
+.log{position:relative;width:100%;padding:8px 2px 10px;color:#fff;white-space:normal;overflow-wrap:anywhere}
 .meta{display:flex;align-items:center;gap:6px;min-height:19px;padding-right:34px;font-size:11px;line-height:1.45}
-.level{font-weight:800;font-style:italic;white-space:nowrap;color:#e8e8e8}
-.level.error,.level.fatal{color:#ff7777}.level.warn{color:#ffc477}.level.info{color:#e8e8e8}.level.debug,.level.trace{color:#aaa}
-.separator{font-style:normal;color:#ddd}
-.date{font-style:italic;color:#bdbdbd;white-space:nowrap}
-.message{display:block;margin:4px 32px 0 0;padding:0;color:#d7d7d7;font-size:11px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-family:inherit;user-select:text}
-.copy-log{position:absolute;top:5px;right:0;width:27px;height:27px;display:grid;place-items:center;border:0;padding:0;margin:0;background:transparent;color:#fff;opacity:.72;cursor:pointer}
-.copy-log:active{opacity:1}.copy-log svg{display:block;width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
-#jump{position:fixed;z-index:8;right:max(12px,env(safe-area-inset-right));bottom:max(14px,env(safe-area-inset-bottom));width:42px;height:42px;display:none;place-items:center;padding:0;border:0;border-radius:0;background:transparent;color:#fff;cursor:pointer;opacity:.96}
+.level{font-weight:800;font-style:italic;white-space:nowrap;color:#fff}
+.level.error,.level.fatal,.level.warn,.level.info,.level.debug,.level.trace{color:#fff}
+.separator{font-style:normal;color:#fff}
+.date{font-style:italic;color:#fff;white-space:nowrap}
+.message{display:block;margin:4px 32px 0 0;padding:0;color:#fff;font-size:11px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-family:inherit;user-select:text}
+.copy-log,#copy-all{position:absolute;top:5px;right:0;width:27px;height:27px;display:grid;place-items:center;border:0;padding:0;margin:0;background:transparent;color:#fff;opacity:.9;cursor:pointer}
+.copy-log:active,#copy-all:active{opacity:1}.copy-log svg,#copy-all svg{display:block;width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+#copy-all{position:fixed;z-index:10;top:max(10px,env(safe-area-inset-top));right:max(12px,env(safe-area-inset-right));width:34px;height:34px;opacity:1}
+#jump{position:fixed;z-index:8;right:max(12px,env(safe-area-inset-right));bottom:max(14px,env(safe-area-inset-bottom));width:42px;height:42px;display:none;place-items:center;padding:0;border:0;border-radius:0;background:transparent;color:#fff;cursor:pointer;opacity:1}
 #jump.visible{display:grid}#jump svg{width:27px;height:27px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+#unseen-count{position:absolute;right:0;top:-15px;min-width:16px;max-width:80px;overflow:hidden;color:#fff;background:#000;font:800 12px/1 system-ui,-apple-system,sans-serif;text-align:right;white-space:nowrap}
 @media(max-width:560px){#logs{padding-left:6px;padding-right:6px}.meta{font-size:10px}.message{font-size:10px}.log{padding-top:7px;padding-bottom:9px}}
 </style>
+</head></style>
 </head>
 <body>
+<button id="copy-all" type="button" aria-label="Copier tous les logs"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg></button>
 <main id="logs" aria-live="off">${initialRowsHtml}</main>
-<button id="jump" type="button" aria-label="Aller aux nouveaux logs ou en bas"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v15M6 13l6 6 6-6"/></svg></button>
+<button id="jump" type="button" aria-label="Aller aux nouveaux logs ou en bas"><span id="unseen-count" aria-live="off"></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v15M6 13l6 6 6-6"/></svg></button>
 <script>
 window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
 (() => {
  const endpoint = location.pathname;
  const logsNode = document.getElementById('logs');
  const jumpButton = document.getElementById('jump');
+ const copyAllButton = document.getElementById('copy-all');
+ const unseenCountNode = document.getElementById('unseen-count');
  let allLogs = Array.isArray(window.__SERVER_LOG_SNAPSHOT__) ? window.__SERVER_LOG_SNAPSHOT__ : [];
  let lastFetchError = '';
  let requestRunning = false;
  let pollTimer = null;
- let following = true;
  let firstUnseenId = '';
+ let unseenCount = 0;
  let jumpAction = 'unseen';
  let hasRendered = false;
  const maxRows = ${LOG_DASHBOARD_PAGE_LIMIT};
  const clientBufferLimit = 1600;
  const textOf = value => String(value == null ? '' : value);
  const levelClass = value => textOf(value).toLowerCase().replace(/[^a-z0-9_-]/g,'');
- function atBottom(){return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 90;}
+ function atBottom(){return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 8;}
  function rowFor(id){return [...logsNode.querySelectorAll('.log')].find(row => row.dataset.id === id) || null;}
  function visibleAnchor(){
    const rows = logsNode.querySelectorAll('.log');
    for(const row of rows){const box=row.getBoundingClientRect();if(box.bottom>0)return {id:row.dataset.id,top:box.top};}
    return null;
  }
- function setJumpVisible(visible){jumpButton.classList.toggle('visible',!!visible);}
+ function updateJump(){
+   jumpButton.classList.toggle('visible',!atBottom() || unseenCount>0);
+   unseenCountNode.textContent=unseenCount>0?(unseenCount>99?'99+':String(unseenCount)):'';
+ }
  function copyText(item){
    return textOf(item.level).toUpperCase() + ' ; ' + textOf(item.at).replace('T',' ').replace('Z','') + '\\n' + textOf(item.text);
  }
+ async function writeClipboard(value){
+   if(navigator.clipboard&&navigator.clipboard.writeText){await navigator.clipboard.writeText(value);return true;}
+   const area=document.createElement('textarea');area.value=value;area.setAttribute('readonly','');area.style.position='fixed';area.style.left='-9999px';area.style.top='0';document.body.appendChild(area);area.select();const copied=document.execCommand('copy');area.remove();if(!copied)throw new Error('clipboard_unavailable');return true;
+ }
+ async function copyAll(){
+   try{await writeClipboard(allLogs.map(copyText).join('\\n\\n'));copyAllButton.style.opacity='.5';window.setTimeout(()=>{copyAllButton.style.opacity='1';},500);}catch(error){}
+ }
+ copyAllButton.addEventListener('click',copyAll);
  function makeRow(item){
    const row=document.createElement('article');row.className='log';row.dataset.id=textOf(item.id);
    const meta=document.createElement('header');meta.className='meta';
@@ -3202,36 +3223,31 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
    return row;
  }
  async function copyOne(item,button){
-   const value=copyText(item);
-   try{
-     if(navigator.clipboard&&navigator.clipboard.writeText)await navigator.clipboard.writeText(value);
-     else{const area=document.createElement('textarea');area.value=value;area.setAttribute('readonly','');area.style.position='fixed';area.style.opacity='0';document.body.appendChild(area);area.select();document.execCommand('copy');area.remove();}
-     button.style.opacity='1';window.setTimeout(()=>{button.style.opacity='.72';},650);
-   }catch(error){}
+   try{await writeClipboard(copyText(item));button.style.opacity='.45';window.setTimeout(()=>{button.style.opacity='.9';},550);}catch(error){}
  }
- function render(nextLogs, initial=false){
+ function render(nextLogs){
    const oldIds=new Set(allLogs.map(item=>textOf(item.id)));
    const incoming=(Array.isArray(nextLogs)?nextLogs:[]).filter(item=>!textOf(item.id).startsWith('dashboard-loading:'));
    const merged=new Map(allLogs.map(item=>[textOf(item.id),item]));
    for(const item of incoming)merged.set(textOf(item.id),item);
    const next=Array.from(merged.values()).sort((a,b)=>textOf(a.at).localeCompare(textOf(b.at))||textOf(a.id).localeCompare(textOf(b.id))).slice(-clientBufferLimit);
    const added=next.filter(item=>!oldIds.has(textOf(item.id))&&!textOf(item.id).startsWith('dashboard-loading:'));
-   const wasAtBottom=initial||!hasRendered||following||atBottom();
+   const wasAtBottom=!hasRendered||atBottom();
    const anchor=wasAtBottom?null:visibleAnchor();
-   if(!wasAtBottom&&added.length&&!firstUnseenId)firstUnseenId=textOf(added[0].id);
+   if(!wasAtBottom&&added.length){if(!firstUnseenId)firstUnseenId=textOf(added[0].id);unseenCount+=added.length;}
    allLogs=next;
    const fragment=document.createDocumentFragment();
    for(const item of allLogs)fragment.appendChild(makeRow(item));
    logsNode.replaceChildren(fragment);
    hasRendered=true;
    if(wasAtBottom){
-     following=true;firstUnseenId='';jumpAction='unseen';setJumpVisible(false);
+     firstUnseenId='';unseenCount=0;jumpAction='unseen';
      window.scrollTo(0,document.documentElement.scrollHeight);
-   }else{
-     following=false;
-     if(anchor){const restored=rowFor(anchor.id);if(restored){const nextTop=restored.getBoundingClientRect().top;window.scrollBy(0,nextTop-anchor.top);}}
-     setJumpVisible(true);
+   }else if(anchor){
+     const restored=rowFor(anchor.id);
+     if(restored){const nextTop=restored.getBoundingClientRect().top;window.scrollBy(0,nextTop-anchor.top);}
    }
+   updateJump();
  }
  async function load(){
    if(requestRunning)return;
@@ -3255,20 +3271,25 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
  jumpButton.addEventListener('click',()=>{
    if(jumpAction==='unseen'&&firstUnseenId){
      const target=rowFor(firstUnseenId);
-     if(target){target.scrollIntoView({block:'start',behavior:'smooth'});jumpAction='bottom';return;}
+     if(target){target.scrollIntoView({block:'start',behavior:'smooth'});jumpAction='bottom';updateJump();return;}
    }
    window.scrollTo({top:document.documentElement.scrollHeight,behavior:'smooth'});
-   jumpAction='unseen';firstUnseenId='';following=true;setJumpVisible(false);
+   jumpAction='unseen';firstUnseenId='';
+   window.setTimeout(updateJump,450);
  });
  let scrollFrame=0;
  window.addEventListener('scroll',()=>{
    if(scrollFrame)return;
    scrollFrame=window.requestAnimationFrame(()=>{
      scrollFrame=0;
-     if(atBottom()){following=true;firstUnseenId='';jumpAction='unseen';setJumpVisible(false);}
-     else{following=false;setJumpVisible(true);}
+     if(atBottom()){firstUnseenId='';unseenCount=0;jumpAction='unseen';}
+     updateJump();
    });
  },{passive:true});
+ document.addEventListener('gesturestart',event=>event.preventDefault(),{passive:false});
+ document.addEventListener('touchmove',event=>{if(event.touches&&event.touches.length>1)event.preventDefault();},{passive:false});
+ document.addEventListener('wheel',event=>{if(event.ctrlKey||event.metaKey)event.preventDefault();},{passive:false});
+ document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&['+','=','-','0'].includes(String(event.key).toLowerCase()))event.preventDefault();});
  document.addEventListener('visibilitychange',()=>{if(!document.hidden)void load();});
  void load();
  pollTimer=window.setInterval(load,5000);
@@ -5935,8 +5956,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const foreignBotSenderNumbers = !isFromMe ? senderNumbers.filter(number => otherBotIdentities.numbers.has(number)) : [];
                         const foreignBotSenderLids = !isFromMe ? senderJids.map(normalizeLidCacheKey).filter(jid => /@lid$/i.test(jid) && otherBotIdentities.lids.has(jid)) : [];
                         if (foreignBotSenderNumbers.length || foreignBotSenderLids.length) {
-                            console.info('[message-ignored-foreign-bot-session]', { sessionId, messageId: msgId, chatJid: from, foreignBotNumberMatch: foreignBotSenderNumbers.length > 0, foreignBotLidMatch: foreignBotSenderLids.length > 0, action: 'another_session_bot_identity_cannot_trigger_this_session' });
-                            return;
+                            console.info('[foreign-bot-owner-treated-as-ordinary-user]', { sessionId, messageId: msgId, chatJid: from, foreignBotNumberMatch: foreignBotSenderNumbers.length > 0, foreignBotLidMatch: foreignBotSenderLids.length > 0, ownerPrivilegeGranted: false, authorization: 'decided_only_by_this_session_mode' });
                         }
                         const senderMatchesAuthenticatedAccount = !!authenticatedAccountNumber && senderNumbers.includes(authenticatedAccountNumber);
                         const isOwnerReal = !!isFromMe || senderMatchesAuthenticatedAccount || senderMatchesOwnLid || privateChatMatchesOwnLid;
@@ -7645,6 +7665,9 @@ async function main() {
         privateLidMappedPhonePrimary: true,
         passiveSocketHealth: true,
         activeGroupFetchHealthProbe: false,
+        runtimeLogDeploymentId: runtimeLogDeploymentId,
+        previousDeploymentLogsPruned: true,
+        publicModeAcceptsOtherBotOwnersAsOrdinaryUsers: true,
         exclusiveAccountRuntimeLocks: true,
         accountLockIncludesPnAndLidAliases: true,
         accountLockExpandsKnownSessionAliases: true,
