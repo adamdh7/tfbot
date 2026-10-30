@@ -28,7 +28,7 @@ let runtimeLogSequence = 0;
 const runtimeLogInstanceId = `${Date.now()}-${process.pid}`;
 const runtimeLogStartedAt = new Date();
 const runtimeLogDeploymentId = String(process.env.LOG_DEPLOY_ID || process.env.RENDER_DEPLOY_ID || (process.env.RENDER_SERVICE_ID && process.env.RENDER_GIT_COMMIT ? `${process.env.RENDER_SERVICE_ID}:${process.env.RENDER_GIT_COMMIT}` : `${process.env.RENDER_SERVICE_ID || 'local'}:${process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId}`)).slice(0, 180);
-const TFBOT_CLUSTER_CODE_REVISION = 'r28-whatsapp-text-del3-format';
+const TFBOT_CLUSTER_CODE_REVISION = 'r29-whatsapp-images-del3-format-svg-loader';
 const runtimeLogClusterId = (String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-30').slice(0, 180);
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-30')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
@@ -433,7 +433,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'wa-render-domain-router-2026-10-30-r28';
+const RUNTIME_FIX_BUILD = 'wa-render-domain-router-2026-10-30-r29';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -4495,9 +4495,11 @@ const translations = {
     disconnect_sys_msg: "Vous avez été déconnecté. Une suppression totale des données et sessions a été initiée via le système.",
     del2_activated: "La modération stricte a été activée pour @{user}. Tous les messages de cet utilisateur seront supprimés de manière instantanée.",
     del2_deactivated: "La modération stricte a été désactivée pour @{user}.",
-    del3_activated: "La suppression du format de message sélectionné est activée dans ce groupe.",
-    del3_deactivated: "La suppression du format de message sélectionné est désactivée.",
-    del3_usage: "Réponds à un message avec del3 pour sélectionner son format WhatsApp.",
+    del3_activated: "Del3 est activé pour le format {format}. Le message auquel tu as répondu a été supprimé. Les prochains messages de ce format seront supprimés automatiquement. Les messages de l’hôte et du bot restent protégés.",
+    del3_activated_protected: "Del3 est activé pour le format {format}. Le message sélectionné appartient à l’hôte ou au bot : il est conservé. Les prochains messages de ce format seront supprimés, sauf ceux de l’hôte et du bot.",
+    del3_activated_delete_failed: "Del3 est activé pour le format {format}, mais WhatsApp n’a pas confirmé la suppression du message sélectionné. Les prochains messages de ce format seront supprimés, sauf ceux de l’hôte et du bot.",
+    del3_deactivated: "La règle del3 du format {format} est désactivée. Les prochains messages de ce format ne seront plus supprimés automatiquement.",
+    del3_usage: "Pour activer del3, réponds directement à un message du groupe avec del3. Le bot détecte son format WhatsApp (texte, image, vidéo, audio, document, sticker, etc.).",
     pending_msg: "En attente de chargement",
     msg_unloaded: "Message non chargé",
     take_time: "Ceci pourrait prendre un peu de temps",
@@ -4544,9 +4546,11 @@ const translations = {
     disconnect_sys_msg: "You have been disconnected. A total deletion of data and sessions has been initiated via the system.",
     del2_activated: "Strict moderation has been activated for @{user}. All incoming messages from this user will be deleted immediately.",
     del2_deactivated: "Strict moderation has been deactivated for @{user}.",
-    del3_activated: "Deletion of the selected WhatsApp message format is now enabled in this group.",
-    del3_deactivated: "Deletion of the selected WhatsApp message format is now disabled.",
-    del3_usage: "Reply to a message with del3 to select its WhatsApp format.",
+    del3_activated: "Del3 is enabled for {format}. The message you replied to was deleted. Future messages in this format will be deleted automatically. The host’s and bot’s messages remain protected.",
+    del3_activated_protected: "Del3 is enabled for {format}. The selected message belongs to the host or bot, so it was kept. Future messages in this format will be deleted, except the host’s and bot’s messages.",
+    del3_activated_delete_failed: "Del3 is enabled for {format}, but WhatsApp did not confirm deletion of the selected message. Future messages in this format will be deleted, except the host’s and bot’s messages.",
+    del3_deactivated: "The del3 rule for {format} is disabled. New messages in this format will no longer be deleted automatically.",
+    del3_usage: "To enable del3, reply directly to a group message with del3. The bot detects its WhatsApp format (text, image, video, audio, document, sticker, etc.).",
     pending_msg: "Waiting for this message",
     msg_unloaded: "Message not loaded",
     take_time: "This may take a while",
@@ -4593,9 +4597,11 @@ const translations = {
     disconnect_sys_msg: "Ha sido desconectado. Se ha iniciado una eliminación total de datos y sesiones a través del sistema.",
     del2_activated: "Se ha activado la moderación estricta para @{user}. Todos los mensajes entrantes de este usuario serán eliminados de inmediato.",
     del2_deactivated: "Se ha desactivado la moderación estricta para @{user}.",
-    del3_activated: "La eliminación del formato de mensaje seleccionado está activada en este grupo.",
-    del3_deactivated: "La eliminación del formato de mensaje seleccionado está desactivada.",
-    del3_usage: "Responde a un mensaje con del3 para seleccionar su formato de WhatsApp.",
+    del3_activated: "Del3 está activado para el formato {format}. Se eliminó el mensaje al que respondiste. Los próximos mensajes de este formato se eliminarán automáticamente. Los mensajes del anfitrión y del bot están protegidos.",
+    del3_activated_protected: "Del3 está activado para el formato {format}. El mensaje seleccionado pertenece al anfitrión o al bot, por eso se conserva. Los próximos mensajes de este formato se eliminarán, excepto los del anfitrión y del bot.",
+    del3_activated_delete_failed: "Del3 está activado para el formato {format}, pero WhatsApp no confirmó la eliminación del mensaje seleccionado. Los próximos mensajes de este formato se eliminarán, excepto los del anfitrión y del bot.",
+    del3_deactivated: "La regla del3 para el formato {format} está desactivada. Los nuevos mensajes de este formato ya no se eliminarán automáticamente.",
+    del3_usage: "Para activar del3, responde directamente a un mensaje del grupo con del3. El bot detectará su formato de WhatsApp (texto, imagen, vídeo, audio, documento, sticker, etc.).",
     pending_msg: "Esperando este mensaje",
     msg_unloaded: "Mensaje no cargado",
     take_time: "Esto puede tomar un tiempo",
@@ -4642,9 +4648,11 @@ const translations = {
     disconnect_sys_msg: "Ou dekonekte. Yon efasman total done ak sesyon yo te inisye atravè sistèm nan.",
     del2_activated: "Modération estrik aktive pou @{user}. Tout mesaj moun sa a voye ap siprime touswit.",
     del2_deactivated: "Modération estrik dezaktive pou @{user}.",
-    del3_activated: "Efase mesaj ki gen menm fòma WhatsApp sa a aktive nan gwoup la.",
-    del3_deactivated: "Efase mesaj ki gen menm fòma WhatsApp sa a dezaktive.",
-    del3_usage: "Reponn yon mesaj ak del3 pou chwazi fòma WhatsApp li.",
+    del3_activated: "Del3 aktive pou fòma {format}. Mesaj ou te reponn lan efase. Tout pwochen mesaj ki gen menm fòma sa a ap efase otomatikman. Mesaj hòt la ak bot la rete pwoteje.",
+    del3_activated_protected: "Del3 aktive pou fòma {format}. Mesaj ou te chwazi a se mesaj hòt la oswa bot la, se poutèt sa li rete la. Pwochen mesaj ki gen menm fòma a ap efase, sof mesaj hòt la ak bot la.",
+    del3_activated_delete_failed: "Del3 aktive pou fòma {format}, men WhatsApp pa konfime efasman mesaj ou te chwazi a. Pwochen mesaj ki gen menm fòma a ap efase, sof mesaj hòt la ak bot la.",
+    del3_deactivated: "Règ del3 pou fòma {format} dezaktive. Nouvo mesaj ki gen fòma sa a pap efase otomatikman ankò.",
+    del3_usage: "Pou aktive del3, reponn dirèkteman yon mesaj nan gwoup la ak del3. Bot la ap detekte fòma WhatsApp la (tèks, imaj, videyo, odyo, dokiman, sticker, elatriye).",
     pending_msg: "Ap tann mesaj sa a",
     msg_unloaded: "Mesaj pa chaje",
     take_time: "Sa ka pran yon ti tan",
@@ -4710,7 +4718,7 @@ function splitCaptionBodies(type, text, userName, maxChars = MAX_WHATSAPP_CAPTIO
 }
 
 async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, sendOptions = {}) {
-    const deliveryImageBuffer = imageBuffer && imageBuffer === adamLogoBuffer ? null : imageBuffer;
+    const deliveryImageBuffer = imageBuffer;
     const bodies = splitCaptionBodies(type, text, userName);
     let lastResult = null;
     for (const body of bodies) {
@@ -6284,7 +6292,7 @@ function parseIncomingCommand(body, language, context = {}) {
 }
 
 async function sendFormatted(sock, from, type, text, pushName, isAI = false, hostName = "Adam D'H7", sendOptions = {}) {
-    return sendImageCaptioned(sock, from, null, type, text, pushName || 'Inconnu', sendOptions);
+    return sendImageCaptioned(sock, from, adamLogoBuffer, type, text, pushName || 'Inconnu', sendOptions);
 }
 
 async function cleanupSocket(sessionId) {
@@ -8829,7 +8837,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             const currentDel3Rules = await getDel3Rules(sessionId, from);
                                             if (currentDel3Rules.some(rule => rule.format === del3Format)) {
                                                 await removeDel3Rule(sessionId, from, del3Format);
-                                                await safeSendFormatted(sock, from, t.cmd_del3, `${t.del3_deactivated} (${del3Format})`, pushName, false, activeHostName);
+                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_deactivated.replace('{format}', del3Format), pushName, false, activeHostName);
                                                 break;
                                             }
                                             await addDel3Rule(sessionId, from, del3Format, extractBody({ message: quotedMessage }));
@@ -8846,8 +8854,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                     console.warn('[del3-selected-message-delete-failed]', { sessionId, group: from, messageId: quoted.stanzaId, format: del3Format, error: del3DeleteError?.message || String(del3DeleteError) });
                                                 }
                                             }
-                                            console.info('[del3-rule-activated]', { sessionId, group: from, format: del3Format, selectedMessageDeleted, quotedSenderProtected: quotedDel3IsProtected, action: 'delete_future_messages_of_same_whatsapp_format_except_owner_and_bot' });
-                                            await safeSendFormatted(sock, from, t.cmd_del3, `${t.del3_activated} (${del3Format})`, pushName, false, activeHostName);
+                                            console.info('[del3-rule-activated]', { sessionId, group: from, format: del3Format, selectedMessageDeleted, quotedSenderProtected: quotedDel3IsProtected, action: 'delete_selected_message_and_future_messages_of_same_whatsapp_format_except_owner_and_bot' });
+                                            const del3ActivationText = quotedDel3IsProtected
+                                                ? t.del3_activated_protected
+                                                : selectedMessageDeleted
+                                                    ? t.del3_activated
+                                                    : t.del3_activated_delete_failed;
+                                            await safeSendFormatted(sock, from, t.cmd_del3, del3ActivationText.replace('{format}', del3Format), pushName, false, activeHostName);
                                             break;
                                         case 'vv':
                                             if (!quotedMessage) break;

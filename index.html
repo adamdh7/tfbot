@@ -69,6 +69,41 @@
             display: block;
             background: #000000;
         }
+        #frame-loading .loading-svg {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 42px;
+            height: 42px;
+            margin: -21px 0 0 -21px;
+            display: block;
+            animation: tfbot-loading-spin .8s linear infinite;
+        }
+        #frame-loading .loading-svg circle {
+            fill: none;
+            stroke: rgba(255,255,255,.2);
+            stroke-width: 3;
+        }
+        #frame-loading .loading-svg path {
+            fill: none;
+            stroke: #ffffff;
+            stroke-width: 3;
+            stroke-linecap: round;
+        }
+        #frame-loading::after {
+            content: 'Connexion au serveur…';
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: calc(50% + 34px);
+            color: #a1a1aa;
+            font-size: 13px;
+            text-align: center;
+            letter-spacing: .2px;
+        }
+        @keyframes tfbot-loading-spin {
+            to { transform: rotate(360deg); }
+        }
         #u-ui {
             display: none;
             position: fixed;
@@ -222,7 +257,7 @@
             'https://tfbot5.onrender.com',
             'https://tfbot6.onrender.com'
         ];
-        const savedOriginKey = 'tfbot.active-origin';
+        const savedOriginKey = 'tfbot.active-origin.v1';
 
         function normalizeAllowedOrigin(value) {
             try {
@@ -244,14 +279,15 @@
         }
 
         async function resolveActiveOrigin() {
-            const deadline = Date.now() + 60000;
+            const deadline = Date.now() + 18000;
             let lastError = null;
             while (Date.now() < deadline) {
                 const controller = new AbortController();
-                const timeoutId = setTimeout(function() { controller.abort(); }, 25000);
+                const timeoutId = setTimeout(function() { controller.abort(); }, 4500);
                 try {
                     const response = await fetch(coordinatorResolveUrl, {
                         method: 'GET',
+                        cache: 'no-store',
                         mode: 'cors',
                         credentials: 'omit',
                         headers: { 'Accept': 'application/json' },
@@ -265,13 +301,13 @@
                         return origin;
                     }
                     if (payload && payload.ok === true && origin && ['starting', 'standby'].includes(String(payload.workerState || ''))) {
-                        await new Promise(function(resolve) { setTimeout(resolve, 1800); });
+                        await new Promise(function(resolve) { setTimeout(resolve, 500); });
                         continue;
                     }
                     throw new Error('active_worker_not_ready');
                 } catch (error) {
                     lastError = error;
-                    await new Promise(function(resolve) { setTimeout(resolve, 2500); });
+                    await new Promise(function(resolve) { setTimeout(resolve, 700); });
                 } finally {
                     clearTimeout(timeoutId);
                 }
@@ -286,6 +322,7 @@
             const frame = document.getElementById('m-f');
             const frameLoading = document.getElementById('frame-loading');
             let frameLoaded = false;
+            let activeOriginConfirmed = false;
             let appRequested = false;
             let activeOrigin = '';
             let retryCount = 0;
@@ -297,6 +334,7 @@
             buttonText.textContent = text.b;
 
             const revealFrame = function() {
+                if (!activeOriginConfirmed) return;
                 if (loadTimeout) clearTimeout(loadTimeout);
                 frameLoading.style.display = 'none';
                 frame.classList.add('ready');
@@ -312,6 +350,7 @@
                 const normalized = normalizeAllowedOrigin(origin);
                 if (!normalized) return false;
                 activeOrigin = normalized;
+                activeOriginConfirmed = false;
                 frameLoaded = false;
                 ui.style.display = 'none';
                 frame.style.display = 'block';
@@ -321,8 +360,16 @@
                 if (loadTimeout) clearTimeout(loadTimeout);
                 loadTimeout = setTimeout(function() {
                     if (!frameLoaded) retryWithCoordinator();
-                }, 45000);
+                }, 18000);
                 return true;
+            };
+
+            const confirmOrigin = function(origin) {
+                const normalized = normalizeAllowedOrigin(origin);
+                if (!normalized) return;
+                if (normalized !== activeOrigin) loadOrigin(normalized);
+                activeOriginConfirmed = true;
+                if (frameLoaded) revealFrame();
             };
 
             const startDomainMonitor = function() {
@@ -331,7 +378,7 @@
                     if (!appRequested || resolving) return;
                     try {
                         const nextOrigin = await resolveActiveOrigin();
-                        if (nextOrigin && nextOrigin !== activeOrigin) loadOrigin(nextOrigin);
+                        if (nextOrigin) confirmOrigin(nextOrigin);
                     } catch (error) {
                         if (!frameLoaded) void retryWithCoordinator();
                     }
@@ -344,43 +391,46 @@
                 retryCount++;
                 try {
                     const nextOrigin = await resolveActiveOrigin();
-                    if (nextOrigin && nextOrigin !== activeOrigin) {
-                        loadOrigin(nextOrigin);
+                    if (nextOrigin) {
+                        confirmOrigin(nextOrigin);
                     } else if (retryCount >= 2) {
                         const saved = getSavedOrigin();
-                        if (saved && saved !== activeOrigin) loadOrigin(saved);
+                        if (saved) confirmOrigin(saved);
                         else showUpdate();
                     } else {
-                        loadOrigin(nextOrigin || getSavedOrigin() || allowedAppOrigins[0]);
+                        const fallback = getSavedOrigin() || allowedAppOrigins[0];
+                        loadOrigin(fallback);
                     }
                 } catch (error) {
                     if (retryCount >= 2) {
                         const saved = getSavedOrigin();
-                        if (saved && saved !== activeOrigin) loadOrigin(saved);
+                        if (saved) confirmOrigin(saved);
                         else showUpdate();
                     } else {
-                        setTimeout(function() { void retryWithCoordinator(); }, 6500);
+                        setTimeout(function() { void retryWithCoordinator(); }, 1200);
                     }
                 } finally {
                     resolving = false;
                 }
             };
 
-            const showApp = async function() {
+            const showApp = function() {
                 appRequested = true;
                 ui.style.display = 'none';
                 frame.style.display = 'block';
                 frameLoading.style.display = 'block';
-                try {
-                    const origin = await resolveActiveOrigin();
-                    loadOrigin(origin);
-                    startDomainMonitor();
-                } catch (error) {
-                    const saved = getSavedOrigin();
-                    loadOrigin(saved || allowedAppOrigins[0]);
-                    startDomainMonitor();
-                    setTimeout(function() { void retryWithCoordinator(); }, 6500);
-                }
+                const saved = getSavedOrigin();
+                loadOrigin(saved || allowedAppOrigins[0]);
+                startDomainMonitor();
+                if (resolving) return;
+                resolving = true;
+                resolveActiveOrigin().then(function(origin) {
+                    if (origin) confirmOrigin(origin);
+                }).catch(function() {
+                    setTimeout(function() { void retryWithCoordinator(); }, 900);
+                }).finally(function() {
+                    resolving = false;
+                });
             };
 
             frame.addEventListener('load', function() {
@@ -428,7 +478,7 @@
     </script>
 </head>
 <body>
-    <div id="frame-loading" aria-hidden="true"></div>
+    <div id="frame-loading" aria-hidden="true"><svg class="loading-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40"><circle cx="20" cy="20" r="16"></circle><path d="M20 4a16 16 0 0 1 16 16"></path></svg></div>
     <div id="u-ui">
         <div class="header">
             <div class="logo-area" aria-hidden="true">
