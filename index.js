@@ -13,7 +13,14 @@ const LOG_DASHBOARD_PATH = (() => {
     return /^\/[A-Za-z0-9_./=-]{12,180}$/.test(normalized) ? normalized : '/adamdh7=modpas/adamdh7';
 })();
 const LOG_DASHBOARD_MAX_ENTRIES = Math.max(100, Math.min(5000, Number(process.env.LOG_DASHBOARD_MAX_ENTRIES || 3000)));
+const LOG_DASHBOARD_RETENTION_DAYS = Math.max(1, Math.min(30, Number(process.env.LOG_DASHBOARD_RETENTION_DAYS || 7)));
+const LOG_DASHBOARD_PERSIST_MAX_ENTRIES = Math.max(5000, Math.min(200000, Number(process.env.LOG_DASHBOARD_PERSIST_MAX_ENTRIES || 50000)));
 const runtimeLogBuffer = [];
+const runtimeLogPendingWrites = [];
+let runtimeLogPersistenceCollection = null;
+let runtimeLogPersistenceTimer = null;
+let runtimeLogPersistenceRunning = false;
+let runtimeLogPruneCounter = 0;
 let runtimeLogSequence = 0;
 const runtimeLogInstanceId = `${Date.now()}-${process.pid}`;
 const runtimeLogSecrets = Object.entries(process.env)
@@ -79,16 +86,96 @@ function sanitizeRuntimeLogValue(value, key = '', depth = 0, seen = new WeakSet(
     return sanitizeRuntimeLogString(value);
 }
 
+function scheduleRuntimeLogPersistence(delayMs = 40) {
+    if (!runtimeLogPersistenceCollection || runtimeLogPersistenceTimer || runtimeLogPersistenceRunning || !runtimeLogPendingWrites.length) return;
+    runtimeLogPersistenceTimer = setTimeout(() => {
+        runtimeLogPersistenceTimer = null;
+        void flushRuntimeLogPersistence();
+    }, Math.max(0, delayMs));
+    if (typeof runtimeLogPersistenceTimer.unref === 'function') runtimeLogPersistenceTimer.unref();
+}
+
+function attachRuntimeLogPersistence(collection) {
+    runtimeLogPersistenceCollection = collection || null;
+    scheduleRuntimeLogPersistence(0);
+}
+
+async function flushRuntimeLogPersistence() {
+    if (runtimeLogPersistenceRunning || !runtimeLogPersistenceCollection || !runtimeLogPendingWrites.length) return;
+    runtimeLogPersistenceRunning = true;
+    let nextRetryDelay = 25;
+    try {
+        while (runtimeLogPersistenceCollection && runtimeLogPendingWrites.length) {
+            const batch = runtimeLogPendingWrites.slice(0, 250);
+            try {
+                await runtimeLogPersistenceCollection.insertMany(batch, { ordered: false });
+            } catch (error) {
+                const writeErrors = Array.isArray(error?.writeErrors) ? error.writeErrors : [];
+                const duplicateOnly = writeErrors.length
+                    ? writeErrors.every(item => Number(item?.code || item?.err?.code) === 11000)
+                    : Number(error?.code) === 11000;
+                if (!duplicateOnly) throw error;
+            }
+            runtimeLogPendingWrites.splice(0, batch.length);
+            runtimeLogPruneCounter += batch.length;
+            if (runtimeLogPruneCounter >= 1000) {
+                runtimeLogPruneCounter = 0;
+                try {
+                    const cutoff = await runtimeLogPersistenceCollection.find({}, { projection: { _id: 1, createdAt: 1 } })
+                        .sort({ createdAt: -1, _id: -1 }).skip(LOG_DASHBOARD_PERSIST_MAX_ENTRIES).limit(1).next();
+                    if (cutoff?.createdAt) {
+                        await runtimeLogPersistenceCollection.deleteMany({
+                            $or: [
+                                { createdAt: { $lt: cutoff.createdAt } },
+                                { createdAt: cutoff.createdAt, _id: { $lt: cutoff._id } }
+                            ]
+                        });
+                    }
+                } catch (pruneError) {
+                    originalConsoleWarn('[runtime-log-retention-prune-failed]', pruneError?.message || String(pruneError));
+                }
+            }
+        }
+    } catch (error) {
+        nextRetryDelay = 5000;
+        originalConsoleError('[runtime-log-persistence-failed]', {
+            error: error?.message || String(error),
+            pendingEntries: runtimeLogPendingWrites.length,
+            retryInMs: nextRetryDelay
+        });
+    } finally {
+        runtimeLogPersistenceRunning = false;
+        if (runtimeLogPendingWrites.length && !runtimeLogPersistenceTimer) scheduleRuntimeLogPersistence(nextRetryDelay);
+    }
+}
+
 function recordRuntimeLog(level, args) {
     try {
         const safeArgs = Array.from(args || []).slice(0, 8).map(value => sanitizeRuntimeLogValue(value));
         let text = safeArgs.map(value => {
             if (typeof value === 'string') return value;
             try { return JSON.stringify(value); } catch (error) { return '[unserializable log value]'; }
-        }).join(' ');
-        text = text.slice(0, 6500);
-        runtimeLogBuffer.push({ id: ++runtimeLogSequence, at: new Date().toISOString(), level: String(level || 'log').toLowerCase(), text });
+        }).join(' ').slice(0, 6500);
+        const sequence = ++runtimeLogSequence;
+        const at = new Date().toISOString();
+        const normalizedLevel = String(level || 'log').toLowerCase();
+        const id = `${runtimeLogInstanceId}:${sequence}`;
+        const entry = { id, at, level: normalizedLevel, text };
+        runtimeLogBuffer.push(entry);
         if (runtimeLogBuffer.length > LOG_DASHBOARD_MAX_ENTRIES) runtimeLogBuffer.splice(0, runtimeLogBuffer.length - LOG_DASHBOARD_MAX_ENTRIES);
+
+        runtimeLogPendingWrites.push({
+            _id: id,
+            instance: runtimeLogInstanceId,
+            sequence,
+            at,
+            createdAt: new Date(at),
+            expireAt: new Date(Date.now() + LOG_DASHBOARD_RETENTION_DAYS * 24 * 60 * 60 * 1000),
+            level: normalizedLevel,
+            text
+        });
+        if (runtimeLogPendingWrites.length > 20000) runtimeLogPendingWrites.splice(0, runtimeLogPendingWrites.length - 15000);
+        scheduleRuntimeLogPersistence();
     } catch (error) {}
 }
 
@@ -716,11 +803,10 @@ function isRecentOutgoingMessageId(sessionId, messageId) {
 
 function rememberOutgoingTextEcho(sessionId, jid, content) {
     const text = normalizeEchoText(content?.text || content?.caption || '');
-    if (!sessionId || !text) return null;
     const canonicalJid = normalizeOutgoingEchoJid(jid);
+    if (!sessionId || !canonicalJid || !text) return null;
     const createdAt = Date.now();
-    const keys = [`${sessionId}:text:${text}`];
-    if (canonicalJid) keys.push(`${sessionId}:jid:${canonicalJid}:${text}`);
+    const keys = [`${sessionId}:jid:${canonicalJid}:${text}`];
     for (const key of keys) outgoingTextEchoCache.set(key, createdAt);
     const cutoff = createdAt - OUTGOING_ECHO_TTL_MS;
     for (const [storedKey, timestamp] of outgoingTextEchoCache.entries()) {
@@ -732,15 +818,24 @@ function rememberOutgoingTextEcho(sessionId, jid, content) {
 
 function consumeOutgoingTextEcho(sessionId, jid, text) {
     const normalized = normalizeEchoText(text);
-    if (!sessionId || !normalized) return false;
     const canonicalJid = normalizeOutgoingEchoJid(jid);
-    const keys = [];
-    if (canonicalJid) keys.push(`${sessionId}:jid:${canonicalJid}:${normalized}`);
-    keys.push(`${sessionId}:text:${normalized}`);
+    if (!sessionId || !canonicalJid || !normalized) return false;
+    const candidateJids = new Set([canonicalJid]);
+    if (/@lid$/i.test(canonicalJid)) {
+        const phoneJid = normalizePhoneCacheJid(getRememberedPhoneForLid(sessionId, canonicalJid));
+        if (phoneJid) candidateJids.add(phoneJid);
+    } else if (/@s\.whatsapp\.net$/i.test(canonicalJid)) {
+        const lidJid = normalizeLidCacheKey(getRememberedLidForPhone(sessionId, canonicalJid));
+        if (/@lid$/i.test(lidJid)) candidateJids.add(lidJid);
+    }
     const now = Date.now();
-    for (const key of keys) {
+    for (const candidateJid of candidateJids) {
+        const key = `${sessionId}:jid:${candidateJid}:${normalized}`;
         const timestamp = outgoingTextEchoCache.get(key);
-        if (timestamp && now - timestamp <= OUTGOING_ECHO_TTL_MS) return true;
+        if (timestamp && now - timestamp <= OUTGOING_ECHO_TTL_MS) {
+            outgoingTextEchoCache.delete(key);
+            return true;
+        }
         if (timestamp) outgoingTextEchoCache.delete(key);
     }
     return false;
@@ -967,6 +1062,11 @@ async function connectMongo() {
         mongoClient = new MongoClient(mongoUri, { maxPoolSize: 30, minPoolSize: 1, serverSelectionTimeoutMS: 15000, connectTimeoutMS: 15000, retryWrites: true, appName: 'AdamDH7WhatsAppBot' });
         await mongoClient.connect();
         db = mongoClient.db('dh7bot');
+        const runtimeLogsCollection = db.collection('server_runtime_logs');
+        await runtimeLogsCollection.createIndex({ createdAt: -1, _id: -1 }, { name: 'server_runtime_logs_created_desc' });
+        await runtimeLogsCollection.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'server_runtime_logs_expire_at_ttl' });
+        attachRuntimeLogPersistence(runtimeLogsCollection);
+        console.info('[runtime-log-persistence-ready]', { collection: 'server_runtime_logs', retentionDays: LOG_DASHBOARD_RETENTION_DAYS, maxEntries: LOG_DASHBOARD_PERSIST_MAX_ENTRIES, dashboardHistoryLimit: LOG_DASHBOARD_MAX_ENTRIES });
         await db.collection('processed_messages').createIndex({ ts: 1 });
         await db.collection('processed_messages').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'processed_messages_expire_at_ttl' });
         await db.collection('baileys_outgoing_messages').createIndex({ createdAt: 1 }, { expireAfterSeconds: BAILEYS_RETRY_MESSAGE_TTL_SECONDS, name: 'baileys_retry_message_ttl' });
@@ -1961,7 +2061,7 @@ app.get('/sw.js', (req, res) => res.sendFile(path.join(__dirname, 'sw.js')));
 app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s Us Adam D’H7"));
 app.get('/ok', (req, res) => res.send('ok'));
 
-app.get(LOG_DASHBOARD_PATH, (req, res) => {
+app.get(LOG_DASHBOARD_PATH, async (req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
@@ -1972,6 +2072,7 @@ app.get(LOG_DASHBOARD_PATH, (req, res) => {
     res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'");
     res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
     res.removeHeader('Access-Control-Allow-Origin');
+
     const now = Date.now();
     const clientKey = String(req.ip || req.socket?.remoteAddress || 'unknown').slice(0, 100);
     const rate = logDashboardRateLimits.get(clientKey) || { startedAt: now, count: 0 };
@@ -1987,14 +2088,28 @@ app.get(LOG_DASHBOARD_PATH, (req, res) => {
     if (rate.count > 150) return res.status(429).type('text/plain').send('Trop de requêtes.');
 
     if (String(req.query?.format || '').toLowerCase() === 'json') {
-        return res.json({
-            ok: true,
-            instance: runtimeLogInstanceId,
-            startedAt: new Date(Number(runtimeLogInstanceId.split('-')[0]) || now).toISOString(),
-            count: runtimeLogBuffer.length,
-            maxEntries: LOG_DASHBOARD_MAX_ENTRIES,
-            logs: runtimeLogBuffer.slice(-LOG_DASHBOARD_MAX_ENTRIES)
-        });
+        const byId = new Map();
+        try {
+            if (db) {
+                const persisted = await db.collection('server_runtime_logs').find({}, { projection: { at: 1, level: 1, text: 1, createdAt: 1 } })
+                    .sort({ createdAt: -1, _id: -1 }).limit(LOG_DASHBOARD_MAX_ENTRIES).toArray();
+                for (const item of persisted) {
+                    byId.set(String(item._id), {
+                        id: String(item._id),
+                        at: String(item.at || item.createdAt?.toISOString?.() || ''),
+                        level: String(item.level || 'log'),
+                        text: String(item.text || '')
+                    });
+                }
+            }
+        } catch (error) {
+            originalConsoleWarn('[runtime-log-history-read-failed]', { error: error?.message || String(error), fallback: 'current_process_memory' });
+        }
+        for (const item of runtimeLogBuffer) byId.set(String(item.id), item);
+        const logs = Array.from(byId.values())
+            .sort((a, b) => String(a.at).localeCompare(String(b.at)) || String(a.id).localeCompare(String(b.id)))
+            .slice(-LOG_DASHBOARD_MAX_ENTRIES);
+        return res.json({ ok: true, count: logs.length, logs });
     }
 
     const html = `<!doctype html>
@@ -2003,50 +2118,80 @@ app.get(LOG_DASHBOARD_PATH, (req, res) => {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark">
-<title>Adam D'H7 · Runtime logs</title>
+<title></title>
 <style>
-:root{color-scheme:dark;background:#000;color:#ededed;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}html,body{margin:0;min-height:100%;width:100%;background:#000;color:#ededed}body{min-height:100vh;min-height:100svh;padding:max(12px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) max(14px,env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left))}
-main{width:min(100%,1500px);margin:0 auto}.top{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 2px 18px;border-bottom:1px solid #252525}.brand{min-width:0}.eyebrow{font-size:10px;letter-spacing:.2em;color:#858585;text-transform:uppercase}.heading{margin-top:5px;font:700 clamp(18px,4vw,25px)/1.2 system-ui,sans-serif;letter-spacing:-.03em}.live{display:flex;align-items:center;gap:8px;color:#a9a9a9;font:11px system-ui,sans-serif;white-space:nowrap}.dot{width:7px;height:7px;border-radius:50%;background:#39d98a;box-shadow:0 0 12px #39d98a}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:14px 0}.toolbar input,.toolbar select{min-height:38px;border:1px solid #333;border-radius:8px;background:#0d0d0d;color:#eee;padding:0 11px;font:12px ui-monospace,monospace;outline:none}.toolbar input{flex:1;min-width:150px}.toolbar input:focus,.toolbar select:focus{border-color:#777}.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:38px;padding:0 12px;border:1px solid #373737;border-radius:8px;background:#111;color:#eee;font:12px system-ui,sans-serif;cursor:pointer}.btn:active{background:#222}.btn svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.stats{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px;color:#929292;font:11px system-ui,sans-serif}.stat{border:1px solid #222;background:#090909;border-radius:7px;padding:7px 9px}.stat strong{color:#eaeaea;font-weight:600}.logs{border-top:1px solid #222}.entry{display:grid;grid-template-columns:92px 62px minmax(0,1fr);gap:10px;padding:9px 7px;border-bottom:1px solid #171717;font-size:11px;line-height:1.55}.time{color:#777}.level{font-size:10px;text-transform:uppercase;color:#b6b6b6}.level.error{color:#ff7272}.level.warn{color:#ffc36a}.level.info{color:#86b9ff}.level.debug,.level.trace{color:#888}.message{white-space:pre-wrap;overflow-wrap:anywhere;color:#d6d6d6;user-select:text}.empty{padding:35px 12px;text-align:center;color:#777;font:12px system-ui,sans-serif}.foot{padding:13px 3px;color:#5f5f5f;font:10px/1.5 system-ui,sans-serif}.toast{position:fixed;left:50%;bottom:max(18px,env(safe-area-inset-bottom));transform:translate(-50%,15px);opacity:0;pointer-events:none;background:#f0f0f0;color:#111;padding:9px 13px;border-radius:8px;font:12px system-ui,sans-serif;transition:.18s}.toast.show{opacity:1;transform:translate(-50%,0)}
-@media(max-width:560px){.entry{grid-template-columns:70px 48px minmax(0,1fr);gap:7px;padding:8px 2px;font-size:10px}.toolbar{gap:6px}.btn{padding:0 9px}.top{align-items:flex-start}.live{padding-top:4px}}
+:root{color-scheme:dark;background:#000;color:#d8d8d8;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0;width:100%;min-height:100%;background:#000;color:#d8d8d8}
+body{min-height:100vh;min-height:100svh;overflow-x:hidden}
+#copy{position:fixed;z-index:5;top:max(9px,env(safe-area-inset-top));right:max(9px,env(safe-area-inset-right));width:34px;height:34px;display:grid;place-items:center;padding:0;margin:0;border:0;background:transparent;color:#e5e5e5;opacity:.78;cursor:pointer}
+#copy:active{opacity:1}
+#copy svg{display:block;width:23px;height:23px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+#logs{width:100%;padding:8px 8px max(16px,env(safe-area-inset-bottom));}
+.log{display:grid;grid-template-columns:max-content max-content minmax(0,1fr);column-gap:9px;align-items:start;padding:3px 0;color:#d5d5d5;font-size:11px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+.time{color:#777;white-space:nowrap}.level{color:#999;white-space:nowrap}.level.error,.level.fatal{color:#ff7777}.level.warn{color:#ffc477}.level.info{color:#91bdff}.level.debug,.level.trace{color:#777}.message{min-width:0;overflow-wrap:anywhere;white-space:pre-wrap;user-select:text}
+@media(max-width:560px){#logs{padding-left:6px;padding-right:6px}.log{grid-template-columns:max-content max-content minmax(0,1fr);column-gap:6px;font-size:10px}}
 </style>
 </head>
 <body>
-<main>
-<header class="top"><div class="brand"><div class="eyebrow">Adam D'H7 / system monitor</div><div class="heading">Runtime logs</div></div><div class="live"><span class="dot" id="status-dot"></span><span id="status">LIVE · connexion…</span></div></header>
-<section class="toolbar">
-<input id="search" type="search" autocomplete="off" placeholder="Filtrer les logs…">
-<select id="level"><option value="all">Tous les niveaux</option><option value="error">Erreur</option><option value="warn">Avertissement</option><option value="info">Info</option><option value="log">Log</option><option value="debug">Debug</option></select>
-<button class="btn" id="pause" type="button"><svg viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></svg><span>Pause</span></button>
-<button class="btn" id="refresh" type="button"><svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9A7 7 0 0 1 18 6l2 6M4 12l2 6a7 7 0 0 0 12.4-3"/></svg><span>Actualiser</span></button>
-<button class="btn" id="copy" type="button" aria-label="Copier les logs"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg><span>Copier</span></button>
-</section>
-<section class="stats"><div class="stat">Dans le buffer : <strong id="count">0</strong></div><div class="stat">Affichés : <strong id="shown">0</strong></div><div class="stat">Dernière mise à jour : <strong id="updated">—</strong></div></section>
-<section class="logs" id="logs" aria-live="polite"><div class="empty">Chargement des événements…</div></section>
-<footer class="foot">Journal local à cette instance Render · mémoire volatile · contenu des messages et identifiants personnels masqués · actualisation automatique toutes les 3 secondes.</footer>
-</main><div class="toast" id="toast"></div>
+<button id="copy" type="button" aria-label="Copier les logs" title="Copier les logs"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg></button>
+<main id="logs" aria-live="polite"></main>
 <script>
 (() => {
  const endpoint = location.pathname;
  const logsNode = document.getElementById('logs');
- const searchNode = document.getElementById('search');
- const levelNode = document.getElementById('level');
- const statusNode = document.getElementById('status');
- const allLogs = [];
- let paused = false;
- let lastInstance = '';
- let lastUpdate = 0;
- let timer = null;
- const escText = value => String(value == null ? '' : value);
- function toast(message){const node=document.getElementById('toast');node.textContent=message;node.classList.add('show');setTimeout(()=>node.classList.remove('show'),1500)}
- function filtered(){const q=searchNode.value.trim().toLowerCase();const level=levelNode.value;return allLogs.filter(item=>(level==='all'||item.level===level)&&(!q||(String(item.at)+' '+String(item.level)+' '+String(item.text)).toLowerCase().includes(q)))}
- function render(){const items=filtered();document.getElementById('count').textContent=String(allLogs.length);document.getElementById('shown').textContent=String(items.length);logsNode.replaceChildren();if(!items.length){const empty=document.createElement('div');empty.className='empty';empty.textContent=allLogs.length?'Aucun résultat pour ce filtre.':'Aucun log reçu pour le moment.';logsNode.appendChild(empty);return}const fragment=document.createDocumentFragment();for(const item of items.slice().reverse()){const row=document.createElement('article');row.className='entry';const date=document.createElement('time');date.className='time';date.textContent=escText(item.at).replace('T',' ').replace('Z','');const level=document.createElement('span');level.className='level '+escText(item.level);level.textContent=escText(item.level);const msg=document.createElement('div');msg.className='message';msg.textContent=escText(item.text);row.append(date,level,msg);fragment.appendChild(row)}logsNode.appendChild(fragment)}
- async function refresh(){if(paused)return;try{statusNode.textContent='LIVE · actualisation';const response=await fetch(endpoint+'?format=json&_='+Date.now(),{cache:'no-store',credentials:'same-origin'});if(!response.ok)throw new Error('HTTP '+response.status);const data=await response.json();if(!data.ok)throw new Error('Réponse invalide');if(lastInstance!==data.instance){allLogs.splice(0,allLogs.length);lastInstance=data.instance}allLogs.splice(0,allLogs.length,...(Array.isArray(data.logs)?data.logs:[]));lastUpdate=Date.now();document.getElementById('updated').textContent=new Date(lastUpdate).toLocaleTimeString();document.getElementById('status-dot').style.background='#39d98a';statusNode.textContent='LIVE · connecté';render()}catch(error){document.getElementById('status-dot').style.background='#ff6666';statusNode.textContent='HORS LIGNE · '+error.message}}
- document.getElementById('pause').addEventListener('click',()=>{paused=!paused;document.querySelector('#pause span').textContent=paused?'Reprendre':'Pause';statusNode.textContent=paused?'PAUSE':'LIVE';if(!paused)refresh()});
- document.getElementById('refresh').addEventListener('click',refresh);
- document.getElementById('copy').addEventListener('click',async()=>{const text=filtered().map(item=>'['+item.at+'] '+item.level.toUpperCase()+' '+item.text).join('\n');try{if(navigator.clipboard&&navigator.clipboard.writeText)await navigator.clipboard.writeText(text);else{const area=document.createElement('textarea');area.value=text;document.body.appendChild(area);area.select();document.execCommand('copy');area.remove()}toast('Logs copiés')}catch(error){toast('Copie impossible')}});
- searchNode.addEventListener('input',render);levelNode.addEventListener('change',render);
- refresh();timer=setInterval(refresh,3000);window.addEventListener('pagehide',()=>{if(timer)clearInterval(timer)});
+ const copyButton = document.getElementById('copy');
+ let allLogs = [];
+ let requestRunning = false;
+ let pollTimer = null;
+ const textOf = value => String(value == null ? '' : value);
+ function render(){
+   const wasAtBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 100;
+   const fragment = document.createDocumentFragment();
+   for(const item of allLogs){
+     const row = document.createElement('div'); row.className = 'log';
+     const time = document.createElement('span'); time.className = 'time'; time.textContent = textOf(item.at).replace('T',' ').replace('Z','');
+     const level = document.createElement('span'); level.className = 'level ' + textOf(item.level); level.textContent = textOf(item.level).toUpperCase();
+     const message = document.createElement('span'); message.className = 'message'; message.textContent = textOf(item.text);
+     row.append(time, level, message); fragment.appendChild(row);
+   }
+   logsNode.replaceChildren(fragment);
+   if(wasAtBottom) window.scrollTo(0, document.documentElement.scrollHeight);
+ }
+ async function load(){
+   if(requestRunning) return;
+   requestRunning = true;
+   try{
+     const response = await fetch(endpoint + '?format=json&_=' + Date.now(), {cache:'no-store', credentials:'same-origin'});
+     if(!response.ok) throw new Error('HTTP ' + response.status);
+     const payload = await response.json();
+     if(!payload || payload.ok !== true || !Array.isArray(payload.logs)) throw new Error('invalid_log_response');
+     allLogs = payload.logs;
+     render();
+   }catch(error){
+     // Keep the last successful server snapshot visible during a temporary network interruption.
+   }finally{
+     requestRunning = false;
+   }
+ }
+ async function copyLogs(){
+   const content = allLogs.map(item => '[' + textOf(item.at) + '] ' + textOf(item.level).toUpperCase() + ' ' + textOf(item.text)).join('\n');
+   try{
+     if(navigator.clipboard && navigator.clipboard.writeText){ await navigator.clipboard.writeText(content); }
+     else{
+       const area = document.createElement('textarea'); area.value = content; area.setAttribute('readonly','');
+       area.style.position = 'fixed'; area.style.opacity = '0'; document.body.appendChild(area); area.select();
+       document.execCommand('copy'); area.remove();
+     }
+     copyButton.style.opacity = '1';
+     window.setTimeout(() => { copyButton.style.opacity = '.78'; }, 700);
+   }catch(error){}
+ }
+ copyButton.addEventListener('click', copyLogs);
+ document.addEventListener('visibilitychange', () => { if(!document.hidden) load(); });
+ load();
+ pollTimer = window.setInterval(load, 2000);
+ window.addEventListener('pagehide', () => { if(pollTimer) window.clearInterval(pollTimer); });
 })();
 </script>
 </body>
@@ -3463,7 +3608,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 liveSession.lastPongAt = Date.now();
             };
             sock.ws.on('pong', markSocketPong);
-            sock.ws.on('ping', markSocketActivity);
             sock.ws.on('open', markSocketActivity);
         }
 
@@ -4306,6 +4450,19 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const msgId = m.key.id;
                 if (!msgId) {
                     console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'missing_message_id' });
+                    continue;
+                }
+                if (!String(receivedBody || '').trim()) {
+                    cacheRecentMessage(sessionId, m);
+                    console.info('[message-deferred-no-readable-content]', {
+                        sessionId,
+                        messageId: msgId,
+                        chatJid: receivedChat,
+                        upsertType,
+                        messageType: receivedType,
+                        action: 'retain_for_quoted_message_but_do_not_claim_until_text_or_caption_arrives',
+                        reason: 'empty_body_must_not_poison_deduplication_cache'
+                    });
                     continue;
                 }
                 console.info('[message-pre-dispatch-checks-started]', {
@@ -6020,7 +6177,7 @@ setInterval(async () => {
         }
         const readyState = currentSocket.ws?.readyState;
         const lastPongAt = Number(sess.lastPongAt || sess.connectedAt || sess.readyAt || now);
-        const pongExpired = sess.wsPongMonitoring && sess.receivedPong && now - lastPongAt > SESSION_WS_PONG_TIMEOUT_MS;
+        const pongExpired = sess.wsPongMonitoring && lastPongAt > 0 && now - lastPongAt > SESSION_WS_PONG_TIMEOUT_MS;
         const socketClosed = readyState !== undefined && readyState !== 1;
         if (!socketClosed && !pongExpired) continue;
         const reason = socketClosed ? 'websocket_not_open' : 'websocket_pong_timeout';
@@ -6084,8 +6241,9 @@ async function shutdownServer(signal) {
     if (httpServer) await new Promise(resolve => {
         try { httpServer.close(() => resolve()); } catch (e) { resolve(); }
     });
-    try { if (mongoClient) await mongoClient.close(); } catch (error) { console.warn('[server-shutdown-mongo-close-failed]', error?.message || String(error)); }
     console.info('[server-shutdown-completed]', { signal, processInstanceId });
+    try { await flushRuntimeLogPersistence(); } catch (error) { originalConsoleError('[runtime-log-shutdown-flush-failed]', error?.message || String(error)); }
+    try { if (mongoClient) await mongoClient.close(); } catch (error) { console.warn('[server-shutdown-mongo-close-failed]', error?.message || String(error)); }
 }
 
 for (const signal of ['SIGTERM', 'SIGINT']) {
