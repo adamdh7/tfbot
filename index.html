@@ -222,7 +222,7 @@
             'https://tfbot5.onrender.com',
             'https://tfbot6.onrender.com'
         ];
-        const savedOriginKey = 'tfbot.active-origin.v1';
+        const savedOriginKey = 'tfbot.active-origin';
 
         function normalizeAllowedOrigin(value) {
             try {
@@ -252,7 +252,6 @@
                 try {
                     const response = await fetch(coordinatorResolveUrl, {
                         method: 'GET',
-                        cache: 'no-store',
                         mode: 'cors',
                         credentials: 'omit',
                         headers: { 'Accept': 'application/json' },
