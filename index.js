@@ -27,8 +27,12 @@ let runtimeLogPruneCounter = 0;
 let runtimeLogSequence = 0;
 const runtimeLogInstanceId = `${Date.now()}-${process.pid}`;
 const runtimeLogStartedAt = new Date();
-const runtimeLogDeploymentId = String(process.env.LOG_DEPLOY_ID || process.env.RENDER_DEPLOY_ID || (process.env.RENDER_SERVICE_ID && process.env.RENDER_GIT_COMMIT ? `${process.env.RENDER_SERVICE_ID}:${process.env.RENDER_GIT_COMMIT}` : `${process.env.RENDER_SERVICE_ID || 'local'}:${process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId}`)).slice(0, 180);
-const TFBOT_CLUSTER_CODE_REVISION = 'r32-router-selection-isolated-diagnostics';
+const runtimeLogRenderServiceId = String(process.env.RENDER_SERVICE_ID || 'local').trim().slice(0, 120);
+const runtimeLogRenderServiceName = String(process.env.RENDER_SERVICE_NAME || process.env.RENDER_SERVICE_TYPE || 'local').trim().slice(0, 120);
+const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
+const runtimeLogRenderCommit = String(process.env.RENDER_GIT_COMMIT || '').trim().slice(0, 80);
+const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}`).slice(0, 240);
+const TFBOT_CLUSTER_CODE_REVISION = 'r33-render-logs-session-consolidation';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-30')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
 const runtimeLogClusterId = TFBOT_CODE_RELEASE_ID;
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
@@ -169,7 +173,7 @@ function recordRuntimeLog(level, args) {
         const at = new Date().toISOString();
         const normalizedLevel = String(level || 'log').toLowerCase();
         const id = `${runtimeLogInstanceId}:${sequence}`;
-        const entry = { id, at, level: normalizedLevel, text };
+        const entry = { id, at, level: normalizedLevel, text, serviceId: runtimeLogRenderServiceId, deploymentId: runtimeLogDeploymentId };
         runtimeLogBuffer.push(entry);
         if (runtimeLogBuffer.length > LOG_DASHBOARD_MAX_ENTRIES) runtimeLogBuffer.splice(0, runtimeLogBuffer.length - LOG_DASHBOARD_MAX_ENTRIES);
 
@@ -178,6 +182,11 @@ function recordRuntimeLog(level, args) {
                 _id: id,
                 instance: runtimeLogInstanceId,
                 deploymentId: runtimeLogDeploymentId,
+                serviceId: runtimeLogRenderServiceId,
+                serviceName: runtimeLogRenderServiceName,
+                renderInstanceId: runtimeLogRenderInstanceId,
+                renderCommit: runtimeLogRenderCommit || null,
+                deploymentStartedAt: runtimeLogStartedAt,
                 clusterId: runtimeLogClusterId,
                 instanceUrl: runtimeLogInstanceUrl || null,
                 sequence,
@@ -349,6 +358,28 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
     if (!sessionId || !parsed || typeof parsed !== 'object' || serverShuttingDown) return;
     const details = getSignalRecoveryPeerDetails(parsed);
     if (!details.remoteJid || !details.peerJid) return;
+    const currentSession = activeSessions.get(sessionId);
+    const currentSocket = currentSession?.sock;
+    const ownPhone = getAuthenticatedPhoneNumber(currentSocket?.user || null, currentSession?.authState?.creds || null);
+    const ownLid = getAuthenticatedLid(currentSocket?.user || null, currentSession?.authState?.creds || null);
+    const ownAliases = [
+        ownPhone ? `${ownPhone}@s.whatsapp.net` : '',
+        ownLid,
+        String(currentSocket?.user?.id || '').trim(),
+        String(currentSocket?.user?.lid || '').trim(),
+        String(currentSession?.authState?.creds?.me?.id || '').trim(),
+        String(currentSession?.authState?.creds?.me?.lid || '').trim()
+    ].filter(Boolean);
+    const peerAliases = [...new Set([details.peerJid, ...(details.aliases || [])].filter(Boolean))];
+    const isSelfPeer = peerAliases.some(peer => ownAliases.some(own => areEquivalentWhatsAppChatJids(sessionId, peer, own)));
+    if (!details.isGroup && isSelfPeer) {
+        console.warn('[signal-private-self-chat-recovery-skipped]', { sessionId, action: 'preserve_own_signal_session_and_credentials', reason: 'self_chat_address_matches_authenticated_account' });
+        return;
+    }
+    if (details.isGroup && isSelfPeer) {
+        console.warn('[signal-group-self-sender-recovery-skipped]', { sessionId, groupJid: details.remoteJid, action: 'preserve_own_signal_session_and_sender_key_memory', reason: 'sender_matches_authenticated_account' });
+        return;
+    }
     const peerKey = `${sessionId}:${details.isGroup ? details.remoteJid : details.peerJid}:${details.isGroup ? details.peerJid : 'private'}`;
     const now = Date.now();
     const previous = signalRecoveryCounters.get(peerKey) || { count: 0, windowAt: now };
@@ -371,12 +402,7 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
         try {
             if (details.isGroup) {
                 const invalidated = await invalidateSenderKeyMemoryForParticipant(sessionId, details.peerJid, 'repeated_signal_decryption_failure', details.remoteJid);
-                if (!invalidated.changed) {
-                    const reset = await resetSessionGroupSenderKeyMemory(sessionId, 'repeated_signal_group_decryption_failure', details.remoteJid);
-                    console.warn('[signal-group-session-recovery]', { sessionId, groupJid: details.remoteJid, participant: details.peerJid, invalidatedEntries: invalidated.removed, groupResetCount: reset, messageId: details.messageId || null });
-                } else {
-                    console.warn('[signal-group-session-recovery]', { sessionId, groupJid: details.remoteJid, participant: details.peerJid, invalidatedEntries: invalidated.removed, messageId: details.messageId || null });
-                }
+                console.warn('[signal-group-session-recovery]', { sessionId, groupJid: details.remoteJid, participant: details.peerJid, invalidatedEntries: invalidated.removed, changedGroups: invalidated.changed, action: invalidated.changed ? 'invalidate_only_matching_participant_memory' : 'preserve_all_group_sender_key_memory_no_matching_participant_entry', messageId: details.messageId || null });
             } else {
                 const repository = sock.signalRepository;
                 const aliases = [...new Set(details.aliases.concat(details.peerJid))].filter(value => /@(?:s\.whatsapp\.net|lid)$/i.test(value));
@@ -644,6 +670,7 @@ const chatHistoryAccessTimes = new Map();
 const groupSettingsCache = new Map();
 const activeDel2UsersCache = new Map();
 const activeDel3RulesCache = new Map();
+const del3DeleteDedupCache = new Map();
 const msgRetryCounterCache = new Map();
 const msgRetryCounterExpiryCache = new Map();
 const MSG_RETRY_COUNTER_TTL_MS = Math.max(60000, Math.min(86400000, Number(process.env.BAILEYS_MSG_RETRY_COUNTER_TTL_MS || 3600000)));
@@ -775,6 +802,7 @@ function cleanupSessionVolatileCaches(sessionId) {
     for (const key of [...groupSettingsCache.keys()]) if (key.startsWith(`${id}_`)) groupSettingsCache.delete(key);
     for (const key of [...activeDel2UsersCache.keys()]) if (key.startsWith(`${id}_`)) activeDel2UsersCache.delete(key);
     for (const key of [...activeDel3RulesCache.keys()]) if (key.startsWith(`${id}_`)) activeDel3RulesCache.delete(key);
+    for (const key of [...del3DeleteDedupCache.keys()]) if (key.startsWith(`del3:${shortLogHash(id)}:`)) del3DeleteDedupCache.delete(key);
     for (const key of [...chatHistories.keys()]) if (key.startsWith(sessionPrefix)) chatHistories.delete(key);
     for (const key of [...chatHistoryAccessTimes.keys()]) if (key.startsWith(sessionPrefix)) chatHistoryAccessTimes.delete(key);
     for (const key of [...msgRetryCounterCache.keys()]) if (key.startsWith(`${id}:`)) msgRetryCounterCache.delete(key);
@@ -1145,14 +1173,15 @@ function queueMessage(executeFn, delayMs = 150, queueKey = null) {
     });
 }
 
-async function claimMessageForProcessing(sessionId, messageId, remoteJid = '') {
+async function claimMessageForProcessing(sessionId, messageId, remoteJid = '', accountIdentity = '') {
     if (!db || !sessionId || !messageId) return true;
     const normalizedChat = String(remoteJid || 'unknown-chat').trim();
-    const documentId = `${sessionId}:${normalizedChat}:${messageId}`;
+    const accountScope = String(accountIdentity || sessionId).trim();
+    const documentId = `${shortLogHash(accountScope)}:${normalizedChat}:${messageId}`;
     try {
         const result = await db.collection('processed_messages').updateOne(
             { _id: documentId },
-            { $setOnInsert: { sessionId, messageId, remoteJid: normalizedChat, ts: Date.now(), expireAt: new Date(Date.now() + PROCESSED_MESSAGE_RETENTION_MS) } },
+            { $setOnInsert: { sessionId, accountScopeHash: shortLogHash(accountScope), messageId, remoteJid: normalizedChat, ts: Date.now(), expireAt: new Date(Date.now() + PROCESSED_MESSAGE_RETENTION_MS) } },
             { upsert: true }
         );
         return result.upsertedCount === 1;
@@ -1564,9 +1593,6 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 fallbackDestinationType: /@lid$/i.test(selfFallbackJid) ? 'lid' : /@s\.whatsapp\.net$/i.test(selfFallbackJid) ? 'phone' : null,
                 action: 'preserve_the_addressing_mode_of_the_self_chat_message'
             });
-        }
-        if (sessionId && /@g\.us$/i.test(originalDestinationJid)) {
-            await resetGroupSenderKeyMemoryBeforeSend(sessionId, originalDestinationJid);
         }
         let destinationJid = isSelfChatDestination ? selfPrimaryJid : originalDestinationJid;
         let destinationResolution = isSelfChatDestination
@@ -2187,16 +2213,19 @@ async function connectMongo(options = {}) {
         const runtimeLogsCollection = db.collection('server_runtime_logs');
         if (!skipStorageInitialization) {
             await runtimeLogsCollection.createIndex({ clusterId: 1, createdAt: -1, _id: -1 }, { name: 'server_runtime_logs_cluster_created_desc' });
+            await runtimeLogsCollection.createIndex({ serviceId: 1, createdAt: -1, _id: -1 }, { name: 'server_runtime_logs_service_created_desc' });
             await runtimeLogsCollection.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'server_runtime_logs_expire_at_ttl' });
         }
-        const removedPreviousDeployLogs = coordinatorOnly ? await runtimeLogsCollection.deleteMany({ clusterId: { $ne: runtimeLogClusterId } }) : { deletedCount: 0 };
+        const removedPreviousServiceDeployLogs = await runtimeLogsCollection.deleteMany({ serviceId: runtimeLogRenderServiceId, deploymentId: { $ne: runtimeLogDeploymentId } });
+        const removedPreviousCodeLogs = coordinatorOnly ? await runtimeLogsCollection.deleteMany({ clusterId: { $ne: runtimeLogClusterId } }) : { deletedCount: 0 };
+        const removedPreviousDeployLogs = { deletedCount: Number(removedPreviousServiceDeployLogs?.deletedCount || 0) + Number(removedPreviousCodeLogs?.deletedCount || 0) };
         if (skipStorageInitialization) {
             pendingRuntimeLogPersistenceCollection = runtimeLogsCollection;
             console.info('[tfbot-worker-storage-prepared]', { host: TFBOT_CLUSTER_INSTANCE_HOST, role: 'selected-worker-awaiting-selection-confirmation', migration: false, indexInitialization: false, persistenceAttached: false });
             return true;
         }
         attachRuntimeLogPersistence(runtimeLogsCollection);
-        console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', deploymentId: runtimeLogDeploymentId, clusterId: runtimeLogClusterId, deploymentStartedAt: runtimeLogStartedAt.toISOString(), removedPreviousDeployLogCount: Number(removedPreviousDeployLogs?.deletedCount || 0), retentionDays: LOG_DASHBOARD_RETENTION_DAYS, maxEntries: LOG_DASHBOARD_PERSIST_MAX_ENTRIES, dashboardHistoryLimit: LOG_DASHBOARD_MAX_ENTRIES, role: coordinatorOnly ? 'coordinator' : 'active-serving' });
+        console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', source: 'render-environment', serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, clusterId: runtimeLogClusterId, deploymentStartedAt: runtimeLogStartedAt.toISOString(), removedPreviousDeployLogCount: Number(removedPreviousDeployLogs?.deletedCount || 0), removedPreviousServiceDeployLogCount: Number(removedPreviousServiceDeployLogs?.deletedCount || 0), removedPreviousCodeLogCount: Number(removedPreviousCodeLogs?.deletedCount || 0), retentionDays: LOG_DASHBOARD_RETENTION_DAYS, maxEntries: LOG_DASHBOARD_PERSIST_MAX_ENTRIES, dashboardHistoryLimit: LOG_DASHBOARD_MAX_ENTRIES, role: coordinatorOnly ? 'coordinator' : 'active-serving' });
         await db.collection('cluster_router').createIndex({ updatedAt: -1 }, { name: 'cluster_router_updated_desc' });
         await db.collection('processed_messages').createIndex({ ts: 1 });
         await db.collection('processed_messages').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'processed_messages_expire_at_ttl' });
@@ -2916,6 +2945,8 @@ async function deleteMongoSession(sessionId) {
         await collection.deleteMany({ _id: { $regex: `^${sessionKey}` } });
         await Promise.all([
             db.collection('session_owners').deleteMany({ sessionId }),
+            db.collection('session_runtime_locks').deleteMany({ _id: sessionId }),
+            db.collection('session_account_runtime_locks').deleteMany({ sessionId }),
             db.collection('user_preferences').deleteMany({ sessionId }),
             db.collection('processed_messages').deleteMany({ sessionId }),
             db.collection('baileys_outgoing_messages').deleteMany({ sessionId }),
@@ -2969,6 +3000,122 @@ async function renameMongoSession(oldSessionId, newSessionId) {
         console.error('[session-rename-failed]', { oldSessionId, newSessionId, error: error?.message || String(error) });
         throw error;
     }
+}
+
+async function mergeSessionScopedData(sourceSessionId, targetSessionId) {
+    if (!db || !sourceSessionId || !targetSessionId || sourceSessionId === targetSessionId) return { migrated: false, reason: 'invalid_session_pair' };
+    const ownerCollection = db.collection('session_owners');
+    const sourceOwner = await ownerCollection.findOne({ sessionId: sourceSessionId });
+    const targetOwner = await ownerCollection.findOne({ sessionId: targetSessionId });
+    if (sourceOwner) {
+        const ownerFields = ['Name', 'name', 'lang', 'mode', 'Mode', 'botMode', 'ownerName', 'ownerNumber', 'OwnerNumber'];
+        const missing = {};
+        for (const field of ownerFields) {
+            const current = targetOwner?.[field];
+            const previous = sourceOwner[field];
+            if ((current === undefined || current === null || current === '') && previous !== undefined && previous !== null && previous !== '') missing[field] = previous;
+        }
+        if (Object.keys(missing).length) await ownerCollection.updateOne({ sessionId: targetSessionId }, { $set: missing, $setOnInsert: { sessionId: targetSessionId, createdAt: sourceOwner.createdAt || new Date() } }, { upsert: true });
+    }
+    const groupSettings = await db.collection('group_settings').find({ sessionId: sourceSessionId }).toArray();
+    for (const source of groupSettings) {
+        const target = await db.collection('group_settings').findOne({ sessionId: targetSessionId, gjid: source.gjid });
+        const fields = {};
+        for (const [key, value] of Object.entries(source)) {
+            if (['_id', 'sessionId', 'gjid', 'createdAt'].includes(key)) continue;
+            if (!target || target[key] === undefined || target[key] === null) fields[key] = value;
+        }
+        if (!target) await db.collection('group_settings').insertOne({ ...Object.fromEntries(Object.entries(source).filter(([key]) => key !== '_id')), sessionId: targetSessionId, migratedFromSessionId: sourceSessionId });
+        else if (Object.keys(fields).length) await db.collection('group_settings').updateOne({ _id: target._id }, { $set: fields });
+    }
+    const del2Targets = await db.collection('group_del2').find({ sessionId: sourceSessionId }).toArray();
+    for (const source of del2Targets) {
+        const selector = { sessionId: targetSessionId, gjid: source.gjid, targetJid: source.targetJid };
+        const document = { ...Object.fromEntries(Object.entries(source).filter(([key]) => key !== '_id')), ...selector, migratedFromSessionId: sourceSessionId };
+        await db.collection('group_del2').updateOne(selector, { $setOnInsert: document }, { upsert: true });
+    }
+    const del3Rules = await db.collection('group_del3').find({ sessionId: sourceSessionId }).toArray();
+    for (const source of del3Rules) {
+        const selector = { sessionId: targetSessionId, gjid: source.gjid, messageFormat: source.messageFormat };
+        const document = { ...Object.fromEntries(Object.entries(source).filter(([key]) => key !== '_id')), ...selector, migratedFromSessionId: sourceSessionId };
+        await db.collection('group_del3').updateOne(selector, { $setOnInsert: document }, { upsert: true });
+    }
+    const preferences = await db.collection('user_preferences').find({ sessionId: sourceSessionId }).toArray();
+    for (const source of preferences) {
+        if (!source.sender) continue;
+        const selector = { sessionId: targetSessionId, sender: source.sender };
+        const target = await db.collection('user_preferences').findOne(selector);
+        if (!target) {
+            const document = { ...Object.fromEntries(Object.entries(source).filter(([key]) => key !== '_id')), ...selector, migratedFromSessionId: sourceSessionId };
+            await db.collection('user_preferences').updateOne(selector, { $setOnInsert: document }, { upsert: true });
+        } else {
+            const fields = {};
+            for (const [key, value] of Object.entries(source)) {
+                if (['_id', 'sessionId', 'sender', 'createdAt'].includes(key)) continue;
+                if (target[key] === undefined || target[key] === null || target[key] === '') fields[key] = value;
+            }
+            if (Object.keys(fields).length) await db.collection('user_preferences').updateOne(selector, { $set: fields });
+        }
+    }
+    const mappings = await db.collection('lid_phone_mappings').find({ sessionId: sourceSessionId }).toArray();
+    for (const source of mappings) {
+        const oldPrefix = `${sourceSessionId}:`;
+        const oldId = String(source._id || '');
+        const newId = oldId.startsWith(oldPrefix) ? `${targetSessionId}:${oldId.slice(oldPrefix.length)}` : `${targetSessionId}:${oldId.split(':').pop()}`;
+        const document = { ...Object.fromEntries(Object.entries(source).filter(([key]) => key !== '_id')), _id: newId, sessionId: targetSessionId, lastSessionId: targetSessionId, migratedFromSessionId: sourceSessionId };
+        await db.collection('lid_phone_mappings').updateOne({ _id: newId }, { $setOnInsert: document }, { upsert: true });
+    }
+    cleanupSessionVolatileCaches(sourceSessionId);
+    cleanupSessionVolatileCaches(targetSessionId);
+    sessionOwnersCache.delete(sourceSessionId);
+    sessionOwnersCache.delete(targetSessionId);
+    registeredBotAccountIdentitiesCache.loadedAt = 0;
+    console.info('[session-account-data-merged]', { sourceSessionId, targetSessionId, groupSettings: groupSettings.length, del2Targets: del2Targets.length, del3Rules: del3Rules.length, userPreferences: preferences.length, lidPhoneMappings: mappings.length, signalAuthKeysCopied: false, authStoreStrategy: 'keep_only_target_session_signal_keys' });
+    return { migrated: true, groupSettings: groupSettings.length, del2Targets: del2Targets.length, del3Rules: del3Rules.length, userPreferences: preferences.length, lidPhoneMappings: mappings.length };
+}
+
+async function consolidateDuplicateSessionsForAccount(targetSessionId, user, creds) {
+    if (!db || !targetSessionId) return 0;
+    const phone = getAuthenticatedPhoneNumber(user, creds);
+    const lid = getAuthenticatedLid(user, creds);
+    const clauses = [];
+    if (phone) clauses.push({ Number: phone }, { number: phone }, { PairingNumber: phone }, { AccountJid: `${phone}@s.whatsapp.net` }, { accountJid: `${phone}@s.whatsapp.net` });
+    if (lid) clauses.push({ OwnerLid: lid }, { ownerLid: lid }, { AccountJid: lid }, { accountJid: lid });
+    if (!clauses.length) return 0;
+    const owners = await db.collection('session_owners').find({ sessionId: { $ne: targetSessionId }, $or: clauses }).limit(100).toArray();
+    let merged = 0;
+    for (const owner of owners) {
+        const sourceSessionId = String(owner.sessionId || '');
+        if (!sourceSessionId || sourceSessionId === targetSessionId) continue;
+        const sourceNumber = normalizePhoneNumber(owner.Number || owner.number || owner.PairingNumber || '');
+        const sourceJid = String(owner.AccountJid || owner.accountJid || '').trim();
+        const sourceLid = normalizeLidCacheKey(owner.OwnerLid || owner.ownerLid || sourceJid);
+        const sameIdentity = !!((phone && (sourceNumber === phone || getAuthenticatedPhoneNumber({ id: sourceJid }, null) === phone)) || (lid && sourceLid === lid));
+        if (!sameIdentity) continue;
+        const liveLeaseUntil = new Date(owner.ownerLeaseUntil || 0).getTime();
+        if (owner.ownerInstanceId && owner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && liveLeaseUntil > Date.now() && owner.connectionStatus !== 'duplicate_account' && !owner.duplicateAccountOf && owner.reauthRequired !== true) {
+            console.warn('[session-account-merge-skipped-live-owner]', { sourceSessionId, targetSessionId, ownerLeaseUntil: new Date(liveLeaseUntil).toISOString(), reason: 'another_render_instance_still_owns_session' });
+            continue;
+        }
+        const oldRuntime = activeSessions.get(sourceSessionId);
+        if (oldRuntime?.sock && ['connecte', 'connected'].includes(String(oldRuntime.status || '').toLowerCase())) {
+            console.warn('[session-account-merge-skipped-live-session]', { sourceSessionId, targetSessionId, reason: 'source_socket_still_connected' });
+            continue;
+        }
+        try {
+            if (oldRuntime?.sock) {
+                await cleanupSocket(sourceSessionId).catch(() => {});
+                await flushAuthWritesForSession(sourceSessionId).catch(() => {});
+            }
+            await mergeSessionScopedData(sourceSessionId, targetSessionId);
+            await deleteMongoSession(sourceSessionId);
+            merged++;
+            console.info('[session-duplicate-removed-after-merge]', { sourceSessionId, targetSessionId, sourceStatus: owner.connectionStatus || null, accountIdentityMatched: true, oldAuthDeleted: true });
+        } catch (error) {
+            console.error('[session-account-merge-failed]', { sourceSessionId, targetSessionId, error: error?.message || String(error), oldSessionPreserved: true });
+        }
+    }
+    return merged;
 }
 
 async function getGroupSetting(sessionId, gjid, key) {
@@ -3095,6 +3242,61 @@ async function removeDel3Rule(sessionId, gjid, messageFormat) {
     const rules = await getDel3Rules(sessionId, gjid);
     const next = rules.filter(rule => rule.format !== messageFormat);
     setBoundedMapEntry(activeDel3RulesCache, `${sessionId}_${gjid}`, next, ACTIVE_DEL2_CACHE_MAX_ENTRIES);
+}
+
+async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, senderJid, senderAliases, ownerRecord) {
+    const chat = String(groupJid || message?.key?.remoteJid || '').trim();
+    const messageId = String(message?.key?.id || '').trim();
+    if (!/@g\.us$/i.test(chat) || !messageId || message?.key?.fromMe === true) return false;
+    const format = getWhatsAppMessageFormat(message);
+    if (!format) return false;
+    const rules = await getDel3Rules(sessionId, chat);
+    if (!rules.some(rule => rule.format === format)) return false;
+    const aliasText = (Array.isArray(senderAliases) ? senderAliases : []).map(String).join(' ');
+    if (isProtectedWhatsAppTarget(senderJid, ownerRecord, sock?.user?.id || '', aliasText)) {
+        console.info('[del3-message-protected]', { sessionId, group: chat, messageId, format, reason: 'host_or_bot' });
+        return false;
+    }
+    const timestampRaw = message?.messageTimestamp && typeof message.messageTimestamp.toNumber === 'function' ? message.messageTimestamp.toNumber() : message?.messageTimestamp;
+    const timestamp = Number(timestampRaw) || 0;
+    const ageSeconds = timestamp > 0 ? Math.max(0, Math.floor(Date.now() / 1000) - timestamp) : 0;
+    if (ageSeconds > 180 && timestamp > 0) {
+        console.info('[del3-message-skipped-stale]', { sessionId, group: chat, messageId, format, ageSeconds });
+        return false;
+    }
+    if (!(await canBotModerateGroup(chat))) {
+        console.warn('[del3-message-delete-skipped]', { sessionId, group: chat, messageId, format, reason: 'bot_not_group_admin_or_group_metadata_unavailable' });
+        return false;
+    }
+    const account = getAuthenticatedPhoneNumber(sock?.user, activeSessions.get(sessionId)?.authState?.creds) || getAuthenticatedLid(sock?.user, activeSessions.get(sessionId)?.authState?.creds) || sessionId;
+    const dedupId = `del3:${shortLogHash(account)}:${chat}:${messageId}`;
+    if (del3DeleteDedupCache.has(dedupId)) return false;
+    let claimed = false;
+    try {
+        if (db) {
+            const claim = await db.collection('processed_messages').updateOne(
+                { _id: dedupId },
+                { $setOnInsert: { sessionId, messageId, remoteJid: chat, operation: 'del3', ts: Date.now(), expireAt: new Date(Date.now() + PROCESSED_MESSAGE_RETENTION_MS) } },
+                { upsert: true }
+            );
+            claimed = claim.upsertedCount === 1;
+            if (!claimed) return false;
+        } else claimed = true;
+        del3DeleteDedupCache.set(dedupId, Date.now());
+        while (del3DeleteDedupCache.size > 12000) del3DeleteDedupCache.delete(del3DeleteDedupCache.keys().next().value);
+        const sourceKey = message.key || {};
+        const participant = String(sourceKey.participant || sourceKey.participantPn || sourceKey.participantAlt || sourceKey.senderPn || senderJid || '').trim();
+        const deleteKey = { ...sourceKey, remoteJid: String(sourceKey.remoteJid || chat), id: messageId, fromMe: sourceKey.fromMe === true };
+        if (participant) deleteKey.participant = participant;
+        await queuedDeleteMessageWithAck(sock, chat, deleteKey, 120, 9000);
+        console.info('[del3-message-format-matched]', { sessionId, group: chat, messageId, format, deleted: true, acknowledgementConfirmed: true, scope: 'same_group_same_whatsapp_format' });
+        return true;
+    } catch (error) {
+        if (claimed && db) await db.collection('processed_messages').deleteOne({ _id: dedupId }).catch(() => {});
+        del3DeleteDedupCache.delete(dedupId);
+        console.warn('[del3-message-delete-failed]', { sessionId, group: chat, messageId, format, error: error?.message || String(error) });
+        return false;
+    }
 }
 
 process.on('unhandledRejection', (error) => { console.error('[unhandledRejection]', error?.message || error); });
@@ -4468,8 +4670,31 @@ app.all('/get-code', async (req, res) => {
         const pendingCutoff = new Date(Date.now() - Math.max(120000, Number(process.env.PAIRING_SESSION_TTL_MS || 900000)));
         pendingOwner = await db.collection('session_owners').findOne({ PairingNumber: number, pairingPending: true, pairingStartedAt: { $gte: pendingCutoff }, connectionStatus: { $in: ['pairing_starting', 'pairing'] } }, { sort: { pairingStartedAt: -1 } }).catch(() => null);
     }
-    const sId = validSuppliedSessionId ? suppliedSessionId : (pendingOwner?.sessionId || `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-    const proposedSessionId = validSuppliedSessionId ? suppliedSessionId : (pendingOwner?.sessionId || '');
+    let sId = validSuppliedSessionId ? suppliedSessionId : (pendingOwner?.sessionId || `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+    let replacedStaleSessionId = '';
+    if (validSuppliedSessionId && connectionFormat === 'pair' && db) {
+        const suppliedOwner = await db.collection('session_owners').findOne({ sessionId: suppliedSessionId }).catch(() => null);
+        const suppliedRuntime = activeSessions.get(suppliedSessionId);
+        const persistedPairingStatus = String(suppliedOwner?.connectionStatus || '').toLowerCase();
+        const runtimePairingStatus = String(suppliedRuntime?.status || '').toLowerCase();
+        const stalePairingStatuses = new Set(['reauth_required', 'pairing_expired', 'pairing_error', 'duplicate_account']);
+        const suppliedStatus = suppliedOwner?.reauthRequired === true ? 'reauth_required' : stalePairingStatuses.has(persistedPairingStatus) ? persistedPairingStatus : (runtimePairingStatus || persistedPairingStatus);
+        const suppliedNumber = normalizePhoneNumber(suppliedOwner?.Number || suppliedOwner?.number || suppliedOwner?.PairingNumber || '');
+        const isStalePairingSession = stalePairingStatuses.has(suppliedStatus) || suppliedOwner?.reauthRequired === true;
+        if (isStalePairingSession && !['connecte', 'connected'].includes(suppliedStatus)) {
+            if (suppliedRuntime?.sock) await cleanupSocket(suppliedSessionId).catch(() => {});
+            await releaseSessionRuntimeLock(suppliedSessionId).catch(() => {});
+            await db.collection('session_account_runtime_locks').deleteMany({ sessionId: suppliedSessionId }).catch(() => {});
+            await db.collection('session_runtime_locks').deleteMany({ _id: suppliedSessionId }).catch(() => {});
+            const oldReconnect = reconnectTimers.get(suppliedSessionId);
+            if (oldReconnect) clearTimeout(oldReconnect);
+            reconnectTimers.delete(suppliedSessionId);
+            replacedStaleSessionId = suppliedSessionId;
+            sId = `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+            console.warn('[pairing-stale-session-replaced]', { previousSessionId: suppliedSessionId, newSessionId: sId, status: suppliedStatus || 'unknown', sameAccountNumberConfirmed: suppliedNumber === number, oldAuthPreservedUntilNewConnection: true });
+        }
+    }
+    const proposedSessionId = replacedStaleSessionId ? '' : (validSuppliedSessionId ? suppliedSessionId : (pendingOwner?.sessionId || ''));
     const existingCreds = proposedSessionId && db ? await db.collection('baileys_auth').findOne({ _id: `auth-${proposedSessionId}-creds` }, { projection: { _id: 1 } }).catch(() => null) : null;
     const expectExisting = !!existingCreds;
     let sess = null;
@@ -4477,7 +4702,7 @@ app.all('/get-code', async (req, res) => {
     try {
         await db.collection('session_owners').updateOne(
             { sessionId: sId },
-            { $set: { format: connectionFormat, Format: connectionFormat, PairingNumber: number || null, pairingPending: true, pairingStartedAt: new Date(), connectionStatus: 'pairing_starting', autoExpirePairing: autoExpire, ...getClusterSessionOwnerFields() }, $setOnInsert: { sessionId: sId, createdAt: new Date() } },
+            { $set: { format: connectionFormat, Format: connectionFormat, PairingNumber: number || null, pairingPending: true, pairingStartedAt: new Date(), connectionStatus: 'pairing_starting', autoExpirePairing: autoExpire, replacementOfSessionId: replacedStaleSessionId || null, ...getClusterSessionOwnerFields() }, $setOnInsert: { sessionId: sId, createdAt: new Date() } },
             { upsert: true }
         );
         sess = await createCodeSession(sId, connectionFormat, expectExisting, autoExpire, number);
@@ -4488,7 +4713,7 @@ app.all('/get-code', async (req, res) => {
         }
         await db.collection('session_owners').updateOne(
             { sessionId: sId },
-            { $set: { format: connectionFormat, Format: connectionFormat, PairingNumber: number || null, pairingPending: true, pairingStartedAt: new Date(), connectionStatus: 'pairing', autoExpirePairing: autoExpire, ...getClusterSessionOwnerFields() } },
+            { $set: { format: connectionFormat, Format: connectionFormat, PairingNumber: number || null, pairingPending: true, pairingStartedAt: new Date(), connectionStatus: 'pairing', autoExpirePairing: autoExpire, replacementOfSessionId: replacedStaleSessionId || null, ...getClusterSessionOwnerFields() } },
             { upsert: true }
         );
         const liveSessionFormat = activeSessions.get(sId);
@@ -4497,7 +4722,7 @@ app.all('/get-code', async (req, res) => {
             liveSessionFormat.pairingNumber = number || null;
             liveSessionFormat.autoExpirePairing = autoExpire;
         }
-        console.info('[session-connection-format-saved]', { sessionId: sId, format: connectionFormat, reusedPendingSession: !!pendingOwner || validSuppliedSessionId, accountNumberLockedBeforeSocket: connectionFormat === 'pair' });
+        console.info('[session-connection-format-saved]', { sessionId: sId, format: connectionFormat, reusedPendingSession: (!!pendingOwner || validSuppliedSessionId) && !replacedStaleSessionId, replacedStaleSession: !!replacedStaleSessionId, accountNumberLockedBeforeSocket: connectionFormat === 'pair' });
         const pairingTimeoutMs = Math.max(120000, Number(process.env.PAIRING_SESSION_TTL_MS || 900000));
         cleanupTimer = setTimeout(async () => {
             const checkSess = activeSessions.get(sId);
@@ -7021,6 +7246,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     const finalRecord = { ...(existingRecord || {}), ...updateData };
                     for (const field of Object.keys(ownerUnset)) delete finalRecord[field];
                     sessionOwnersCache.set(sessionId, finalRecord);
+                    const consolidatedAccountSessions = await consolidateDuplicateSessionsForAccount(sessionId, sock.user, state.creds);
+                    if (consolidatedAccountSessions) console.info('[session-account-duplicates-consolidated-after-connect]', { sessionId, removedDuplicates: consolidatedAccountSessions });
                     const openedSession = activeSessions.get(sessionId);
                     if (openedSession) {
                         openedSession.number = currentBotNum || null;
@@ -7661,35 +7888,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 });
                 if (!String(receivedBody || '').trim() && !receivedParsedCommand) {
                     if (receivedIsGroup && !m?.key?.fromMe && receivedType !== 'unknown' && receivedType !== 'protocolMessage' && receivedType !== 'senderKeyDistributionMessage') {
-                        try {
-                            const earlyFormat = getWhatsAppMessageFormat(m);
-                            if (earlyFormat) {
-                                const earlyRules = await getDel3Rules(sessionId, receivedChat);
-                                if (earlyRules.some(rule => rule.format === earlyFormat)) {
-                                    const receivedTimestamp = Number(m?.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m?.messageTimestamp) || 0;
-                                    const appendAgeSeconds = receivedTimestamp > 0 ? Math.max(0, Math.floor(Date.now() / 1000) - receivedTimestamp) : 0;
-                                    const isFreshMessage = upsertType !== 'append' || !receivedTimestamp || appendAgeSeconds <= 180;
-                                    if (isFreshMessage) {
-                                        let ownerRecordForDel3 = sessionOwnersCache.get(sessionId) || null;
-                                        if (!ownerRecordForDel3 && db) {
-                                            ownerRecordForDel3 = await db.collection('session_owners').findOne({ sessionId }).catch(() => null);
-                                            if (ownerRecordForDel3) sessionOwnersCache.set(sessionId, ownerRecordForDel3);
-                                        }
-                                        const earlyIsProtected = isProtectedWhatsAppTarget(receivedSenderJid, ownerRecordForDel3, sock.user?.id || '', receivedSenderAliases.join(' '));
-                                        if (earlyIsProtected) {
-                                            console.info('[del3-message-protected]', { sessionId, group: receivedChat, messageId: receivedId, format: earlyFormat, reason: 'host_or_bot' });
-                                        } else if (!(await canBotModerateGroup(receivedChat))) {
-                                            console.warn('[del3-message-delete-skipped]', { sessionId, group: receivedChat, messageId: receivedId, format: earlyFormat, reason: 'bot_not_group_admin_or_group_metadata_unavailable' });
-                                        } else {
-                                            await queuedDeleteMessageWithAck(sock, receivedChat, m.key, 120, 6500);
-                                            console.info('[del3-message-format-matched]', { sessionId, group: receivedChat, messageId: receivedId, format: earlyFormat, deleted: true, acknowledgementConfirmed: true, stage: 'before_empty_body_short_circuit' });
-                                        }
-                                    }
-                                }
-                            }
-                        } catch (earlyDel3Error) {
-                            console.warn('[del3-message-delete-failed]', { sessionId, group: receivedChat, messageId: receivedId, messageType: receivedType, error: earlyDel3Error?.message || String(earlyDel3Error), stage: 'before_empty_body_short_circuit' });
+                        let ownerRecordForDel3 = sessionOwnersCache.get(sessionId) || null;
+                        if (!ownerRecordForDel3 && db) {
+                            ownerRecordForDel3 = await db.collection('session_owners').findOne({ sessionId }).catch(() => null);
+                            if (ownerRecordForDel3) sessionOwnersCache.set(sessionId, ownerRecordForDel3);
                         }
+                        await applyDel3ToIncomingMessage(sock, sessionId, m, receivedChat, receivedSenderJid, receivedSenderAliases, ownerRecordForDel3);
                     }
                     cacheRecentMessage(sessionId, m);
                     console.info('[message-awaiting-readable-content]', {
@@ -7821,7 +8025,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 let messageClaimed = true;
                 let messageClaimTimedOut = false;
                 try {
-                    messageClaimed = await promiseWithTimeout(claimMessageForProcessing(sessionId, msgId, receivedChat), 5000, 'message processing database claim');
+                    messageClaimed = await promiseWithTimeout(claimMessageForProcessing(sessionId, msgId, receivedChat, liveAccountPhone || liveAccountLid || ''), 5000, 'message processing database claim');
                 } catch (claimError) {
                     messageClaimTimedOut = /timed out/i.test(String(claimError?.message || claimError));
                     console.error(messageClaimTimedOut ? '[message-processing-claim-timeout]' : '[message-processing-claim-failed-open]', {
@@ -8163,30 +8367,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             bodyTruncated: String(earlyBody || '').length > 12000
                         });
 
-                        if (isGroup && sender && sender !== from && sender !== botId && !isFromMe && !isOwnerReal && !isProtectedWhatsAppTarget(sender, sOwnerTop, botId, senderJids.join(' '))) {
-                            try {
-                                const incomingMessageFormat = getWhatsAppMessageFormat(m);
-                                if (incomingMessageFormat) {
-                                    const del3Rules = await getDel3Rules(sessionId, from);
-                                    if (del3Rules.some(rule => rule.format === incomingMessageFormat)) {
-                                        let deletedByDel3 = false;
-                                        try {
-                                            if (await canBotModerateGroup(from)) {
-                                                await queuedDeleteMessageWithAck(sock, from, m.key, 120, 6500);
-                                                deletedByDel3 = true;
-                                            } else {
-                                                console.warn('[del3-message-delete-skipped]', { sessionId, group: from, messageId: msgId, format: incomingMessageFormat, reason: 'bot_not_group_admin_or_group_metadata_unavailable' });
-                                            }
-                                        } catch (del3DeleteError) {
-                                            console.warn('[del3-message-delete-failed]', { sessionId, group: from, messageId: msgId, format: incomingMessageFormat, error: del3DeleteError?.message || String(del3DeleteError) });
-                                        }
-                                        console.info('[del3-message-format-matched]', { sessionId, group: from, messageId: msgId, format: incomingMessageFormat, deleted: deletedByDel3 });
-                                        if (deletedByDel3) return;
-                                    }
-                                }
-                            } catch (del3MatchError) {
-                                console.warn('[del3-rule-match-failed]', { sessionId, group: from, messageId: msgId, error: del3MatchError?.message || String(del3MatchError) });
-                            }
+                        if (isGroup && sender && !isFromMe && !isOwnerReal) {
+                            const del3Deleted = await applyDel3ToIncomingMessage(sock, sessionId, m, from, sender, senderJids, sOwnerTop);
+                            if (del3Deleted) return;
                         }
 
                         if (isGroup && sender && sender !== botId && !isOwnerReal) {
@@ -9571,21 +9754,22 @@ async function loadExistingSessions() {
         }
         const number = getAuthenticatedPhoneNumber(null, credentials);
         const lid = getAuthenticatedLid(null, credentials);
-        candidates.push({ sessionId, number, lid, timestampFromId: Number(sessionId.match(/^session_(\d+)/)?.[1] || 0) });
+        candidates.push({ sessionId, number, lid, credentials, timestampFromId: Number(sessionId.match(/^session_(\d+)/)?.[1] || 0) });
     }
     const ownerDocs = candidates.length
         ? await db.collection('session_owners').find({ sessionId: { $in: candidates.map(item => item.sessionId) } }).toArray()
         : [];
     const owners = new Map(ownerDocs.map(owner => [owner.sessionId, owner]));
-    const liveClusterOwnerIds = new Set();
-    const restoreCheckAt = Date.now();
-    const restorableCandidates = candidates.filter(candidate => {
+    const now = Date.now();
+    const identityCandidates = candidates.filter(candidate => candidate.number || candidate.lid);
+    const restorableCandidates = identityCandidates.filter(candidate => {
         const owner = owners.get(candidate.sessionId) || {};
         const ownerLeaseUntil = new Date(owner.ownerLeaseUntil || 0).getTime();
-        const isOwnedByLivePeer = TFBOT_CLUSTER_ENABLED && owner.ownerInstanceId && owner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && ownerLeaseUntil > restoreCheckAt && liveClusterOwnerIds.has(String(owner.ownerInstanceId));
-        return !isOwnedByLivePeer && !owner.reauthRequired && !owner.duplicateAccountOf && owner.connectionStatus !== 'duplicate_account';
+        const isOwnedByLivePeer = TFBOT_CLUSTER_ENABLED && owner.ownerInstanceId && owner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && ownerLeaseUntil > now && owner.connectionStatus !== 'duplicate_account' && !owner.duplicateAccountOf && owner.reauthRequired !== true;
+        const status = String(owner.connectionStatus || '').toLowerCase();
+        return !isOwnedByLivePeer && !owner.reauthRequired && !owner.duplicateAccountOf && status !== 'duplicate_account' && status !== 'reauth_required' && status !== 'pairing_expired';
     });
-    const parent = restorableCandidates.map((_, index) => index);
+    const parent = identityCandidates.map((_, index) => index);
     const findRoot = index => {
         let root = index;
         while (parent[root] !== root) root = parent[root];
@@ -9602,26 +9786,20 @@ async function loadExistingSessions() {
         if (leftRoot !== rightRoot) parent[rightRoot] = leftRoot;
     };
     const firstByIdentity = new Map();
-    for (let index = 0; index < restorableCandidates.length; index++) {
-        const candidate = restorableCandidates[index];
+    for (let index = 0; index < identityCandidates.length; index++) {
+        const candidate = identityCandidates[index];
         const owner = owners.get(candidate.sessionId) || {};
-        const ownerNumber = normalizePhoneNumber(owner.Number || owner.number || '');
+        const ownerNumber = normalizePhoneNumber(owner.Number || owner.number || owner.PairingNumber || '');
         const ownerAccountPhone = getAuthenticatedPhoneNumber({ id: owner.AccountJid || owner.accountJid || '' }, null);
         const ownerLid = normalizeLidCacheKey(owner.OwnerLid || owner.ownerLid || '');
         const ownerAccountLid = normalizeLidCacheKey(owner.AccountJid || owner.accountJid || '');
-        const ownerMatchesCredential = !!(
-            (candidate.number && (ownerNumber === candidate.number || ownerAccountPhone === candidate.number)) ||
-            (candidate.lid && (ownerLid === candidate.lid || ownerAccountLid === candidate.lid))
-        );
         const identityKeys = new Set();
         if (candidate.number) identityKeys.add(`pn:${candidate.number}`);
         if (candidate.lid) identityKeys.add(`lid:${candidate.lid}`);
-        if (ownerMatchesCredential) {
-            if (/^\d{6,20}$/.test(ownerNumber)) identityKeys.add(`pn:${ownerNumber}`);
-            if (/^\d{6,20}$/.test(ownerAccountPhone)) identityKeys.add(`pn:${ownerAccountPhone}`);
-            if (/@lid$/i.test(ownerLid)) identityKeys.add(`lid:${ownerLid}`);
-            if (/@lid$/i.test(ownerAccountLid)) identityKeys.add(`lid:${ownerAccountLid}`);
-        }
+        if (ownerNumber && (!candidate.number || ownerNumber === candidate.number)) identityKeys.add(`pn:${ownerNumber}`);
+        if (ownerAccountPhone && (!candidate.number || ownerAccountPhone === candidate.number)) identityKeys.add(`pn:${ownerAccountPhone}`);
+        if (/@lid$/i.test(ownerLid) && (!candidate.lid || ownerLid === candidate.lid)) identityKeys.add(`lid:${ownerLid}`);
+        if (/@lid$/i.test(ownerAccountLid) && (!candidate.lid || ownerAccountLid === candidate.lid)) identityKeys.add(`lid:${ownerAccountLid}`);
         for (const identityKey of identityKeys) {
             const previousIndex = firstByIdentity.get(identityKey);
             if (previousIndex !== undefined) unite(index, previousIndex);
@@ -9629,27 +9807,42 @@ async function loadExistingSessions() {
         }
     }
     const groups = new Map();
-    for (let index = 0; index < restorableCandidates.length; index++) {
+    for (let index = 0; index < identityCandidates.length; index++) {
         const root = findRoot(index);
         if (!groups.has(root)) groups.set(root, []);
-        groups.get(root).push(restorableCandidates[index]);
+        groups.get(root).push(identityCandidates[index]);
     }
     const sessionsToRestore = [];
+    const restorableIds = new Set(restorableCandidates.map(item => item.sessionId));
     for (const group of groups.values()) {
-        group.sort((a, b) => {
-            const aOwner = owners.get(a.sessionId);
-            const bOwner = owners.get(b.sessionId);
-            const aConnected = Number(aOwner?.connectedSince || 0);
-            const bConnected = Number(bOwner?.connectedSince || 0);
-            if (aConnected !== bConnected) return bConnected - aConnected;
-            return b.timestampFromId - a.timestampFromId;
-        });
-        const selectedSession = group[0];
-        const storedOwner = owners.get(selectedSession.sessionId);
-        sessionsToRestore.push({ sessionId: selectedSession.sessionId, format: normalizeConnectionFormat(storedOwner?.format || storedOwner?.Format || 'pair') });
-        for (const duplicate of group.slice(1)) {
-            console.warn('[session-restore-duplicate-skipped-preserved]', { identityCount: group.length, keptSessionId: selectedSession.sessionId, preservedSessionId: duplicate.sessionId, accountIdentityDetailsRedacted: true });
+        const eligible = group.filter(item => restorableIds.has(item.sessionId));
+        if (!eligible.length) {
+            console.warn('[session-account-group-no-restorable-session]', { sessionCount: group.length, sessionIds: group.map(item => item.sessionId), action: 'preserve_all_auth_and_group_data_until_reauthentication' });
+            continue;
         }
+        eligible.sort((a, b) => b.timestampFromId - a.timestampFromId || Number(owners.get(b.sessionId)?.connectedSince || 0) - Number(owners.get(a.sessionId)?.connectedSince || 0));
+        const selectedSession = eligible[0];
+        const selectedOwner = owners.get(selectedSession.sessionId) || {};
+        sessionsToRestore.push({ sessionId: selectedSession.sessionId, format: normalizeConnectionFormat(selectedOwner.format || selectedOwner.Format || 'pair') });
+        for (const duplicate of group.filter(item => item.sessionId !== selectedSession.sessionId)) {
+            const duplicateOwner = owners.get(duplicate.sessionId) || {};
+            const leaseUntil = new Date(duplicateOwner.ownerLeaseUntil || 0).getTime();
+            const livePeer = TFBOT_CLUSTER_ENABLED && duplicateOwner.ownerInstanceId && duplicateOwner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && leaseUntil > now && duplicateOwner.connectionStatus !== 'duplicate_account' && !duplicateOwner.duplicateAccountOf && duplicateOwner.reauthRequired !== true;
+            if (livePeer) {
+                console.warn('[session-account-duplicate-preserved-live-peer]', { keptSessionId: selectedSession.sessionId, preservedSessionId: duplicate.sessionId, action: 'do_not_delete_data_while_other_render_instance_lease_is_live' });
+                continue;
+            }
+            try {
+                await mergeSessionScopedData(duplicate.sessionId, selectedSession.sessionId);
+                await deleteMongoSession(duplicate.sessionId);
+                console.info('[session-restore-duplicate-merged-and-removed]', { identityGroupSize: group.length, keptSessionId: selectedSession.sessionId, removedSessionId: duplicate.sessionId, accountDataMigrated: true, signalAuthCopied: false });
+            } catch (error) {
+                console.error('[session-restore-duplicate-merge-failed]', { keptSessionId: selectedSession.sessionId, preservedSessionId: duplicate.sessionId, error: error?.message || String(error) });
+            }
+        }
+    }
+    for (const candidate of restorableCandidates) {
+        if (identityCandidates.length && sessionsToRestore.some(item => item.sessionId === candidate.sessionId)) continue;
     }
     for (const restoredSession of sessionsToRestore) {
         const { sessionId, format: restoredFormat } = restoredSession;
@@ -9868,8 +10061,8 @@ async function main() {
         pairingAuthPreservedOnTransientFailure: true,
         pairingTimeoutMs: Math.max(120000, Number(process.env.PAIRING_SESSION_TTL_MS || 900000)),
         imageUploadBasename: 'tfbot',
-        groupSenderKeyResetBeforeSendCooldownMs: GROUP_SENDER_KEY_RESET_EVERY_SEND ? 0 : GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS,
-        groupSenderKeyResetEveryMessage: GROUP_SENDER_KEY_RESET_EVERY_SEND,
+        groupSenderKeyResetBeforeSendEnabled: false,
+        groupSenderKeyResetEveryMessage: false,
         selfChatAddressingMode: 'preserve_original_jid',
         privateLidMappedPhonePrimary: true,
         passiveSocketHealth: true,
@@ -9897,7 +10090,7 @@ async function main() {
     });
     if (TFBOT_CLUSTER_ENABLED) {
         if (!TFBOT_CLUSTER_TOKEN) console.error('[tfbot-cluster-token-missing]', { host: TFBOT_CLUSTER_INSTANCE_HOST || null, action: 'keep_cluster_node_in_standby_without_mongodb_or_session_restore' });
-        console.info('[tfbot-build-active]', { revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY });
+        console.info('[tfbot-build-active]', { revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, renderServiceId: runtimeLogRenderServiceId, renderServiceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, deploymentStartedAt: runtimeLogStartedAt.toISOString() });
     httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
         if (TFBOT_CLUSTER_COORDINATOR_ONLY) {
             tfbotWorkerActive = false;
