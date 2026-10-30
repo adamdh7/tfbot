@@ -428,10 +428,43 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'wa-render-bandwidth-cluster-2026-10-30-r22';
+const RUNTIME_FIX_BUILD = 'wa-render-domain-router-2026-10-30-r23';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim();
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
+const TFBOT_ROUTER_RESOLVE_PATH = '/__tfbot/router/resolve';
+const TFBOT_ROUTER_OK_PATH = '/__tfbot/router/ok';
+const TFBOT_ROUTER_STATE_ID = 'active-domain';
+const TFBOT_PRIMARY_DOMAIN = Object.freeze({ host: 'tf.bot.adamdh7.org', url: 'https://tf.bot.adamdh7.org', priority: 0 });
+const TFBOT_COORDINATOR_HOST = 'tfbot7.onrender.com';
+const TFBOT_ROUTER_SERVING_DOMAINS = Object.freeze([
+    TFBOT_PRIMARY_DOMAIN,
+    { host: 'tfbot2.onrender.com', url: 'https://tfbot2.onrender.com', priority: 1 },
+    { host: 'tfbot3.onrender.com', url: 'https://tfbot3.onrender.com', priority: 2 },
+    { host: 'tfbot4.onrender.com', url: 'https://tfbot4.onrender.com', priority: 3 },
+    { host: 'tfbot5.onrender.com', url: 'https://tfbot5.onrender.com', priority: 4 },
+    { host: 'tfbot6.onrender.com', url: 'https://tfbot6.onrender.com', priority: 5 }
+]);
+const TFBOT_ROUTER_DOMAIN_BY_HOST = new Map(TFBOT_ROUTER_SERVING_DOMAINS.map(item => [item.host, item]));
+function normalizeTfbotHost(value) {
+    return String(value || '').trim().toLowerCase().replace(/^https?:\/\//, '').split('/')[0].split(':')[0].replace(/\.$/, '');
+}
+function detectTfbotRuntimeHost() {
+    const externalHost = normalizeTfbotHost(process.env.RENDER_EXTERNAL_HOSTNAME || '');
+    if (TFBOT_ROUTER_DOMAIN_BY_HOST.has(externalHost) || externalHost === TFBOT_COORDINATOR_HOST) return externalHost;
+    const serviceName = String(process.env.RENDER_SERVICE_NAME || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+    const serviceNumber = serviceName.match(/tfbot[-_]?([2-7])(?:$|[-_])/i) || serviceName.match(/^tfbot([2-7])$/i);
+    if (serviceNumber) return `tfbot${serviceNumber[1]}.onrender.com`;
+    if (/tfbot/.test(serviceName)) return TFBOT_PRIMARY_DOMAIN.host;
+    const legacyHost = normalizeTfbotHost(process.env.TFBOT_INSTANCE_URL || '');
+    if (TFBOT_ROUTER_DOMAIN_BY_HOST.has(legacyHost) || legacyHost === TFBOT_COORDINATOR_HOST) return legacyHost;
+    if (String(process.env.RENDER || '').toLowerCase() === 'true' && externalHost) return TFBOT_PRIMARY_DOMAIN.host;
+    return '';
+}
+const TFBOT_CLUSTER_INSTANCE_HOST = detectTfbotRuntimeHost();
+const TFBOT_CLUSTER_COORDINATOR_ONLY = TFBOT_CLUSTER_INSTANCE_HOST === TFBOT_COORDINATOR_HOST;
+const TFBOT_CLUSTER_COORDINATOR_URL = `https://${TFBOT_COORDINATOR_HOST}`;
+const TFBOT_CLUSTER_INSTANCE_URL = TFBOT_CLUSTER_INSTANCE_HOST ? `https://${TFBOT_CLUSTER_INSTANCE_HOST}` : '';
 const TFBOT_CLUSTER_LEASE_MS = Math.max(45000, Math.min(180000, Number(process.env.TFBOT_CLUSTER_LEASE_MS || 90000)));
 const TFBOT_CLUSTER_HEARTBEAT_MS = Math.max(10000, Math.min(45000, Number(process.env.TFBOT_CLUSTER_HEARTBEAT_MS || 20000)));
 const TFBOT_CLUSTER_HEALTH_TIMEOUT_MS = Math.max(1500, Math.min(10000, Number(process.env.TFBOT_CLUSTER_HEALTH_TIMEOUT_MS || 5000)));
@@ -440,20 +473,11 @@ const TFBOT_CLUSTER_HEALTH_CACHE_MS = Math.max(3000, Math.min(30000, Number(proc
 const TFBOT_CLUSTER_HEALTH_PROBE_LIMIT = Math.max(1, Math.min(6, Number(process.env.TFBOT_CLUSTER_HEALTH_PROBE_LIMIT || 3)));
 const TFBOT_CLUSTER_CANDIDATE_LIMIT = Math.max(4, Math.min(30, Number(process.env.TFBOT_CLUSTER_CANDIDATE_LIMIT || 12)));
 const TFBOT_CLUSTER_PROXY_TIMEOUT_MS = Math.max(8000, Math.min(45000, Number(process.env.TFBOT_CLUSTER_PROXY_TIMEOUT_MS || 30000)));
-const TFBOT_CLUSTER_INSTANCE_URL = (() => {
-    const raw = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim();
-    try {
-        const url = new URL(raw);
-        if (!['https:', 'http:'].includes(url.protocol)) return '';
-        if (url.protocol === 'http:' && !TFBOT_CLUSTER_PRIVATE_NETWORK && !['localhost', '127.0.0.1'].includes(url.hostname)) return '';
-        url.username = '';
-        url.password = '';
-        url.pathname = '/';
-        url.search = '';
-        url.hash = '';
-        return url.origin;
-    } catch (error) { return ''; }
-})();
+const TFBOT_ROUTER_STATE_TTL_MS = Math.max(5000, Math.min(45000, Number(process.env.TFBOT_ROUTER_STATE_TTL_MS || 10000)));
+const TFBOT_ROUTER_COORDINATOR_CACHE_MS = Math.max(30000, Math.min(120000, Number(process.env.TFBOT_ROUTER_COORDINATOR_CACHE_MS || 60000)));
+const TFBOT_ROUTER_ACTIVE_PROBE_MS = Math.max(5000, Math.min(30000, Number(process.env.TFBOT_ROUTER_ACTIVE_PROBE_MS || 10000)));
+const TFBOT_ROUTER_PROBE_TIMEOUT_MS = Math.max(1500, Math.min(8000, Number(process.env.TFBOT_ROUTER_PROBE_TIMEOUT_MS || 3500)));
+const TFBOT_ROUTER_COORDINATOR_TIMEOUT_MS = Math.max(2500, Math.min(12000, Number(process.env.TFBOT_ROUTER_COORDINATOR_TIMEOUT_MS || 5000)));
 const TFBOT_CLUSTER_INSTANCE_ID = String(process.env.RENDER_INSTANCE_ID || process.env.HOSTNAME || `process-${process.pid}`).slice(0, 180);
 const TFBOT_CLUSTER_ENABLED = !!(TFBOT_CLUSTER_TOKEN && TFBOT_CLUSTER_INSTANCE_URL);
 let clusterInFlightRequests = 0;
@@ -462,6 +486,12 @@ let clusterRegistrationPromise = null;
 let clusterHeartbeatTimer = null;
 let clusterRouteCache = new Map();
 const clusterHealthCache = new Map();
+let tfbotActiveDomainCache = null;
+let tfbotActiveDomainCacheAt = 0;
+let tfbotCoordinatorSelectionCache = null;
+let tfbotCoordinatorSelectionAt = 0;
+let tfbotCoordinatorActiveProbeAt = 0;
+let tfbotCoordinatorSelectionPromise = null;
 const BOT_TIME_ZONE = process.env.BOT_TIME_ZONE || 'America/Santo_Domingo';
 const CHAT_CONTEXT_MAX_CHARS = Math.max(2500, Number(process.env.CHAT_CONTEXT_MAX_CHARS || 7000));
 const AI_MAX_INPUT_CHARS = Math.max(1000, Number(process.env.AI_MAX_INPUT_CHARS || 12000));
@@ -1742,6 +1772,7 @@ const TFBOT_WHATSAPP_COLLECTION = 'whatsapp_sessions';
 const TFBOT_LOGICAL_COLLECTIONS = new Set([
     'baileys_outgoing_messages',
     'cluster_instances',
+    'cluster_router',
     'bot_runtime_state',
     'group_del2',
     'group_del3',
@@ -3066,7 +3097,40 @@ app.use((req, res, next) => {
 });
 
 app.use((req, res, next) => {
-    if (!TFBOT_CLUSTER_ENABLED || !db || req.method === 'OPTIONS' || isValidClusterHop(req) || String(req.path || '') === TFBOT_CLUSTER_HEALTH_PATH) return next();
+    if (!TFBOT_CLUSTER_ENABLED || !db || req.method === 'OPTIONS' || isValidClusterHop(req)) return next();
+    const requestPath = String(req.path || '/');
+    if (requestPath === TFBOT_CLUSTER_HEALTH_PATH || requestPath === TFBOT_ROUTER_OK_PATH || requestPath === TFBOT_ROUTER_RESOLVE_PATH || requestPath.startsWith('/__tfbot/router/')) return next();
+    const requestHost = normalizeTfbotHost(req.get('host') || req.hostname || '');
+    const externalHost = normalizeTfbotHost(process.env.RENDER_EXTERNAL_HOSTNAME || '');
+    const knownHost = TFBOT_ROUTER_DOMAIN_BY_HOST.has(requestHost) || requestHost === TFBOT_COORDINATOR_HOST || (!!externalHost && requestHost === externalHost);
+    if (!knownHost) return next();
+    void (async () => {
+        const active = await resolveActiveTfbotDomain();
+        const activeHost = normalizeTfbotHost(active?.host || '');
+        const activeUrl = String(active?.url || '').replace(/\/+$/, '');
+        if (!TFBOT_ROUTER_DOMAIN_BY_HOST.has(activeHost) || !activeUrl) {
+            if (requestHost === TFBOT_CLUSTER_INSTANCE_HOST && !TFBOT_CLUSTER_COORDINATOR_ONLY) return next();
+            throw new Error('no_valid_active_tfbot_domain');
+        }
+        if (requestHost === activeHost) return next();
+        const destination = new URL(String(req.originalUrl || req.url || '/'), `${activeUrl}/`);
+        res.setHeader('Cache-Control', 'no-store, max-age=0');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-API-Token, X-TFBOT-Cluster-Token, X-TFBOT-Expected-Host, X-TFBOT-Cluster-Hop');
+        res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD');
+        res.setHeader('Vary', 'Origin');
+        res.setHeader('X-TFBOT-Active-Domain', activeHost);
+        res.setHeader('X-TFBOT-Router-Generation', String(active.generation || ''));
+        console.info('[tfbot-domain-redirect]', { fromHost: requestHost, toHost: activeHost, path: String(req.path || '/'), method: req.method, source: active.source || 'mongodb' });
+        return res.redirect(307, destination.toString());
+    })().catch(error => {
+        console.warn('[tfbot-domain-router-fallback]', { requestHost, path: requestPath, error: error?.message || String(error), action: 'serve_current_reachable_instance' });
+        if (!res.headersSent && !res.writableEnded) next();
+    });
+});
+
+app.use((req, res, next) => {
+    if (!TFBOT_CLUSTER_ENABLED || !db || req.method === 'OPTIONS' || isValidClusterHop(req) || String(req.path || '') === TFBOT_CLUSTER_HEALTH_PATH || String(req.path || '').startsWith('/__tfbot/router/')) return next();
     const requestPath = String(req.path || '/');
     if (/\.(?:css|js|mjs|map|png|jpe?g|webp|gif|svg|ico|woff2?|ttf|otf|mp4|webm|pdf)$/i.test(requestPath)) return next();
     void registerCurrentClusterInstance(false).catch(error => console.warn('[cluster-instance-page-touch-failed]', { path: requestPath, error: error?.message || String(error) }));
@@ -3084,7 +3148,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     const requestPath = String(req.path || '/').replace(/\/+$/, '') || '/';
-    if (requestPath === TFBOT_CLUSTER_HEALTH_PATH || isValidClusterHop(req)) return next();
+    if (requestPath === TFBOT_CLUSTER_HEALTH_PATH || requestPath === TFBOT_ROUTER_OK_PATH || requestPath === TFBOT_ROUTER_RESOLVE_PATH || isValidClusterHop(req)) return next();
     if (requestPath === LOG_DASHBOARD_PATH) return next();
     if (requestPath === '/list') return next();
     if (requestPath === '/') {
@@ -3158,6 +3222,192 @@ function getClusterSessionOwnerFields() {
     };
 }
 
+function normalizeTfbotActiveDomainRecord(record, source = 'mongodb') {
+    const host = normalizeTfbotHost(record?.activeHost || record?.host || '');
+    const known = TFBOT_ROUTER_DOMAIN_BY_HOST.get(host);
+    if (!known) return null;
+    const suppliedUrl = String(record?.activeUrl || record?.url || known.url).replace(/\/+$/, '');
+    if (suppliedUrl !== known.url) return null;
+    return {
+        host,
+        url: known.url,
+        checkedAt: record?.checkedAt ? new Date(record.checkedAt) : new Date(0),
+        generation: String(record?.generation || ''),
+        healthy: record?.healthy !== false,
+        source: String(record?.source || source)
+    };
+}
+
+async function probeTfbotServingDomain(domain) {
+    if (!TFBOT_CLUSTER_TOKEN || !domain?.host || !domain?.url) return null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TFBOT_ROUTER_PROBE_TIMEOUT_MS);
+    try {
+        const response = await fetch(`${domain.url}${TFBOT_ROUTER_OK_PATH}`, {
+            method: 'GET',
+            headers: {
+                'X-TFBOT-Cluster-Token': TFBOT_CLUSTER_TOKEN,
+                'X-TFBOT-Expected-Host': domain.host,
+                'Accept': 'application/json'
+            },
+            cache: 'no-store',
+            redirect: 'manual',
+            signal: controller.signal
+        });
+        if (response.status !== 200) {
+            await response.body?.cancel().catch(() => {});
+            return null;
+        }
+        const payload = await response.json().catch(() => null);
+        if (!payload || payload.ok !== true || payload.service !== 'tfbot-router-node' || normalizeTfbotHost(payload.host) !== domain.host || String(payload.releaseId || '') !== runtimeLogClusterId || payload.database !== TFBOT_DATABASE_NAME) return null;
+        return { ok: true, host: domain.host, url: domain.url, activeSessionCount: Number(payload.activeSessionCount || 0), checkedAt: new Date() };
+    } catch (error) {
+        return null;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+async function refreshTfbotActiveDomain(force = false, fallbackHost = '') {
+    if (!TFBOT_CLUSTER_COORDINATOR_ONLY || !TFBOT_CLUSTER_ENABLED || !db || serverShuttingDown) return null;
+    const nowMs = Date.now();
+    if (!force && tfbotCoordinatorSelectionCache && nowMs - tfbotCoordinatorSelectionAt < TFBOT_ROUTER_COORDINATOR_CACHE_MS) {
+        const reachableCaller = TFBOT_ROUTER_DOMAIN_BY_HOST.get(normalizeTfbotHost(fallbackHost));
+        if (!tfbotCoordinatorSelectionCache.healthy && reachableCaller) {
+            const checkedAt = new Date();
+            const fallbackRecord = {
+                _id: TFBOT_ROUTER_STATE_ID,
+                activeHost: reachableCaller.host,
+                activeUrl: reachableCaller.url,
+                healthy: true,
+                selectedBy: TFBOT_COORDINATOR_HOST,
+                source: 'tfbot7-reachable-caller-fallback',
+                checkedAt,
+                generation: crypto.randomUUID(),
+                healthyHosts: [],
+                updatedAt: checkedAt
+            };
+            await db.collection('cluster_router').updateOne({ _id: TFBOT_ROUTER_STATE_ID }, { $set: fallbackRecord, $setOnInsert: { createdAt: checkedAt } }, { upsert: true });
+            tfbotCoordinatorSelectionCache = normalizeTfbotActiveDomainRecord(fallbackRecord, fallbackRecord.source);
+            tfbotCoordinatorSelectionAt = Date.now();
+            tfbotCoordinatorActiveProbeAt = Date.now();
+            return tfbotCoordinatorSelectionCache;
+        }
+        if (tfbotCoordinatorSelectionCache.healthy && nowMs - tfbotCoordinatorActiveProbeAt >= TFBOT_ROUTER_ACTIVE_PROBE_MS) {
+            const activeDomain = TFBOT_ROUTER_DOMAIN_BY_HOST.get(tfbotCoordinatorSelectionCache.host);
+            const activeHealth = activeDomain ? await probeTfbotServingDomain(activeDomain) : null;
+            tfbotCoordinatorActiveProbeAt = Date.now();
+            if (!activeHealth?.ok) return refreshTfbotActiveDomain(true, fallbackHost);
+        }
+        return tfbotCoordinatorSelectionCache;
+    }
+    if (tfbotCoordinatorSelectionPromise) return tfbotCoordinatorSelectionPromise;
+    tfbotCoordinatorSelectionPromise = (async () => {
+        const checked = await Promise.all(TFBOT_ROUTER_SERVING_DOMAINS.map(async domain => ({ domain, health: await probeTfbotServingDomain(domain) })));
+        const healthy = checked.filter(item => item.health?.ok).sort((a, b) => a.domain.priority - b.domain.priority);
+        let selected = healthy[0]?.domain || null;
+        let healthySelection = !!selected;
+        if (!selected) {
+            const reachableCaller = TFBOT_ROUTER_DOMAIN_BY_HOST.get(normalizeTfbotHost(fallbackHost));
+            if (reachableCaller) {
+                selected = reachableCaller;
+                healthySelection = true;
+            }
+        }
+        if (!selected) selected = TFBOT_PRIMARY_DOMAIN;
+        const checkedAt = new Date();
+        const generation = crypto.randomUUID();
+        const result = {
+            _id: TFBOT_ROUTER_STATE_ID,
+            activeHost: selected.host,
+            activeUrl: selected.url,
+            healthy: healthySelection,
+            selectedBy: TFBOT_COORDINATOR_HOST,
+            source: healthySelection ? 'tfbot7-health-get' : 'tfbot7-primary-last-resort',
+            checkedAt,
+            generation,
+            healthyHosts: healthy.map(item => item.domain.host),
+            probeResults: checked.map(item => ({ host: item.domain.host, ok: !!item.health?.ok, checkedAt })),
+            updatedAt: checkedAt,
+            expireAt: new Date(checkedAt.getTime() + 7 * 24 * 60 * 60 * 1000)
+        };
+        await db.collection('cluster_router').updateOne({ _id: TFBOT_ROUTER_STATE_ID }, { $set: result, $setOnInsert: { createdAt: checkedAt } }, { upsert: true });
+        const normalized = normalizeTfbotActiveDomainRecord(result, 'tfbot7-health-get');
+        tfbotCoordinatorSelectionCache = normalized;
+        tfbotCoordinatorSelectionAt = Date.now();
+        tfbotCoordinatorActiveProbeAt = Date.now();
+        console.info('[tfbot-router-selection-updated]', { activeHost: selected.host, healthy: healthySelection, healthyHosts: healthy.map(item => item.domain.host), coordinator: TFBOT_COORDINATOR_HOST, generation });
+        return normalized;
+    })();
+    try {
+        return await tfbotCoordinatorSelectionPromise;
+    } finally {
+        tfbotCoordinatorSelectionPromise = null;
+    }
+}
+
+async function requestTfbotCoordinatorSelection() {
+    if (!TFBOT_CLUSTER_TOKEN) return null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TFBOT_ROUTER_COORDINATOR_TIMEOUT_MS);
+    try {
+        const response = await fetch(`${TFBOT_CLUSTER_COORDINATOR_URL}${TFBOT_ROUTER_RESOLVE_PATH}`, {
+            method: 'GET',
+            headers: {
+                'X-TFBOT-Cluster-Token': TFBOT_CLUSTER_TOKEN,
+                'X-TFBOT-Calling-Host': TFBOT_CLUSTER_INSTANCE_HOST,
+                'Accept': 'application/json'
+            },
+            cache: 'no-store',
+            redirect: 'manual',
+            signal: controller.signal
+        });
+        if (response.status !== 200) {
+            await response.body?.cancel().catch(() => {});
+            return null;
+        }
+        const payload = await response.json().catch(() => null);
+        if (!payload || payload.ok !== true) return null;
+        return normalizeTfbotActiveDomainRecord(payload, 'tfbot7-resolve');
+    } catch (error) {
+        console.warn('[tfbot-coordinator-unreachable]', { coordinator: TFBOT_COORDINATOR_HOST, error: error?.name === 'AbortError' ? 'timeout' : String(error?.message || error).slice(0, 140), fallback: 'mongodb-or-current-reachable-domain' });
+        return null;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+async function resolveActiveTfbotDomain() {
+    if (!TFBOT_CLUSTER_ENABLED || !db) {
+        const local = TFBOT_ROUTER_DOMAIN_BY_HOST.get(TFBOT_CLUSTER_INSTANCE_HOST) || TFBOT_PRIMARY_DOMAIN;
+        return { ...local, source: 'local-default', generation: '' };
+    }
+    const now = Date.now();
+    if (tfbotActiveDomainCache && now - tfbotActiveDomainCacheAt < TFBOT_ROUTER_STATE_TTL_MS) return tfbotActiveDomainCache;
+    const stored = await db.collection('cluster_router').findOne({ _id: TFBOT_ROUTER_STATE_ID }).catch(() => null);
+    const storedRoute = normalizeTfbotActiveDomainRecord(stored);
+    if (storedRoute && now - storedRoute.checkedAt.getTime() <= TFBOT_ROUTER_STATE_TTL_MS) {
+        tfbotActiveDomainCache = storedRoute;
+        tfbotActiveDomainCacheAt = now;
+        return storedRoute;
+    }
+    let selected = null;
+    if (TFBOT_CLUSTER_COORDINATOR_ONLY) selected = await refreshTfbotActiveDomain(false);
+    else selected = await requestTfbotCoordinatorSelection();
+    if (!selected) {
+        const refreshedStored = await db.collection('cluster_router').findOne({ _id: TFBOT_ROUTER_STATE_ID }).catch(() => null);
+        selected = normalizeTfbotActiveDomainRecord(refreshedStored, 'mongodb-stale-fallback');
+        if (selected && now - selected.checkedAt.getTime() > 180000) selected = null;
+    }
+    if (!selected && !TFBOT_CLUSTER_COORDINATOR_ONLY && TFBOT_ROUTER_DOMAIN_BY_HOST.has(TFBOT_CLUSTER_INSTANCE_HOST)) {
+        selected = { ...TFBOT_ROUTER_DOMAIN_BY_HOST.get(TFBOT_CLUSTER_INSTANCE_HOST), checkedAt: new Date(), generation: '', healthy: true, source: 'current-reachable-instance-fallback' };
+    }
+    if (!selected) selected = { ...TFBOT_PRIMARY_DOMAIN, checkedAt: new Date(), generation: '', healthy: false, source: 'primary-last-resort' };
+    tfbotActiveDomainCache = selected;
+    tfbotActiveDomainCacheAt = now;
+    return selected;
+}
+
 async function registerCurrentClusterInstance(force = false) {
     if (!TFBOT_CLUSTER_ENABLED || !db || serverShuttingDown) return false;
     const nowMs = Date.now();
@@ -3169,6 +3419,8 @@ async function registerCurrentClusterInstance(force = false) {
         const record = {
             instanceId: TFBOT_CLUSTER_INSTANCE_ID,
             url: TFBOT_CLUSTER_INSTANCE_URL,
+            host: TFBOT_CLUSTER_INSTANCE_HOST,
+            role: TFBOT_CLUSTER_COORDINATOR_ONLY ? 'coordinator' : 'serving',
             serviceId: String(process.env.RENDER_SERVICE_ID || ''),
             serviceName: String(process.env.RENDER_SERVICE_NAME || ''),
             region: String(process.env.RENDER_REGION || ''),
@@ -3176,9 +3428,9 @@ async function registerCurrentClusterInstance(force = false) {
             privateNetwork: TFBOT_CLUSTER_PRIVATE_NETWORK,
             build: RUNTIME_FIX_BUILD,
             releaseId: runtimeLogClusterId,
-            status: serverShuttingDown ? 'draining' : 'ready',
-            draining: serverShuttingDown,
-            activeSessionCount: activeSessions.size,
+            status: serverShuttingDown ? 'draining' : TFBOT_CLUSTER_COORDINATOR_ONLY ? 'coordinator' : 'ready',
+            draining: serverShuttingDown || TFBOT_CLUSTER_COORDINATOR_ONLY,
+            activeSessionCount: TFBOT_CLUSTER_COORDINATOR_ONLY ? 0 : activeSessions.size,
             inFlightCount: clusterInFlightRequests,
             lastSeenAt: now,
             updatedAt: now,
@@ -3189,10 +3441,12 @@ async function registerCurrentClusterInstance(force = false) {
             { $set: record, $setOnInsert: { createdAt: now } },
             { upsert: true }
         );
-        await db.collection('session_owners').updateMany(
-            { ownerInstanceId: TFBOT_CLUSTER_INSTANCE_ID, connectionStatus: { $in: ['connected', 'connecte', 'pairing', 'pairing_starting', 'synchronisation'] } },
-            { $set: { ownerLeaseUntil: leaseUntil, ownerUpdatedAt: now } }
-        ).catch(() => {});
+        if (!TFBOT_CLUSTER_COORDINATOR_ONLY) {
+            await db.collection('session_owners').updateMany(
+                { ownerInstanceId: TFBOT_CLUSTER_INSTANCE_ID, connectionStatus: { $in: ['connected', 'connecte', 'pairing', 'pairing_starting', 'synchronisation'] } },
+                { $set: { ownerLeaseUntil: leaseUntil, ownerUpdatedAt: now } }
+            ).catch(() => {});
+        }
         clusterRegistrationAt = nowMs;
         return true;
     })();
@@ -3204,7 +3458,7 @@ async function registerCurrentClusterInstance(force = false) {
 }
 
 async function probeClusterInstance(instance) {
-    if (!TFBOT_CLUSTER_ENABLED || !instance) return null;
+    if (!TFBOT_CLUSTER_ENABLED || !instance || String(instance.role || '') === 'coordinator' || normalizeTfbotHost(instance.host || '') === TFBOT_COORDINATOR_HOST) return null;
     const instanceId = String(instance._id || instance.instanceId || '');
     const baseUrl = String(instance.url || '').replace(/\/+$/, '');
     if (!instanceId || !baseUrl) return null;
@@ -3255,13 +3509,13 @@ async function getHealthyClusterCandidates(excludedIds = []) {
     if (!TFBOT_CLUSTER_ENABLED || !db) return [];
     const excluded = new Set((Array.isArray(excludedIds) ? excludedIds : [excludedIds]).map(value => String(value || '')));
     const rows = await db.collection('cluster_instances').find(
-        { status: 'ready', draining: { $ne: true }, leaseUntil: { $gt: new Date() } },
+        { status: 'ready', role: { $ne: 'coordinator' }, draining: { $ne: true }, leaseUntil: { $gt: new Date() } },
         { projection: { url: 1, status: 1, activeSessionCount: 1, inFlightCount: 1, leaseUntil: 1, releaseId: 1, build: 1, lastAssignedAt: 1 } }
     ).sort({ activeSessionCount: 1, inFlightCount: 1, lastAssignedAt: 1, updatedAt: -1 }).limit(TFBOT_CLUSTER_CANDIDATE_LIMIT).toArray();
     const candidates = [];
     const eligibleRows = rows.filter(row => {
         const id = String(row._id || '');
-        return id && !excluded.has(id) && row.url && (!row.releaseId || row.releaseId === runtimeLogClusterId);
+        return id && row.role !== 'coordinator' && normalizeTfbotHost(row.host || '') !== TFBOT_COORDINATOR_HOST && !excluded.has(id) && row.url && (!row.releaseId || row.releaseId === runtimeLogClusterId);
     });
     const desiredHealthyCount = Math.max(1, Math.min(TFBOT_CLUSTER_HEALTH_PROBE_LIMIT, eligibleRows.length));
     for (let offset = 0; offset < eligibleRows.length && candidates.length < desiredHealthyCount; offset += TFBOT_CLUSTER_HEALTH_PROBE_LIMIT) {
@@ -3279,7 +3533,7 @@ async function getHealthyClusterCandidates(excludedIds = []) {
         }
     }
     if (!candidates.some(item => item._id === TFBOT_CLUSTER_INSTANCE_ID)) {
-        const localRecord = await db.collection('cluster_instances').findOne({ _id: TFBOT_CLUSTER_INSTANCE_ID, leaseUntil: { $gt: new Date() } }).catch(() => null);
+        const localRecord = TFBOT_CLUSTER_COORDINATOR_ONLY ? null : await db.collection('cluster_instances').findOne({ _id: TFBOT_CLUSTER_INSTANCE_ID, role: { $ne: 'coordinator' }, leaseUntil: { $gt: new Date() } }).catch(() => null);
         if (localRecord && !excluded.has(TFBOT_CLUSTER_INSTANCE_ID)) candidates.push({ ...localRecord, local: true, health: { ok: true, local: true } });
     }
     candidates.sort((a, b) => Number(a.activeSessionCount || 0) - Number(b.activeSessionCount || 0) || Number(a.inFlightCount || 0) - Number(b.inFlightCount || 0) || (new Date(a.lastAssignedAt || 0).getTime() - new Date(b.lastAssignedAt || 0).getTime()) || Number(!!a.local) - Number(!!b.local));
@@ -3288,7 +3542,7 @@ async function getHealthyClusterCandidates(excludedIds = []) {
 
 async function selectLeastLoadedClusterInstance(excludedIds = []) {
     const candidates = await getHealthyClusterCandidates(excludedIds);
-    const selected = candidates[0] || { _id: TFBOT_CLUSTER_INSTANCE_ID, url: TFBOT_CLUSTER_INSTANCE_URL, local: true, health: { ok: true, local: true } };
+    const selected = candidates[0] || { _id: TFBOT_CLUSTER_INSTANCE_ID, url: TFBOT_CLUSTER_INSTANCE_URL, local: !TFBOT_CLUSTER_COORDINATOR_ONLY, health: { ok: !TFBOT_CLUSTER_COORDINATOR_ONLY, local: !TFBOT_CLUSTER_COORDINATOR_ONLY } };
     if (selected?._id && db) {
         const assignedAt = new Date();
         await db.collection('cluster_instances').updateOne({ _id: selected._id, leaseUntil: { $gt: assignedAt } }, { $set: { lastAssignedAt: assignedAt } }).catch(() => {});
@@ -3325,7 +3579,7 @@ async function resolveClusterTargetForPairing(req) {
             console.warn('[cluster-session-owner-failover]', { sessionId, previousOwnerInstanceId: ownerId, action: 'reassign_only_after_session_and_account_locks_expire' });
             return selectLeastLoadedClusterInstance([ownerId]);
         }
-        return selectLeastLoadedClusterInstance();
+        return { _id: TFBOT_CLUSTER_INSTANCE_ID, url: TFBOT_CLUSTER_INSTANCE_URL, local: !TFBOT_CLUSTER_COORDINATOR_ONLY };
     }
     if (/^\d{8,15}$/.test(number)) {
         const pendingCutoff = new Date(Date.now() - Math.max(120000, Number(process.env.PAIRING_SESSION_TTL_MS || 900000)));
@@ -3341,7 +3595,7 @@ async function resolveClusterTargetForPairing(req) {
         const activeOwner = await db.collection('session_owners').findOne({ Number: number, connectionStatus: { $in: ['connected', 'connecte'] } }, { projection: { sessionId: 1, ownerInstanceId: 1 } }).catch(() => null);
         if (activeOwner?.sessionId) return { unavailable: true, reason: 'whatsapp_number_already_has_active_session', sessionId: activeOwner.sessionId };
     }
-    return selectLeastLoadedClusterInstance();
+    return { _id: TFBOT_CLUSTER_INSTANCE_ID, url: TFBOT_CLUSTER_INSTANCE_URL, local: !TFBOT_CLUSTER_COORDINATOR_ONLY };
 }
 
 async function proxyClusterRequest(req, res, instance) {
@@ -3445,9 +3699,39 @@ app.get(TFBOT_CLUSTER_HEALTH_PATH, (req, res) => {
     });
 });
 
+app.get(TFBOT_ROUTER_OK_PATH, (req, res) => {
+    if (!isValidClusterToken(req)) return res.status(404).type('text/plain').send('Not found');
+    const expectedHost = normalizeTfbotHost(req.get('X-TFBOT-Expected-Host') || '');
+    const requestHost = normalizeTfbotHost(req.get('host') || req.hostname || '');
+    const ready = !!db && !serverShuttingDown && !TFBOT_CLUSTER_COORDINATOR_ONLY && !!TFBOT_ROUTER_DOMAIN_BY_HOST.get(TFBOT_CLUSTER_INSTANCE_HOST) && expectedHost === TFBOT_CLUSTER_INSTANCE_HOST && requestHost === expectedHost;
+    return res.status(ready ? 200 : 503).json({
+        ok: ready,
+        service: 'tfbot-router-node',
+        database: TFBOT_DATABASE_NAME,
+        host: TFBOT_CLUSTER_INSTANCE_HOST,
+        releaseId: runtimeLogClusterId,
+        instanceId: TFBOT_CLUSTER_INSTANCE_ID,
+        activeSessionCount: activeSessions.size,
+        inFlightCount: clusterInFlightRequests,
+        at: new Date().toISOString()
+    });
+});
+
+app.get(TFBOT_ROUTER_RESOLVE_PATH, async (req, res) => {
+    if (!isValidClusterToken(req) || !TFBOT_CLUSTER_COORDINATOR_ONLY) return res.status(404).type('text/plain').send('Not found');
+    try {
+        const selected = await refreshTfbotActiveDomain(false, req.get('X-TFBOT-Calling-Host') || '');
+        if (!selected) return res.status(503).json({ ok: false, error: 'no_domain_selection_available' });
+        return res.status(200).json({ ok: true, host: selected.host, url: selected.url, activeHost: selected.host, activeUrl: selected.url, checkedAt: selected.checkedAt, generation: selected.generation, healthy: selected.healthy, source: selected.source });
+    } catch (error) {
+        console.error('[tfbot-router-resolve-failed]', { error: error?.message || String(error) });
+        return res.status(503).json({ ok: false, error: 'domain_resolution_failed' });
+    }
+});
+
 async function startClusterHeartbeat() {
     if (!TFBOT_CLUSTER_ENABLED || !db) {
-        console.warn('[cluster-disabled]', { tokenConfigured: !!TFBOT_CLUSTER_TOKEN, instanceUrlConfigured: !!TFBOT_CLUSTER_INSTANCE_URL, requiredEnvironment: ['TFBOT_CLUSTER_TOKEN', 'TFBOT_INSTANCE_URL or RENDER_EXTERNAL_URL'] });
+        console.warn('[cluster-disabled]', { tokenConfigured: !!TFBOT_CLUSTER_TOKEN, detectedRenderHost: TFBOT_CLUSTER_INSTANCE_HOST || null, note: 'domain detection uses RENDER_EXTERNAL_HOSTNAME and RENDER_SERVICE_NAME; no TFBOT_INSTANCE_URL is required' });
         return false;
     }
     await registerCurrentClusterInstance(true);
@@ -3456,11 +3740,13 @@ async function startClusterHeartbeat() {
         registerCurrentClusterInstance(true).catch(error => console.warn('[cluster-heartbeat-failed]', { error: error?.message || String(error) }));
     }, TFBOT_CLUSTER_HEARTBEAT_MS);
     if (typeof clusterHeartbeatTimer.unref === 'function') clusterHeartbeatTimer.unref();
-    console.info('[cluster-instance-registered]', { instanceId: TFBOT_CLUSTER_INSTANCE_ID, url: TFBOT_CLUSTER_INSTANCE_URL, releaseId: runtimeLogClusterId, leaseMs: TFBOT_CLUSTER_LEASE_MS, heartbeatMs: TFBOT_CLUSTER_HEARTBEAT_MS });
+    console.info('[cluster-instance-registered]', { instanceId: TFBOT_CLUSTER_INSTANCE_ID, host: TFBOT_CLUSTER_INSTANCE_HOST, url: TFBOT_CLUSTER_INSTANCE_URL, role: TFBOT_CLUSTER_COORDINATOR_ONLY ? 'coordinator' : 'serving', coordinator: TFBOT_COORDINATOR_HOST, releaseId: runtimeLogClusterId, leaseMs: TFBOT_CLUSTER_LEASE_MS, heartbeatMs: TFBOT_CLUSTER_HEARTBEAT_MS });
+    if (TFBOT_CLUSTER_COORDINATOR_ONLY) console.info('[tfbot-router-ready]', { coordinator: TFBOT_COORDINATOR_HOST, servingDomains: TFBOT_ROUTER_SERVING_DOMAINS.map(item => item.host), selection: 'on-demand-get-probes' });
     return true;
 }
 
 async function createCodeSession(sId, format = 'pair', expectExisting = false, autoExpire = false, requestedNumber = '') {
+    if (TFBOT_CLUSTER_COORDINATOR_ONLY) throw new Error('coordinator_instance_cannot_create_whatsapp_sessions');
     const normalizedFormat = normalizeConnectionFormat(format);
     const phoneNumber = normalizePhoneNumber(requestedNumber);
     const acquireRequestedNumberLock = async () => {
@@ -9044,7 +9330,17 @@ async function main() {
         physicalCollections: [TFBOT_WHATSAPP_COLLECTION, TFBOT_APP_DATA_COLLECTION],
         clusterEnabled: TFBOT_CLUSTER_ENABLED,
         clusterPrivateNetwork: TFBOT_CLUSTER_PRIVATE_NETWORK,
+        clusterInstanceHost: TFBOT_CLUSTER_INSTANCE_HOST || null,
         clusterInstanceUrl: TFBOT_CLUSTER_INSTANCE_URL || null,
+        clusterCoordinator: TFBOT_COORDINATOR_HOST,
+        clusterCoordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY,
+        clusterActiveDomainProbeMs: TFBOT_ROUTER_ACTIVE_PROBE_MS,
+        clusterFullDomainProbeMs: TFBOT_ROUTER_COORDINATOR_CACHE_MS,
+        clusterServingDomains: TFBOT_ROUTER_SERVING_DOMAINS.map(item => item.host),
+        clusterDomainRouter: true,
+        clusterDomainDetectionUsesRenderDefaults: true,
+        clusterDomainSelectionPriority: 'primary-first-then-tfbot2-to-tfbot6',
+        clusterNonActiveDomainsRedirectStatus: 307,
         logoMaxBytes: TFBOT_LOGO_MAX_BYTES,
         logoMaxDimension: TFBOT_LOGO_MAX_DIMENSION,
         logoJpegQuality: TFBOT_LOGO_JPEG_QUALITY,
@@ -9097,10 +9393,14 @@ async function main() {
     } catch (clusterStartError) {
         console.error('[cluster-startup-registration-failed]', clusterStartError?.message || String(clusterStartError));
     }
-    try {
-        await loadExistingSessions();
-    } catch (error) {
-        console.error('[session-restore]', error?.message || error);
+    if (!TFBOT_CLUSTER_COORDINATOR_ONLY) {
+        try {
+            await loadExistingSessions();
+        } catch (error) {
+            console.error('[session-restore]', error?.message || error);
+        }
+    } else {
+        console.info('[tfbot-coordinator-session-restore-skipped]', { host: TFBOT_CLUSTER_INSTANCE_HOST, role: 'health-check-and-domain-selection-only' });
     }
 }
 
