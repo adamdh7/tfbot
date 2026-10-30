@@ -1701,7 +1701,7 @@ async function connectMongo() {
     try {
         mongoClient = new MongoClient(mongoUri, { maxPoolSize: 30, minPoolSize: 1, serverSelectionTimeoutMS: 15000, connectTimeoutMS: 15000, retryWrites: true, appName: 'AdamDH7WhatsAppBot' });
         await mongoClient.connect();
-        db = mongoClient.db('dh7bot');
+        db = mongoClient.db('tfbot');
         const runtimeLogsCollection = db.collection('server_runtime_logs');
         await runtimeLogsCollection.createIndex({ deploymentId: 1, createdAt: -1, _id: -1 }, { name: 'server_runtime_logs_deployment_created_desc' });
         const removedPreviousDeployLogs = await runtimeLogsCollection.deleteMany({ deploymentId: { $ne: runtimeLogDeploymentId } });
