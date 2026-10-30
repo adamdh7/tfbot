@@ -335,7 +335,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'wa-signal-delivery-2026-10-30-r3';
+const RUNTIME_FIX_BUILD = 'wa-signal-delivery-2026-10-30-r6';
 const PORT = process.env.PORT || 7000;
 const BOT_TIME_ZONE = process.env.BOT_TIME_ZONE || 'America/Santo_Domingo';
 const CHAT_CONTEXT_MAX_CHARS = Math.max(2500, Number(process.env.CHAT_CONTEXT_MAX_CHARS || 7000));
@@ -414,8 +414,11 @@ const reconnectTimers = new Map();
 const sessionStartPromises = new Map();
 const SESSION_HEALTH_CHECK_INTERVAL_MS = Math.max(15000, Number(process.env.SESSION_HEALTH_CHECK_INTERVAL_MS) || 30000);
 const SESSION_WS_PONG_TIMEOUT_MS = Math.max(60000, Number(process.env.SESSION_WS_PONG_TIMEOUT_MS) || 120000);
-const BAILEYS_RESET_GROUP_SENDER_KEY_MEMORY = !/^(?:0|false|off|no)$/i.test(String(process.env.BAILEYS_RESET_GROUP_SENDER_KEY_MEMORY ?? 'true').trim());
+const GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS = Math.max(60000, Number(process.env.GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS) || 6 * 60 * 60 * 1000);
+const groupSenderKeyResetAt = new Map();
+const groupSenderKeyResetInFlight = new Map();
 const GROUP_METADATA_CACHE_TTL_MS = Math.max(30000, Number(process.env.GROUP_METADATA_CACHE_TTL_MS) || 300000);
+const LID_PHONE_MAPPING_FRESH_MS = Math.max(5000, Math.min(300000, Number(process.env.LID_PHONE_MAPPING_FRESH_MS) || 60000));
 const GROUP_METADATA_FETCH_TIMEOUT_MS = Math.max(3000, Number(process.env.GROUP_METADATA_FETCH_TIMEOUT_MS) || 12000);
 const authWriteQueues = new Map();
 const groupMetadataFetchPromises = new Map();
@@ -490,44 +493,73 @@ function rememberLidPhonePair(sessionId, first, second, source = 'message_key') 
     const globalKey = `global:${lid}`;
     const currentSessionRecord = lidPhoneResolutionCache.get(sessionKey);
     const currentGlobalRecord = lidPhoneResolutionCache.get(globalKey);
-    if ((currentSessionRecord?.phone && currentSessionRecord.phone !== phone) || (currentGlobalRecord?.phone && currentGlobalRecord.phone !== phone)) {
-        console.warn('[lid-phone-map-conflict]', {
+    const trustedSessionSources = new Set(['signal_lid_mapping', 'signal_pn_lid_mapping', 'lid_mapping_update', 'message_key', 'cached_group_metadata']);
+    const trustedSessionEvidence = trustedSessionSources.has(source);
+    const sessionConflict = !!(currentSessionRecord?.phone && currentSessionRecord.phone !== phone);
+    const globalConflict = !!(currentGlobalRecord?.phone && currentGlobalRecord.phone !== phone);
+    if (sessionConflict && !trustedSessionEvidence) {
+        console.warn('[lid-phone-map-session-conflict]', {
             sessionId,
             lid,
-            existingPhone: currentGlobalRecord?.phone || currentSessionRecord?.phone || null,
+            existingPhone: currentSessionRecord.phone,
             observedPhone: phone,
-            source
+            source,
+            action: 'keep_session_mapping'
         });
         return false;
     }
     const now = Date.now();
     const record = { phone, source, updatedAt: now };
+    if (sessionConflict) {
+        console.warn('[lid-phone-map-session-refresh]', {
+            sessionId,
+            lid,
+            previousPhone: currentSessionRecord.phone,
+            observedPhone: phone,
+            source,
+            action: 'replace_session_mapping_from_current_signal_evidence'
+        });
+    }
     lidPhoneResolutionCache.set(sessionKey, record);
-    lidPhoneResolutionCache.set(globalKey, record);
+    if (!globalConflict) {
+        lidPhoneResolutionCache.set(globalKey, record);
+    } else {
+        console.warn('[lid-phone-map-global-conflict]', {
+            sessionId,
+            lid,
+            existingGlobalPhone: currentGlobalRecord.phone,
+            observedSessionPhone: phone,
+            source,
+            action: 'preserve_global_mapping_and_use_session_scoped_mapping'
+        });
+    }
     while (lidPhoneResolutionCache.size > 10000) lidPhoneResolutionCache.delete(lidPhoneResolutionCache.keys().next().value);
-    const lastPersistedAt = Number(lidPhonePersistedKeys.get(lid) || 0);
-    if (db && Date.now() - lastPersistedAt >= 12 * 60 * 60 * 1000 && !lidPhonePersistingKeys.has(lid)) {
-        lidPhonePersistingKeys.add(lid);
+    const persistKey = `${sessionId}:${lid}`;
+    const lastPersistedAt = Number(lidPhonePersistedKeys.get(persistKey) || 0);
+    const mappingChanged = !currentSessionRecord?.phone || normalizePhoneCacheJid(currentSessionRecord.phone) !== phone;
+    if (db && (mappingChanged || Date.now() - lastPersistedAt >= 12 * 60 * 60 * 1000) && !lidPhonePersistingKeys.has(persistKey)) {
+        lidPhonePersistingKeys.add(persistKey);
         void (async () => {
             const collection = db.collection('lid_phone_mappings');
-            const existing = await collection.findOne({ _id: lid }, { projection: { phone: 1 } });
-            const existingPhone = normalizePhoneCacheJid(existing?.phone || '');
-            if (existingPhone && existingPhone !== phone) {
-                console.warn('[lid-phone-map-database-conflict]', { sessionId, lid, existingPhone, observedPhone: phone, source });
-                lidPhonePersistedKeys.set(lid, Date.now());
-                return;
-            }
+            const scopedId = `${sessionId}:${lid}`;
             await collection.updateOne(
-                { _id: lid },
-                { $set: { phone, lastSessionId: sessionId, source, updatedAt: new Date(), expireAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) }, $setOnInsert: { createdAt: new Date() } },
+                { _id: scopedId },
+                { $set: { phone, lastSessionId: sessionId, sessionId, source, updatedAt: new Date(), expireAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) }, $setOnInsert: { createdAt: new Date(), scoped: true } },
                 { upsert: true }
             );
-            lidPhonePersistedKeys.set(lid, Date.now());
+            if (!globalConflict) {
+                await collection.updateOne(
+                    { _id: lid },
+                    { $set: { phone, lastSessionId: sessionId, source, updatedAt: new Date(), expireAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) }, $setOnInsert: { createdAt: new Date() } },
+                    { upsert: true }
+                );
+            }
+            lidPhonePersistedKeys.set(persistKey, Date.now());
             while (lidPhonePersistedKeys.size > 5000) lidPhonePersistedKeys.delete(lidPhonePersistedKeys.keys().next().value);
         })().catch(error => {
             console.warn('[lid-phone-map-persist-failed]', { sessionId, lid, error: error?.message || String(error) });
         }).finally(() => {
-            lidPhonePersistingKeys.delete(lid);
+            lidPhonePersistingKeys.delete(persistKey);
         });
     }
     return true;
@@ -553,14 +585,28 @@ function getRememberedPhoneForLid(sessionId, lidValue) {
 function getRememberedLidForPhone(sessionId, phoneValue) {
     const phone = normalizePhoneCacheJid(phoneValue);
     if (!phone) return '';
-    const prefix = sessionId ? `${sessionId}:` : '';
-    for (const [key, record] of lidPhoneResolutionCache.entries()) {
-        if (prefix && !key.startsWith(prefix) && !key.startsWith('global:')) continue;
-        if (normalizePhoneCacheJid(record?.phone) !== phone) continue;
-        const lid = normalizeLidCacheKey(key.startsWith('global:') ? key.slice('global:'.length) : prefix ? key.slice(prefix.length) : key.slice(key.indexOf(':') + 1));
-        if (/@lid$/i.test(lid) && Date.now() - Number(record.updatedAt || 0) <= 30 * 24 * 60 * 60 * 1000) return lid;
+    const now = Date.now();
+    const sessionPrefix = sessionId ? `${sessionId}:` : '';
+    const collect = prefix => {
+        const matches = [];
+        for (const [key, record] of lidPhoneResolutionCache.entries()) {
+            if (!key.startsWith(prefix)) continue;
+            if (normalizePhoneCacheJid(record?.phone) !== phone) continue;
+            if (now - Number(record?.updatedAt || 0) > 30 * 24 * 60 * 60 * 1000) {
+                lidPhoneResolutionCache.delete(key);
+                continue;
+            }
+            const lid = normalizeLidCacheKey(key.slice(prefix.length));
+            if (/@lid$/i.test(lid)) matches.push({ lid, updatedAt: Number(record.updatedAt || 0) });
+        }
+        matches.sort((a, b) => b.updatedAt - a.updatedAt);
+        return matches[0]?.lid || '';
+    };
+    if (sessionPrefix) {
+        const sessionMatch = collect(sessionPrefix);
+        if (sessionMatch) return sessionMatch;
     }
-    return '';
+    return collect('global:');
 }
 
 function phoneFromCachedGroupMetadata(sessionId, lidValue) {
@@ -671,43 +717,60 @@ async function resolvePhoneForLid(sessionId, sock, lidValue) {
     const lid = normalizeLidCacheKey(lidValue);
     if (!lid || !/@lid$/i.test(lid)) return null;
     const cached = getRememberedPhoneForLid(sessionId, lid);
-    if (cached) {
-        const sessionRecord = lidPhoneResolutionCache.get(`${sessionId}:${lid}`);
-        const globalRecord = lidPhoneResolutionCache.get(`global:${lid}`);
-        return { phone: cached, source: sessionRecord?.source || globalRecord?.source || 'lid_phone_cache' };
+    const sessionRecord = lidPhoneResolutionCache.get(`${sessionId}:${lid}`);
+    if (cached && sessionRecord && Date.now() - Number(sessionRecord.updatedAt || 0) <= LID_PHONE_MAPPING_FRESH_MS) {
+        return { phone: cached, source: sessionRecord.source || 'session_lid_phone_cache' };
     }
-    const groupMetadataResolution = phoneFromCachedGroupMetadata(sessionId, lid);
-    if (groupMetadataResolution?.phone) return groupMetadataResolution;
     try {
         const mapped = normalizePhoneCacheJid(await promiseWithTimeout(sock?.signalRepository?.lidMapping?.getPNForLID?.(lid), 1500, 'LID-to-PN socket lookup'));
         if (mapped) {
-            const accepted = rememberLidPhonePair(sessionId, lid, mapped, 'signal_lid_mapping');
-            if (!accepted) {
-                const stablePhone = getRememberedPhoneForLid(sessionId, lid);
-                if (stablePhone) return { phone: stablePhone, source: 'lid_phone_cache_conflict_safe' };
-            }
+            rememberLidPhonePair(sessionId, lid, mapped, 'signal_lid_mapping');
             return { phone: mapped, source: 'signal_lid_mapping' };
         }
     } catch (error) {
         console.warn('[lid-phone-socket-resolution-failed]', { sessionId, lid, error: error?.message || String(error) });
     }
+    if (cached) {
+        const globalRecord = lidPhoneResolutionCache.get(`global:${lid}`);
+        return { phone: cached, source: sessionRecord?.source || globalRecord?.source || 'lid_phone_cache' };
+    }
+    const groupMetadataResolution = phoneFromCachedGroupMetadata(sessionId, lid);
+    if (groupMetadataResolution?.phone) return groupMetadataResolution;
     if (db) {
         try {
-            const record = await promiseWithTimeout(db.collection('lid_phone_mappings').findOne({ _id: lid }, { projection: { phone: 1, source: 1 } }), 1500, 'LID-to-PN database lookup');
+            const scopedRecord = await promiseWithTimeout(db.collection('lid_phone_mappings').findOne({ _id: `${sessionId}:${lid}` }, { projection: { phone: 1, source: 1 } }), 1500, 'session-scoped LID-to-PN database lookup');
+            const legacyRecord = scopedRecord ? null : await promiseWithTimeout(db.collection('lid_phone_mappings').findOne({ _id: lid }, { projection: { phone: 1, source: 1 } }), 1500, 'LID-to-PN database lookup');
+            const record = scopedRecord || legacyRecord;
             const persistedPhone = normalizePhoneCacheJid(record?.phone || '');
             if (persistedPhone) {
-                const accepted = rememberLidPhonePair(sessionId, lid, persistedPhone, record?.source || 'mongo_lid_phone_mapping');
-                if (!accepted) {
-                    const stablePhone = getRememberedPhoneForLid(sessionId, lid);
-                    if (stablePhone) return { phone: stablePhone, source: 'lid_phone_cache_conflict_safe' };
-                }
-                return { phone: persistedPhone, source: 'mongo_lid_phone_mapping' };
+                rememberLidPhonePair(sessionId, lid, persistedPhone, record?.source || 'mongo_lid_phone_mapping');
+                return { phone: persistedPhone, source: scopedRecord ? 'mongo_session_lid_phone_mapping' : 'mongo_lid_phone_mapping' };
             }
         } catch (error) {
             console.warn('[lid-phone-database-resolution-failed]', { sessionId, lid, error: error?.message || String(error) });
         }
     }
     return null;
+}
+
+async function resolveLidForPhone(sessionId, sock, phoneValue) {
+    const phone = normalizePhoneCacheJid(phoneValue);
+    if (!phone) return null;
+    const remembered = getRememberedLidForPhone(sessionId, phone);
+    const sessionRecord = remembered ? lidPhoneResolutionCache.get(`${sessionId}:${remembered}`) : null;
+    if (remembered && sessionRecord && Date.now() - Number(sessionRecord.updatedAt || 0) <= LID_PHONE_MAPPING_FRESH_MS) {
+        return { lid: remembered, source: sessionRecord.source || 'session_phone_lid_cache' };
+    }
+    try {
+        const mappedLid = normalizeLidCacheKey(await promiseWithTimeout(sock?.signalRepository?.lidMapping?.getLIDForPN?.(phone), 1500, 'PN-to-LID socket lookup'));
+        if (/@lid$/i.test(mappedLid)) {
+            rememberLidPhonePair(sessionId, mappedLid, phone, 'signal_pn_lid_mapping');
+            return { lid: mappedLid, source: 'signal_pn_lid_mapping' };
+        }
+    } catch (error) {
+        console.warn('[pn-lid-socket-resolution-failed]', { sessionId, phone, error: error?.message || String(error) });
+    }
+    return /@lid$/i.test(remembered) ? { lid: remembered, source: 'session_or_global_lid_cache' } : null;
 }
 
 function cacheMessageIdentityAliases(sessionId, message) {
@@ -815,6 +878,7 @@ function cacheRecentMessage(sessionId, message) {
         id,
         key: message.key ? { ...message.key } : null,
         from: message.key.remoteJid || '',
+        chatAliases: [...new Set([message.key.remoteJid, message.key.remoteJidAlt, message.key.participant, message.key.participantAlt, message.key.participantPn, message.key.senderPn].map(value => String(value || '').trim()).filter(Boolean))],
         sender: message.key.participant || message.key.remoteJid || '',
         fromMe: !!message.key.fromMe,
         participantAlt: message.key.participantAlt || message.key.participantPn || '',
@@ -899,6 +963,165 @@ function areEquivalentWhatsAppChatJids(sessionId, first, second) {
     return !!leftPhone && !!rightPhone && leftPhone === rightPhone;
 }
 
+
+async function invalidateSenderKeyMemoryForParticipant(sessionId, participantJid, reason = 'identity_change') {
+    const normalizedParticipant = normalizeOutgoingEchoJid(participantJid);
+    if (!sessionId || !normalizedParticipant || !db) return { scanned: 0, changed: 0, removed: 0 };
+    const active = activeSessions.get(sessionId);
+    const keyStore = active?.signalKeyStore || active?.sock?.authState?.keys;
+    if (!keyStore || typeof keyStore.get !== 'function' || typeof keyStore.set !== 'function') return { scanned: 0, changed: 0, removed: 0 };
+    const aliases = new Set([normalizedParticipant]);
+    const participantPhone = normalizePhoneCacheJid(participantJid) || getRememberedPhoneForLid(sessionId, participantJid);
+    const participantLid = /@lid$/i.test(normalizeLidCacheKey(participantJid)) ? normalizeLidCacheKey(participantJid) : getRememberedLidForPhone(sessionId, participantPhone);
+    if (participantPhone) aliases.add(normalizeOutgoingEchoJid(participantPhone));
+    if (/@lid$/i.test(participantLid)) aliases.add(normalizeOutgoingEchoJid(participantLid));
+    const prefix = `auth-${sessionId}_key_sender-key-memory-`;
+    const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const groupIds = new Set();
+    try {
+        const docs = await db.collection('baileys_auth').find(
+            { _id: { $regex: `^${escapedPrefix}` } },
+            { projection: { _id: 1 } }
+        ).limit(2000).toArray();
+        for (const doc of docs) {
+            const groupJid = String(doc?._id || '').slice(prefix.length);
+            if (/@g\.us$/i.test(groupJid)) groupIds.add(groupJid);
+        }
+    } catch (error) {
+        console.warn('[sender-key-memory-enumeration-failed]', { sessionId, error: error?.message || String(error) });
+    }
+    const groupPrefix = `${sessionId}:`;
+    for (const cacheKey of groupMetadataCache.keys()) {
+        if (!cacheKey.startsWith(groupPrefix)) continue;
+        const groupJid = cacheKey.slice(groupPrefix.length);
+        if (/@g\.us$/i.test(groupJid)) groupIds.add(groupJid);
+    }
+    let changedGroups = 0;
+    let removedEntries = 0;
+    let scannedGroups = 0;
+    for (const groupJid of groupIds) {
+        scannedGroups++;
+        try {
+            const stored = await promiseWithTimeout(keyStore.get('sender-key-memory', [groupJid]), 5000, 'Read group sender-key memory');
+            const currentMap = stored?.[groupJid];
+            if (!currentMap || typeof currentMap !== 'object' || Array.isArray(currentMap)) continue;
+            const nextMap = { ...currentMap };
+            let removedHere = 0;
+            for (const storedJid of Object.keys(nextMap)) {
+                const canonicalStored = normalizeOutgoingEchoJid(storedJid);
+                const matches = aliases.has(canonicalStored) || [...aliases].some(alias => areEquivalentWhatsAppChatJids(sessionId, storedJid, alias));
+                if (matches) {
+                    delete nextMap[storedJid];
+                    removedHere++;
+                }
+            }
+            if (!removedHere) continue;
+            const nextValue = Object.keys(nextMap).length ? nextMap : null;
+            await promiseWithTimeout(keyStore.set({ 'sender-key-memory': { [groupJid]: nextValue } }), 8000, 'Invalidate changed participant sender-key memory');
+            changedGroups++;
+            removedEntries += removedHere;
+        } catch (error) {
+            console.warn('[sender-key-memory-participant-invalidation-failed]', { sessionId, groupJid, reason, error: error?.message || String(error) });
+        }
+    }
+    if (changedGroups) {
+        await flushAuthWritesForSession(sessionId).catch(error => console.warn('[sender-key-memory-invalidation-flush-failed]', { sessionId, reason, error: error?.message || String(error) }));
+    }
+    console.info('[sender-key-memory-participant-invalidated]', {
+        sessionId,
+        participant: normalizedParticipant,
+        reason,
+        scannedGroups,
+        changedGroups,
+        removedEntries
+    });
+    return { scanned: scannedGroups, changed: changedGroups, removed: removedEntries };
+}
+
+async function resetSessionGroupSenderKeyMemory(sessionId, reason = 'group_membership_change', onlyGroupJid = '') {
+    if (!sessionId || !db) return 0;
+    const active = activeSessions.get(sessionId);
+    const keyStore = active?.signalKeyStore || active?.sock?.authState?.keys;
+    if (!keyStore || typeof keyStore.set !== 'function') return 0;
+    const groupIds = new Set();
+    const prefix = `auth-${sessionId}_key_sender-key-memory-`;
+    const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (onlyGroupJid && /@g\.us$/i.test(onlyGroupJid)) groupIds.add(onlyGroupJid);
+    else {
+        try {
+            const docs = await db.collection('baileys_auth').find(
+                { _id: { $regex: `^${escapedPrefix}` } },
+                { projection: { _id: 1 } }
+            ).limit(2000).toArray();
+            for (const doc of docs) {
+                const groupJid = String(doc?._id || '').slice(prefix.length);
+                if (/@g\.us$/i.test(groupJid)) groupIds.add(groupJid);
+            }
+        } catch (error) {
+            console.warn('[sender-key-memory-reset-enumeration-failed]', { sessionId, reason, error: error?.message || String(error) });
+        }
+        const groupPrefix = `${sessionId}:`;
+        for (const cacheKey of groupMetadataCache.keys()) {
+            if (!cacheKey.startsWith(groupPrefix)) continue;
+            const groupJid = cacheKey.slice(groupPrefix.length);
+            if (/@g\.us$/i.test(groupJid)) groupIds.add(groupJid);
+        }
+    }
+    let resetCount = 0;
+    for (const groupJid of groupIds) {
+        try {
+            await promiseWithTimeout(keyStore.set({ 'sender-key-memory': { [groupJid]: null } }), 8000, 'Reset group sender-key memory');
+            groupSenderKeyResetAt.set(`${sessionId}:${groupJid}`, Date.now());
+            resetCount++;
+        } catch (error) {
+            console.warn('[sender-key-memory-group-reset-failed]', { sessionId, groupJid, reason, error: error?.message || String(error) });
+        }
+    }
+    if (resetCount) await flushAuthWritesForSession(sessionId).catch(error => console.warn('[sender-key-memory-group-reset-flush-failed]', { sessionId, reason, error: error?.message || String(error) }));
+    console.info('[sender-key-memory-session-reset]', { sessionId, reason, resetCount });
+    return resetCount;
+}
+
+async function resetGroupSenderKeyMemoryBeforeSend(sessionId, groupJid) {
+    const normalizedGroupJid = String(groupJid || '').trim();
+    if (!sessionId || !/@g\.us$/i.test(normalizedGroupJid)) return false;
+    const cacheKey = `${sessionId}:${normalizedGroupJid}`;
+    const lastResetAt = Number(groupSenderKeyResetAt.get(cacheKey) || 0);
+    if (lastResetAt && Date.now() - lastResetAt < GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS) return false;
+    const pending = groupSenderKeyResetInFlight.get(cacheKey);
+    if (pending) return pending;
+    const active = activeSessions.get(sessionId);
+    const keyStore = active?.signalKeyStore || active?.sock?.authState?.keys;
+    if (!keyStore || typeof keyStore.set !== 'function') {
+        console.warn('[group-sender-key-memory-reset-skipped]', { sessionId, groupJid: normalizedGroupJid, reason: 'signal_key_store_not_attached' });
+        return false;
+    }
+    const operation = (async () => {
+        try {
+            await promiseWithTimeout(keyStore.set({ 'sender-key-memory': { [normalizedGroupJid]: null } }), 8000, 'Initial group sender-key memory reset');
+            await flushAuthWritesForSession(sessionId);
+            groupSenderKeyResetAt.set(cacheKey, Date.now());
+            while (groupSenderKeyResetAt.size > 10000) groupSenderKeyResetAt.delete(groupSenderKeyResetAt.keys().next().value);
+            console.info('[group-sender-key-memory-cooldown-reset]', {
+                sessionId,
+                groupJid: normalizedGroupJid,
+                cooldownMs: GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS,
+                action: 'reset_once_per_group_cooldown_not_before_every_message'
+            });
+            return true;
+        } catch (error) {
+            console.warn('[group-sender-key-memory-reset-failed]', { sessionId, groupJid: normalizedGroupJid, error: error?.message || String(error) });
+            return false;
+        }
+    })();
+    groupSenderKeyResetInFlight.set(cacheKey, operation);
+    try {
+        return await operation;
+    } finally {
+        if (groupSenderKeyResetInFlight.get(cacheKey) === operation) groupSenderKeyResetInFlight.delete(cacheKey);
+    }
+}
+
 function rememberOutgoingMessageId(sessionId, messageId) {
     const id = String(messageId || '').trim();
     if (!sessionId || !id) return;
@@ -977,7 +1200,8 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         const ownPhoneJid = normalizePhoneCacheJid(sock.user?.id || sock.user?.phoneNumber || '');
         let ownLidJid = normalizeLidCacheKey(sock.user?.lid || '');
         if (!/@lid$/i.test(ownLidJid) && sessionId && ownPhoneJid) {
-            ownLidJid = normalizeLidCacheKey(getRememberedLidForPhone(sessionId, ownPhoneJid));
+            const ownLidResolution = await resolveLidForPhone(sessionId, sock, ownPhoneJid);
+            ownLidJid = normalizeLidCacheKey(ownLidResolution?.lid || '');
         }
         let destinationPhoneJid = normalizePhoneCacheJid(originalDestinationJid);
         if (!destinationPhoneJid && sessionId && /@lid$/i.test(originalDestinationJid)) {
@@ -995,58 +1219,59 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 console.warn('[self-chat-identity-check-failed]', { sessionId, error: selfCheckError?.message || String(selfCheckError) });
             }
         }
+        const selfPrimaryJid = isSelfChatDestination && ownPhoneJid ? ownPhoneJid : ownLidJid;
+        const selfFallbackJid = isSelfChatDestination && /@lid$/i.test(ownLidJid) && ownPhoneJid !== ownLidJid ? ownLidJid : '';
         if (isSelfChatDestination) {
-            console.info('[self-chat-pn-preferred]', {
+            console.info(selfPrimaryJid === ownPhoneJid ? '[self-chat-pn-preferred]' : '[self-chat-lid-fallback-primary]', {
                 sessionId,
-                destinationResolution: 'own_phone_jid_preferred_to_avoid_own_lid_signal_session_mismatch',
+                destinationResolution: selfPrimaryJid === ownPhoneJid ? 'own_phone_preferred_with_lid_fallback' : 'own_lid_used_because_phone_unavailable',
                 ownPhoneAvailable: !!ownPhoneJid,
+                ownLidAvailable: /@lid$/i.test(ownLidJid),
                 originalDestinationType: /@lid$/i.test(originalDestinationJid) ? 'lid' : 'phone'
             });
         }
-        if (BAILEYS_RESET_GROUP_SENDER_KEY_MEMORY && /@g\.us$/i.test(originalDestinationJid)) {
-            const signalKeys = activeSession?.signalKeyStore || activeSession?.authState?.keys;
-            if (signalKeys && typeof signalKeys.set === 'function') {
-                await promiseWithTimeout(
-                    signalKeys.set({ 'sender-key-memory': { [originalDestinationJid]: null } }),
-                    12000,
-                    'Reset group sender-key distribution memory'
-                );
-                if (sessionId) await flushAuthWritesForSession(sessionId);
-                console.info('[group-sender-key-memory-reset]', {
-                    sessionId,
-                    groupJid: originalDestinationJid,
-                    action: 'force_fresh_sender_key_distribution_before_group_send',
-                    reason: 'repair_stale_device_sender_key_memory'
-                });
-            } else {
-                console.warn('[group-sender-key-memory-reset-unavailable]', { sessionId, groupJid: originalDestinationJid, reason: 'signal_key_store_not_attached' });
-            }
+        if (sessionId && /@g\.us$/i.test(originalDestinationJid)) {
+            await resetGroupSenderKeyMemoryBeforeSend(sessionId, originalDestinationJid);
         }
-        let destinationJid = isSelfChatDestination ? ownPhoneJid : originalDestinationJid;
+        let destinationJid = isSelfChatDestination ? selfPrimaryJid : originalDestinationJid;
         let destinationResolution = isSelfChatDestination
-            ? 'self_chat_phone_jid_preferred'
+            ? (selfPrimaryJid === ownPhoneJid ? 'self_chat_phone_preferred_lid_fallback' : 'self_chat_lid_primary_phone_unavailable')
             : /@lid$/i.test(originalDestinationJid) ? 'original_lid_preferred' : 'original_destination';
-        let alternateDestinationJid = '';
-        let alternateDestinationResolution = isSelfChatDestination ? 'self_chat_lid_fallback_disabled' : '';
+        let alternateDestinationJid = isSelfChatDestination ? selfFallbackJid : '';
+        let alternateDestinationResolution = isSelfChatDestination && selfFallbackJid ? 'self_chat_lid_fallback' : '';
         if (!isSelfChatDestination && sessionId && /@lid$/i.test(originalDestinationJid)) {
             try {
                 const resolved = await resolvePhoneForLid(sessionId, sock, originalDestinationJid);
-                alternateDestinationJid = normalizePhoneCacheJid(resolved?.phone || getRememberedPhoneForLid(sessionId, originalDestinationJid));
+                const mappedPhone = normalizePhoneCacheJid(resolved?.phone || getRememberedPhoneForLid(sessionId, originalDestinationJid));
+                alternateDestinationJid = mappedPhone;
                 alternateDestinationResolution = resolved?.source || (alternateDestinationJid ? 'lid_phone_cache' : 'unavailable');
+                if (mappedPhone) {
+                    const refreshed = await resolveLidForPhone(sessionId, sock, mappedPhone);
+                    const refreshedLid = normalizeLidCacheKey(refreshed?.lid || '');
+                    if (/@lid$/i.test(refreshedLid)) {
+                        if (refreshedLid !== normalizeLidCacheKey(originalDestinationJid)) {
+                            destinationJid = refreshedLid;
+                            destinationResolution = `private_lid_revalidated_${refreshed?.source || 'signal_mapping'}`;
+                            alternateDestinationJid = mappedPhone;
+                            alternateDestinationResolution = 'verified_phone_fallback';
+                        } else {
+                            alternateDestinationResolution = 'verified_phone_fallback';
+                        }
+                        console.info('[private-send-lid-revalidated]', {
+                            sessionId,
+                            destinationChanged: refreshedLid !== normalizeLidCacheKey(originalDestinationJid),
+                            resolutionSource: refreshed?.source || 'signal_mapping'
+                        });
+                    }
+                }
             } catch (resolveError) {
                 console.warn('[private-send-alternate-resolution-failed]', { sessionId, originalDestinationJid, error: resolveError?.message || String(resolveError) });
             }
         } else if (!isSelfChatDestination && sessionId && /@s\.whatsapp\.net$/i.test(originalDestinationJid)) {
             try {
-                alternateDestinationJid = getRememberedLidForPhone(sessionId, originalDestinationJid);
-                if (!alternateDestinationJid) {
-                    const mappedLid = normalizeLidCacheKey(await sock?.signalRepository?.lidMapping?.getLIDForPN?.(normalizePhoneCacheJid(originalDestinationJid)));
-                    if (/@lid$/i.test(mappedLid)) {
-                        alternateDestinationJid = mappedLid;
-                        rememberLidPhonePair(sessionId, mappedLid, originalDestinationJid, 'signal_pn_lid_mapping');
-                    }
-                }
-                alternateDestinationResolution = alternateDestinationJid ? 'pn_lid_mapping' : 'unavailable';
+                const mapped = await resolveLidForPhone(sessionId, sock, originalDestinationJid);
+                alternateDestinationJid = normalizeLidCacheKey(mapped?.lid || getRememberedLidForPhone(sessionId, originalDestinationJid));
+                alternateDestinationResolution = mapped?.source || (alternateDestinationJid ? 'session_or_global_lid_cache' : 'unavailable');
             } catch (resolveError) {
                 console.warn('[private-send-alternate-resolution-failed]', { sessionId, originalDestinationJid, error: resolveError?.message || String(resolveError) });
             }
@@ -1168,7 +1393,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 cacheRecentMessage(sessionId, result);
                 const outgoingAccountPhone = normalizedJidNumber(sock.user?.id || sock.user?.phoneNumber || '');
                 const outgoingAccountJid = String(sock.user?.id || sock.user?.phoneNumber || '');
-                const outgoingAliases = [originalDestinationJid, destinationJid, alternateDestinationJid, result.key?.remoteJidAlt, result.key?.participant].filter(Boolean);
+                const outgoingAliases = [originalDestinationJid, destinationJid, alternateDestinationJid, isSelfChatDestination ? ownLidJid : '', result.key?.remoteJidAlt, result.key?.participant, result.key?.participantAlt, result.key?.participantPn].filter(Boolean);
                 await persistOutgoingRetryMessage(sessionId, sentDestinationJid, result, outgoingAliases, outgoingAccountPhone, outgoingAccountJid);
             }
         }
@@ -3696,7 +3921,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 for (let i = recentMsgsCache.length - 1; i >= 0; i--) {
                     const found = recentMsgsCache[i];
                     if (found.sessionId !== sessionId || found.id !== key?.id || !found.fromMe) continue;
-                    if (requestedChatJid && !areEquivalentWhatsAppChatJids(sessionId, found.from, requestedChatJid)) continue;
+                    const recentChatAliases = [...new Set([found.from, ...(Array.isArray(found.chatAliases) ? found.chatAliases : []), found.key?.remoteJidAlt, found.key?.participantAlt, found.key?.participantPn].map(value => String(value || '').trim()).filter(Boolean))];
+                    if (requestedChatJid && !recentChatAliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, requestedChatJid))) continue;
                     exactRecentMessage = found;
                     break;
                 }
@@ -3728,7 +3954,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     const storedChatMatches = !requestedChatJid || storedChatAliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, requestedChatJid));
                     if (stored?.message && stored.fromMe !== false && storedChatMatches) {
                         const restoredMessage = fixBuffers(stored.message);
-                        cacheRecentMessage(sessionId, { key: { id: key.id, remoteJid: stored.remoteJid || requestedChatJid || '', fromMe: true }, message: restoredMessage, messageTimestamp: stored.messageTimestamp || Math.floor(Date.now() / 1000) });
+                        cacheRecentMessage(sessionId, { key: { id: key.id, remoteJid: stored.remoteJid || requestedChatJid || '', remoteJidAlt: stored.remoteJidAlt || '', fromMe: true }, message: restoredMessage, messageTimestamp: stored.messageTimestamp || Math.floor(Date.now() / 1000) });
                         console.info('[message-retry-store-hit]', { sessionId, messageId: String(key.id), chatMatch: !!requestedChatJid, lookupScope, storedSessionId: stored.sessionId || sessionId });
                         return restoredMessage;
                     }
@@ -3944,15 +4170,46 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     for (const [lid, pn] of Object.entries(mappingUpdate)) mappingEntries.push({ lid, pn });
                 }
                 let savedMappings = 0;
+                let changedMappings = 0;
                 for (const item of mappingEntries) {
                     const first = item?.lid || item?.LID || item?.lidJid || item?.lidJID || item?.from || item?.id || '';
                     const second = item?.pn || item?.PN || item?.phoneNumber || item?.phone || item?.pnJid || item?.to || item?.value || '';
+                    const normalizedLid = normalizeLidCacheKey(first);
+                    const normalizedPhone = normalizePhoneCacheJid(second);
+                    const previous = normalizedLid ? lidPhoneResolutionCache.get(`${sessionId}:${normalizedLid}`) : null;
                     if (rememberLidPhonePair(sessionId, first, second, 'lid_mapping_update')) savedMappings++;
+                    if (normalizedLid && normalizedPhone && previous?.phone && normalizePhoneCacheJid(previous.phone) !== normalizedPhone) {
+                        changedMappings++;
+                        void invalidateSenderKeyMemoryForParticipant(sessionId, normalizedLid, 'lid_mapping_changed').catch(error => console.warn('[lid-mapping-sender-key-invalidation-failed]', { sessionId, error: error?.message || String(error) }));
+                    }
                 }
-                console.info('[lid-mapping-update]', { sessionId, mappingCount: mappingEntries.length, savedMappings });
+                console.info('[lid-mapping-update]', { sessionId, mappingCount: mappingEntries.length, savedMappings, changedMappings });
             } catch (mappingUpdateError) {
                 console.warn('[lid-mapping-update-failed]', { sessionId, error: mappingUpdateError?.message || String(mappingUpdateError) });
             }
+        });
+
+        sock.ev.on('identity-change', change => {
+            const changedJid = String(change?.jid || change?.id || change?.from || change?.participant || '').trim();
+            const isSelfIdentity = change?.me === true;
+            if (isSelfIdentity) {
+                void resetSessionGroupSenderKeyMemory(sessionId, 'own_signal_identity_changed').catch(error => console.warn('[identity-change-group-reset-failed]', { sessionId, error: error?.message || String(error) }));
+                console.warn('[whatsapp-identity-change]', { sessionId, participant: 'self', action: 'reset_group_sender_key_memory' });
+                return;
+            }
+            if (!changedJid) {
+                console.warn('[whatsapp-identity-change-without-jid]', { sessionId, eventKeys: Object.keys(change || {}) });
+                return;
+            }
+            console.warn('[whatsapp-identity-change]', { sessionId, participant: normalizeOutgoingEchoJid(changedJid), action: 'invalidate_participant_sender_key_memory' });
+            void invalidateSenderKeyMemoryForParticipant(sessionId, changedJid, 'baileys_identity_change').catch(error => console.warn('[identity-change-sender-key-invalidation-failed]', { sessionId, error: error?.message || String(error) }));
+        });
+
+        sock.ev.on('group-participants.update', update => {
+            const groupJid = String(update?.id || update?.jid || update?.groupJid || '').trim();
+            if (!/@g\.us$/i.test(groupJid)) return;
+            invalidateCachedGroupMetadata(sessionId, groupJid);
+            void resetSessionGroupSenderKeyMemory(sessionId, 'group_participants_updated', groupJid).catch(error => console.warn('[group-participant-sender-key-reset-failed]', { sessionId, groupJid, error: error?.message || String(error) }));
         });
 
         sock.ev.on('connection.update', async (update) => {
@@ -6552,10 +6809,14 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
 async function main() {
     console.info('[runtime-build]', {
         build: RUNTIME_FIX_BUILD,
-        groupSenderKeyMemoryReset: BAILEYS_RESET_GROUP_SENDER_KEY_MEMORY,
+        groupSenderKeyResetBeforeSendCooldownMs: GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS,
+        groupSenderKeyResetEveryMessage: false,
         passiveSocketHealth: true,
         activeGroupFetchHealthProbe: false,
-        selfChatPhoneJidPreferred: true,
+        selfChatPhonePreferred: true,
+        lidPhoneMappingFreshMs: LID_PHONE_MAPPING_FRESH_MS,
+        sessionScopedLidMappings: true,
+        senderKeyIdentityInvalidation: true,
         signalAuthWriteFlush: true
     });
     await connectMongo();
