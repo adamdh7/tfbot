@@ -7,6 +7,91 @@ const originalConsoleDebug = console.debug.bind(console);
 const originalConsoleTrace = console.trace.bind(console);
 const originalConsoleDir = console.dir.bind(console);
 const originalConsoleTable = console.table.bind(console);
+const LOG_DASHBOARD_PATH = (() => {
+    const configured = String(process.env.LOG_DASHBOARD_PATH || '/adamdh7=modpas/adamdh7').trim();
+    const normalized = (configured.startsWith('/') ? configured : `/${configured}`).replace(/\/+$/, '');
+    return /^\/[A-Za-z0-9_./=-]{12,180}$/.test(normalized) ? normalized : '/adamdh7=modpas/adamdh7';
+})();
+const LOG_DASHBOARD_MAX_ENTRIES = Math.max(100, Math.min(5000, Number(process.env.LOG_DASHBOARD_MAX_ENTRIES || 3000)));
+const runtimeLogBuffer = [];
+let runtimeLogSequence = 0;
+const runtimeLogInstanceId = `${Date.now()}-${process.pid}`;
+const runtimeLogSecrets = Object.entries(process.env)
+    .filter(([key, value]) => /TOKEN|SECRET|PASSWORD|PASSWD|API.?KEY|MONGO_URI|URI$|CF_ACCOUNTS|TAVILY/i.test(key) && String(value || '').length >= 8)
+    .map(([, value]) => String(value));
+
+function shortLogHash(value) {
+    try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
+    catch (error) { return 'hidden'; }
+}
+
+function sanitizeRuntimeLogString(value) {
+    let output = String(value ?? '').slice(0, 3000);
+    for (const secret of runtimeLogSecrets) output = output.split(secret).join('[REDACTED]');
+    output = output
+        .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [REDACTED]')
+        .replace(/([?&](?:token|key|secret|password|api_key)=)[^&\s]+/gi, '$1[REDACTED]')
+        .replace(/\b\d{5,25}(?::\d+)?@(?:s\.whatsapp\.net|lid|g\.us|newsletter)\b/gi, '[WHATSAPP_ID]')
+        .replace(/\b\+?\d[\d ().-]{7,}\d\b/g, '[PHONE]');
+    return output;
+}
+
+function sanitizeRuntimeLogValue(value, key = '', depth = 0, seen = new WeakSet()) {
+    const field = String(key || '').toLowerCase();
+    if (/(?:token|secret|password|passwd|authorization|cookie|api.?key|private.?key|authstate|credentials|signal.?key.?store)/i.test(field)) return '[REDACTED]';
+    if (/(?:messagetext|bodypreview|textpreview|argumentpreview|quotedmessage|messagebody|messagecontent|caption|rawbody|bodyraw|^message$|^conversation$|^text$|^raw$|extendedtextmessage)/i.test(field)) {
+        const length = typeof value === 'string' ? value.length : value && typeof value === 'object' ? 'object' : 0;
+        return `[message content redacted; ${length}]`;
+    }
+    if (/(?:sessionid|messageid|responsemessageid|stanzaid)$/i.test(field) && value !== null && value !== undefined) {
+        const prefix = /session/i.test(field) ? 'session' : 'message';
+        return `${prefix}#${shortLogHash(value)}`;
+    }
+    if (/(?:jid|phone|number|sendername|pushname|ownername|accountname|displayname|hostname|contactname|contact|filename|address|latitude|longitude|location|aliases|identitycandidates|participantids)/i.test(field) && value !== null && value !== undefined) {
+        if (Array.isArray(value)) return value.slice(0, 20).map(item => `[id#${shortLogHash(item)}]`);
+        const raw = String(value);
+        const domain = raw.endsWith('@g.us') ? 'group' : raw.endsWith('@lid') ? 'lid' : raw.endsWith('@s.whatsapp.net') ? 'private' : 'id';
+        return `${domain}#${shortLogHash(raw)}`;
+    }
+    if (depth > 5) return '[DEPTH_LIMIT]';
+    if (value === null || value === undefined || typeof value === 'boolean' || typeof value === 'number') return value;
+    if (typeof value === 'string') return sanitizeRuntimeLogString(value);
+    if (typeof value === 'bigint') return String(value);
+    if (typeof value === 'function') return '[Function]';
+    if (Buffer.isBuffer(value) || value instanceof Uint8Array) return `[binary ${value.length} bytes]`;
+    if (value instanceof Error) {
+        return {
+            name: sanitizeRuntimeLogString(value.name || 'Error'),
+            message: sanitizeRuntimeLogString(value.message || ''),
+            stack: sanitizeRuntimeLogString(String(value.stack || '').slice(0, 1800))
+        };
+    }
+    if (typeof value === 'object') {
+        if (seen.has(value)) return '[Circular]';
+        seen.add(value);
+        if (Array.isArray(value)) return value.slice(0, 40).map(item => sanitizeRuntimeLogValue(item, key, depth + 1, seen));
+        const output = {};
+        for (const [childKey, childValue] of Object.entries(value).slice(0, 80)) {
+            output[childKey] = sanitizeRuntimeLogValue(childValue, childKey, depth + 1, seen);
+        }
+        return output;
+    }
+    return sanitizeRuntimeLogString(value);
+}
+
+function recordRuntimeLog(level, args) {
+    try {
+        const safeArgs = Array.from(args || []).slice(0, 8).map(value => sanitizeRuntimeLogValue(value));
+        let text = safeArgs.map(value => {
+            if (typeof value === 'string') return value;
+            try { return JSON.stringify(value); } catch (error) { return '[unserializable log value]'; }
+        }).join(' ');
+        text = text.slice(0, 6500);
+        runtimeLogBuffer.push({ id: ++runtimeLogSequence, at: new Date().toISOString(), level: String(level || 'log').toLowerCase(), text });
+        if (runtimeLogBuffer.length > LOG_DASHBOARD_MAX_ENTRIES) runtimeLogBuffer.splice(0, runtimeLogBuffer.length - LOG_DASHBOARD_MAX_ENTRIES);
+    } catch (error) {}
+}
+
 let lastSignalDiagnosticAt = 0;
 function getSignalLogText(args) {
     return args.map(value => {
@@ -61,46 +146,56 @@ function logSignalDecryptionFailure(args) {
         : kind === 'signal_session_missing' ? 'No Signal session was available for this peer'
         : kind === 'bad_mac' ? 'Signal authentication check failed'
         : 'Baileys could not decrypt an incoming message';
-    originalConsoleWarn('[whatsapp-signal-diagnostic]', { kind, peerJid, messageId, fromMe, detail: safeDetail, messageBodyAvailable: false, explanation: 'The message could not be decrypted, so WhatsApp did not provide readable text to the message handler.', retryExpected: true, credentialsDeleted: false });
+    const diagnostic = { kind, peerJid, messageId, fromMe, detail: safeDetail, messageBodyAvailable: false, explanation: 'The message could not be decrypted, so WhatsApp did not provide readable text to the message handler.', retryExpected: true, credentialsDeleted: false };
+    recordRuntimeLog('warn', ['[whatsapp-signal-diagnostic]', diagnostic]);
+    originalConsoleWarn('[whatsapp-signal-diagnostic]', diagnostic);
 }
 console.log = (...args) => {
     if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
+    recordRuntimeLog('log', args);
     originalConsoleLog(...args);
 };
 console.error = (...args) => {
     if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
+    recordRuntimeLog('error', args);
     originalConsoleError(...args);
 };
 console.warn = (...args) => {
     if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
+    recordRuntimeLog('warn', args);
     originalConsoleWarn(...args);
 };
 console.info = (...args) => {
     if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
+    recordRuntimeLog('info', args);
     originalConsoleInfo(...args);
 };
 console.debug = (...args) => {
     if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
+    recordRuntimeLog('debug', args);
     originalConsoleDebug(...args);
 };
 console.trace = (...args) => {
     if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
+    recordRuntimeLog('trace', args);
     originalConsoleTrace(...args);
 };
 console.dir = (...args) => {
     if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
+    recordRuntimeLog('dir', args);
     originalConsoleDir(...args);
 };
 console.table = (...args) => {
     if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
+    recordRuntimeLog('table', args);
     originalConsoleTable(...args);
 };
 const crypto = require('crypto');
@@ -121,6 +216,35 @@ const {
     initAuthCreds
 } = require('@whiskeysockets/baileys');
 const { MongoClient } = require('mongodb');
+const { Writable } = require('stream');
+
+function createDashboardPinoLogger(options = {}) {
+    const component = String(options?.base?.component || 'baileys').slice(0, 60);
+    const sink = new Writable({
+        write(chunk, encoding, callback) {
+            try {
+                const lines = String(chunk || '').split(/\r?\n/).filter(Boolean);
+                for (const line of lines) {
+                    let parsed;
+                    try { parsed = JSON.parse(line); } catch (error) { parsed = { msg: line }; }
+                    const diagnosticArgs = [parsed?.msg || parsed?.message || '', parsed];
+                    if (isSignalDecryptionFailure(diagnosticArgs)) {
+                        logSignalDecryptionFailure(diagnosticArgs);
+                        continue;
+                    }
+                    if (isSensitiveSignalLog(diagnosticArgs)) continue;
+                    const level = ({ 10: 'trace', 20: 'debug', 30: 'info', 40: 'warn', 50: 'error', 60: 'fatal' })[Number(parsed?.level)] || 'log';
+                    recordRuntimeLog(level, [`[${component}]`, parsed]);
+                    process.stdout.write(`${line}\n`);
+                }
+                callback();
+            } catch (error) {
+                callback(error);
+            }
+        }
+    });
+    return pino(options, sink);
+}
 
 const PORT = process.env.PORT || 7000;
 const BOT_TIME_ZONE = process.env.BOT_TIME_ZONE || 'America/Santo_Domingo';
@@ -1336,7 +1460,7 @@ function isSameOriginFrontendApiRequest(req) {
 app.use((req, res, next) => {
     const originalSend = res.send.bind(res);
     const originalSendFile = res.sendFile.bind(res);
-    const skipEmbeddedBotPage = () => isBotIframeDocumentRequest(req);
+    const skipEmbeddedBotPage = () => isBotIframeDocumentRequest(req) || String(req.path || '') === LOG_DASHBOARD_PATH;
     res.send = function(body) {
         const contentType = String(res.getHeader('Content-Type') || '');
         const htmlBody = typeof body === 'string' && (/text\/html/i.test(contentType) || /^\s*(?:<!doctype\s+html|<html\b)/i.test(body));
@@ -1377,6 +1501,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     const requestPath = String(req.path || '/').replace(/\/+$/, '') || '/';
+    if (requestPath === LOG_DASHBOARD_PATH) return next();
     if (requestPath === '/list') return next();
     if (requestPath === '/') {
         if (isAllowedEmbeddedHomeRequest(req)) return next();
@@ -1835,6 +1960,100 @@ app.get('/manifest.json', (req, res) => res.sendFile(path.join(__dirname, 'manif
 app.get('/sw.js', (req, res) => res.sendFile(path.join(__dirname, 'sw.js')));
 app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s Us Adam D’H7"));
 app.get('/ok', (req, res) => res.send('ok'));
+
+app.get(LOG_DASHBOARD_PATH, (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'");
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    res.removeHeader('Access-Control-Allow-Origin');
+    const now = Date.now();
+    const clientKey = String(req.ip || req.socket?.remoteAddress || 'unknown').slice(0, 100);
+    const rate = logDashboardRateLimits.get(clientKey) || { startedAt: now, count: 0 };
+    if (now - rate.startedAt > 60000) { rate.startedAt = now; rate.count = 0; }
+    rate.count++;
+    logDashboardRateLimits.set(clientKey, rate);
+    if (logDashboardRateLimits.size > 2000) {
+        for (const [key, value] of logDashboardRateLimits.entries()) {
+            if (now - value.startedAt > 120000 || logDashboardRateLimits.size > 1800) logDashboardRateLimits.delete(key);
+            if (logDashboardRateLimits.size <= 1800) break;
+        }
+    }
+    if (rate.count > 150) return res.status(429).type('text/plain').send('Trop de requêtes.');
+
+    if (String(req.query?.format || '').toLowerCase() === 'json') {
+        return res.json({
+            ok: true,
+            instance: runtimeLogInstanceId,
+            startedAt: new Date(Number(runtimeLogInstanceId.split('-')[0]) || now).toISOString(),
+            count: runtimeLogBuffer.length,
+            maxEntries: LOG_DASHBOARD_MAX_ENTRIES,
+            logs: runtimeLogBuffer.slice(-LOG_DASHBOARD_MAX_ENTRIES)
+        });
+    }
+
+    const html = `<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Adam D'H7 · Runtime logs</title>
+<style>
+:root{color-scheme:dark;background:#000;color:#ededed;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}html,body{margin:0;min-height:100%;width:100%;background:#000;color:#ededed}body{min-height:100vh;min-height:100svh;padding:max(12px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) max(14px,env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left))}
+main{width:min(100%,1500px);margin:0 auto}.top{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 2px 18px;border-bottom:1px solid #252525}.brand{min-width:0}.eyebrow{font-size:10px;letter-spacing:.2em;color:#858585;text-transform:uppercase}.heading{margin-top:5px;font:700 clamp(18px,4vw,25px)/1.2 system-ui,sans-serif;letter-spacing:-.03em}.live{display:flex;align-items:center;gap:8px;color:#a9a9a9;font:11px system-ui,sans-serif;white-space:nowrap}.dot{width:7px;height:7px;border-radius:50%;background:#39d98a;box-shadow:0 0 12px #39d98a}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:14px 0}.toolbar input,.toolbar select{min-height:38px;border:1px solid #333;border-radius:8px;background:#0d0d0d;color:#eee;padding:0 11px;font:12px ui-monospace,monospace;outline:none}.toolbar input{flex:1;min-width:150px}.toolbar input:focus,.toolbar select:focus{border-color:#777}.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:38px;padding:0 12px;border:1px solid #373737;border-radius:8px;background:#111;color:#eee;font:12px system-ui,sans-serif;cursor:pointer}.btn:active{background:#222}.btn svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.stats{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px;color:#929292;font:11px system-ui,sans-serif}.stat{border:1px solid #222;background:#090909;border-radius:7px;padding:7px 9px}.stat strong{color:#eaeaea;font-weight:600}.logs{border-top:1px solid #222}.entry{display:grid;grid-template-columns:92px 62px minmax(0,1fr);gap:10px;padding:9px 7px;border-bottom:1px solid #171717;font-size:11px;line-height:1.55}.time{color:#777}.level{font-size:10px;text-transform:uppercase;color:#b6b6b6}.level.error{color:#ff7272}.level.warn{color:#ffc36a}.level.info{color:#86b9ff}.level.debug,.level.trace{color:#888}.message{white-space:pre-wrap;overflow-wrap:anywhere;color:#d6d6d6;user-select:text}.empty{padding:35px 12px;text-align:center;color:#777;font:12px system-ui,sans-serif}.foot{padding:13px 3px;color:#5f5f5f;font:10px/1.5 system-ui,sans-serif}.toast{position:fixed;left:50%;bottom:max(18px,env(safe-area-inset-bottom));transform:translate(-50%,15px);opacity:0;pointer-events:none;background:#f0f0f0;color:#111;padding:9px 13px;border-radius:8px;font:12px system-ui,sans-serif;transition:.18s}.toast.show{opacity:1;transform:translate(-50%,0)}
+@media(max-width:560px){.entry{grid-template-columns:70px 48px minmax(0,1fr);gap:7px;padding:8px 2px;font-size:10px}.toolbar{gap:6px}.btn{padding:0 9px}.top{align-items:flex-start}.live{padding-top:4px}}
+</style>
+</head>
+<body>
+<main>
+<header class="top"><div class="brand"><div class="eyebrow">Adam D'H7 / system monitor</div><div class="heading">Runtime logs</div></div><div class="live"><span class="dot" id="status-dot"></span><span id="status">LIVE · connexion…</span></div></header>
+<section class="toolbar">
+<input id="search" type="search" autocomplete="off" placeholder="Filtrer les logs…">
+<select id="level"><option value="all">Tous les niveaux</option><option value="error">Erreur</option><option value="warn">Avertissement</option><option value="info">Info</option><option value="log">Log</option><option value="debug">Debug</option></select>
+<button class="btn" id="pause" type="button"><svg viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></svg><span>Pause</span></button>
+<button class="btn" id="refresh" type="button"><svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9A7 7 0 0 1 18 6l2 6M4 12l2 6a7 7 0 0 0 12.4-3"/></svg><span>Actualiser</span></button>
+<button class="btn" id="copy" type="button" aria-label="Copier les logs"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg><span>Copier</span></button>
+</section>
+<section class="stats"><div class="stat">Dans le buffer : <strong id="count">0</strong></div><div class="stat">Affichés : <strong id="shown">0</strong></div><div class="stat">Dernière mise à jour : <strong id="updated">—</strong></div></section>
+<section class="logs" id="logs" aria-live="polite"><div class="empty">Chargement des événements…</div></section>
+<footer class="foot">Journal local à cette instance Render · mémoire volatile · contenu des messages et identifiants personnels masqués · actualisation automatique toutes les 3 secondes.</footer>
+</main><div class="toast" id="toast"></div>
+<script>
+(() => {
+ const endpoint = location.pathname;
+ const logsNode = document.getElementById('logs');
+ const searchNode = document.getElementById('search');
+ const levelNode = document.getElementById('level');
+ const statusNode = document.getElementById('status');
+ const allLogs = [];
+ let paused = false;
+ let lastInstance = '';
+ let lastUpdate = 0;
+ let timer = null;
+ const escText = value => String(value == null ? '' : value);
+ function toast(message){const node=document.getElementById('toast');node.textContent=message;node.classList.add('show');setTimeout(()=>node.classList.remove('show'),1500)}
+ function filtered(){const q=searchNode.value.trim().toLowerCase();const level=levelNode.value;return allLogs.filter(item=>(level==='all'||item.level===level)&&(!q||(String(item.at)+' '+String(item.level)+' '+String(item.text)).toLowerCase().includes(q)))}
+ function render(){const items=filtered();document.getElementById('count').textContent=String(allLogs.length);document.getElementById('shown').textContent=String(items.length);logsNode.replaceChildren();if(!items.length){const empty=document.createElement('div');empty.className='empty';empty.textContent=allLogs.length?'Aucun résultat pour ce filtre.':'Aucun log reçu pour le moment.';logsNode.appendChild(empty);return}const fragment=document.createDocumentFragment();for(const item of items.slice().reverse()){const row=document.createElement('article');row.className='entry';const date=document.createElement('time');date.className='time';date.textContent=escText(item.at).replace('T',' ').replace('Z','');const level=document.createElement('span');level.className='level '+escText(item.level);level.textContent=escText(item.level);const msg=document.createElement('div');msg.className='message';msg.textContent=escText(item.text);row.append(date,level,msg);fragment.appendChild(row)}logsNode.appendChild(fragment)}
+ async function refresh(){if(paused)return;try{statusNode.textContent='LIVE · actualisation';const response=await fetch(endpoint+'?format=json&_='+Date.now(),{cache:'no-store',credentials:'same-origin'});if(!response.ok)throw new Error('HTTP '+response.status);const data=await response.json();if(!data.ok)throw new Error('Réponse invalide');if(lastInstance!==data.instance){allLogs.splice(0,allLogs.length);lastInstance=data.instance}allLogs.splice(0,allLogs.length,...(Array.isArray(data.logs)?data.logs:[]));lastUpdate=Date.now();document.getElementById('updated').textContent=new Date(lastUpdate).toLocaleTimeString();document.getElementById('status-dot').style.background='#39d98a';statusNode.textContent='LIVE · connecté';render()}catch(error){document.getElementById('status-dot').style.background='#ff6666';statusNode.textContent='HORS LIGNE · '+error.message}}
+ document.getElementById('pause').addEventListener('click',()=>{paused=!paused;document.querySelector('#pause span').textContent=paused?'Reprendre':'Pause';statusNode.textContent=paused?'PAUSE':'LIVE';if(!paused)refresh()});
+ document.getElementById('refresh').addEventListener('click',refresh);
+ document.getElementById('copy').addEventListener('click',async()=>{const text=filtered().map(item=>'['+item.at+'] '+item.level.toUpperCase()+' '+item.text).join('\n');try{if(navigator.clipboard&&navigator.clipboard.writeText)await navigator.clipboard.writeText(text);else{const area=document.createElement('textarea');area.value=text;document.body.appendChild(area);area.select();document.execCommand('copy');area.remove()}toast('Logs copiés')}catch(error){toast('Copie impossible')}});
+ searchNode.addEventListener('input',render);levelNode.addEventListener('change',render);
+ refresh();timer=setInterval(refresh,3000);window.addEventListener('pagehide',()=>{if(timer)clearInterval(timer)});
+})();
+</script>
+</body>
+</html>`;
+    return res.status(200).type('html').send(html);
+});
+const logDashboardRateLimits = new Map();
 const handleTFSlugRequest = (req, res) => {
     const match = String(req.path || '').match(/(?:^|\/)TF-([A-Za-z0-9_-]{1,80})(?:\/.*)?$/i);
     const id = String(req.params?.id || match?.[1] || '');
@@ -3058,9 +3277,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         });
         const sock = makeWASocket({
             version,
-            logger: pino({ level: baileysLogLevel, base: { sessionId, component: 'baileys' } }),
+            logger: createDashboardPinoLogger({ level: baileysLogLevel, base: { sessionId, component: 'baileys' } }),
             printQRInTerminal: false,
-            auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: signalStoreLogLevel, base: { sessionId, component: 'signal-key-store' } })) },
+            auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, createDashboardPinoLogger({ level: signalStoreLogLevel, base: { sessionId, component: 'signal-key-store' } })) },
             browser: Browsers.ubuntu('Chrome'), 
             markOnlineOnConnect: false,
             generateHighQualityLinkPreview: true,
@@ -4557,7 +4776,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const modeCandidates = [sOwnerTop?.mode, sOwnerTop?.Mode, sOwnerTop?.botMode].filter(value => value !== undefined && value !== null && String(value).trim() !== '').map(value => normalizeText(value));
                         const isPublicMode = modeCandidates.some(value => ['public', 'piblik', 'publico'].includes(value));
                         const botMode = modeCandidates.length ? [...new Set(modeCandidates)].join('|') : 'prive';
-                        const allowed = !isChannel && (isPublicMode || isOwnerReal);
+                        const isReadOnlyMenuCommand = receivedParsedCommand?.internalCommand === 'menu';
+                        const allowed = !isChannel && (isPublicMode || isOwnerReal || isReadOnlyMenuCommand);
 
                         const bodyRaw = earlyBody;
                         const body = bodyRaw.trim();
@@ -4598,6 +4818,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             isOwnerReal,
                             isPublicMode,
                             allowed,
+                            isReadOnlyMenuCommand,
+                            authorizationReason: isPublicMode ? 'public_mode' : isOwnerReal ? 'owner' : isReadOnlyMenuCommand ? 'read_only_menu_allowed_in_private_mode' : 'private_mode_block',
                             mode: botMode,
                             bodyLength: body.length,
                             bodyPreview: body.slice(0, 240)
