@@ -32,7 +32,7 @@ const runtimeLogRenderServiceName = String(process.env.RENDER_SERVICE_NAME || pr
 const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
 const runtimeLogRenderCommit = String(process.env.RENDER_GIT_COMMIT || '').trim().slice(0, 80);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}`).slice(0, 240);
-const TFBOT_CLUSTER_CODE_REVISION = 'r33-render-logs-session-consolidation';
+const TFBOT_CLUSTER_CODE_REVISION = 'r36-del3-all-formats-pairing-cleanup';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-30')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
 const runtimeLogClusterId = TFBOT_CODE_RELEASE_ID;
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
@@ -261,12 +261,12 @@ function logSignalDecryptionFailure(args) {
     signalDiagnosticTimes.set(diagnosticKey, now);
     while (signalDiagnosticTimes.size > 500) signalDiagnosticTimes.delete(signalDiagnosticTimes.keys().next().value);
     const safeDetail = kind === 'message_counter_error' ? 'Signal message counter was out of sequence'
-        : kind === 'signal_chain_closed' ? 'The Signal session chain was closed and needs a targeted peer-session refresh'
+        : kind === 'signal_chain_closed' ? 'The Signal session chain is unavailable; stored account credentials are being preserved'
         : kind === 'signal_mac_buffer_invalid' ? 'A Signal session record contained invalid or missing MAC key material'
         : kind === 'signal_session_missing' ? 'No Signal session was available for this peer'
         : kind === 'bad_mac' ? 'Signal authentication check failed'
         : 'Baileys could not decrypt an incoming message';
-    const diagnostic = { kind, peerJid, messageId, fromMe, detail: safeDetail, messageBodyAvailable: false, explanation: 'The message could not be decrypted, so WhatsApp did not provide readable text to the message handler.', retryExpected: true, credentialsDeleted: false };
+    const diagnostic = { kind, peerJid, messageId, fromMe, detail: safeDetail, messageBodyAvailable: false, explanation: 'The message could not be decrypted, so WhatsApp did not provide readable text to the message handler.', retryExpected: !!messageId, credentialsDeleted: false, accountCredentialsPreserved: true };
     recordRuntimeLog('warn', ['[whatsapp-signal-diagnostic]', diagnostic]);
     originalConsoleWarn('[whatsapp-signal-diagnostic]', diagnostic);
 }
@@ -442,7 +442,6 @@ function createDashboardPinoLogger(options = {}) {
                     const diagnosticArgs = [parsed?.msg || parsed?.message || '', parsed];
                     if (isSignalDecryptionFailure(diagnosticArgs)) {
                         logSignalDecryptionFailure(diagnosticArgs);
-                        scheduleSignalRecoveryFromLog(String(options?.base?.sessionId || ''), parsed);
                         continue;
                     }
                     if (isSensitiveSignalLog(diagnosticArgs)) continue;
@@ -459,7 +458,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-30-r31';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-30-r36';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -550,7 +549,7 @@ const SEARCH_TOTAL_TIMEOUT_MS = Math.max(5000, Number(process.env.SEARCH_TOTAL_T
 const CLOUDFLARE_API_BASE_URL = String(process.env.CLOUDFLARE_API_BASE_URL || '').trim().replace(/\/+$/, '');
 const TAVILY_SEARCH_URL = String(process.env.TAVILY_SEARCH_URL || '').trim();
 const BREF_UPLOAD_URL = String(process.env.BREF_UPLOAD_URL || '').trim();
-const TF_BOT_BASE_URL = String(process.env.TF_BOT_BASE_URL || '').trim().replace(/\/+$/, '');
+const TF_BOT_BASE_URL = String(process.env.TF_BOT_BASE_URL || process.env.RENDER_EXTERNAL_URL || 'https://tf.bot.adamdh7.org').trim().replace(/\/+$/, '');
 const TF_REDIRECT_URL = String(process.env.TF_REDIRECT_URL || '').trim();
 const tfEvents = new EventEmitter();
 
@@ -2888,8 +2887,7 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
                 const keyId = doc._id.substring(prefix.length);
                 const restored = fixBuffers(doc.data);
                 if (type === 'session' && (!restored || (!Buffer.isBuffer(restored) && !(restored instanceof Uint8Array)) || restored.length === 0)) {
-                    await collection.deleteOne({ _id: doc._id });
-                    console.warn('[signal-auth-invalid-session-record-pruned]', { sessionId, keyHash: shortLogHash(keyId), reason: 'session_record_is_not_a_nonempty_serialized_buffer', scope: 'single_peer_session_only' });
+                    console.warn('[signal-auth-session-record-invalid-preserved]', { sessionId, keyHash: shortLogHash(keyId), reason: 'session_record_is_not_a_nonempty_serialized_buffer', action: 'skip_invalid_value_without_deleting_persisted_record' });
                     continue;
                 }
                 result[keyId] = restored;
@@ -3190,29 +3188,51 @@ async function removeDel2Target(sessionId, gjid, targetJid) {
 
 function getWhatsAppMessageFormat(value) {
     const source = value?.message && typeof value.message === 'object' ? value.message : value;
-    const content = unwrapMessageContent(source);
-    if (!content || typeof content !== 'object') return '';
-    const ignored = new Set(['messageContextInfo', 'senderKeyDistributionMessage', 'protocolMessage', 'keepInChatMessage', 'messageHistoryBundle']);
-    const key = Object.keys(content).find(item => !ignored.has(item));
-    if (!key) return '';
     const groups = {
-        text: ['conversation', 'extendedTextMessage', 'buttonsResponseMessage', 'listResponseMessage', 'templateButtonReplyMessage', 'interactiveResponseMessage', 'groupMentionMessage'],
+        text: ['conversation', 'extendedTextMessage', 'buttonsResponseMessage', 'listResponseMessage', 'templateButtonReplyMessage', 'interactiveResponseMessage', 'groupMentionMessage', 'buttonsMessage', 'listMessage', 'templateMessage', 'interactiveMessage'],
         image: ['imageMessage'],
         video: ['videoMessage'],
-        audio: ['audioMessage', 'ptvMessage'],
+        audio: ['audioMessage', 'ptvMessage', 'voiceMessage'],
         document: ['documentMessage', 'documentWithCaptionMessage'],
-        sticker: ['stickerMessage'],
+        sticker: ['stickerMessage', 'lottieStickerMessage'],
         album: ['albumMessage'],
         location: ['locationMessage', 'liveLocationMessage'],
-        contact: ['contactMessage', 'contactsArrayMessage'],
+        contact: ['contactMessage', 'contactsArrayMessage', 'phoneNumberShareMessage'],
         poll: ['pollCreationMessage', 'pollCreationMessageV2', 'pollCreationMessageV3', 'pollUpdateMessage'],
         reaction: ['reactionMessage'],
-        event: ['eventMessage'],
-        status: ['groupStatusMessage', 'statusMentionMessage', 'statusMentionMessageV2']
+        event: ['eventMessage', 'scheduledCallCreationMessage', 'scheduledCallEditMessage'],
+        status: ['groupStatusMessage', 'statusMentionMessage', 'statusMentionMessageV2'],
+        group: ['groupInviteMessage', 'newsletterAdminInviteMessage'],
+        commerce: ['productMessage', 'orderMessage', 'catalogMessage'],
+        payment: ['paymentInviteMessage', 'requestPaymentMessage', 'sendPaymentMessage', 'declinePaymentRequestMessage', 'cancelPaymentRequestMessage'],
+        call: ['callLogMessage']
     };
-    for (const [format, keys] of Object.entries(groups)) if (keys.includes(key)) return format;
-    if (ignored.has(key)) return '';
-    return key.replace(/Message(?:V\d+)?$/, '').replace(/V\d+$/, '').toLowerCase() || '';
+    const keyToFormat = new Map();
+    for (const [format, keys] of Object.entries(groups)) for (const key of keys) keyToFormat.set(key, format);
+    const ignored = new Set(['messageContextInfo', 'senderKeyDistributionMessage', 'protocolMessage', 'keepInChatMessage', 'messageHistoryBundle', 'contextInfo', 'quotedMessage', 'deviceListMetadata', 'deviceListMetadataVersion']);
+    const wrapperKeys = new Set(['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'documentWithCaptionMessage', 'deviceSentMessage', 'editedMessage']);
+    const scan = (node, depth, seen) => {
+        if (!node || typeof node !== 'object' || depth > 12 || seen.has(node)) return '';
+        seen.add(node);
+        const entries = Object.entries(node);
+        for (const [key, payload] of entries) {
+            if (!wrapperKeys.has(key) || !payload || typeof payload !== 'object') continue;
+            const nested = payload.message && typeof payload.message === 'object' ? payload.message : payload;
+            const found = scan(nested, depth + 1, seen);
+            if (found) return found;
+        }
+        for (const [key, payload] of entries) {
+            if (ignored.has(key) || wrapperKeys.has(key)) continue;
+            const known = keyToFormat.get(key);
+            if (known) return known;
+        }
+        for (const [key, payload] of entries) {
+            if (ignored.has(key) || wrapperKeys.has(key) || !payload || typeof payload !== 'object') continue;
+            return `other:${String(key).slice(0, 80)}`;
+        }
+        return '';
+    };
+    return scan(source, 0, new WeakSet());
 }
 
 async function getDel3Rules(sessionId, gjid) {
@@ -3288,8 +3308,8 @@ async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, se
         const participant = String(sourceKey.participant || sourceKey.participantPn || sourceKey.participantAlt || sourceKey.senderPn || senderJid || '').trim();
         const deleteKey = { ...sourceKey, remoteJid: String(sourceKey.remoteJid || chat), id: messageId, fromMe: sourceKey.fromMe === true };
         if (participant) deleteKey.participant = participant;
-        await queuedDeleteMessageWithAck(sock, chat, deleteKey, 120, 9000);
-        console.info('[del3-message-format-matched]', { sessionId, group: chat, messageId, format, deleted: true, acknowledgementConfirmed: true, scope: 'same_group_same_whatsapp_format' });
+        await queuedSendMessage(sock, chat, { delete: deleteKey }, {}, 180);
+        console.info('[del3-message-format-matched]', { sessionId, group: chat, messageId, format, deleteRequestSent: true, serverAcknowledgementTracked: false, scope: 'same_group_same_whatsapp_format' });
         return true;
     } catch (error) {
         if (claimed && db) await db.collection('processed_messages').deleteOne({ _id: dedupId }).catch(() => {});
@@ -4578,7 +4598,7 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
                     scheduleRequest(900, 'retry_after_socket_restart');
                     return;
                 }
-                if (update?.qr) scheduleRequest(120, 'qr_event');
+                if (update?.qr) scheduleRequest(150, 'qr_event');
                 if (update?.connection === 'connecting' && attemptsOnSocket === 0) scheduleRequest(700, 'socket_connecting');
             };
             try { currentSocket.ev.on('connection.update', currentHandler); } catch (error) {
@@ -4586,7 +4606,7 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
                 return false;
             }
             const activeQr = String(active?.qrString || '').trim();
-            scheduleRequest(activeQr ? 120 : 1000, activeQr ? 'qr_already_captured' : trigger || 'socket_attached');
+            scheduleRequest(activeQr ? 150 : 1000, activeQr ? 'qr_already_captured' : trigger || 'socket_attached');
             console.info('[pairing-code-socket-attached]', { sessionId, qrAvailable: !!activeQr, socketReplaced: totalAttempts > 0 });
             return true;
         };
@@ -4599,6 +4619,10 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
             }
             if (!active?.sock) {
                 scheduleRequest(750, 'waiting_for_reconnect');
+                return;
+            }
+            if (!active.qrString && String(active.status || '').toLowerCase() !== 'qr_disponible') {
+                scheduleRequest(350, 'waiting_for_pairing_challenge');
                 return;
             }
             if (currentSocket !== active.sock) {
@@ -4678,20 +4702,26 @@ app.all('/get-code', async (req, res) => {
         const persistedPairingStatus = String(suppliedOwner?.connectionStatus || '').toLowerCase();
         const runtimePairingStatus = String(suppliedRuntime?.status || '').toLowerCase();
         const stalePairingStatuses = new Set(['reauth_required', 'pairing_expired', 'pairing_error', 'duplicate_account']);
-        const suppliedStatus = suppliedOwner?.reauthRequired === true ? 'reauth_required' : stalePairingStatuses.has(persistedPairingStatus) ? persistedPairingStatus : (runtimePairingStatus || persistedPairingStatus);
+        const persistedAuth = !suppliedRuntime && db ? await db.collection('baileys_auth').findOne({ _id: `auth-${suppliedSessionId}-creds` }, { projection: { 'creds.registered': 1 } }).catch(() => null) : null;
+        const suppliedRegistered = suppliedRuntime?.authState?.creds?.registered === true || persistedAuth?.creds?.registered === true;
+        const runtimeConnected = ['connecte', 'connected'].includes(runtimePairingStatus);
+        const suppliedStatus = runtimeConnected ? runtimePairingStatus : suppliedOwner?.reauthRequired === true ? 'reauth_required' : stalePairingStatuses.has(persistedPairingStatus) ? persistedPairingStatus : (runtimePairingStatus || persistedPairingStatus);
         const suppliedNumber = normalizePhoneNumber(suppliedOwner?.Number || suppliedOwner?.number || suppliedOwner?.PairingNumber || '');
         const isStalePairingSession = stalePairingStatuses.has(suppliedStatus) || suppliedOwner?.reauthRequired === true;
-        if (isStalePairingSession && !['connecte', 'connected'].includes(suppliedStatus)) {
+        if (isStalePairingSession && !runtimeConnected) {
             if (suppliedRuntime?.sock) await cleanupSocket(suppliedSessionId).catch(() => {});
-            await releaseSessionRuntimeLock(suppliedSessionId).catch(() => {});
-            await db.collection('session_account_runtime_locks').deleteMany({ sessionId: suppliedSessionId }).catch(() => {});
-            await db.collection('session_runtime_locks').deleteMany({ _id: suppliedSessionId }).catch(() => {});
             const oldReconnect = reconnectTimers.get(suppliedSessionId);
             if (oldReconnect) clearTimeout(oldReconnect);
             reconnectTimers.delete(suppliedSessionId);
+            await releaseSessionRuntimeLock(suppliedSessionId).catch(() => {});
+            await db.collection('session_account_runtime_locks').deleteMany({ sessionId: suppliedSessionId }).catch(() => {});
+            await db.collection('session_runtime_locks').deleteMany({ _id: suppliedSessionId }).catch(() => {});
+            if (!suppliedRegistered && ['pairing_expired', 'pairing_error'].includes(suppliedStatus)) {
+                await deleteMongoSession(suppliedSessionId).catch(error => console.warn('[pairing-stale-session-delete-failed]', { sessionId: suppliedSessionId, error: error?.message || String(error) }));
+            }
             replacedStaleSessionId = suppliedSessionId;
             sId = `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-            console.warn('[pairing-stale-session-replaced]', { previousSessionId: suppliedSessionId, newSessionId: sId, status: suppliedStatus || 'unknown', sameAccountNumberConfirmed: suppliedNumber === number, oldAuthPreservedUntilNewConnection: true });
+            console.warn('[pairing-stale-session-replaced]', { previousSessionId: suppliedSessionId, newSessionId: sId, status: suppliedStatus || 'unknown', sameAccountNumberConfirmed: suppliedNumber === number, oldPairingRecordDeleted: !suppliedRegistered && ['pairing_expired', 'pairing_error'].includes(suppliedStatus), registeredAccountDataPreservedForConsolidation: suppliedRegistered || ['reauth_required', 'duplicate_account'].includes(suppliedStatus) });
         }
     }
     const proposedSessionId = replacedStaleSessionId ? '' : (validSuppliedSessionId ? suppliedSessionId : (pendingOwner?.sessionId || ''));
@@ -4726,19 +4756,13 @@ app.all('/get-code', async (req, res) => {
         const pairingTimeoutMs = Math.max(120000, Number(process.env.PAIRING_SESSION_TTL_MS || 900000));
         cleanupTimer = setTimeout(async () => {
             const checkSess = activeSessions.get(sId);
-            if (!checkSess || checkSess.status === 'connecte' || checkSess.status === 'connected') return;
-            if (autoExpire) {
-                try { await cleanupSocket(sId); } catch (error) {}
-                try { await deleteMongoSession(sId); } catch (error) { console.warn('[pairing-auto-expire-cleanup-failed]', { sessionId: sId, error: error?.message || String(error) }); }
-                console.info('[pairing-session-auto-expired]', { sessionId: sId, authDeleted: true });
-                return;
-            }
-            checkSess.status = 'pairing_expired';
-            checkSess.pairingExpiredAt = Date.now();
+            const ownerState = await db.collection('session_owners').findOne({ sessionId: sId }, { projection: { connectionStatus: 1 } }).catch(() => null);
+            const isConnected = ['connecte', 'connected'].includes(String(checkSess?.status || ownerState?.connectionStatus || '').toLowerCase());
+            const isRegistered = checkSess?.authState?.creds?.registered === true;
+            if (isConnected || isRegistered) return;
             try { await cleanupSocket(sId); } catch (error) { console.warn('[pairing-session-expiry-socket-cleanup-failed]', { sessionId: sId, error: error?.message || String(error) }); }
-            await releaseSessionRuntimeLock(sId);
-            await db.collection('session_owners').updateOne({ sessionId: sId }, { $set: { pairingPending: false, connectionStatus: 'pairing_expired', pairingExpiredAt: new Date() } }).catch(() => {});
-            console.info('[pairing-session-expired-auth-preserved]', { sessionId: sId, authDeleted: false, retryWithSameSessionId: true });
+            try { await deleteMongoSession(sId); } catch (error) { console.warn('[pairing-session-expiry-cleanup-failed]', { sessionId: sId, error: error?.message || String(error) }); }
+            console.info('[pairing-session-expired-and-removed]', { sessionId: sId, authDeleted: true, ownerRecordDeleted: true, autoExpireRequested: autoExpire });
         }, pairingTimeoutMs);
         if (typeof cleanupTimer.unref === 'function') cleanupTimer.unref();
         if (method === 'qr') {
@@ -4769,11 +4793,14 @@ app.all('/get-code', async (req, res) => {
             if (current.status !== 'connecte' && current.status !== 'connected') current.status = 'pairing_error';
         }
         const isConflict = /whatsapp_account_already_active|pairing_account_already_active|duplicate_account_runtime_lock|account_runtime_lock/.test(String(error?.message || ''));
-        if (!current?.sock && autoExpire) {
-            try { await deleteMongoSession(sId); } catch (cleanupError) {}
+        const currentRegistered = current?.authState?.creds?.registered === true;
+        const currentConnected = ['connecte', 'connected'].includes(String(current?.status || '').toLowerCase());
+        if (!currentRegistered && !currentConnected) {
+            try { if (current?.sock) await cleanupSocket(sId); } catch (cleanupError) {}
+            try { await deleteMongoSession(sId); } catch (cleanupError) { console.warn('[pairing-failed-session-removal-failed]', { sessionId: sId, error: cleanupError?.message || String(cleanupError) }); }
         }
-        console.error('[pairing-request-failed]', { sessionId: sId, format: connectionFormat, error: error?.message || String(error), authPreserved: !autoExpire || !!current?.sock, retryWithSameSessionId: !isConflict });
-        return res.status(isConflict ? 409 : 503).json({ ok: false, error: String(error?.message || error || 'pair_error'), sessionId: sId, format: connectionFormat, retryWithSameSessionId: !isConflict, authPreserved: !autoExpire || !!current?.sock });
+        console.error('[pairing-request-failed]', { sessionId: sId, format: connectionFormat, error: error?.message || String(error), authPreserved: currentRegistered || currentConnected, retryWithSameSessionId: !isConflict });
+        return res.status(isConflict ? 409 : 503).json({ ok: false, error: String(error?.message || error || 'pair_error'), sessionId: sId, format: connectionFormat, retryWithSameSessionId: !isConflict, authPreserved: currentRegistered || currentConnected });
     }
 });
 
@@ -4824,11 +4851,11 @@ const translations = {
     disconnect_sys_msg: "Vous avez été déconnecté. Une suppression totale des données et sessions a été initiée via le système.",
     del2_activated: "La modération stricte a été activée pour @{user}. Tous les messages de cet utilisateur seront supprimés de manière instantanée.",
     del2_deactivated: "La modération stricte a été désactivée pour @{user}.",
-    del3_activated: "Del3 est activé pour le format {format}. Le message auquel tu as répondu a été supprimé. Les prochains messages de ce format seront supprimés automatiquement. Les messages de l’hôte et du bot restent protégés.",
-    del3_activated_protected: "Del3 est activé pour le format {format}. Le message sélectionné appartient à l’hôte ou au bot : il est conservé. Les prochains messages de ce format seront supprimés, sauf ceux de l’hôte et du bot.",
-    del3_activated_delete_failed: "Del3 est activé pour le format {format}, mais WhatsApp n’a pas confirmé la suppression du message sélectionné. Les prochains messages de ce format seront supprimés, sauf ceux de l’hôte et du bot.",
-    del3_deactivated: "La règle del3 du format {format} est désactivée. Les prochains messages de ce format ne seront plus supprimés automatiquement.",
-    del3_usage: "Pour activer del3, réponds directement à un message du groupe avec del3. Le bot détecte son format WhatsApp (texte, image, vidéo, audio, document, sticker, etc.).",
+    del3_activated: "La suppression automatique est activée pour ce type de message. Le message sélectionné a été supprimé.",
+    del3_deactivated: "La suppression automatique est désactivée pour ce type de message. Le message sélectionné a été supprimé.",
+    del3_delete_failed: "Impossible de supprimer ce message. Vérifie les droits du bot et réessaie.",
+    del3_deleted_unclassified: "Le message a été supprimé. Son type n’a pas pu être identifié, donc la suppression automatique n’a pas été modifiée.",
+    del3_usage: "Réponds à un message du groupe avec del3 pour le supprimer et activer ou désactiver la suppression automatique des prochains messages du même type.",
     del3_bot_admin_required: "Le bot doit être administrateur du groupe pour activer del3 et supprimer les messages. Ajoute-le comme administrateur, puis réessaie.",
     pending_msg: "En attente de chargement",
     msg_unloaded: "Message non chargé",
@@ -4845,7 +4872,7 @@ const translations = {
     group_required: "Cette commande doit être utilisée dans un groupe WhatsApp.",
     admin_required: "Cette commande nécessite les droits d’administrateur du groupe.",
     command_error: "La commande a échoué. Réessaie et vérifie les droits du bot.",
-    info_text: "*● IA & RECHERCHE*\n*○ ia* : Interroger l'Intelligence Artificielle pour des réponses textuelles.\n*○ lang* : Modifier la langue.\n*○ image* : Générer une image numérique.\n*○ chercher* : Effectuer des recherches web.\n\n*● UTILITAIRES & SYSTEME*\n*○ menu* : Afficher l'arborescence.\n*○ qrbot* : Initier une sous-session via code QR.\n*○ qr* : Convertir texte/lien en code QR.\n*○ code* : Générer code d'autorisation.\n*○ lien* : Obtenir lien officiel.\n*○ sit* : Consulter les sites.\n*○ info* : Informations explicatives.\n\n*● LOGISTIQUE DE GROUPE*\n*○ tagtout* : Mentionner tous les membres.\n*○ hidetag* : Diffuser un message secrètement.\n*○ expulse* : Retirer un membre.\n*○ add* : Ajouter un numéro.\n*○ promote* : Élever membre au rang admin.\n*○ demote* : Rétrograder un admin.\n*○ expulsetout* : Expulsion globale.\n*○ del3* : Supprimer les messages du même format WhatsApp, sauf ceux de l’hôte et du bot.\n*○ ferme* : Restreindre l'envoi de messages.\n*○ ouvert* : Autoriser l'envoi de messages."
+    info_text: "*● ASSISTANT & RECHERCHE*\n*○ ia* : Poser une question à l’assistant.\n*○ image* : Générer une image à partir d’une description.\n*○ chercher* : Rechercher des informations sur le Web.\n*○ lang fr|en|es|ht* : Choisir la langue du bot.\n\n*● CONNEXION & INFORMATIONS*\n*○ menu* : Afficher la liste des commandes.\n*○ info* : Afficher l’aide des commandes.\n*○ qrbot* : Créer une nouvelle connexion par QR code.\n*○ code numéro* : Obtenir un code de connexion pour un numéro international (hôte uniquement).\n*○ qr texte ou lien* : Créer un QR code.\n*○ lien* : Afficher les liens officiels.\n*○ sit* : Afficher les sites officiels.\n*○ alive* : Voir depuis combien de temps le bot est connecté.\n*○ ping* : Mesurer le délai de réponse.\n*○ url* : Répondre à un média pour obtenir son lien.\n*○ vv* : Renvoyer un média à vue unique auquel tu réponds.\n\n*● GROUPE & MODÉRATION*\n*○ tagtout* : Mentionner tous les membres.\n*○ hidetag* : Envoyer une mention collective sans afficher la liste.\n*○ expulse* : Retirer le membre mentionné ou ciblé.\n*○ add numéro* : Ajouter un numéro au groupe.\n*○ promote / demote* : Donner ou retirer les droits d’administration.\n*○ expulsetout* : Retirer les membres non administrateurs en une opération.\n*○ expulsetout2* : Retirer les membres non administrateurs par petits groupes.\n*○ ferme / ouvert* : Limiter l’envoi aux administrateurs ou le réautoriser à tous.\n*○ bienvenue* : Activer ou désactiver le message d’accueil.\n*○ nolien* : Bloquer les liens selon le réglage simple.\n*○ nolien2* : Appliquer le blocage strict des liens.\n*○ del* : Répondre à un message pour le supprimer.\n*○ del2* : Activer ou désactiver la suppression des messages d’un membre ciblé.\n*○ del3* : Répondre à un message pour le supprimer et activer ou désactiver la suppression des prochains messages du même type.\n\n*● RÉGLAGES DU BOT*\n*○ prive / public* : Changer le mode privé ou public (hôte uniquement)."
   },
   en: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "search",
@@ -4876,11 +4903,11 @@ const translations = {
     disconnect_sys_msg: "You have been disconnected. A total deletion of data and sessions has been initiated via the system.",
     del2_activated: "Strict moderation has been activated for @{user}. All incoming messages from this user will be deleted immediately.",
     del2_deactivated: "Strict moderation has been deactivated for @{user}.",
-    del3_activated: "Del3 is enabled for {format}. The message you replied to was deleted. Future messages in this format will be deleted automatically. The host’s and bot’s messages remain protected.",
-    del3_activated_protected: "Del3 is enabled for {format}. The selected message belongs to the host or bot, so it was kept. Future messages in this format will be deleted, except the host’s and bot’s messages.",
-    del3_activated_delete_failed: "Del3 is enabled for {format}, but WhatsApp did not confirm deletion of the selected message. Future messages in this format will be deleted, except the host’s and bot’s messages.",
-    del3_deactivated: "The del3 rule for {format} is disabled. New messages in this format will no longer be deleted automatically.",
-    del3_usage: "To enable del3, reply directly to a group message with del3. The bot detects its WhatsApp format (text, image, video, audio, document, sticker, etc.).",
+    del3_activated: "Automatic deletion is enabled for this message type. The selected message was deleted.",
+    del3_deactivated: "Automatic deletion is disabled for this message type. The selected message was deleted.",
+    del3_delete_failed: "This message could not be deleted. Check the bot permissions and try again.",
+    del3_deleted_unclassified: "The message was deleted. Its type could not be identified, so automatic deletion was not changed.",
+    del3_usage: "Reply to a group message with del3 to delete it and toggle automatic deletion of future messages of the same type.",
     del3_bot_admin_required: "The bot must be a group administrator to enable del3 and delete messages. Make it an admin, then try again.",
     pending_msg: "Waiting for this message",
     msg_unloaded: "Message not loaded",
@@ -4897,7 +4924,7 @@ const translations = {
     group_required: "This command must be used in a WhatsApp group.",
     admin_required: "This command requires group administrator permissions.",
     command_error: "The command failed. Try again and check the bot permissions.",
-    info_text: "*● AI & SEARCH*\n*○ ai* : Query AI for detailed text responses.\n*○ lang* : Modify configuration language.\n*○ image* : Generate a digital image.\n*○ search* : Perform web searches.\n\n*● UTILITIES & SYSTEM*\n*○ menu* : View full menu.\n*○ qrbot* : Initiate session via QR code.\n*○ qr* : Convert text/link to QR code.\n*○ code* : Generate code.\n*○ link* : Obtain official link.\n*○ sit* : Consult official sites.\n*○ info* : Information.\n\n*● GROUP LOGISTICS*\n*○ tagall* : Mention all members.\n*○ hidetag* : Broadcast secret mention.\n*○ kick* : Remove a member.\n*○ add* : Add phone number.\n*○ promote* : Elevate member to admin.\n*○ demote* : Demote admin.\n*○ kickall* : Global expulsion.\n*○ del3* : Delete messages of the selected WhatsApp format, except the owner and the bot.\n*○ close* : Restrict messages.\n*○ open* : Allow messages."
+    info_text: "*● ASSISTANT & SEARCH*\n*○ ai* : Ask the assistant a question.\n*○ image* : Generate an image from a description.\n*○ search* : Search the Web for information.\n*○ lang fr|en|es|ht* : Choose the bot language.\n\n*● CONNECTION & INFORMATION*\n*○ menu* : Show the command list.\n*○ info* : Show command help.\n*○ qrbot* : Create a new connection using a QR code.\n*○ code number* : Get a connection code for an international number (owner only).\n*○ qr text or link* : Create a QR code.\n*○ link* : Show official links.\n*○ sit* : Show official websites.\n*○ alive* : Show how long the bot has been connected.\n*○ ping* : Measure response time.\n*○ url* : Reply to media to get its link.\n*○ vv* : Resend a view-once media item you replied to.\n\n*● GROUP & MODERATION*\n*○ tagall* : Mention every group member.\n*○ hidetag* : Mention everyone without displaying the member list.\n*○ kick* : Remove the mentioned or selected member.\n*○ add number* : Add a number to the group.\n*○ promote / demote* : Grant or remove administrator rights.\n*○ kickall* : Remove non-admin members in one operation.\n*○ kickall2* : Remove non-admin members in small batches.\n*○ close / open* : Restrict messages to admins or allow everyone to send.\n*○ welcome* : Enable or disable welcome messages.\n*○ nolink* : Apply basic link filtering.\n*○ nolink2* : Apply strict link filtering.\n*○ del* : Reply to a message to delete it.\n*○ del2* : Enable or disable deletion of messages from a selected member.\n*○ del3* : Reply to a message to delete it and enable or disable deletion of future messages of the same type.\n\n*● BOT SETTINGS*\n*○ private / public* : Change private or public mode (owner only)."
   },
   es: {
     cmd_ai: "ia", cmd_lang: "lang", cmd_imaj: "imagen", cmd_cheche: "buscar",
@@ -4928,11 +4955,11 @@ const translations = {
     disconnect_sys_msg: "Ha sido desconectado. Se ha iniciado una eliminación total de datos y sesiones a través del sistema.",
     del2_activated: "Se ha activado la moderación estricta para @{user}. Todos los mensajes entrantes de este usuario serán eliminados de inmediato.",
     del2_deactivated: "Se ha desactivado la moderación estricta para @{user}.",
-    del3_activated: "Del3 está activado para el formato {format}. Se eliminó el mensaje al que respondiste. Los próximos mensajes de este formato se eliminarán automáticamente. Los mensajes del anfitrión y del bot están protegidos.",
-    del3_activated_protected: "Del3 está activado para el formato {format}. El mensaje seleccionado pertenece al anfitrión o al bot, por eso se conserva. Los próximos mensajes de este formato se eliminarán, excepto los del anfitrión y del bot.",
-    del3_activated_delete_failed: "Del3 está activado para el formato {format}, pero WhatsApp no confirmó la eliminación del mensaje seleccionado. Los próximos mensajes de este formato se eliminarán, excepto los del anfitrión y del bot.",
-    del3_deactivated: "La regla del3 para el formato {format} está desactivada. Los nuevos mensajes de este formato ya no se eliminarán automáticamente.",
-    del3_usage: "Para activar del3, responde directamente a un mensaje del grupo con del3. El bot detectará su formato de WhatsApp (texto, imagen, vídeo, audio, documento, sticker, etc.).",
+    del3_activated: "La eliminación automática está activada para este tipo de mensaje. El mensaje seleccionado se eliminó.",
+    del3_deactivated: "La eliminación automática está desactivada para este tipo de mensaje. El mensaje seleccionado se eliminó.",
+    del3_delete_failed: "No se pudo eliminar este mensaje. Comprueba los permisos del bot e inténtalo de nuevo.",
+    del3_deleted_unclassified: "El mensaje se eliminó. No se pudo identificar su tipo, por lo que no se modificó la eliminación automática.",
+    del3_usage: "Responde a un mensaje del grupo con del3 para eliminarlo y activar o desactivar la eliminación automática de los próximos mensajes del mismo tipo.",
     del3_bot_admin_required: "El bot debe ser administrador del grupo para activar del3 y eliminar mensajes. Hazlo administrador y vuelve a intentarlo.",
     pending_msg: "Esperando este mensaje",
     msg_unloaded: "Mensaje no cargado",
@@ -4949,7 +4976,7 @@ const translations = {
     group_required: "Este comando debe usarse en un grupo de WhatsApp.",
     admin_required: "Este comando requiere permisos de administrador del grupo.",
     command_error: "El comando falló. Inténtalo de nuevo y comprueba los permisos del bot.",
-    info_text: "*● IA & BÚSQUEDA*\n*○ ia* : Consultar la IA para respuestas.\n*○ lang* : Modificar idioma.\n*○ imagen* : Generar imagen digital.\n*○ buscar* : Búsquedas web.\n\n*● UTILIDADES Y SISTEMA*\n*○ menú* : Ver menú completo.\n*○ qrbot* : Iniciar sesión vía código QR.\n*○ qr* : Convertir texto/enlace a código QR.\n*○ código* : Generar código.\n*○ enlace* : Obtener enlace oficial.\n*○ sit* : Consultar sitios oficiales.\n*○ info* : Información.\n\n*● LOGÍSTICA DE GRUPO*\n*○ etiquetartodo* : Mencionar a todos.\n*○ hidetag* : Mencionar en secreto.\n*○ expulsar* : Eliminar miembro.\n*○ añadir* : Añadir número.\n*○ promover* : Promover a admin.\n*○ degradar* : Degradar admin.\n*○ borrartodo* : Expulsión global.\n*○ del3* : Eliminar mensajes del mismo formato de WhatsApp, excepto los del propietario y el bot.\n*○ cerrar* : Restringir mensajes.\n*○ abrir* : Permitir mensajes."
+    info_text: "*● ASISTENTE Y BÚSQUEDA*\n*○ ia* : Hacer una pregunta al asistente.\n*○ imagen* : Generar una imagen a partir de una descripción.\n*○ buscar* : Buscar información en la Web.\n*○ lang fr|en|es|ht* : Elegir el idioma del bot.\n\n*● CONEXIÓN E INFORMACIÓN*\n*○ menú* : Mostrar la lista de comandos.\n*○ info* : Mostrar la ayuda de los comandos.\n*○ qrbot* : Crear una nueva conexión mediante QR.\n*○ código número* : Obtener un código de conexión para un número internacional (solo propietario).\n*○ qr texto o enlace* : Crear un código QR.\n*○ enlace* : Mostrar los enlaces oficiales.\n*○ sit* : Mostrar los sitios oficiales.\n*○ alive* : Ver cuánto tiempo lleva conectado el bot.\n*○ ping* : Medir el tiempo de respuesta.\n*○ url* : Responder a un archivo multimedia para obtener su enlace.\n*○ vv* : Volver a enviar un archivo de vista única al que respondiste.\n\n*● GRUPO Y MODERACIÓN*\n*○ etiquetartodo* : Mencionar a todos los miembros.\n*○ hidetag* : Mencionar a todos sin mostrar la lista.\n*○ expulsar* : Retirar al miembro mencionado o seleccionado.\n*○ añadir número* : Añadir un número al grupo.\n*○ promover / degradar* : Dar o quitar permisos de administrador.\n*○ borrartodo* : Retirar a los miembros que no son administradores en una operación.\n*○ borrartodo2* : Retirar a los miembros que no son administradores por grupos pequeños.\n*○ cerrar / abrir* : Limitar los mensajes a administradores o permitir que todos escriban.\n*○ bienvenida* : Activar o desactivar los mensajes de bienvenida.\n*○ sinenlace* : Aplicar un filtro básico de enlaces.\n*○ sinenlace2* : Aplicar un filtro estricto de enlaces.\n*○ del* : Responder a un mensaje para eliminarlo.\n*○ del2* : Activar o desactivar la eliminación de mensajes de un miembro seleccionado.\n*○ del3* : Responder a un mensaje para eliminarlo y activar o desactivar la eliminación de futuros mensajes del mismo tipo.\n\n*● AJUSTES DEL BOT*\n*○ privado / publico* : Cambiar el modo privado o público (solo propietario)."
   },
   ht: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "imaj", cmd_cheche: "cheche",
@@ -4980,11 +5007,11 @@ const translations = {
     disconnect_sys_msg: "Ou dekonekte. Yon efasman total done ak sesyon yo te inisye atravè sistèm nan.",
     del2_activated: "Modération estrik aktive pou @{user}. Tout mesaj moun sa a voye ap siprime touswit.",
     del2_deactivated: "Modération estrik dezaktive pou @{user}.",
-    del3_activated: "Del3 aktive pou fòma {format}. Mesaj ou te reponn lan efase. Tout pwochen mesaj ki gen menm fòma sa a ap efase otomatikman. Mesaj hòt la ak bot la rete pwoteje.",
-    del3_activated_protected: "Del3 aktive pou fòma {format}. Mesaj ou te chwazi a se mesaj hòt la oswa bot la, se poutèt sa li rete la. Pwochen mesaj ki gen menm fòma a ap efase, sof mesaj hòt la ak bot la.",
-    del3_activated_delete_failed: "Del3 aktive pou fòma {format}, men WhatsApp pa konfime efasman mesaj ou te chwazi a. Pwochen mesaj ki gen menm fòma a ap efase, sof mesaj hòt la ak bot la.",
-    del3_deactivated: "Règ del3 pou fòma {format} dezaktive. Nouvo mesaj ki gen fòma sa a pap efase otomatikman ankò.",
-    del3_usage: "Pou aktive del3, reponn dirèkteman yon mesaj nan gwoup la ak del3. Bot la ap detekte fòma WhatsApp la (tèks, imaj, videyo, odyo, dokiman, sticker, elatriye).",
+    del3_activated: "Sipresyon otomatik aktive pou kalite mesaj sa a. Mesaj ou te chwazi a efase.",
+    del3_deactivated: "Sipresyon otomatik dezaktive pou kalite mesaj sa a. Mesaj ou te chwazi a efase.",
+    del3_delete_failed: "Mesaj sa a pa t kapab efase. Verifye pèmisyon bot la epi eseye ankò.",
+    del3_deleted_unclassified: "Mesaj la efase. Nou pa t kapab idantifye kalite li, kidonk efasman otomatik la pa chanje.",
+    del3_usage: "Reponn sou yon mesaj nan gwoup la ak del3 pou efase li epi aktive oswa dezaktive efasman otomatik pwochen mesaj ki gen menm kalite a.",
     del3_bot_admin_required: "Bot la dwe administratè gwoup la pou aktive del3 epi efase mesaj yo. Mete li kòm administratè, epi eseye ankò.",
     pending_msg: "Ap tann mesaj sa a",
     msg_unloaded: "Mesaj pa chaje",
@@ -5001,7 +5028,7 @@ const translations = {
     group_required: "Ou dwe itilize kòmand sa a nan yon gwoup WhatsApp.",
     admin_required: "Kòmand sa a mande dwa administratè gwoup la.",
     command_error: "Kòmand lan echwe. Eseye ankò epi verifye dwa bot la.",
-    info_text: "*● IA & RECHÈCH*\n*○ ai* : Poze IA kesyon pou jwenn repons text.\n*○ lang* : Modifye lang kreyòl la.\n*○ imaj* : Jenere imaj nimerik.\n*○ cheche* : Fè rechèch sou entènèt.\n\n*● ITILITE AK SISTÈM*\n*○ meni* : Wè tout kòmand yo.\n*○ qrbot* : Inisye sesyon avèk QR.\n*○ qr* : Konvèti tèks oswa lyen nan kòd QR.\n*○ kòd* : Jenere kòd otorizasyon.\n*○ lyen* : Jwenn lyen ofisyèl.\n*○ sit* : Konsilte sit ofisyèl yo.\n*○ info* : Enfòmasyon.\n\n*● LOJISTIK GWOUP*\n*○ tout* : Mansyone tout moun.\n*○ hidetag* : Voye mesaj an sekrè.\n*○ kick* : Retire yon manm.\n*○ add* : Ajoute nimewo.\n*○ promote* : Mete yon moun admin.\n*○ demote* : Desann yon admin.\n*○ siptout* : Mete tout moun deyò.\n*○ del3* : Efase mesaj ki gen menm fòma WhatsApp la, sof mesaj mèt la ak bot la.\n*○ fèmen* : Restrenn voye mesaj.\n*○ ouvri* : Pèmèt tout mesaj."
+    info_text: "*● ASISTAN AK RECHÈCH*\n*○ ai* : Poze asistan an yon kesyon.\n*○ imaj* : Jenere yon imaj apati yon deskripsyon.\n*○ cheche* : Chèche enfòmasyon sou entènèt.\n*○ lang fr|en|es|ht* : Chwazi lang bot la.\n\n*● KONEKSYON AK ENFÒMASYON*\n*○ meni* : Montre lis kòmand yo.\n*○ info* : Montre eksplikasyon kòmand yo.\n*○ qrbot* : Kreye yon nouvo koneksyon ak QR code.\n*○ kòd nimewo* : Jwenn yon kòd koneksyon pou yon nimewo entènasyonal (pwopriyetè sèlman).\n*○ qr tèks oswa lyen* : Kreye yon QR code.\n*○ lyen* : Montre lyen ofisyèl yo.\n*○ sit* : Montre sit ofisyèl yo.\n*○ alive* : Montre depi konbyen tan bot la konekte.\n*○ ping* : Mezire tan repons lan.\n*○ url* : Reponn sou yon medya pou jwenn lyen li.\n*○ vv* : Voye ankò yon medya yon sèl fwa ou te reponn.\n\n*● GWOUP AK MODERASYON*\n*○ tout* : Mansyone tout manm yo.\n*○ hidetag* : Mansyone tout moun san montre lis la.\n*○ kick* : Retire manm ou mansyone oswa chwazi a.\n*○ add nimewo* : Ajoute yon nimewo nan gwoup la.\n*○ promote / demote* : Bay oswa retire dwa administratè.\n*○ siptout* : Retire manm ki pa administratè yo nan yon sèl operasyon.\n*○ siptout2* : Retire manm ki pa administratè yo pa ti gwoup.\n*○ fèmen / ouvri* : Kite administratè yo sèlman ekri oswa pèmèt tout moun ekri.\n*○ byenveni* : Aktive oswa dezaktive mesaj akeyi yo.\n*○ nolyen* : Mete yon filtè lyen senp.\n*○ nolyen2* : Mete yon filtè lyen sevè.\n*○ del* : Reponn sou yon mesaj pou efase li.\n*○ del2* : Aktive oswa dezaktive efasman mesaj yon manm chwazi.\n*○ del3* : Reponn sou yon mesaj pou efase li epi aktive oswa dezaktive efasman pwochen mesaj ki gen menm kalite a.\n\n*● PARAMÈT BOT LA*\n*○ prive / piblik* : Chanje mòd prive oswa piblik (pwopriyetè sèlman)."
   }
 };
 
@@ -5096,15 +5123,22 @@ async function optimizeAdamLogoForBandwidth() {
     const originalBytes = adamLogoBuffer.length;
     try {
         const sharp = require('sharp');
-        const optimized = await sharp(adamLogoBuffer, { failOn: 'none' })
+        const input = sharp(adamLogoBuffer, { failOn: 'error', limitInputPixels: 40000000 });
+        const metadata = await input.metadata();
+        if (!metadata || !Number(metadata.width) || !Number(metadata.height)) throw new Error('logo_image_metadata_invalid');
+        const optimized = await sharp(adamLogoBuffer, { failOn: 'error', limitInputPixels: 40000000 })
             .rotate()
             .resize(TFBOT_LOGO_MAX_DIMENSION, TFBOT_LOGO_MAX_DIMENSION, { fit: 'inside', withoutEnlargement: true })
             .jpeg({ quality: TFBOT_LOGO_JPEG_QUALITY, mozjpeg: true, progressive: true })
             .toBuffer();
-        if (optimized.length > 0 && optimized.length < originalBytes) adamLogoBuffer = optimized;
-        logoOptimizationResult = adamLogoBuffer.length <= TFBOT_LOGO_MAX_BYTES ? 'optimized_image' : 'image_above_size_limit';
+        if (!Buffer.isBuffer(optimized) || !optimized.length || detectImageMimeType(optimized) !== 'image/jpeg') throw new Error('logo_optimization_output_invalid');
+        adamLogoBuffer = optimized;
+        logoOptimizationResult = 'optimized_image';
     } catch (error) {
-        logoOptimizationResult = 'optimizer_unavailable';
+        adamLogoBuffer = null;
+        logoOptimizationResult = 'invalid_image_text_fallback';
+        console.warn('[logo-image-invalid-text-fallback]', { originalBytes, error: String(error?.message || error).slice(0, 180), action: 'disable_image_attachment_and_send_text_only' });
+        return false;
     }
     if (adamLogoBuffer.length > TFBOT_LOGO_MAX_BYTES) {
         adamLogoBuffer = null;
@@ -6173,12 +6207,20 @@ function normalizePhoneNumber(number) {
 
 function unwrapMessageContent(message) {
     let msg = message || {};
-    for (let depth = 0; msg && depth < 10; depth++) {
-        const next = msg.ephemeralMessage?.message || msg.viewOnceMessage?.message || msg.viewOnceMessageV2?.message || msg.viewOnceMessageV2Extension?.message || msg.documentWithCaptionMessage?.message;
-        if (!next || next === msg) break;
+    const wrappers = ['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'documentWithCaptionMessage', 'deviceSentMessage', 'editedMessage'];
+    for (let depth = 0; msg && depth < 12; depth++) {
+        let next = null;
+        for (const wrapper of wrappers) {
+            const candidate = msg?.[wrapper]?.message;
+            if (candidate && typeof candidate === 'object' && candidate !== msg) {
+                next = candidate;
+                break;
+            }
+        }
+        if (!next) break;
         msg = next;
     }
-    return msg || {};
+    return msg && typeof msg === 'object' ? msg : {};
 }
 
 function getMessageContextInfo(message) {
@@ -7696,10 +7738,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         });
 
         sock.ev.on('messages.upsert', async (up) => {
+            let liveAccountPhone = '';
+            let liveAccountLid = '';
             try {
                 if (activeSessions.get(sessionId)?.sock !== sock) return;
-                const liveAccountPhone = getAuthenticatedPhoneNumber(sock.user, state.creds);
-                const liveAccountLid = getAuthenticatedLid(sock.user, state.creds);
+                liveAccountPhone = getAuthenticatedPhoneNumber(sock.user, state.creds);
+                liveAccountLid = getAuthenticatedLid(sock.user, state.creds);
                 const liveAccountIdentity = liveAccountPhone || liveAccountLid;
                 const liveAccountLockKey = normalizeAccountRuntimeLockKey(liveAccountIdentity);
                 if (liveAccountLockKey) {
@@ -9177,58 +9221,68 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, t.cmd_del3, t.admin_required, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            if (!quoted?.stanzaId || !quotedMessage) {
+                                            if (!quoted?.stanzaId) {
                                                 await safeSendFormatted(sock, from, t.cmd_del3, t.del3_usage, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            const del3Format = getWhatsAppMessageFormat({ message: quotedMessage });
-                                            if (!del3Format) {
-                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_usage, pushName, true, activeHostName);
-                                                break;
+                                            const quotedDel3Id = String(quoted.stanzaId);
+                                            const cachedDel3Quote = recentMsgsCache.find(entry => entry.sessionId === sessionId && String(entry.id) === quotedDel3Id && (entry.from === from || entry.chatAliases?.includes(from) || areEquivalentWhatsAppChatJids(sessionId, entry.from, from)));
+                                            let storedDel3Quote = null;
+                                            if (!cachedDel3Quote && db) {
+                                                storedDel3Quote = await db.collection('baileys_outgoing_messages').findOne(
+                                                    { _id: `${sessionId}:${quotedDel3Id}`, sessionId, messageId: quotedDel3Id, fromMe: true },
+                                                    { projection: { message: 1, remoteJid: 1, remoteJidAlt: 1, remoteJidAliases: 1, fromMe: 1 } }
+                                                ).catch(error => {
+                                                    console.warn('[del3-quoted-message-lookup-failed]', { sessionId, group: from, messageId: quotedDel3Id, error: error?.message || String(error) });
+                                                    return null;
+                                                });
+                                                if (storedDel3Quote) {
+                                                    const aliases = [storedDel3Quote.remoteJid, storedDel3Quote.remoteJidAlt, ...(Array.isArray(storedDel3Quote.remoteJidAliases) ? storedDel3Quote.remoteJidAliases : [])].filter(Boolean);
+                                                    if (aliases.length && !aliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, from))) storedDel3Quote = null;
+                                                }
                                             }
-                                            const currentDel3Rules = await getDel3Rules(sessionId, from);
-                                            if (currentDel3Rules.some(rule => rule.format === del3Format)) {
-                                                await removeDel3Rule(sessionId, from, del3Format);
-                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_deactivated.replace('{format}', del3Format), pushName, false, activeHostName);
-                                                break;
-                                            }
-                                            if (!(await canBotModerateGroup(from))) {
-                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_bot_admin_required, pushName, true, activeHostName);
-                                                console.warn('[del3-rule-activation-blocked]', { sessionId, group: from, format: del3Format, reason: 'bot_not_group_admin_or_group_metadata_unavailable' });
-                                                break;
-                                            }
-                                            await addDel3Rule(sessionId, from, del3Format, extractBody({ message: quotedMessage }));
-                                            const cachedDel3Quote = recentMsgsCache.find(entry => entry.sessionId === sessionId && entry.id === quoted.stanzaId && (entry.from === from || entry.chatAliases?.includes(from)));
-                                            const quotedDel3Sender = cachedDel3Quote?.sender || quoted.participant || quoted.participantPn || quoted.participantAlt || '';
-                                            const quotedDel3Participant = cachedDel3Quote?.key?.participant || quoted.participant || quoted.participantPn || quoted.participantAlt || quoted.senderPn || '';
+                                            const quotedDel3Message = quotedMessage || cachedDel3Quote?.message || (storedDel3Quote?.message ? fixBuffers(storedDel3Quote.message) : null);
+                                            const del3Format = quotedDel3Message ? getWhatsAppMessageFormat({ message: quotedDel3Message }) : '';
+                                            const quotedDel3KeySource = cachedDel3Quote?.key || (storedDel3Quote ? { remoteJid: storedDel3Quote.remoteJid || from, remoteJidAlt: storedDel3Quote.remoteJidAlt || '', id: quotedDel3Id, fromMe: true } : {});
+                                            const quotedDel3FromMe = cachedDel3Quote ? cachedDel3Quote.fromMe === true || quotedDel3KeySource.fromMe === true : storedDel3Quote ? storedDel3Quote.fromMe === true : quoted.fromMe === true || quotedDel3KeySource.fromMe === true;
+                                            const quotedDel3Participant = quotedDel3KeySource.participant || quoted.participant || quoted.participantPn || quoted.participantAlt || quoted.senderPn || '';
                                             const quotedDel3Key = {
-                                                ...(cachedDel3Quote?.key || {}),
-                                                remoteJid: cachedDel3Quote?.key?.remoteJid || quoted.remoteJid || from,
-                                                id: quoted.stanzaId,
-                                                fromMe: cachedDel3Quote ? !!cachedDel3Quote.fromMe : quoted.fromMe === true
+                                                ...quotedDel3KeySource,
+                                                remoteJid: quotedDel3KeySource.remoteJid || quoted.remoteJid || from,
+                                                id: quotedDel3Id,
+                                                fromMe: quotedDel3FromMe
                                             };
-                                            if (quotedDel3Participant) quotedDel3Key.participant = quotedDel3Participant;
+                                            if (quotedDel3Participant && !quotedDel3FromMe) quotedDel3Key.participant = quotedDel3Participant;
                                             if (quoted.participantAlt) quotedDel3Key.participantAlt = quoted.participantAlt;
                                             if (quoted.participantPn) quotedDel3Key.participantPn = quoted.participantPn;
                                             if (quoted.senderPn) quotedDel3Key.senderPn = quoted.senderPn;
-                                            const quotedDel3Aliases = [...new Set([quotedDel3Sender, quoted.participant, quoted.participantPn, quoted.participantAlt, quoted.senderPn, cachedDel3Quote?.participantAlt, cachedDel3Quote?.key?.participantAlt, cachedDel3Quote?.key?.participantPn, cachedDel3Quote?.key?.senderPn].filter(Boolean).map(String))];
-                                            const quotedDel3IsProtected = !!cachedDel3Quote?.fromMe || !!quotedDel3Key.fromMe || isProtectedWhatsAppTarget(quotedDel3Sender, sOwnerTop, botId, quotedDel3Aliases.join(' '));
-                                            let selectedMessageDeleted = false;
-                                            if (!quotedDel3IsProtected) {
-                                                try {
-                                                    await queuedDeleteMessageWithAck(sock, from, quotedDel3Key, 120, 6500);
-                                                    selectedMessageDeleted = true;
-                                                } catch (del3DeleteError) {
-                                                    console.warn('[del3-selected-message-delete-failed]', { sessionId, group: from, messageId: quoted.stanzaId, format: del3Format, error: del3DeleteError?.message || String(del3DeleteError) });
-                                                }
+                                            if (!quotedDel3FromMe && !(await canBotModerateGroup(from))) {
+                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_bot_admin_required, pushName, true, activeHostName);
+                                                break;
                                             }
-                                            console.info('[del3-rule-activated]', { sessionId, group: from, format: del3Format, selectedMessageDeleted, quotedSenderProtected: quotedDel3IsProtected, quotedKeyAvailable: !!quotedDel3Key.id, quotedParticipantAvailable: !!quotedDel3Key.participant || !!quotedDel3Key.fromMe, action: 'delete_selected_message_after_server_ack_and_future_messages_of_same_whatsapp_format_except_owner_and_bot' });
-                                            const del3ActivationText = quotedDel3IsProtected
-                                                ? t.del3_activated_protected
-                                                : selectedMessageDeleted
-                                                    ? t.del3_activated
-                                                    : t.del3_activated_delete_failed;
-                                            await safeSendFormatted(sock, from, t.cmd_del3, del3ActivationText.replace('{format}', del3Format), pushName, false, activeHostName);
+                                            try {
+                                                await queuedSendMessage(sock, from, { delete: quotedDel3Key }, {}, 180);
+                                            } catch (del3SelectedDeleteError) {
+                                                console.warn('[del3-selected-message-delete-failed]', { sessionId, group: from, messageId: quotedDel3Id, format: del3Format || 'unknown', error: del3SelectedDeleteError?.message || String(del3SelectedDeleteError) });
+                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_delete_failed || t.command_error, pushName, true, activeHostName);
+                                                break;
+                                            }
+                                            if (!del3Format) {
+                                                console.info('[del3-selected-message-deleted-format-unknown]', { sessionId, group: from, messageId: quotedDel3Id, messageContentAvailable: !!quotedDel3Message, automaticRuleChanged: false });
+                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_deleted_unclassified || t.del3_delete_failed, pushName, false, activeHostName);
+                                                break;
+                                            }
+                                            const currentDel3Rules = await getDel3Rules(sessionId, from);
+                                            const del3AlreadyEnabled = currentDel3Rules.some(rule => rule.format === del3Format);
+                                            if (del3AlreadyEnabled) {
+                                                await removeDel3Rule(sessionId, from, del3Format);
+                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_deactivated, pushName, false, activeHostName);
+                                                console.info('[del3-rule-deactivated]', { sessionId, group: from, format: del3Format, selectedMessageDeleteRequestSent: true });
+                                                break;
+                                            }
+                                            await addDel3Rule(sessionId, from, del3Format, extractBody({ message: quotedDel3Message }));
+                                            console.info('[del3-rule-activated]', { sessionId, group: from, format: del3Format, selectedMessageDeleteRequestSent: true, futureMessages: 'same_group_same_format_except_host_and_bot' });
+                                            await safeSendFormatted(sock, from, t.cmd_del3, t.del3_activated, pushName, false, activeHostName);
                                             break;
                                         case 'vv':
                                             if (!quotedMessage) break;
@@ -9741,6 +9795,37 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 async function loadExistingSessions() {
     if (!db) return;
     const collection = db.collection('baileys_auth');
+    const pairingCutoff = new Date(Date.now() - Math.max(120000, Number(process.env.PAIRING_SESSION_TTL_MS || 900000)));
+    const stalePairingOwners = await db.collection('session_owners').find({
+        $or: [
+            { connectionStatus: { $in: ['pairing_expired', 'pairing_error'] } },
+            { pairingPending: true, pairingStartedAt: { $lt: pairingCutoff }, connectionStatus: { $in: ['pairing_starting', 'pairing'] } }
+        ]
+    }).limit(500).toArray().catch(error => {
+        console.warn('[session-expired-pairing-scan-failed]', { error: error?.message || String(error) });
+        return [];
+    });
+    for (const owner of stalePairingOwners) {
+        const staleSessionId = String(owner.sessionId || '').trim();
+        if (!staleSessionId) continue;
+        const runtime = activeSessions.get(staleSessionId);
+        const runtimeStatus = String(runtime?.status || '').toLowerCase();
+        if (['connecte', 'connected'].includes(runtimeStatus) || runtime?.authState?.creds?.registered === true) continue;
+        const leaseUntil = new Date(owner.ownerLeaseUntil || 0).getTime();
+        if (TFBOT_CLUSTER_ENABLED && owner.ownerInstanceId && owner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && leaseUntil > Date.now()) continue;
+        const liveSessionLock = await db.collection('session_runtime_locks').findOne({ _id: staleSessionId, leaseUntil: { $gt: new Date() } }, { projection: { _id: 1, owner: 1 } }).catch(() => null);
+        if (liveSessionLock && liveSessionLock.owner !== processInstanceId) continue;
+        const liveAccountLock = await db.collection('session_account_runtime_locks').findOne({ sessionId: staleSessionId, leaseUntil: { $gt: new Date() } }, { projection: { _id: 1, owner: 1 } }).catch(() => null);
+        if (liveAccountLock && liveAccountLock.owner !== processInstanceId) continue;
+        const credsDoc = await collection.findOne({ _id: `auth-${staleSessionId}-creds` }, { projection: { 'creds.registered': 1 } }).catch(() => null);
+        if (credsDoc?.creds?.registered === true) continue;
+        try {
+            await deleteMongoSession(staleSessionId);
+            console.info('[session-expired-pairing-removed]', { sessionId: staleSessionId, status: String(owner.connectionStatus || 'pairing_expired'), credentialsRegistered: false, associatedDataRemoved: true });
+        } catch (error) {
+            console.warn('[session-expired-pairing-removal-failed]', { sessionId: staleSessionId, error: error?.message || String(error) });
+        }
+    }
     const credsDocs = await collection.find({ _id: { $regex: /^auth-.*-creds$/ } }).toArray();
     const candidates = [];
     for (const doc of credsDocs) {
@@ -10055,8 +10140,8 @@ async function main() {
         pairAccountLockedBeforeSocket: true,
         pairActiveSessionReusedWithoutSocketReplacement: true,
         sharedLogicalLeaseTtlIndex: 'leaseUntil_single_field',
-        pairCodeWaitsForFreshQrEvent: false,
-        pairCodeRequestedProactively: true,
+        pairCodeWaitsForFreshQrEvent: true,
+        pairCodeRequestedProactively: false,
         authWritesAllowSessionScopedBootstrapUntilIdentity: true,
         pairingAuthPreservedOnTransientFailure: true,
         pairingTimeoutMs: Math.max(120000, Number(process.env.PAIRING_SESSION_TTL_MS || 900000)),
@@ -10076,12 +10161,13 @@ async function main() {
         accountLockUsesRecentPnlidMappings: true,
         duplicateSessionsSkippedOnRestore: true,
         activeSocketWithoutFencingTokenIsClosed: true,
-        invalidSignalSessionRecordPruning: 'single_session_key_only',
+        invalidSignalSessionRecordPruning: 'preserve_invalid_record_and_skip_unusable_value',
+        del3UnknownMessageFormats: 'classified_by_exact_whatsapp_message_key',
         lockLeaseMs: SESSION_RUNTIME_LOCK_LEASE_MS,
         lockRenewMs: SESSION_RUNTIME_LOCK_RENEW_MS,
         authWritesFencedByRuntimeLock: true,
         retryStoreExactSessionIdFallback: true,
-        targetedSignalPeerRecovery: true,
+        targetedSignalPeerRecovery: false,
         selfChatPhonePreferred: false,
         lidPhoneMappingFreshMs: LID_PHONE_MAPPING_FRESH_MS,
         sessionScopedLidMappings: true,
