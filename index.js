@@ -335,7 +335,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'wa-command-grammar-2026-10-30-r7';
+const RUNTIME_FIX_BUILD = 'wa-message-visibility-2026-10-30-r8';
 const PORT = process.env.PORT || 7000;
 const BOT_TIME_ZONE = process.env.BOT_TIME_ZONE || 'America/Santo_Domingo';
 const CHAT_CONTEXT_MAX_CHARS = Math.max(2500, Number(process.env.CHAT_CONTEXT_MAX_CHARS || 7000));
@@ -415,6 +415,7 @@ const sessionStartPromises = new Map();
 const SESSION_HEALTH_CHECK_INTERVAL_MS = Math.max(15000, Number(process.env.SESSION_HEALTH_CHECK_INTERVAL_MS) || 30000);
 const SESSION_WS_PONG_TIMEOUT_MS = Math.max(60000, Number(process.env.SESSION_WS_PONG_TIMEOUT_MS) || 120000);
 const GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS = Math.max(60000, Number(process.env.GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS) || 6 * 60 * 60 * 1000);
+const GROUP_SENDER_KEY_RESET_EVERY_SEND = String(process.env.GROUP_SENDER_KEY_RESET_EVERY_SEND || 'true').trim().toLowerCase() !== 'false';
 const groupSenderKeyResetAt = new Map();
 const groupSenderKeyResetInFlight = new Map();
 const GROUP_METADATA_CACHE_TTL_MS = Math.max(30000, Number(process.env.GROUP_METADATA_CACHE_TTL_MS) || 300000);
@@ -1087,7 +1088,7 @@ async function resetGroupSenderKeyMemoryBeforeSend(sessionId, groupJid) {
     if (!sessionId || !/@g\.us$/i.test(normalizedGroupJid)) return false;
     const cacheKey = `${sessionId}:${normalizedGroupJid}`;
     const lastResetAt = Number(groupSenderKeyResetAt.get(cacheKey) || 0);
-    if (lastResetAt && Date.now() - lastResetAt < GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS) return false;
+    if (!GROUP_SENDER_KEY_RESET_EVERY_SEND && lastResetAt && Date.now() - lastResetAt < GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS) return false;
     const pending = groupSenderKeyResetInFlight.get(cacheKey);
     if (pending) return pending;
     const active = activeSessions.get(sessionId);
@@ -1102,11 +1103,12 @@ async function resetGroupSenderKeyMemoryBeforeSend(sessionId, groupJid) {
             await flushAuthWritesForSession(sessionId);
             groupSenderKeyResetAt.set(cacheKey, Date.now());
             while (groupSenderKeyResetAt.size > 10000) groupSenderKeyResetAt.delete(groupSenderKeyResetAt.keys().next().value);
-            console.info('[group-sender-key-memory-cooldown-reset]', {
+            console.info(GROUP_SENDER_KEY_RESET_EVERY_SEND ? '[group-sender-key-memory-reset-before-every-send]' : '[group-sender-key-memory-cooldown-reset]', {
                 sessionId,
                 groupJid: normalizedGroupJid,
-                cooldownMs: GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS,
-                action: 'reset_once_per_group_cooldown_not_before_every_message'
+                resetEverySend: GROUP_SENDER_KEY_RESET_EVERY_SEND,
+                cooldownMs: GROUP_SENDER_KEY_RESET_EVERY_SEND ? 0 : GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS,
+                action: GROUP_SENDER_KEY_RESET_EVERY_SEND ? 'clear_sender_key_memory_before_each_group_send_to_reissue_distribution' : 'reset_once_per_group_cooldown'
             });
             return true;
         } catch (error) {
@@ -1219,15 +1221,21 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 console.warn('[self-chat-identity-check-failed]', { sessionId, error: selfCheckError?.message || String(selfCheckError) });
             }
         }
-        const selfPrimaryJid = isSelfChatDestination && ownPhoneJid ? ownPhoneJid : ownLidJid;
-        const selfFallbackJid = isSelfChatDestination && /@lid$/i.test(ownLidJid) && ownPhoneJid !== ownLidJid ? ownLidJid : '';
+        const originalDestinationIsLid = /@lid$/i.test(originalDestinationJid);
+        const originalDestinationIsPhone = /@s\.whatsapp\.net$/i.test(originalDestinationJid);
+        const selfPrimaryJid = isSelfChatDestination
+            ? (originalDestinationIsLid || originalDestinationIsPhone ? originalDestinationJid : (ownLidJid || ownPhoneJid))
+            : '';
+        const selfFallbackJid = isSelfChatDestination
+            ? (originalDestinationIsLid && ownPhoneJid ? ownPhoneJid : originalDestinationIsPhone && /@lid$/i.test(ownLidJid) ? ownLidJid : '')
+            : '';
         if (isSelfChatDestination) {
-            console.info(selfPrimaryJid === ownPhoneJid ? '[self-chat-pn-preferred]' : '[self-chat-lid-fallback-primary]', {
+            console.info('[self-chat-original-address-preserved]', {
                 sessionId,
-                destinationResolution: selfPrimaryJid === ownPhoneJid ? 'own_phone_preferred_with_lid_fallback' : 'own_lid_used_because_phone_unavailable',
-                ownPhoneAvailable: !!ownPhoneJid,
-                ownLidAvailable: /@lid$/i.test(ownLidJid),
-                originalDestinationType: /@lid$/i.test(originalDestinationJid) ? 'lid' : 'phone'
+                originalDestinationType: originalDestinationIsLid ? 'lid' : originalDestinationIsPhone ? 'phone' : 'unknown',
+                primaryDestinationType: /@lid$/i.test(selfPrimaryJid) ? 'lid' : /@s\.whatsapp\.net$/i.test(selfPrimaryJid) ? 'phone' : 'unknown',
+                fallbackDestinationType: /@lid$/i.test(selfFallbackJid) ? 'lid' : /@s\.whatsapp\.net$/i.test(selfFallbackJid) ? 'phone' : null,
+                action: 'preserve_the_addressing_mode_of_the_self_chat_message'
             });
         }
         if (sessionId && /@g\.us$/i.test(originalDestinationJid)) {
@@ -1235,34 +1243,39 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         }
         let destinationJid = isSelfChatDestination ? selfPrimaryJid : originalDestinationJid;
         let destinationResolution = isSelfChatDestination
-            ? (selfPrimaryJid === ownPhoneJid ? 'self_chat_phone_preferred_lid_fallback' : 'self_chat_lid_primary_phone_unavailable')
-            : /@lid$/i.test(originalDestinationJid) ? 'original_lid_preferred' : 'original_destination';
+            ? (originalDestinationIsLid ? 'self_chat_original_lid_preserved' : originalDestinationIsPhone ? 'self_chat_original_phone_preserved' : 'self_chat_original_address_preserved')
+            : /@lid$/i.test(originalDestinationJid) ? 'original_lid_pending_phone_resolution' : 'original_phone_preserved';
         let alternateDestinationJid = isSelfChatDestination ? selfFallbackJid : '';
-        let alternateDestinationResolution = isSelfChatDestination && selfFallbackJid ? 'self_chat_lid_fallback' : '';
+        let alternateDestinationResolution = isSelfChatDestination && selfFallbackJid ? (/\@lid$/i.test(selfFallbackJid) ? 'self_chat_lid_fallback' : 'self_chat_phone_fallback') : '';
         if (!isSelfChatDestination && sessionId && /@lid$/i.test(originalDestinationJid)) {
             try {
+                const normalizedOriginalLid = normalizeLidCacheKey(originalDestinationJid);
                 const resolved = await resolvePhoneForLid(sessionId, sock, originalDestinationJid);
                 const mappedPhone = normalizePhoneCacheJid(resolved?.phone || getRememberedPhoneForLid(sessionId, originalDestinationJid));
-                alternateDestinationJid = mappedPhone;
-                alternateDestinationResolution = resolved?.source || (alternateDestinationJid ? 'lid_phone_cache' : 'unavailable');
-                if (mappedPhone) {
-                    const refreshed = await resolveLidForPhone(sessionId, sock, mappedPhone);
-                    const refreshedLid = normalizeLidCacheKey(refreshed?.lid || '');
-                    if (/@lid$/i.test(refreshedLid)) {
-                        if (refreshedLid !== normalizeLidCacheKey(originalDestinationJid)) {
-                            destinationJid = refreshedLid;
-                            destinationResolution = `private_lid_revalidated_${refreshed?.source || 'signal_mapping'}`;
-                            alternateDestinationJid = mappedPhone;
-                            alternateDestinationResolution = 'verified_phone_fallback';
-                        } else {
-                            alternateDestinationResolution = 'verified_phone_fallback';
-                        }
-                        console.info('[private-send-lid-revalidated]', {
-                            sessionId,
-                            destinationChanged: refreshedLid !== normalizeLidCacheKey(originalDestinationJid),
-                            resolutionSource: refreshed?.source || 'signal_mapping'
-                        });
-                    }
+                const sessionMapping = lidPhoneResolutionCache.get(`${sessionId}:${normalizedOriginalLid}`);
+                const sessionMappingFresh = !!(sessionMapping?.phone && normalizePhoneCacheJid(sessionMapping.phone) === mappedPhone && Date.now() - Number(sessionMapping.updatedAt || 0) <= LID_PHONE_MAPPING_FRESH_MS);
+                const liveSignalMapping = resolved?.source === 'signal_lid_mapping';
+                if (mappedPhone && (liveSignalMapping || sessionMappingFresh)) {
+                    destinationJid = mappedPhone;
+                    destinationResolution = `private_pn_primary_from_lid_${resolved?.source || 'fresh_session_mapping'}`;
+                    alternateDestinationJid = originalDestinationJid;
+                    alternateDestinationResolution = 'original_lid_fallback';
+                    console.info('[private-send-pn-primary-from-lid]', {
+                        sessionId,
+                        mappingSource: resolved?.source || sessionMapping?.source || 'fresh_session_mapping',
+                        mappingAgeMs: sessionMapping ? Math.max(0, Date.now() - Number(sessionMapping.updatedAt || 0)) : null,
+                        action: 'send_to_verified_phone_jid_first_keep_original_lid_as_fallback'
+                    });
+                } else {
+                    alternateDestinationJid = mappedPhone;
+                    alternateDestinationResolution = mappedPhone ? 'unverified_phone_fallback' : 'unavailable';
+                    console.info('[private-send-lid-preserved]', {
+                        sessionId,
+                        mappingSource: resolved?.source || null,
+                        mappingFresh: false,
+                        hasPhoneFallback: !!mappedPhone,
+                        action: 'keep_original_lid_until_phone_mapping_is_verified'
+                    });
                 }
             } catch (resolveError) {
                 console.warn('[private-send-alternate-resolution-failed]', { sessionId, originalDestinationJid, error: resolveError?.message || String(resolveError) });
@@ -1277,14 +1290,6 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             }
         }
         if (alternateDestinationJid === destinationJid) alternateDestinationJid = '';
-        if (!isSelfChatDestination && sessionId && /@s\.whatsapp\.net$/i.test(originalDestinationJid) && /@lid$/i.test(alternateDestinationJid)) {
-            const resolvedLidJid = normalizeLidCacheKey(alternateDestinationJid);
-            const resolvedLidSource = alternateDestinationResolution || 'pn_lid_mapping';
-            destinationJid = resolvedLidJid;
-            destinationResolution = `private_lid_preferred_from_pn_${resolvedLidSource}`;
-            alternateDestinationJid = originalDestinationJid;
-            alternateDestinationResolution = 'original_pn_fallback';
-        }
         console.info('[private-send-target]', {
             sessionId,
             originalDestinationJid,
@@ -6825,11 +6830,13 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
 async function main() {
     console.info('[runtime-build]', {
         build: RUNTIME_FIX_BUILD,
-        groupSenderKeyResetBeforeSendCooldownMs: GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS,
-        groupSenderKeyResetEveryMessage: false,
+        groupSenderKeyResetBeforeSendCooldownMs: GROUP_SENDER_KEY_RESET_EVERY_SEND ? 0 : GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS,
+        groupSenderKeyResetEveryMessage: GROUP_SENDER_KEY_RESET_EVERY_SEND,
+        selfChatAddressingMode: 'preserve_original_jid',
+        privateLidMappedPhonePrimary: true,
         passiveSocketHealth: true,
         activeGroupFetchHealthProbe: false,
-        selfChatPhonePreferred: true,
+        selfChatPhonePreferred: false,
         lidPhoneMappingFreshMs: LID_PHONE_MAPPING_FRESH_MS,
         sessionScopedLidMappings: true,
         senderKeyIdentityInvalidation: true,
