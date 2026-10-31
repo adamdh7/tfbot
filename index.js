@@ -33,7 +33,7 @@ const runtimeLogRenderServiceName = String(process.env.RENDER_SERVICE_NAME || pr
 const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
 const runtimeLogRenderCommit = String(process.env.RENDER_GIT_COMMIT || '').trim().slice(0, 80);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}:${shortLogHash(runtimeLogInstanceId)}`).slice(0, 240);
-const TFBOT_CLUSTER_CODE_REVISION = 'r47-fast-session-handoff-restore-pairing-code-retry-safe-message-claims';
+const TFBOT_CLUSTER_CODE_REVISION = 'r48-libsignal-session-record-structured-object-storage';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
 const runtimeLogClusterId = `${runtimeLogDeploymentId}:${shortLogHash(runtimeLogInstanceId)}`.slice(0, 240);
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
@@ -653,7 +653,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r47';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r48';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -2718,7 +2718,56 @@ function restoreSignalSessionBuffer(value, depth = 0, seen = new WeakSet()) {
 }
 
 function isBinarySignalKeyCategory(type) {
-    return ['session', 'sender-key', 'identity-key'].includes(String(type || ''));
+    return ['sender-key', 'identity-key'].includes(String(type || ''));
+}
+
+function normalizeSignalSessionRecord(value) {
+    let candidate = value;
+    if (Buffer.isBuffer(candidate) || candidate instanceof Uint8Array || candidate instanceof ArrayBuffer || ArrayBuffer.isView(candidate)) {
+        try {
+            const bytes = Buffer.isBuffer(candidate) || ArrayBuffer.isView(candidate)
+                ? Buffer.from(candidate.buffer || candidate, candidate.byteOffset || 0, candidate.byteLength || candidate.length)
+                : Buffer.from(candidate);
+            candidate = JSON.parse(bytes.toString('utf8'));
+        } catch (error) {
+            return null;
+        }
+    } else if (typeof candidate === 'string') {
+        try {
+            candidate = JSON.parse(candidate);
+        } catch (error) {
+            try {
+                const bytes = restoreSignalSessionBuffer(candidate);
+                if (!bytes) return null;
+                candidate = JSON.parse(bytes.toString('utf8'));
+            } catch (parseError) {
+                return null;
+            }
+        }
+    } else if (candidate && typeof candidate === 'object' && !Array.isArray(candidate) && (!candidate._sessions || typeof candidate._sessions !== 'object' || Array.isArray(candidate._sessions))) {
+        try {
+            const bytes = restoreSignalSessionBuffer(candidate);
+            if (!bytes) return null;
+            candidate = JSON.parse(bytes.toString('utf8'));
+        } catch (error) {
+            return null;
+        }
+    }
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
+    if (!candidate._sessions || typeof candidate._sessions !== 'object' || Array.isArray(candidate._sessions)) return null;
+    if (candidate.version !== undefined && candidate.version !== null && !['string', 'number'].includes(typeof candidate.version)) return null;
+    const normalized = fixBuffers(candidate);
+    if (!normalized || typeof normalized !== 'object' || Array.isArray(normalized)) return null;
+    if (!normalized._sessions || typeof normalized._sessions !== 'object' || Array.isArray(normalized._sessions)) return null;
+    if (normalized.version !== undefined && normalized.version !== null && !['string', 'number'].includes(typeof normalized.version)) return null;
+    return normalized;
+}
+
+function normalizeSignalKeyValue(type, value) {
+    const category = String(type || '');
+    if (category === 'session') return normalizeSignalSessionRecord(value);
+    if (isBinarySignalKeyCategory(category)) return normalizeSignalBinaryValue(value);
+    return fixBuffers(value);
 }
 
 function normalizeSignalBinaryValue(value) {
@@ -2796,7 +2845,11 @@ function createDurableSignalKeyStore(store, logger = null) {
                 for (const id of missing) {
                     const raw = fetched?.[id];
                     if (raw === null || raw === undefined) continue;
-                    const value = isBinarySignalKeyCategory(type) ? normalizeSignalBinaryValue(raw) : fixBuffers(raw);
+                    const value = normalizeSignalKeyValue(type, raw);
+                    if (type === 'session' && !value) {
+                        console.warn('[signal-auth-session-record-read-skipped-invalid]', { category: type, keyHash: shortLogHash(id), ...describeSignalSessionValue(raw), reason: 'session_record_requires_structured_sessions_object', action: 'preserve_stored_record_and_skip_invalid_value' });
+                        continue;
+                    }
                     if (isBinarySignalKeyCategory(type) && (!Buffer.isBuffer(value) || value.length === 0)) {
                         console.warn('[signal-auth-cache-read-skipped-invalid-binary-key]', { category: type, keyHash: shortLogHash(id), ...describeSignalSessionValue(raw), action: 'do_not_cache_or_return_non_binary_signal_record' });
                         continue;
@@ -2820,7 +2873,11 @@ function createDurableSignalKeyStore(store, logger = null) {
                         updates.push({ type, id, value: null });
                         continue;
                     }
-                    const value = isBinarySignalKeyCategory(type) ? normalizeSignalBinaryValue(raw) : fixBuffers(raw);
+                    const value = normalizeSignalKeyValue(type, raw);
+                    if (type === 'session' && !value) {
+                        console.error('[signal-auth-session-record-write-rejected]', { category: type, keyHash: shortLogHash(id), ...describeSignalSessionValue(raw), reason: 'baileys_session_record_requires_structured_sessions_object', action: 'reject_without_polluting_signal_cache' });
+                        throw new Error('signal_auth_session_record_write_invalid');
+                    }
                     if (isBinarySignalKeyCategory(type) && (!Buffer.isBuffer(value) || value.length === 0)) {
                         console.error('[signal-auth-binary-key-normalization-failed]', { category: type, keyHash: shortLogHash(id), ...describeSignalSessionValue(raw), reason: 'baileys_signal_key_not_serialized_to_nonempty_bytes', action: 'reject_without_polluting_signal_cache' });
                         throw new Error(`signal_auth_${type.replace(/[^a-z0-9_-]/gi, '')}_write_not_binary`);
@@ -3469,9 +3526,9 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
         for (const [id, value] of Object.entries(legacyData)) {
             if (value === null || value === undefined) continue;
             const targetId = `${sessionKey}_key_${type}-${id}`;
-            const migratedValue = isBinarySignalKeyCategory(type) ? normalizeSignalBinaryValue(value) : fixBuffers(value);
-            if (isBinarySignalKeyCategory(type) && (!Buffer.isBuffer(migratedValue) || migratedValue.length === 0)) {
-                console.warn('[auth-store-legacy-binary-key-skipped]', { sessionId, type, keyHash: shortLogHash(id), ...describeSignalSessionValue(value), action: 'preserve_legacy_document_without_migrating_invalid_binary' });
+            const migratedValue = normalizeSignalKeyValue(type, value);
+            if ((type === 'session' && !migratedValue) || (isBinarySignalKeyCategory(type) && (!Buffer.isBuffer(migratedValue) || migratedValue.length === 0))) {
+                console.warn('[auth-store-legacy-signal-key-skipped]', { sessionId, type, keyHash: shortLogHash(id), ...describeSignalSessionValue(value), action: 'preserve_legacy_document_without_migrating_invalid_signal_value' });
                 continue;
             }
             operations.push({ updateOne: { filter: { _id: targetId }, update: { $setOnInsert: { data: migratedValue } }, upsert: true } });
@@ -3491,15 +3548,23 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
             const docs = await collection.find({ _id: { $in: dbIds } }).toArray();
             for (const doc of docs) {
                 const keyId = doc._id.substring(prefix.length);
-                let restored = isBinarySignalKeyCategory(type) ? normalizeSignalBinaryValue(doc.data) : fixBuffers(doc.data);
+                let restored = normalizeSignalKeyValue(type, doc.data);
+                if (type === 'session' && !restored) {
+                    const storedShape = doc.data && typeof doc.data === 'object' ? Object.keys(doc.data).slice(0, 16) : [];
+                    console.warn('[signal-auth-session-record-invalid-preserved]', { sessionId, category: type, keyHash: shortLogHash(keyId), ...describeSignalSessionValue(doc.data), storedShape, reason: 'session_record_requires_structured_sessions_object', action: 'preserve_record_and_skip_invalid_value' });
+                    continue;
+                }
                 if (isBinarySignalKeyCategory(type) && (!Buffer.isBuffer(restored) || restored.length === 0)) {
                     const storedShape = doc.data && typeof doc.data === 'object' ? Object.keys(doc.data).slice(0, 16) : [];
                     console.warn('[signal-auth-binary-key-record-invalid-preserved]', { sessionId, category: type, keyHash: shortLogHash(keyId), ...describeSignalSessionValue(doc.data), storedShape, reason: 'signal_key_record_cannot_be_restored_as_nonempty_binary', action: 'preserve_record_and_skip_until_valid_binary_representation_is_available' });
                     continue;
                 }
-                if (Buffer.isBuffer(restored) && !Buffer.isBuffer(doc.data) && doc.data?._bsontype !== 'Binary') {
+                if (isBinarySignalKeyCategory(type) && Buffer.isBuffer(restored) && !Buffer.isBuffer(doc.data) && doc.data?._bsontype !== 'Binary') {
                     await collection.updateOne({ _id: doc._id }, { $set: { data: restored, normalizedAt: new Date() } }, { writeConcern: { w: 'majority', wtimeout: 10000 } });
                     console.info('[signal-auth-record-normalized]', { sessionId, keyHash: shortLogHash(keyId), category: type, byteLength: restored.length });
+                } else if (type === 'session' && (Buffer.isBuffer(doc.data) || doc.data instanceof Uint8Array || typeof doc.data === 'string')) {
+                    await collection.updateOne({ _id: doc._id }, { $set: { data: restored, normalizedAt: new Date() } }, { writeConcern: { w: 'majority', wtimeout: 10000 } });
+                    console.info('[signal-auth-session-record-normalized]', { sessionId, keyHash: shortLogHash(keyId), category: type, version: restored.version || null, sessionCount: Object.keys(restored._sessions || {}).length });
                 }
                 result[keyId] = restored;
             }
@@ -3515,7 +3580,11 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
                     const dbId = `${sessionKey}_key_${type}-${id}`;
                     if (value === null || value === undefined) operations.push({ deleteOne: { filter: { _id: dbId } } });
                     else {
-                        const storedValue = isBinarySignalKeyCategory(type) ? normalizeSignalBinaryValue(value) : fixBuffers(value);
+                        const storedValue = normalizeSignalKeyValue(type, value);
+                        if (type === 'session' && !storedValue) {
+                            console.error('[signal-auth-session-record-write-rejected]', { sessionId, category: type, keyHash: shortLogHash(id), ...describeSignalSessionValue(value), reason: 'session_record_requires_structured_sessions_object', action: 'reject_without_corrupting_existing_record' });
+                            throw new Error('signal_auth_session_record_write_invalid');
+                        }
                         if (isBinarySignalKeyCategory(type) && (!Buffer.isBuffer(storedValue) || storedValue.length === 0)) {
                             const binaryKeyError = `signal_auth_${type.replace(/[^a-z0-9_-]/gi, '')}_write_not_binary`;
                             console.error('[signal-auth-binary-key-write-rejected]', { sessionId, category: type, keyHash: shortLogHash(id), ...describeSignalSessionValue(value), reason: 'signal_key_record_must_be_nonempty_binary', acceptedConversions: ['Uint8Array', 'Buffer', 'BSON Binary', 'BufferJSON', 'serialized byte arrays'], action: 'reject_without_corrupting_existing_record' });
@@ -5161,9 +5230,10 @@ async function pollTfbotCoordinatorSelection() {
             });
             const payload = await response.json().catch(() => null);
             if (!response.ok || !payload || payload.ok !== true) return false;
-            const coordinatorReleaseId = String(payload.releaseId || '');
-            if (coordinatorReleaseId && coordinatorReleaseId !== TFBOT_CODE_RELEASE_ID) {
-                console.warn('[tfbot-worker-coordinator-release-mismatch]', { host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorReleaseId, workerReleaseId: TFBOT_CODE_RELEASE_ID, action: 'honor_explicit_active_host_and_generation_without_forcing_shutdown' });
+            const coordinatorReleaseId = String(payload.releaseId || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/\s+/g, ' ');
+            const workerReleaseId = String(TFBOT_CODE_RELEASE_ID || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/\s+/g, ' ');
+            if (coordinatorReleaseId && coordinatorReleaseId !== workerReleaseId) {
+                console.warn('[tfbot-worker-coordinator-release-mismatch]', { host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorReleaseId, workerReleaseId, action: 'honor_explicit_active_host_and_generation_without_forcing_shutdown' });
             }
             const selectedHost = normalizeTfbotHost(payload.activeHost || payload.host || '');
             const selectedDomain = TFBOT_ROUTER_DOMAIN_BY_HOST.get(selectedHost);
@@ -11148,7 +11218,10 @@ async function main() {
         accountLockUsesRecentPnlidMappings: true,
         duplicateSessionsSkippedOnRestore: true,
         activeSocketWithoutFencingTokenIsClosed: true,
-        invalidSignalSessionRecordPruning: 'preserve_invalid_record_and_skip_unusable_value',
+        signalSessionRecordStorage: 'structured-object-with-_sessions-and-version',
+        signalBinaryKeyCategories: ['sender-key', 'identity-key'],
+        signalSessionRecordValidation: 'accept-serialized-session-record-object',
+        invalidSignalSessionRecordHandling: 'preserve-invalid-record-and-skip-unusable-value',
         del3UnknownMessageFormats: 'classified_by_exact_whatsapp_message_key',
         lockLeaseMs: SESSION_RUNTIME_LOCK_LEASE_MS,
         lockRenewMs: SESSION_RUNTIME_LOCK_RENEW_MS,
