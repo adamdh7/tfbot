@@ -33,10 +33,10 @@ const runtimeLogRenderServiceName = String(process.env.RENDER_SERVICE_NAME || pr
 const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
 const runtimeLogRenderCommit = String(process.env.RENDER_GIT_COMMIT || '').trim().slice(0, 80);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}:${shortLogHash(runtimeLogInstanceId)}`).slice(0, 240);
-const TFBOT_CLUSTER_CODE_REVISION = 'r50-lid-pn-decrypt-retry-and-ai-chat-dispatch';
+const TFBOT_CLUSTER_CODE_REVISION = 'r51-device-seen-owner-authorization-deploy-log-scope';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
 const runtimeLogClusterId = `${runtimeLogDeploymentId}:${shortLogHash(runtimeLogInstanceId)}`.slice(0, 240);
-const runtimeLogDeploymentGroupId = String(`${runtimeLogRenderCommit || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`).slice(0, 240);
+const runtimeLogDeploymentGroupId = String(process.env.TFBOT_LOG_DEPLOYMENT_GROUP_ID || `${runtimeLogRenderCommit || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`).normalize('NFKC').replace(/[\p{Cc}\p{Cf}]/gu, '').trim().slice(0, 240);
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
 const runtimeLogSecrets = Object.entries(process.env)
     .filter(([key, value]) => /TOKEN|SECRET|PASSWORD|PASSWD|API.?KEY|MONGO_URI|URI$|CF_ACCOUNTS|TAVILY|OWNER_?NUMBER|TFBOT_OWNER/i.test(key) && String(value || '').length >= 6)
@@ -137,6 +137,7 @@ function attachRuntimeLogPersistence(collection) {
             _id: entry.id,
             instance: runtimeLogInstanceId,
             deploymentId: runtimeLogDeploymentId,
+            deploymentGroupId: runtimeLogDeploymentGroupId,
             serviceId: runtimeLogRenderServiceId,
             serviceName: runtimeLogRenderServiceName,
             renderInstanceId: runtimeLogRenderInstanceId,
@@ -211,8 +212,7 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
                 { __tfbotBucket: 'server_runtime_logs' },
                 { _id: { $regex: '^server_runtime_logs::' } },
                 { _id: { $regex: '^server_runtime_logs:' }, level: { $exists: true }, text: { $exists: true } },
-                { _id: { $regex: '^(?:runtime[-_]?logs?|logs)[:::_-]' }, level: { $exists: true }, text: { $exists: true } },
-                { deploymentId: { $exists: true }, level: { $exists: true }, text: { $exists: true }, createdAt: { $exists: true } }
+                { _id: { $regex: '^(?:runtime[-_]?logs?|logs)[:::_-]' }, level: { $exists: true }, text: { $exists: true }, createdAt: { $exists: true } }
             ]
         };
         const legacyBefore = await rawAppCollection.countDocuments(legacyLogFilter).catch(() => 0);
@@ -262,12 +262,12 @@ async function flushRuntimeLogPersistence() {
             if (runtimeLogPruneCounter >= 1000) {
                 runtimeLogPruneCounter = 0;
                 try {
-                    const currentReleaseFilter = { clusterId: runtimeLogClusterId };
+                    const currentReleaseFilter = { deploymentGroupId: runtimeLogDeploymentGroupId };
                     const cutoff = await runtimeLogPersistenceCollection.find(currentReleaseFilter, { projection: { _id: 1, createdAt: 1 } })
                         .sort({ createdAt: -1, _id: -1 }).skip(LOG_DASHBOARD_PERSIST_MAX_ENTRIES).limit(1).next();
                     if (cutoff?.createdAt) {
                         await runtimeLogPersistenceCollection.deleteMany({
-                            clusterId: runtimeLogClusterId,
+                            deploymentGroupId: runtimeLogDeploymentGroupId,
                             $or: [
                                 { createdAt: { $lt: cutoff.createdAt } },
                                 { createdAt: cutoff.createdAt, _id: { $lt: cutoff._id } }
@@ -303,7 +303,7 @@ function recordRuntimeLog(level, args) {
         const at = new Date().toISOString();
         const normalizedLevel = String(level || 'log').toLowerCase();
         const id = `${runtimeLogInstanceId}:${sequence}`;
-        const entry = { id, at, level: normalizedLevel, text, serviceId: runtimeLogRenderServiceId, deploymentId: runtimeLogDeploymentId };
+        const entry = { id, at, level: normalizedLevel, text, serviceId: runtimeLogRenderServiceId, deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId };
         runtimeLogBuffer.push(entry);
         if (runtimeLogBuffer.length > LOG_DASHBOARD_MAX_ENTRIES) runtimeLogBuffer.splice(0, runtimeLogBuffer.length - LOG_DASHBOARD_MAX_ENTRIES);
 
@@ -312,6 +312,7 @@ function recordRuntimeLog(level, args) {
                 _id: id,
                 instance: runtimeLogInstanceId,
                 deploymentId: runtimeLogDeploymentId,
+                deploymentGroupId: runtimeLogDeploymentGroupId,
                 serviceId: runtimeLogRenderServiceId,
                 serviceName: runtimeLogRenderServiceName,
                 renderInstanceId: runtimeLogRenderInstanceId,
@@ -725,7 +726,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r50';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r51';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -2582,7 +2583,7 @@ async function connectMongo(options = {}) {
         db = createTfbotDatabase(targetDb);
         const runtimeLogsCollection = db.collection('server_runtime_logs');
         if (!skipStorageInitialization) {
-            await runtimeLogsCollection.createIndex({ clusterId: 1, createdAt: -1, _id: -1 }, { name: 'server_runtime_logs_cluster_created_desc' });
+            await runtimeLogsCollection.createIndex({ deploymentGroupId: 1, createdAt: -1, _id: -1 }, { name: 'server_runtime_logs_deployment_group_created_desc' });
             await runtimeLogsCollection.createIndex({ serviceId: 1, createdAt: -1, _id: -1 }, { name: 'server_runtime_logs_service_created_desc' });
             await runtimeLogsCollection.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'server_runtime_logs_expire_at_ttl' });
         }
@@ -6062,16 +6063,10 @@ async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIM
     let databaseReadError = null;
     try {
         if (db) {
-            const filter = {
-                serviceId: runtimeLogRenderServiceId,
-                deploymentId: runtimeLogDeploymentId,
-                clusterId: runtimeLogClusterId,
-                instance: runtimeLogInstanceId,
-                createdAt: { $gte: runtimeLogStartedAt }
-            };
-            if (incremental) filter.createdAt.$gte = new Date(Math.max(runtimeLogStartedAt.getTime(), since - 2000));
+            const filter = { deploymentGroupId: runtimeLogDeploymentGroupId };
+            if (incremental) filter.createdAt = { $gte: new Date(Math.max(0, since - 2000)) };
             const cursor = db.collection('server_runtime_logs')
-                .find(filter, { projection: { at: 1, level: 1, text: 1, createdAt: 1, clusterId: 1, deploymentId: 1, serviceId: 1, instance: 1 } })
+                .find(filter, { projection: { at: 1, level: 1, text: 1, createdAt: 1, clusterId: 1, deploymentId: 1, deploymentGroupId: 1, serviceId: 1, serviceName: 1, instance: 1, renderInstanceId: 1 } })
                 .sort(incremental ? { createdAt: 1, _id: 1 } : { createdAt: -1, _id: -1 })
                 .limit(limit);
             if (typeof cursor.maxTimeMS === 'function') cursor.maxTimeMS(1800);
@@ -7120,7 +7115,10 @@ function getConfiguredOwnerAccessIdentities(ownerRecord = {}) {
         ownerRecord?.OwnerNumber,
         ownerRecord?.ownerNumber,
         ownerRecord?.OwnerPhone,
-        ownerRecord?.ownerPhone
+        ownerRecord?.ownerPhone,
+        ownerRecord?.Number,
+        ownerRecord?.number,
+        ownerRecord?.PairingNumber
     ];
     const lidValues = [
         process.env.TFBOT_OWNER_LID,
@@ -7128,7 +7126,9 @@ function getConfiguredOwnerAccessIdentities(ownerRecord = {}) {
         ownerRecord?.AdminLid,
         ownerRecord?.adminLid,
         ownerRecord?.OwnerAdminLid,
-        ownerRecord?.ownerAdminLid
+        ownerRecord?.ownerAdminLid,
+        ownerRecord?.OwnerLid,
+        ownerRecord?.ownerLid
     ];
     const numbers = new Set(numberValues.flatMap(value => Array.isArray(value) ? value : String(value || '').split(/[,;\s]+/)).map(normalizePhoneNumber).filter(value => /^\d{6,20}$/.test(value)));
     const lids = new Set(lidValues.flatMap(value => Array.isArray(value) ? value : String(value || '').split(/[,;\s]+/)).map(normalizeLidCacheKey).filter(value => /@lid$/i.test(value)));
@@ -7140,6 +7140,25 @@ function matchConfiguredOwnerAccess(identities, senderJids = [], senderNumbers =
     const senderLidMatch = (Array.isArray(senderJids) ? senderJids : []).some(value => identities.lids.has(normalizeLidCacheKey(value)));
     const privateChatLidMatch = !isGroup && identities.lids.has(normalizeLidCacheKey(rawChatJid));
     return { matched: accountMatch || senderLidMatch || privateChatLidMatch, accountMatch, lidMatch: senderLidMatch || privateChatLidMatch };
+}
+
+function hasLinkedDeviceSentEnvelope(message) {
+    const wrappers = ['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'documentWithCaptionMessage', 'editedMessage'];
+    let current = message || {};
+    for (let depth = 0; current && depth < 12; depth++) {
+        if (Object.prototype.hasOwnProperty.call(current, 'deviceSentMessage') && current.deviceSentMessage && typeof current.deviceSentMessage === 'object') return true;
+        let next = null;
+        for (const wrapper of wrappers) {
+            const candidate = current?.[wrapper]?.message;
+            if (candidate && typeof candidate === 'object' && candidate !== current) {
+                next = candidate;
+                break;
+            }
+        }
+        if (!next) break;
+        current = next;
+    }
+    return false;
 }
 
 function unwrapMessageContent(message) {
@@ -7725,7 +7744,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             sessionId,
             logLevel: baileysLogLevel,
             signalStoreLogLevel,
-            queryTimeoutMs: Math.max(30000, Math.min(120000, Number(process.env.BAILEYS_QUERY_TIMEOUT_MS || 90000))),
+            queryTimeoutMs: Math.max(30000, Math.min(120000, Number(process.env.BAILEYS_QUERY_TIMEOUT_MS || 120000))),
             enableAutoSessionRecreation: true,
             enableRecentMessageCache: true,
             retryCounterTtlMs: MSG_RETRY_COUNTER_TTL_MS,
@@ -7742,7 +7761,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             auth: { creds: state.creds, keys: cachedSignalKeyStore },
             cachedGroupMetadata: async groupJid => getGroupMetadataCached(sessionId, sock, groupJid),
             browser: connectionFormat === 'pair' ? Browsers.macOS('Chrome') : Browsers.ubuntu('Chrome'),
-            defaultQueryTimeoutMs: Math.max(30000, Math.min(120000, Number(process.env.BAILEYS_QUERY_TIMEOUT_MS || 90000))),
+            defaultQueryTimeoutMs: Math.max(30000, Math.min(120000, Number(process.env.BAILEYS_QUERY_TIMEOUT_MS || 120000))),
             markOnlineOnConnect: connectionFormat === 'pair',
             generateHighQualityLinkPreview: true,
             msgRetryCounterCache: createSessionRetryCache(sessionId),
@@ -8874,6 +8893,22 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
             for (const m of rawBatch) {
                 try {
+                const messageKeyForRead = m?.key || null;
+                const messageChatForRead = String(messageKeyForRead?.remoteJid || messageKeyForRead?.remoteJidAlt || '').trim();
+                const messageIdForRead = String(messageKeyForRead?.id || '').trim();
+                if (messageKeyForRead && !messageKeyForRead.fromMe && messageChatForRead && messageIdForRead && messageChatForRead !== 'status@broadcast') {
+                    const readKey = { remoteJid: messageChatForRead, id: messageIdForRead, fromMe: false };
+                    if (messageKeyForRead.participant) readKey.participant = messageKeyForRead.participant;
+                    Promise.resolve().then(() => sock.readMessages([readKey])).then(() => {
+                        console.info('[whatsapp-incoming-message-marked-read]', { sessionId, messageId: messageIdForRead, chatJid: messageChatForRead, action: 'mark_received_message_as_seen_before_dispatch' });
+                    }).catch(readError => {
+                        console.warn('[whatsapp-incoming-message-read-failed]', { sessionId, messageId: messageIdForRead, error: readError?.message || String(readError) });
+                    });
+                }
+                if (m?.key?.fromMe === true && hasLinkedDeviceSentEnvelope(m?.message)) {
+                    console.info('[companion-device-message-seen-and-ignored]', { sessionId, messageId: messageIdForRead || null, chatJid: messageChatForRead || null, action: 'ignore_linked_computer_echo_without_ai_dispatch_or_command_execution' });
+                    continue;
+                }
                 const liveSessionForMessage = activeSessions.get(sessionId);
                 if (liveSessionForMessage?.sock === sock) {
                     liveSessionForMessage.lastMessageAt = Date.now();
@@ -9329,10 +9364,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const otherBotIdentities = !isFromMe ? await getRegisteredBotAccountsExcept(sessionId, authenticatedAccountNumber, ownLidCandidates) : { numbers: new Set(), lids: new Set() };
                         const foreignBotSenderNumbers = !isFromMe ? senderNumbers.filter(number => otherBotIdentities.numbers.has(number)) : [];
                         const foreignBotSenderLids = !isFromMe ? senderJids.map(normalizeLidCacheKey).filter(jid => /@lid$/i.test(jid) && otherBotIdentities.lids.has(jid)) : [];
+                        const senderMatchesRegisteredBotAccount = foreignBotSenderNumbers.length > 0 || foreignBotSenderLids.length > 0;
                         if ((foreignBotSenderNumbers.length || foreignBotSenderLids.length) && !configuredOwnerMatch.matched) {
-                            console.info('[foreign-bot-owner-treated-as-ordinary-user]', { sessionId, messageId: msgId, chatJid: from, foreignBotNumberMatch: foreignBotSenderNumbers.length > 0, foreignBotLidMatch: foreignBotSenderLids.length > 0, ownerPrivilegeGranted: false, authorization: 'decided_only_by_this_session_mode' });
+                            console.info('[registered-bot-account-recognized-as-owner]', { sessionId, messageId: msgId, chatJid: from, registeredBotNumberMatch: foreignBotSenderNumbers.length > 0, registeredBotLidMatch: foreignBotSenderLids.length > 0, ownerPrivilegeGranted: senderMatchesRegisteredBotAccount, authorization: 'same_mongodb_registered_bot_sessions_share_owner_access' });
                         }
-                        const isOwnerReal = !!isFromMe || senderMatchesAuthenticatedAccount || senderMatchesOwnLid || privateChatMatchesOwnLid || configuredOwnerMatch.matched;
+                        const isOwnerReal = !!isFromMe || senderMatchesAuthenticatedAccount || senderMatchesOwnLid || privateChatMatchesOwnLid || configuredOwnerMatch.matched || senderMatchesRegisteredBotAccount;
                         const sName = pushName;
                         const socketOwnerName = sanitizeSessionDisplayName(sock.user?.name);
                         const incomingDisplayName = sanitizeSessionDisplayName(pushName);
@@ -9458,7 +9494,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             pushName: sName,
                             configuredOwnerAccess: configuredOwnerAccess.numbers.size > 0 || configuredOwnerAccess.lids.size > 0,
                             configuredOwnerIdentityHashes: [...ownerNumberCandidates, ...configuredOwnerAccess.lids].map(shortLogHash),
-                            ownerMatchSources: { fromMe: isFromMe, senderMatchesAuthenticatedAccount, senderMatchesOwnLid, privateChatMatchesOwnLid, configuredOwnerAccountMatched: configuredOwnerMatch.accountMatch, configuredOwnerLidMatched: configuredOwnerMatch.lidMatch },
+                            ownerMatchSources: { fromMe: isFromMe, senderMatchesAuthenticatedAccount, senderMatchesOwnLid, privateChatMatchesOwnLid, configuredOwnerAccountMatched: configuredOwnerMatch.accountMatch, configuredOwnerLidMatched: configuredOwnerMatch.lidMatch, senderMatchesRegisteredBotAccount },
                             isOwnerReal,
                             isGroup,
                             mode: normalizeText(sOwnerTop?.mode || sOwnerTop?.Mode || sOwnerTop?.botMode || 'prive')
