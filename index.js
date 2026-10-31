@@ -33,7 +33,7 @@ const runtimeLogRenderServiceName = String(process.env.RENDER_SERVICE_NAME || pr
 const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
 const runtimeLogRenderCommit = String(process.env.RENDER_GIT_COMMIT || '').trim().slice(0, 80);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}:${shortLogHash(runtimeLogInstanceId)}`).slice(0, 240);
-const TFBOT_CLUSTER_CODE_REVISION = 'r46-durable-signal-cache-self-chat-private-owner-only-startup-replay';
+const TFBOT_CLUSTER_CODE_REVISION = 'r47-fast-session-handoff-restore-pairing-code-retry-safe-message-claims';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
 const runtimeLogClusterId = `${runtimeLogDeploymentId}:${shortLogHash(runtimeLogInstanceId)}`.slice(0, 240);
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
@@ -653,7 +653,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r46';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r47';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -693,16 +693,18 @@ const TFBOT_CLUSTER_COORDINATOR_ONLY = TFBOT_CLUSTER_INSTANCE_HOST === TFBOT_COO
 const TFBOT_CLUSTER_COORDINATOR_URL = `https://${TFBOT_COORDINATOR_HOST}`;
 const TFBOT_CLUSTER_INSTANCE_URL = TFBOT_CLUSTER_INSTANCE_HOST ? `https://${TFBOT_CLUSTER_INSTANCE_HOST}` : '';
 const TFBOT_CLUSTER_LEASE_MS = Math.max(90000, Math.min(240000, Number(process.env.TFBOT_CLUSTER_LEASE_MS || 180000)));
-const TFBOT_CLUSTER_HEARTBEAT_MS = 77000;
+const TFBOT_CLUSTER_HEARTBEAT_MS = 30000;
 const TFBOT_CLUSTER_HEALTH_TIMEOUT_MS = 7000;
 const TFBOT_CLUSTER_PRIVATE_NETWORK = String(process.env.TFBOT_CLUSTER_PRIVATE_NETWORK || '').toLowerCase() === 'true';
 const TFBOT_CLUSTER_HEALTH_CACHE_MS = Math.max(3000, Math.min(30000, Number(process.env.TFBOT_CLUSTER_HEALTH_CACHE_MS || 12000)));
 const TFBOT_CLUSTER_HEALTH_PROBE_LIMIT = Math.max(1, Math.min(6, Number(process.env.TFBOT_CLUSTER_HEALTH_PROBE_LIMIT || 3)));
 const TFBOT_CLUSTER_CANDIDATE_LIMIT = Math.max(4, Math.min(30, Number(process.env.TFBOT_CLUSTER_CANDIDATE_LIMIT || 12)));
 const TFBOT_CLUSTER_PROXY_TIMEOUT_MS = Math.max(8000, Math.min(45000, Number(process.env.TFBOT_CLUSTER_PROXY_TIMEOUT_MS || 30000)));
-const TFBOT_ROUTER_STATE_TTL_MS = 77000;
-const TFBOT_ROUTER_COORDINATOR_CACHE_MS = 77000;
-const TFBOT_ROUTER_ACTIVE_PROBE_MS = 77000;
+const TFBOT_ROUTER_STATE_TTL_MS = 7000;
+const TFBOT_ROUTER_COORDINATOR_CACHE_MS = 7000;
+const TFBOT_ROUTER_ACTIVE_PROBE_MS = 7000;
+const TFBOT_WORKER_COORDINATOR_POLL_MS = Math.max(3000, Math.min(15000, Number(process.env.TFBOT_WORKER_COORDINATOR_POLL_MS || 5000)));
+const TFBOT_PAIRING_PROXY_TIMEOUT_MS = Math.max(90000, Math.min(180000, Number(process.env.TFBOT_PAIRING_PROXY_TIMEOUT_MS || 140000)));
 const TFBOT_ROUTER_PROBE_TIMEOUT_MS = 2800;
 const TFBOT_ROUTER_COORDINATOR_TIMEOUT_MS = 3800;
 const TFBOT_CLUSTER_INSTANCE_ID = String(process.env.RENDER_INSTANCE_ID || process.env.HOSTNAME || `process-${process.pid}`).slice(0, 180);
@@ -838,11 +840,13 @@ const authWriteFailures = new Map();
 const groupMetadataFetchPromises = new Map();
 const sessionRuntimeLockTimers = new Map();
 const sessionRuntimeLockTokens = new Map();
+const previousDeploymentSessionTakeoverOwners = new Map();
 const sessionRuntimeLockLeaseUntil = new Map();
 const sessionFenceClosureInFlight = new Set();
 const workerDrainingSessionIds = new Set();
 let workerDrainExpectedClosedUntil = 0;
 const sessionLockRetryTimers = new Map();
+const sessionLockRetryAttempts = new Map();
 const accountRuntimeLockTimers = new Map();
 const sessionAccountRuntimeLocks = new Map();
 const sessionAccountRuntimeLockTokens = new Map();
@@ -852,11 +856,12 @@ const accountRuntimeLockAcquisitionPromises = new Map();
 let serverShuttingDown = false;
 let httpServer = null;
 const processInstanceId = `${process.env.RENDER_INSTANCE_ID || process.env.HOSTNAME || 'render'}-${process.pid}-${typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : crypto.randomBytes(12).toString('hex')}`;
-const SESSION_RUNTIME_LOCK_LEASE_MS = Math.max(60000, Number(process.env.SESSION_RUNTIME_LOCK_LEASE_MS || 120000));
-const SESSION_RUNTIME_LOCK_RENEW_MS = Math.max(10000, Math.min(SESSION_RUNTIME_LOCK_LEASE_MS / 3, Number(process.env.SESSION_RUNTIME_LOCK_RENEW_MS || 20000)));
+const SESSION_RUNTIME_LOCK_LEASE_MS = Math.max(30000, Math.min(180000, Number(process.env.SESSION_RUNTIME_LOCK_LEASE_MS || 60000)));
+const SESSION_RUNTIME_LOCK_RENEW_MS = Math.max(5000, Math.min(SESSION_RUNTIME_LOCK_LEASE_MS / 3, Number(process.env.SESSION_RUNTIME_LOCK_RENEW_MS || 12000)));
 const SESSION_RUNTIME_LOCK_SAFETY_MS = Math.max(5000, Math.min(30000, Number(process.env.SESSION_RUNTIME_LOCK_SAFETY_MS || 20000)));
 const BAILEYS_RETRY_MESSAGE_TTL_SECONDS = Math.max(3600, Number(process.env.BAILEYS_RETRY_MESSAGE_TTL_SECONDS || 604800));
 const PROCESSED_MESSAGE_RETENTION_MS = Math.max(60000, Number(process.env.PROCESSED_MESSAGE_RETENTION_MS || 86400000));
+const MESSAGE_PROCESSING_LEASE_MS = Math.max(30000, Math.min(180000, Number(process.env.MESSAGE_PROCESSING_LEASE_MS || 60000)));
 let mongoClient;
 let db;
 
@@ -1015,6 +1020,8 @@ function cleanupSessionVolatileCaches(sessionId) {
     for (const key of [...outgoingTextEchoCache.keys()]) if (key.startsWith(`${id}:`)) outgoingTextEchoCache.delete(key);
     for (let index = recentMsgsCache.length - 1; index >= 0; index--) if (recentMsgsCache[index]?.sessionId === id) recentMsgsCache.splice(index, 1);
     for (const key of [...processedLocalCache]) if (key.startsWith(`${id}:`)) processedLocalCache.delete(key);
+    previousDeploymentSessionTakeoverOwners.delete(id);
+    sessionLockRetryAttempts.delete(id);
     for (const key of [...signalRecoveryCounters.keys()]) if (key.startsWith(`${id}:`)) signalRecoveryCounters.delete(key);
     for (const key of [...signalRecoveryCooldowns.keys()]) if (key.startsWith(`${id}:`)) signalRecoveryCooldowns.delete(key);
     for (const [key, timer] of [...signalRecoveryTimers.entries()]) {
@@ -1416,18 +1423,20 @@ async function claimMessageForProcessing(sessionId, messageId, remoteJid = '', a
     const accountScopeHash = shortLogHash(accountScope);
     const documentId = `${accountScopeHash}:${normalizedMessageId}`;
     const now = Date.now();
-    const leaseUntil = new Date(now + Math.max(60000, Number(process.env.MESSAGE_PROCESSING_LEASE_MS || 300000)));
+    const leaseUntil = new Date(now + MESSAGE_PROCESSING_LEASE_MS);
+    const reclaimConditions = [
+        { status: { $exists: false } },
+        { status: 'retryable' },
+        { status: 'processing', leaseUntil: { $lte: new Date(now) } }
+    ];
+    const previousOwnerInstanceId = previousDeploymentSessionTakeoverOwners.get(sessionId);
+    if (previousOwnerInstanceId) {
+        const escapedOwnerId = previousOwnerInstanceId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        reclaimConditions.push({ status: 'processing', sessionId, claimOwner: { $regex: `^${escapedOwnerId}-` } });
+    }
     try {
         const result = await db.collection('processed_messages').updateOne(
-            {
-                _id: documentId,
-                $or: [
-                    { status: { $exists: false } },
-                    { status: 'retryable' },
-                    { status: 'processing', claimOwner: { $ne: processInstanceId } },
-                    { status: 'processing', leaseUntil: { $lte: new Date(now) } }
-                ]
-            },
+            { _id: documentId, $or: reclaimConditions },
             {
                 $set: { sessionId, accountScopeHash, messageId: normalizedMessageId, remoteJid: normalizedChat, upsertType: String(upsertType || 'notify'), status: 'processing', claimOwner: processInstanceId, claimedAt: new Date(now), leaseUntil, ts: now, expireAt: new Date(now + PROCESSED_MESSAGE_RETENTION_MS) },
                 $inc: { attempts: 1 }
@@ -1439,6 +1448,23 @@ async function claimMessageForProcessing(sessionId, messageId, remoteJid = '', a
         if (error && error.code === 11000) return false;
         console.error('[message-dedupe]', { sessionId, remoteJid: normalizedChat, messageId: normalizedMessageId, error: error?.message || String(error) });
         return true;
+    }
+}
+
+async function renewMessageProcessingClaim(sessionId, messageId, accountIdentity = '') {
+    if (!db || !sessionId || !messageId) return false;
+    const accountScope = String(accountIdentity || sessionId).trim();
+    const documentId = `${shortLogHash(accountScope)}:${String(messageId || '').trim()}`;
+    const now = new Date();
+    try {
+        const result = await db.collection('processed_messages').updateOne(
+            { _id: documentId, sessionId, status: 'processing', claimOwner: processInstanceId },
+            { $set: { leaseUntil: new Date(now.getTime() + MESSAGE_PROCESSING_LEASE_MS), heartbeatAt: now, expireAt: new Date(now.getTime() + PROCESSED_MESSAGE_RETENTION_MS) } }
+        );
+        return result.matchedCount === 1;
+    } catch (error) {
+        console.warn('[message-processing-claim-heartbeat-failed]', { sessionId, messageId, error: error?.message || String(error) });
+        return false;
     }
 }
 
@@ -2997,19 +3023,43 @@ async function acquireSessionRuntimeLock(sessionId) {
         sessionRuntimeLockLeaseUntil.delete(sessionId);
     }
     if (sessionFenceClosureInFlight.has(sessionId)) return false;
+    let previousOwnerInstanceId = previousDeploymentSessionTakeoverOwners.get(sessionId) || '';
+    if (TFBOT_CLUSTER_ENABLED && !previousOwnerInstanceId) {
+        const ownerRecord = await db.collection('session_owners').findOne({ sessionId }, { projection: { ownerInstanceId: 1, ownerInstanceUrl: 1, ownerDeploymentId: 1 } }).catch(() => null);
+        if (isPreviousDeploymentOwnerOnCurrentHost(ownerRecord)) {
+            previousOwnerInstanceId = String(ownerRecord.ownerInstanceId || '');
+            previousDeploymentSessionTakeoverOwners.set(sessionId, previousOwnerInstanceId);
+        }
+    }
     const lockToken = crypto.randomUUID();
     const leaseUntil = new Date(Date.now() + SESSION_RUNTIME_LOCK_LEASE_MS);
-    try {
-        const result = await db.collection('session_runtime_locks').updateOne(
-            { _id: sessionId, $or: [{ leaseUntil: { $lte: now } }, { leaseUntil: { $exists: false } }] },
-            { $set: { owner: processInstanceId, lockToken, leaseUntil, updatedAt: now, acquiredAt: now } },
-            { upsert: true }
-        );
-        if (result.matchedCount !== 1 && result.upsertedCount !== 1) return false;
-    } catch (error) {
-        if (error?.code !== 11000) throw error;
-        return false;
+    let lockAcquired = false;
+    if (previousOwnerInstanceId) {
+        const previousLock = await db.collection('session_runtime_locks').findOne({ _id: sessionId }, { projection: { owner: 1, lockToken: 1, leaseUntil: 1 } }).catch(() => null);
+        const previousOwnerPrefix = `${previousOwnerInstanceId}-`;
+        if (previousLock?.lockToken && String(previousLock.owner || '').startsWith(previousOwnerPrefix)) {
+            const takeover = await db.collection('session_runtime_locks').updateOne(
+                { _id: sessionId, owner: previousLock.owner, lockToken: previousLock.lockToken },
+                { $set: { owner: processInstanceId, lockToken, leaseUntil, updatedAt: new Date(), acquiredAt: new Date(), handoffFrom: previousLock.owner } }
+            ).catch(error => { throw error; });
+            lockAcquired = takeover.matchedCount === 1;
+            if (lockAcquired) console.warn('[session-runtime-lock-previous-deployment-handoff]', { sessionId, previousOwnerInstanceId, action: 'fence_previous_render_process_and_restore_session_immediately' });
+        }
     }
+    if (!lockAcquired) {
+        try {
+            const result = await db.collection('session_runtime_locks').updateOne(
+                { _id: sessionId, $or: [{ leaseUntil: { $lte: now } }, { leaseUntil: { $exists: false } }] },
+                { $set: { owner: processInstanceId, lockToken, leaseUntil, updatedAt: now, acquiredAt: now } },
+                { upsert: true }
+            );
+            lockAcquired = result.matchedCount === 1 || result.upsertedCount === 1;
+        } catch (error) {
+            if (error?.code !== 11000) throw error;
+            return false;
+        }
+    }
+    if (!lockAcquired) return false;
     sessionRuntimeLockTokens.set(sessionId, lockToken);
     sessionRuntimeLockLeaseUntil.set(sessionId, leaseUntil.getTime());
     if (!sessionRuntimeLockTimers.has(sessionId)) {
@@ -3210,25 +3260,36 @@ async function acquireAccountRuntimeLock(sessionId, identityValue, identityAlias
         }
 
         const lockToken = crypto.randomUUID();
+        let accountLockAcquired = false;
         try {
             const result = await db.collection('session_account_runtime_locks').updateOne(
                 { _id: accountKey, $or: [{ leaseUntil: { $lte: now } }, { leaseUntil: { $exists: false } }] },
                 { $set: { owner: processInstanceId, sessionId, lockToken, leaseUntil, updatedAt: now, acquiredAt: now } },
                 { upsert: true }
             );
-            if (result.matchedCount !== 1 && result.upsertedCount !== 1) {
-                const holder = await db.collection('session_account_runtime_locks').findOne({ _id: accountKey }, { projection: { owner: 1, sessionId: 1, leaseUntil: 1 } }).catch(() => null);
-                await releaseNewlyAcquired();
-                return { acquired: false, accountPhone: requestedKeys[0], accountKeys: requestedKeys, conflictingKey: accountKey, holderSessionId: holder?.sessionId || null, holderOwner: holder?.owner || null, leaseUntil: holder?.leaseUntil || null };
-            }
+            accountLockAcquired = result.matchedCount === 1 || result.upsertedCount === 1;
         } catch (error) {
             if (error?.code !== 11000) {
                 await releaseNewlyAcquired();
                 throw error;
             }
-            const holder = await db.collection('session_account_runtime_locks').findOne({ _id: accountKey }, { projection: { owner: 1, sessionId: 1, leaseUntil: 1 } }).catch(() => null);
-            await releaseNewlyAcquired();
-            return { acquired: false, accountPhone: requestedKeys[0], accountKeys: requestedKeys, conflictingKey: accountKey, holderSessionId: holder?.sessionId || null, holderOwner: holder?.owner || null, leaseUntil: holder?.leaseUntil || null };
+        }
+        if (!accountLockAcquired) {
+            const holder = await db.collection('session_account_runtime_locks').findOne({ _id: accountKey }, { projection: { owner: 1, sessionId: 1, lockToken: 1, leaseUntil: 1 } }).catch(() => null);
+            const previousOwnerInstanceId = previousDeploymentSessionTakeoverOwners.get(sessionId) || '';
+            const previousOwnerPrefix = previousOwnerInstanceId ? `${previousOwnerInstanceId}-` : '';
+            if (previousOwnerPrefix && holder?.sessionId === sessionId && holder?.lockToken && String(holder.owner || '').startsWith(previousOwnerPrefix)) {
+                const takeover = await db.collection('session_account_runtime_locks').updateOne(
+                    { _id: accountKey, owner: holder.owner, sessionId, lockToken: holder.lockToken },
+                    { $set: { owner: processInstanceId, sessionId, lockToken, leaseUntil, updatedAt: new Date(), acquiredAt: new Date(), handoffFrom: holder.owner } }
+                );
+                accountLockAcquired = takeover.matchedCount === 1;
+                if (accountLockAcquired) console.warn('[session-account-runtime-lock-previous-deployment-handoff]', { sessionId, accountKeyHash: shortLogHash(accountKey), previousOwnerInstanceId, action: 'transfer_only_the_same_session_account_lock' });
+            }
+            if (!accountLockAcquired) {
+                await releaseNewlyAcquired();
+                return { acquired: false, accountPhone: requestedKeys[0], accountKeys: requestedKeys, conflictingKey: accountKey, holderSessionId: holder?.sessionId || null, holderOwner: holder?.owner || null, leaseUntil: holder?.leaseUntil || null };
+            }
         }
         const createdEntry = { key: accountKey, token: lockToken, leaseUntil: leaseUntil.getTime() };
         acquiredEntries.push(createdEntry);
@@ -3315,13 +3376,15 @@ async function releaseSessionRuntimeLock(sessionId) {
 
 function scheduleSessionLockRetry(sessionId, autoExpire, format) {
     if (serverShuttingDown || tfbotWorkerStopping || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive) || sessionLockRetryTimers.has(sessionId)) return;
-    const delay = SESSION_RUNTIME_LOCK_LEASE_MS + 1000 + Math.floor(Math.random() * 5000);
+    const retryAttempt = Math.min(6, Number(sessionLockRetryAttempts.get(sessionId) || 0) + 1);
+    sessionLockRetryAttempts.set(sessionId, retryAttempt);
+    const delay = Math.min(15000, 900 * (2 ** (retryAttempt - 1))) + Math.floor(Math.random() * 400);
     const timer = setTimeout(async () => {
         sessionLockRetryTimers.delete(sessionId);
         try {
             await startAdamBot(sessionId, autoExpire, format, true);
         } catch (error) {
-            console.warn('[session-lock-retry]', { sessionId, error: error?.message || String(error) });
+            console.warn('[session-lock-retry]', { sessionId, attempt: retryAttempt, retryInMs: delay, error: error?.message || String(error) });
             scheduleSessionLockRetry(sessionId, autoExpire, format);
         }
     }, delay);
@@ -4032,8 +4095,8 @@ app.use((req, res, next) => {
     const activeHost = normalizeTfbotHost(active?.host || '');
     const activeUrl = String(active?.url || '').replace(/\/+$/, '');
     if (!TFBOT_ROUTER_DOMAIN_BY_HOST.has(activeHost) || !activeUrl) {
-        res.setHeader('Retry-After', '77');
-        return res.status(503).json({ ok: false, error: 'tfbot_active_server_unavailable', retryAfterMs: 77000 });
+        res.setHeader('Retry-After', String(Math.ceil(TFBOT_WORKER_COORDINATOR_POLL_MS / 1000)));
+        return res.status(503).json({ ok: false, error: 'tfbot_active_server_unavailable', retryAfterMs: TFBOT_WORKER_COORDINATOR_POLL_MS });
     }
     if (requestHost !== activeHost) {
         let destination;
@@ -4150,6 +4213,16 @@ function renewTfbotWorkerLease() {
     }, TFBOT_CLUSTER_LEASE_MS + 1000);
     if (typeof tfbotWorkerLeaseTimer.unref === 'function') tfbotWorkerLeaseTimer.unref();
     return tfbotWorkerLeaseUntil;
+}
+
+function isPreviousDeploymentOwnerOnCurrentHost(owner) {
+    if (!TFBOT_CLUSTER_ENABLED || !owner || typeof owner !== 'object') return false;
+    const ownerInstanceId = String(owner.ownerInstanceId || '').trim();
+    if (!ownerInstanceId || ownerInstanceId === TFBOT_CLUSTER_INSTANCE_ID) return false;
+    const ownerHost = normalizeTfbotHost(owner.ownerInstanceUrl || '');
+    if (!ownerHost || ownerHost !== TFBOT_CLUSTER_INSTANCE_HOST) return false;
+    const ownerRelease = String(owner.ownerDeploymentId || '').trim();
+    return !ownerRelease || ownerRelease !== TFBOT_CODE_RELEASE_ID;
 }
 
 function getClusterSessionOwnerFields() {
@@ -4427,7 +4500,7 @@ async function refreshTfbotActiveDomain(force = false) {
                 checkedHosts: checked.map(item => item.domain.host),
                 coordinator: TFBOT_COORDINATOR_HOST,
                 generation,
-                pollingIntervalMs: 77000,
+                pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS,
                 selectionMode: 'sticky-current-url-unless-exact-render-owner-suspension',
                 controls: [previousControl, control].filter(Boolean)
             });
@@ -4653,7 +4726,7 @@ async function resolveClusterTargetForPairing(req) {
     return { _id: TFBOT_CLUSTER_INSTANCE_ID, url: TFBOT_CLUSTER_INSTANCE_URL, local: !TFBOT_CLUSTER_COORDINATOR_ONLY };
 }
 
-async function proxyClusterRequest(req, res, instance) {
+async function proxyClusterRequest(req, res, instance, timeoutOverride = TFBOT_CLUSTER_PROXY_TIMEOUT_MS) {
     const baseUrl = String(instance?.url || '').replace(/\/+$/, '');
     if (!baseUrl || instance?.local || String(instance?._id || '') === TFBOT_CLUSTER_INSTANCE_ID) return false;
     let target;
@@ -4670,7 +4743,8 @@ async function proxyClusterRequest(req, res, instance) {
     const authorization = String(req.get('Authorization') || '');
     if (authorization) headers.Authorization = authorization;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TFBOT_CLUSTER_PROXY_TIMEOUT_MS);
+    const requestTimeoutMs = Math.max(1000, Number(timeoutOverride) || TFBOT_CLUSTER_PROXY_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
     try {
         let body;
         if (!['GET', 'HEAD'].includes(req.method)) {
@@ -4722,13 +4796,13 @@ app.use((req, res, next) => {
             next();
             return;
         }
-        if (await proxyClusterRequest(req, res, target)) return;
+        if (await proxyClusterRequest(req, res, target, TFBOT_PAIRING_PROXY_TIMEOUT_MS)) return;
         const fallback = await selectLeastLoadedClusterInstance([String(target._id || '')]);
         if (fallback?.unavailable) {
             res.status(503).json({ ok: false, error: 'no_healthy_cluster_instance', retryAfterMs: 10000 });
             return;
         }
-        if (fallback && !fallback.local && String(fallback._id || '') !== TFBOT_CLUSTER_INSTANCE_ID && await proxyClusterRequest(req, res, fallback)) return;
+        if (fallback && !fallback.local && String(fallback._id || '') !== TFBOT_CLUSTER_INSTANCE_ID && await proxyClusterRequest(req, res, fallback, TFBOT_PAIRING_PROXY_TIMEOUT_MS)) return;
         next();
     })().catch(error => {
         console.error('[cluster-request-routing-failed]', { path: requestPath, error: error?.message || String(error) });
@@ -4787,11 +4861,11 @@ app.get(TFBOT_ROUTER_RESOLVE_PATH, async (req, res) => {
     try {
         const refreshRequested = String(req.query?.refresh || '') === '1';
         const privateRefresh = isValidClusterToken(req);
-        const publicRefreshAllowed = refreshRequested && Date.now() - tfbotCoordinatorPublicRefreshAt >= 77000;
+        const publicRefreshAllowed = refreshRequested && Date.now() - tfbotCoordinatorPublicRefreshAt >= TFBOT_ROUTER_ACTIVE_PROBE_MS;
         const force = (privateRefresh && refreshRequested) || publicRefreshAllowed || !tfbotCoordinatorSelectionCache;
         if (publicRefreshAllowed && !privateRefresh) tfbotCoordinatorPublicRefreshAt = Date.now();
         let selected = await refreshTfbotActiveDomain(force);
-        if (!selected) return res.status(503).json({ ok: false, error: 'no_ready_domain_selection_available', retryAfterMs: 5000, pollingIntervalMs: 77000 });
+        if (!selected) return res.status(503).json({ ok: false, error: 'no_ready_domain_selection_available', retryAfterMs: TFBOT_WORKER_COORDINATOR_POLL_MS, pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS });
         let workerActive = selected.workerActive === true;
         let workerState = String(selected.workerState || 'starting');
         if (!workerActive && Date.now() - tfbotCoordinatorResolveProbeAt >= 4000) {
@@ -4805,14 +4879,14 @@ app.get(TFBOT_ROUTER_RESOLVE_PATH, async (req, res) => {
                 tfbotActiveDomainCache = refreshedSelection;
                 selected = refreshedSelection;
             } else {
-                return res.status(503).json({ ok: false, error: 'selected_worker_not_responding_yet', activeHost: selected.host, retryAfterMs: 4000, pollingIntervalMs: 77000 });
+                return res.status(503).json({ ok: false, error: 'selected_worker_not_responding_yet', activeHost: selected.host, retryAfterMs: TFBOT_WORKER_COORDINATOR_POLL_MS, pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS });
             }
         }
         res.setHeader('Cache-Control', 'no-store, max-age=0');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Headers', 'Accept, X-TFBOT-Cluster-Token');
         res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
-        return res.status(200).json({ ok: true, host: selected.host, url: selected.url, activeHost: selected.host, activeUrl: selected.url, checkedAt: selected.checkedAt, generation: selected.generation, healthy: selected.healthy, workerActive, workerState, source: selected.source, healthyHosts: selected.healthyHosts || [], retryAfterMs: workerActive ? 77000 : 2500, pollingIntervalMs: 77000 });
+        return res.status(200).json({ ok: true, host: selected.host, url: selected.url, activeHost: selected.host, activeUrl: selected.url, checkedAt: selected.checkedAt, generation: selected.generation, healthy: selected.healthy, workerActive, workerState, source: selected.source, healthyHosts: selected.healthyHosts || [], retryAfterMs: workerActive ? TFBOT_WORKER_COORDINATOR_POLL_MS : 2500, pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS });
     } catch (error) {
         console.error('[tfbot-router-resolve-failed]', { errorName: error?.name || 'Error', error: error?.message || String(error), stack: String(error?.stack || '').slice(0, 900), releaseId: TFBOT_CODE_RELEASE_ID });
         return res.status(503).json({ ok: false, error: 'domain_resolution_failed', retryAfterMs: 5000, releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION });
@@ -4825,12 +4899,12 @@ app.get(TFBOT_WORKER_POLL_PATH, async (req, res) => {
     try {
         let selected = tfbotCoordinatorSelectionCache;
         if (!selected) selected = await refreshTfbotActiveDomain(true);
-        if (!selected) return res.status(503).json({ ok: false, error: 'tfbot_active_server_unavailable', retryAfterMs: 77000, releaseId: TFBOT_CODE_RELEASE_ID });
+        if (!selected) return res.status(503).json({ ok: false, error: 'tfbot_active_server_unavailable', retryAfterMs: TFBOT_WORKER_COORDINATOR_POLL_MS, releaseId: TFBOT_CODE_RELEASE_ID });
         res.setHeader('Cache-Control', 'no-store, max-age=0');
-        return res.status(200).json({ ok: true, host: selected.host, url: selected.url, activeHost: selected.host, activeUrl: selected.url, generation: selected.generation, releaseId: TFBOT_CODE_RELEASE_ID, source: 'tfbot7-worker-poll', pollingIntervalMs: 77000 });
+        return res.status(200).json({ ok: true, host: selected.host, url: selected.url, activeHost: selected.host, activeUrl: selected.url, generation: selected.generation, releaseId: TFBOT_CODE_RELEASE_ID, source: 'tfbot7-worker-poll', pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS });
     } catch (error) {
         console.error('[tfbot-worker-poll-response-failed]', { errorName: error?.name || 'Error', error: error?.message || String(error), stack: String(error?.stack || '').slice(0, 900), releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION });
-        return res.status(503).json({ ok: false, error: 'tfbot_worker_poll_unavailable', retryAfterMs: 77000, releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION });
+        return res.status(503).json({ ok: false, error: 'tfbot_worker_poll_unavailable', retryAfterMs: TFBOT_WORKER_COORDINATOR_POLL_MS, releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION });
     }
 });
 
@@ -5140,9 +5214,9 @@ async function startTfbotWorkerCoordinatorPoller() {
     tfbotWorkerCoordinatorPollTimer = setInterval(() => {
         if (serverShuttingDown || tfbotWorkerCoordinatorPollPromise) return;
         void pollTfbotCoordinatorSelection();
-    }, 77000);
+    }, TFBOT_WORKER_COORDINATOR_POLL_MS);
     if (typeof tfbotWorkerCoordinatorPollTimer.unref === 'function') tfbotWorkerCoordinatorPollTimer.unref();
-    console.info('[tfbot-worker-coordinator-poller-ready]', { host: TFBOT_CLUSTER_INSTANCE_HOST, coordinator: TFBOT_COORDINATOR_HOST, pollingIntervalMs: 77000, databaseAccess: false, persistence: false, role: 'poll-tfbot7-selection' });
+    console.info('[tfbot-worker-coordinator-poller-ready]', { host: TFBOT_CLUSTER_INSTANCE_HOST, coordinator: TFBOT_COORDINATOR_HOST, pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS, databaseAccess: false, persistence: false, role: 'poll-tfbot7-selection' });
     return true;
 }
 
@@ -5159,9 +5233,9 @@ async function startTfbotCoordinatorMonitor() {
         tfbotCoordinatorPollPromise = refreshTfbotActiveDomain(true)
             .catch(error => console.warn('[tfbot-coordinator-poll-failed]', error?.message || String(error)))
             .finally(() => { tfbotCoordinatorPollPromise = null; });
-    }, 77000);
+    }, TFBOT_WORKER_COORDINATOR_POLL_MS);
     if (typeof tfbotCoordinatorPollTimer.unref === 'function') tfbotCoordinatorPollTimer.unref();
-    console.info('[tfbot-router-ready]', { coordinator: TFBOT_COORDINATOR_HOST, servingDomains: TFBOT_ROUTER_SERVING_DOMAINS.map(item => item.host), pollingIntervalMs: 77000, databaseAccess: !!db, whatsappRuntime: false, persistenceOwner: TFBOT_COORDINATOR_HOST, role: 'coordinator-router' });
+    console.info('[tfbot-router-ready]', { coordinator: TFBOT_COORDINATOR_HOST, servingDomains: TFBOT_ROUTER_SERVING_DOMAINS.map(item => item.host), pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS, databaseAccess: !!db, whatsappRuntime: false, persistenceOwner: TFBOT_COORDINATOR_HOST, role: 'coordinator-router' });
     return true;
 }
 
@@ -5217,6 +5291,7 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
     const operation = new Promise((resolve, reject) => {
         let settled = false;
         let requestStarted = false;
+        let requestAttempts = 0;
         let currentSocket = null;
         let currentHandler = null;
         let retryTimer = null;
@@ -5239,6 +5314,9 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
             if (retryTimer) clearTimeout(retryTimer);
             if (pollTimer) clearInterval(pollTimer);
             detachSocket();
+            const latestSession = activeSessions.get(sessionId) || sessionData;
+            if (latestSession) latestSession.pairingCodeRequestStarted = false;
+            if (sessionData && sessionData !== latestSession) sessionData.pairingCodeRequestStarted = false;
             if (error) reject(error);
             else resolve(value);
         };
@@ -5271,7 +5349,14 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
                 if (update?.connection === 'close') {
                     const statusCode = Number(update?.lastDisconnect?.error?.output?.statusCode || update?.lastDisconnect?.error?.statusCode || 0);
                     if (requestStarted) {
-                        finish(new Error(`pairing_socket_closed_during_code_request:${statusCode || 'unknown'}`));
+                        const transientClose = ![401, 403, 419].includes(statusCode) && requestAttempts < 2;
+                        requestStarted = false;
+                        const latestSession = activeSessions.get(sessionId) || sessionData;
+                        if (latestSession) latestSession.pairingCodeRequestStarted = false;
+                        if (sessionData && sessionData !== latestSession) sessionData.pairingCodeRequestStarted = false;
+                        detachSocket();
+                        if (transientClose) schedule(900, 'pairing_socket_transient_retry');
+                        else finish(new Error(`pairing_socket_closed_during_code_request:${statusCode || 'unknown'}`));
                         return;
                     }
                     detachSocket();
@@ -5314,25 +5399,41 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
                 attachSocket(socket, 'replacement_socket_detected');
                 return;
             }
-            const challengeReady = !!String(active?.qrString || '').trim() || String(active?.status || '').toLowerCase() === 'qr_disponible';
+            const socketReadyState = socket?.ws?.readyState ?? socket?.ws?._socket?.readyState ?? socket?.socket?.readyState;
+            const challengeReady = !!String(active?.qrString || '').trim() || String(active?.status || '').toLowerCase() === 'qr_disponible' || Number(socketReadyState) === 1;
             if (!challengeReady) {
                 schedule(350, 'waiting_for_pairing_challenge');
                 return;
             }
             requestStarted = true;
+            requestAttempts++;
             active.pairingCodeRequestStarted = true;
             if (sessionData && sessionData !== active) sessionData.pairingCodeRequestStarted = true;
             const requestSocket = socket;
-            console.info('[pairing-code-request-started]', { sessionId, attempt: 1, numberLength: normalizedNumber.length, qrAvailable: !!active.qrString });
+            console.info('[pairing-code-request-started]', { sessionId, attempt: requestAttempts, numberLength: normalizedNumber.length, qrAvailable: !!active.qrString, websocketReady: Number(socketReadyState) === 1 });
             try {
                 const result = await requestSocket.requestPairingCode(normalizedNumber);
                 if (activeSessions.get(sessionId)?.sock && activeSessions.get(sessionId).sock !== requestSocket) throw new Error('pairing_socket_replaced_during_code_request');
                 const code = normalizePairingCode(result);
                 if (typeof active?.flushAuthWrites === 'function') await active.flushAuthWrites();
-                console.info('[pairing-code-request-completed]', { sessionId, attempt: 1, codeLength: code.length, codeCharacterSet: /^[0-9]{8}$/.test(code) ? 'numeric' : 'crockford_base32' });
+                console.info('[pairing-code-request-completed]', { sessionId, attempt: requestAttempts, codeLength: code.length, codeCharacterSet: /^[0-9]{8}$/.test(code) ? 'numeric' : 'crockford_base32' });
                 finish(null, code);
             } catch (error) {
-                console.warn('[pairing-code-request-failed]', { sessionId, attempt: 1, error: error?.message || String(error), retryable: false, action: 'start_a_fresh_pairing_session_without_reusing_a_rejected_code' });
+                const errorText = String(error?.message || error || 'pairing_code_request_failed');
+                const permanentFailure = /401|403|419|already_registered|already_active|duplicate_account|invalid.*number|invalid.*phone|code_format_invalid/i.test(errorText);
+                const canRetry = requestAttempts < 2 && !permanentFailure;
+                console.warn('[pairing-code-request-failed]', { sessionId, attempt: requestAttempts, error: errorText.slice(0, 300), retryable: canRetry, action: canRetry ? 'retry_once_after_socket_readiness' : 'finish_pairing_code_request' });
+                requestStarted = false;
+                const latestSession = activeSessions.get(sessionId) || sessionData;
+                if (latestSession) latestSession.pairingCodeRequestStarted = false;
+                if (sessionData && sessionData !== latestSession) sessionData.pairingCodeRequestStarted = false;
+                if (canRetry) {
+                    detachSocket();
+                    const replacement = activeSessions.get(sessionId)?.sock || null;
+                    if (replacement) attachSocket(replacement, 'pairing_code_transient_retry');
+                    else schedule(1000, 'pairing_code_transient_retry');
+                    return;
+                }
                 finish(error);
             }
         };
@@ -5344,7 +5445,7 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
                 return;
             }
             if (active?.sock && active.sock !== currentSocket) attachSocket(active.sock, 'replacement_socket_detected');
-            else if (active?.sock && (active?.qrString || String(active?.status || '').toLowerCase() === 'qr_disponible')) void attempt('challenge_poll');
+            else if (active?.sock && (active?.qrString || String(active?.status || '').toLowerCase() === 'qr_disponible' || Number(active?.sock?.ws?.readyState ?? active?.sock?.ws?._socket?.readyState ?? active?.sock?.socket?.readyState) === 1)) void attempt('challenge_poll');
         }, 300);
         if (typeof pollTimer.unref === 'function') pollTimer.unref();
         timeoutTimer = setTimeout(() => finish(new Error('pairing_code_timeout')), Math.max(20000, Number(timeoutMs) || 75000));
@@ -5465,7 +5566,7 @@ app.all('/get-code', async (req, res) => {
             console.info('[qr-bref-url-created]', { sessionId: sId, filename: 'tfbot.png', url: qrUrl });
             return res.json({ ok: true, qr, qrUrl, qrImageUrl: qrUrl, qrDataUrl: qrUrl, sessionId: sId });
         }
-        const code = await requestPairingCodeWhenReady(sId, sess, number, 75000);
+        const code = await requestPairingCodeWhenReady(sId, sess, number, 105000);
         return res.json({ ok: true, code, sessionId: sId, number });
     } catch (error) {
         const current = activeSessions.get(sId);
@@ -6714,7 +6815,8 @@ function scheduleSessionReconnect(sessionId, autoExpire, format) {
     session.reconnectAttempts = attempt;
     session.status = 'deconnecte';
     session.disconnectTime = Date.now();
-    const delay = Math.min(180000, 4000 * (2 ** Math.min(attempt - 1, 6))) + Math.floor(Math.random() * 1200);
+    const baseDelay = attempt === 1 ? 500 : attempt === 2 ? 1200 : Math.min(30000, 2500 * (2 ** Math.min(attempt - 3, 4)));
+    const delay = baseDelay + Math.floor(Math.random() * 500);
     const timer = setTimeout(async () => {
         reconnectTimers.delete(sessionId);
         const latest = activeSessions.get(sessionId);
@@ -7153,6 +7255,10 @@ function fitErrorExplanation(value) {
 
 function errorFallbackText(actionName, language) {
     const action = String(actionName || 'Action').replace(/\s+/g, ' ').slice(0, 40);
+    if (/^(?:code|cmd[_ -]?code|kòd|kod)$/i.test(normalizeText(actionName))) {
+        const codeFallbacks = { fr: 'L’action « code » n’a pas abouti.', en: 'The “code” action did not complete.', es: 'La acción «code» no se completó.', ht: 'Aksyon «code» la pa reyisi.' };
+        return codeFallbacks[['fr', 'en', 'es', 'ht'].includes(language) ? language : 'ht'];
+    }
     const fallbacks = {
         fr: `L’action « ${action} » n’a pas abouti. Vérifie les droits nécessaires et réessaie.`,
         en: `The “${action}” action did not complete. Check the required permissions and try again.`,
@@ -7390,6 +7496,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         sessionLockRetryTimers.delete(sessionId);
         const lockAcquired = await acquireSessionRuntimeLock(sessionId);
         if (!lockAcquired) throw new Error('session_runtime_lock_owned_elsewhere');
+        sessionLockRetryAttempts.delete(sessionId);
         if (TFBOT_CLUSTER_ENABLED) {
             await db.collection('session_owners').updateOne(
                 { sessionId },
@@ -8871,6 +8978,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 setImmediate(async () => {
                     let messageProcessingSucceeded = true;
                     let messageProcessingError = '';
+                    const messageClaimHeartbeat = setInterval(() => {
+                        void renewMessageProcessingClaim(sessionId, msgId, liveAccountPhone || liveAccountLid || '');
+                    }, Math.max(10000, Math.floor(MESSAGE_PROCESSING_LEASE_MS / 3)));
+                    if (typeof messageClaimHeartbeat.unref === 'function') messageClaimHeartbeat.unref();
                     try {
                         console.info('[message-processing-started]', {
                             sessionId,
@@ -10204,7 +10315,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 if (!internalApiToken) throw new Error('internal_api_token_not_configured');
                                                 const pairingApiUrl = new URL('/get-code', `${pairingApiBase}/`).toString();
                                                 const pairingController = new AbortController();
-                                                const pairingTimeout = setTimeout(() => pairingController.abort(), 80000);
+                                                const pairingTimeout = setTimeout(() => pairingController.abort(), 155000);
                                                 let response;
                                                 let responseText;
                                                 try {
@@ -10254,14 +10365,17 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                             await queuedSendMessage(sock, from, { delete: msgConfirmation.key }, {}, 200);
                                                             await queuedSendMessage(sock, from, { text: String(data.code).trim() }, {}, 200);
                                                         } catch (e) {
-                                                            await safeSendActionError(sock, from, t.cmd_code, e, messageLang, pushName, m.messageTimestamp);
+                                                            console.error('[pairing-code-confirmation-delivery-failed]', { sessionId, messageId: msgId, error: redactActionError(e).slice(0, 500) });
+                                                            await safeSendFormatted(sock, from, t.cmd_code, errorFallbackText('code', messageLang), pushName, true, activeHostName);
                                                         }
                                                     });
                                                 } else {
                                                     throw new Error(data?.error || data?.message || 'code_api_response_missing_code');
                                                 }
                                             } catch (e) {
-                                                await safeSendActionError(sock, from, t.cmd_code, e, messageLang, pushName, m.messageTimestamp);
+                                                console.error('[pairing-code-command-failed]', { sessionId, messageId: msgId, error: redactActionError(e).slice(0, 700) });
+                                                await safeSendFormatted(sock, from, t.cmd_code, errorFallbackText('code', messageLang), pushName, true, activeHostName);
+                                                terminalResponseSent = true;
                                             }
                                             break;
                                         case 'hidetag':
@@ -10502,6 +10616,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         messageProcessingError = cmdError?.message || String(cmdError);
                         console.error('[message-handler]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, messageClassification: receivedClassification, detectedCommand: receivedParsedCommand?.internalCommand || receivedParsedCommand?.command || null, incomingChatJid: rawFrom, replyTargetJid: from, action: 'message_handler_failed', error: messageProcessingError });
                     } finally {
+                        clearInterval(messageClaimHeartbeat);
                         if (!messageProcessingSucceeded) processedLocalCache.delete(`${sessionId}:id:${msgId}`);
                         await finishMessageProcessingClaim(sessionId, msgId, liveAccountPhone || liveAccountLid || '', messageProcessingSucceeded, messageProcessingError);
                     }
@@ -10714,7 +10829,7 @@ async function loadExistingSessions() {
     const restorableCandidates = identityCandidates.filter(candidate => {
         const owner = owners.get(candidate.sessionId) || {};
         const ownerLeaseUntil = new Date(owner.ownerLeaseUntil || 0).getTime();
-        const isOwnedByLivePeer = TFBOT_CLUSTER_ENABLED && owner.ownerInstanceId && owner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && ownerLeaseUntil > now && owner.connectionStatus !== 'duplicate_account' && !owner.duplicateAccountOf && owner.reauthRequired !== true;
+        const isOwnedByLivePeer = TFBOT_CLUSTER_ENABLED && owner.ownerInstanceId && owner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && ownerLeaseUntil > now && !isPreviousDeploymentOwnerOnCurrentHost(owner) && owner.connectionStatus !== 'duplicate_account' && !owner.duplicateAccountOf && owner.reauthRequired !== true;
         const status = String(owner.connectionStatus || '').toLowerCase();
         return !isOwnedByLivePeer && !owner.reauthRequired && !owner.duplicateAccountOf && status !== 'duplicate_account' && status !== 'reauth_required' && status !== 'pairing_expired';
     });
@@ -10766,7 +10881,7 @@ async function loadExistingSessions() {
     for (const group of groups.values()) {
         const eligible = group.filter(item => restorableIds.has(item.sessionId));
         if (!eligible.length) {
-            console.warn('[session-account-group-no-restorable-session]', { sessionCount: group.length, sessionIds: group.map(item => item.sessionId), action: 'preserve_all_auth_and_group_data_until_reauthentication' });
+            console.warn('[session-account-group-no-restorable-session]', { sessionCount: group.length, sessions: group.map(item => { const owner = owners.get(item.sessionId) || {}; return { sessionId: item.sessionId, status: String(owner.connectionStatus || owner.status || 'unknown'), reauthRequired: owner.reauthRequired === true, duplicate: !!owner.duplicateAccountOf, ownerLeaseActive: new Date(owner.ownerLeaseUntil || 0).getTime() > now, previousDeploymentOnThisHost: isPreviousDeploymentOwnerOnCurrentHost(owner) }; }), action: 'preserve_auth_and_report_exact_restore_block_reason' });
             continue;
         }
         eligible.sort((a, b) => b.timestampFromId - a.timestampFromId || Number(owners.get(b.sessionId)?.connectedSince || 0) - Number(owners.get(a.sessionId)?.connectedSince || 0));
@@ -10793,15 +10908,16 @@ async function loadExistingSessions() {
     for (const candidate of restorableCandidates) {
         if (identityCandidates.length && sessionsToRestore.some(item => item.sessionId === candidate.sessionId)) continue;
     }
-    for (const restoredSession of sessionsToRestore) {
+    await Promise.all(sessionsToRestore.map(async restoredSession => {
         const { sessionId, format: restoredFormat } = restoredSession;
         try {
-            console.info('[session-restore-format]', { sessionId, format: restoredFormat });
+            console.info('[session-restore-format]', { sessionId, format: restoredFormat, startupMode: 'parallel' });
             await startAdamBot(sessionId, false, restoredFormat, true);
         } catch (error) {
             console.error('[session-restore-start-failed]', { sessionId, format: restoredFormat, error: error?.message || String(error) });
+            if (/session_runtime_lock_owned_elsewhere|account_runtime_lock_owned_elsewhere/.test(String(error?.message || ''))) scheduleSessionLockRetry(sessionId, false, restoredFormat);
         }
-    }
+    }));
 }
 
 setInterval(async () => {
@@ -10988,9 +11104,9 @@ async function main() {
         clusterDomainDetectionUsesRenderDefaults: true,
         clusterDomainSelectionPriority: 'tf-bot-then-tfbot2-through-tfbot6',
         clusterDomainSelectionMode: 'switch-only-on-render-owner-suspension; any-other-http-response-is-valid',
-        clusterWorkerCoordinatorPollMs: 77000,
+        clusterWorkerCoordinatorPollMs: TFBOT_WORKER_COORDINATOR_POLL_MS,
         clusterNonActiveDomainsRedirectStatus: 307,
-        clusterPollingIntervalMs: 77000,
+        clusterPollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS,
         clusterInactiveWorkersConnectMongo: false,
         clusterCoordinatorConnectMongo: TFBOT_CLUSTER_COORDINATOR_ONLY,
         clusterInactiveWorkersRestoreSessions: false,
@@ -11003,8 +11119,15 @@ async function main() {
         pairAccountLockedBeforeSocket: true,
         pairActiveSessionReusedWithoutSocketReplacement: true,
         sharedLogicalLeaseTtlIndex: 'leaseUntil_single_field',
-        pairCodeWaitsForFreshQrEvent: true,
-        pairCodeRequestedProactively: false,
+        pairCodeWaitsForFreshQrEvent: false,
+        pairCodeRequestedProactively: true,
+        pairCodeTransientRetryLimit: 2,
+        pairingProxyTimeoutMs: TFBOT_PAIRING_PROXY_TIMEOUT_MS,
+        sameHostPreviousDeploymentSessionHandoff: true,
+        sessionRestoreParallel: true,
+        messageProcessingClaimsAreExclusive: true,
+        messageProcessingClaimsReclaimOnlyExpiredOrPreviousDeployment: true,
+        messageProcessingLeaseMs: MESSAGE_PROCESSING_LEASE_MS,
         authWritesAllowSessionScopedBootstrapUntilIdentity: true,
         pairingAuthPreservedOnTransientFailure: true,
         pairingTimeoutMs: Math.max(120000, Number(process.env.PAIRING_SESSION_TTL_MS || 900000)),
@@ -11029,6 +11152,7 @@ async function main() {
         del3UnknownMessageFormats: 'classified_by_exact_whatsapp_message_key',
         lockLeaseMs: SESSION_RUNTIME_LOCK_LEASE_MS,
         lockRenewMs: SESSION_RUNTIME_LOCK_RENEW_MS,
+        sameHostDeploymentHandoff: true,
         authWritesFencedByRuntimeLock: true,
         retryStoreExactSessionIdFallback: true,
         targetedSignalPeerRecovery: true,
@@ -11072,13 +11196,13 @@ async function main() {
                 });
             }
             tfbotCoordinatorStorageReady = true;
-            console.info('[tfbot-coordinator-mode]', { host: TFBOT_CLUSTER_INSTANCE_HOST, role: 'coordinator-only-storage-and-router', mongoConnected: !!db, whatsappRuntime: false, sessionRestore: false, pollingIntervalMs: 77000 });
+            console.info('[tfbot-coordinator-mode]', { host: TFBOT_CLUSTER_INSTANCE_HOST, role: 'coordinator-only-storage-and-router', mongoConnected: !!db, whatsappRuntime: false, sessionRestore: false, pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS });
             await startTfbotCoordinatorMonitor();
             return;
         }
         tfbotWorkerActive = false;
         tfbotWorkerState = 'standby';
-        console.info('[tfbot-worker-standby]', { host: TFBOT_CLUSTER_INSTANCE_HOST, role: 'poll-tfbot7-for-selection', mongoConnected: false, sessionRestore: false, pollingIntervalMs: 77000 });
+        console.info('[tfbot-worker-standby]', { host: TFBOT_CLUSTER_INSTANCE_HOST, role: 'poll-tfbot7-for-selection', mongoConnected: false, sessionRestore: false, pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS });
         await startTfbotWorkerCoordinatorPoller();
         return;
     }
