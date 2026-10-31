@@ -33,7 +33,7 @@ const runtimeLogRenderServiceName = String(process.env.RENDER_SERVICE_NAME || pr
 const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
 const runtimeLogRenderCommit = String(process.env.RENDER_GIT_COMMIT || '').trim().slice(0, 80);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}:${shortLogHash(runtimeLogInstanceId)}`).slice(0, 240);
-const TFBOT_CLUSTER_CODE_REVISION = 'r45-preserve-router-selection-auth-write-failure-logs-purge';
+const TFBOT_CLUSTER_CODE_REVISION = 'r46-durable-signal-cache-self-chat-private-owner-only-startup-replay';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
 const runtimeLogClusterId = `${runtimeLogDeploymentId}:${shortLogHash(runtimeLogInstanceId)}`.slice(0, 240);
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
@@ -444,11 +444,11 @@ const EventEmitter = require('events');
 const {
     default: makeWASocket,
     fetchLatestBaileysVersion,
-    makeCacheableSignalKeyStore,
     DisconnectReason,
     Browsers,
     downloadContentFromMessage,
-    initAuthCreds
+    initAuthCreds,
+    BufferJSON
 } = require('@whiskeysockets/baileys');
 const { MongoClient } = require('mongodb');
 const { Writable } = require('stream');
@@ -549,8 +549,7 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
     const peerAliases = [...new Set([details.peerJid, ...(details.aliases || [])].filter(Boolean))];
     const isSelfPeer = peerAliases.some(peer => ownAliases.some(own => areEquivalentWhatsAppChatJids(sessionId, peer, own)));
     if (!details.isGroup && isSelfPeer) {
-        console.warn('[signal-private-self-chat-recovery-skipped]', { sessionId, action: 'preserve_own_signal_session_and_credentials', reason: 'self_chat_address_matches_authenticated_account' });
-        return;
+        console.warn('[signal-private-self-chat-recovery-queued]', { sessionId, peer: details.peerJid, aliasCount: peerAliases.length, messageId: details.messageId || null, action: 'refresh_only_self_chat_peer_session_without_deleting_account_credentials' });
     }
     if (details.isGroup && isSelfPeer) {
         console.warn('[signal-group-self-sender-recovery-skipped]', { sessionId, groupJid: details.remoteJid, action: 'preserve_own_signal_session_and_sender_key_memory', reason: 'sender_matches_authenticated_account' });
@@ -587,7 +586,7 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
                 console.warn('[signal-group-session-recovery]', { sessionId, groupJid: details.remoteJid, participant: details.peerJid, invalidatedEntries: invalidated.removed, changedGroups: invalidated.changed, action: invalidated.changed ? 'invalidate_only_matching_participant_memory' : 'preserve_all_group_sender_key_memory_no_matching_participant_entry', messageId: details.messageId || null });
             } else {
                 const repository = sock.signalRepository;
-                const aliases = [...new Set(details.aliases.concat(details.peerJid))].filter(value => /@(?:s\.whatsapp\.net|lid)$/i.test(value));
+                const aliases = [...new Set(details.aliases.concat(details.peerJid, isSelfPeer ? ownAliases : []))].filter(value => /@(?:s\.whatsapp\.net|lid)$/i.test(value));
                 if (typeof repository?.deleteSession === 'function') {
                     await promiseWithTimeout(repository.deleteSession(aliases), 12000, 'Targeted Signal peer-session recovery');
                 } else {
@@ -600,7 +599,7 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
                     await promiseWithTimeout(keyStore.set({ session: updates }), 12000, 'Targeted Signal peer-session recovery');
                 }
                 await flushAuthWritesForSession(sessionId);
-                console.warn('[signal-private-session-recovery]', { sessionId, peer: details.peerJid, aliasCount: aliases.length, messageId: details.messageId || null, action: 'reset_only_affected_peer_session_keep_account_auth' });
+                console.warn(isSelfPeer ? '[signal-private-self-chat-session-recovery]' : '[signal-private-session-recovery]', { sessionId, peer: details.peerJid, aliasCount: aliases.length, messageId: details.messageId || null, action: isSelfPeer ? 'reset_only_self_chat_peer_session_preserve_account_credentials' : 'reset_only_affected_peer_session_keep_account_auth' });
             }
         } catch (error) {
             console.error('[signal-targeted-session-recovery-failed]', { sessionId, peer: details.peerJid, groupJid: details.isGroup ? details.remoteJid : null, error: error?.message || String(error), action: 'preserve_all_other_signal_keys' });
@@ -654,7 +653,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r45';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r46';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1409,24 +1408,57 @@ function queueMessage(executeFn, delayMs = 150, queueKey = null) {
     });
 }
 
-async function claimMessageForProcessing(sessionId, messageId, remoteJid = '', accountIdentity = '') {
+async function claimMessageForProcessing(sessionId, messageId, remoteJid = '', accountIdentity = '', upsertType = 'notify') {
     if (!db || !sessionId || !messageId) return true;
     const normalizedChat = String(remoteJid || 'unknown-chat').trim();
     const normalizedMessageId = String(messageId || '').trim();
     const accountScope = String(accountIdentity || sessionId).trim();
     const accountScopeHash = shortLogHash(accountScope);
     const documentId = `${accountScopeHash}:${normalizedMessageId}`;
+    const now = Date.now();
+    const leaseUntil = new Date(now + Math.max(60000, Number(process.env.MESSAGE_PROCESSING_LEASE_MS || 300000)));
     try {
         const result = await db.collection('processed_messages').updateOne(
-            { _id: documentId },
-            { $setOnInsert: { sessionId, accountScopeHash, messageId: normalizedMessageId, remoteJid: normalizedChat, ts: Date.now(), expireAt: new Date(Date.now() + PROCESSED_MESSAGE_RETENTION_MS) } },
-            { upsert: true }
+            {
+                _id: documentId,
+                $or: [
+                    { status: { $exists: false } },
+                    { status: 'retryable' },
+                    { status: 'processing', claimOwner: { $ne: processInstanceId } },
+                    { status: 'processing', leaseUntil: { $lte: new Date(now) } }
+                ]
+            },
+            {
+                $set: { sessionId, accountScopeHash, messageId: normalizedMessageId, remoteJid: normalizedChat, upsertType: String(upsertType || 'notify'), status: 'processing', claimOwner: processInstanceId, claimedAt: new Date(now), leaseUntil, ts: now, expireAt: new Date(now + PROCESSED_MESSAGE_RETENTION_MS) },
+                $inc: { attempts: 1 }
+            },
+            { upsert: true, writeConcern: { w: 'majority', wtimeout: 10000 } }
         );
-        return result.upsertedCount === 1;
+        return result.upsertedCount === 1 || result.matchedCount === 1;
     } catch (error) {
         if (error && error.code === 11000) return false;
         console.error('[message-dedupe]', { sessionId, remoteJid: normalizedChat, messageId: normalizedMessageId, error: error?.message || String(error) });
         return true;
+    }
+}
+
+async function finishMessageProcessingClaim(sessionId, messageId, accountIdentity = '', succeeded = true, error = '') {
+    if (!db || !sessionId || !messageId) return false;
+    const normalizedMessageId = String(messageId || '').trim();
+    const accountScope = String(accountIdentity || sessionId).trim();
+    const documentId = `${shortLogHash(accountScope)}:${normalizedMessageId}`;
+    const now = new Date();
+    try {
+        const update = succeeded
+            ? { $set: { status: 'processed', processedAt: now, leaseUntil: now, expireAt: new Date(now.getTime() + PROCESSED_MESSAGE_RETENTION_MS) }, $unset: { claimOwner: 1, lastError: 1 } }
+            : { $set: { status: 'retryable', leaseUntil: new Date(0), lastError: String(error || 'message_handler_failed').slice(0, 240), failedAt: now }, $unset: { claimOwner: 1 } };
+        const result = await db.collection('processed_messages').updateOne({ _id: documentId, status: 'processing', claimOwner: processInstanceId }, update, { writeConcern: { w: 'majority', wtimeout: 10000 } });
+        if (result.matchedCount !== 1) return false;
+        console.info('[message-processing-claim-finalized]', { sessionId, messageId: normalizedMessageId, status: succeeded ? 'processed' : 'retryable' });
+        return true;
+    } catch (finishError) {
+        console.warn('[message-processing-claim-finalize-failed]', { sessionId, messageId: normalizedMessageId, status: succeeded ? 'processed' : 'retryable', error: finishError?.message || String(finishError) });
+        return false;
     }
 }
 
@@ -2576,10 +2608,11 @@ function fixBuffers(obj) {
 }
 
 function restoreSignalSessionBuffer(value, depth = 0, seen = new WeakSet()) {
-    if (value === null || value === undefined || depth > 7) return null;
+    if (value === null || value === undefined || depth > 9) return null;
     if (Buffer.isBuffer(value)) return value.length ? Buffer.from(value) : null;
     if (value instanceof Uint8Array) return value.byteLength ? Buffer.from(value) : null;
     if (value instanceof ArrayBuffer) return value.byteLength ? Buffer.from(new Uint8Array(value)) : null;
+    if (ArrayBuffer.isView(value)) return value.byteLength ? Buffer.from(value.buffer, value.byteOffset, value.byteLength) : null;
     if (Array.isArray(value)) {
         if (value.length && value.every(item => Number.isInteger(item) && item >= 0 && item <= 255)) return Buffer.from(value);
         return null;
@@ -2593,12 +2626,42 @@ function restoreSignalSessionBuffer(value, depth = 0, seen = new WeakSet()) {
     }
     if (typeof value !== 'object' || seen.has(value)) return null;
     seen.add(value);
-    if (typeof value.serialize === 'function') {
+    if (value._bsontype === 'Binary') {
         try {
-            const serialized = value.serialize();
+            const raw = typeof value.value === 'function' ? value.value(true) : value.buffer;
+            const restored = restoreSignalSessionBuffer(raw, depth + 1, seen);
+            if (restored) {
+                const position = Number(value.position);
+                return Number.isInteger(position) && position > 0 && position < restored.length ? Buffer.from(restored.subarray(0, position)) : restored;
+            }
+        } catch (error) {}
+    }
+    for (const methodName of ['serialize', 'toBuffer', 'toUint8Array', 'toBytes', 'asBuffer']) {
+        try {
+            if (typeof value[methodName] !== 'function') continue;
+            const serialized = value[methodName]();
+            if (serialized === value) continue;
             const output = restoreSignalSessionBuffer(serialized, depth + 1, seen);
             if (output) return output;
         } catch (error) {}
+    }
+    if (typeof value.value === 'function') {
+        try {
+            const output = restoreSignalSessionBuffer(value.value(true), depth + 1, seen);
+            if (output) return output;
+        } catch (error) {}
+    }
+    if (typeof value.toJSON === 'function') {
+        try {
+            const jsonValue = value.toJSON();
+            if (jsonValue !== value) {
+                const output = restoreSignalSessionBuffer(jsonValue, depth + 1, seen);
+                if (output) return output;
+            }
+        } catch (error) {}
+    }
+    if (value.buffer instanceof ArrayBuffer && Number.isInteger(value.byteOffset) && Number.isInteger(value.byteLength) && value.byteLength > 0) {
+        return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
     }
     const directKeys = Object.keys(value).filter(key => /^\d+$/.test(key)).sort((a, b) => Number(a) - Number(b));
     const extraKeys = Object.keys(value).filter(key => !/^\d+$/.test(key));
@@ -2611,17 +2674,148 @@ function restoreSignalSessionBuffer(value, depth = 0, seen = new WeakSet()) {
     const fixed = fixBuffers(value);
     if (Buffer.isBuffer(fixed)) return fixed.length ? Buffer.from(fixed) : null;
     if (fixed instanceof Uint8Array) return fixed.byteLength ? Buffer.from(fixed) : null;
+    if (fixed !== value && fixed && typeof fixed === 'object') {
+        const output = restoreSignalSessionBuffer(fixed, depth + 1, seen);
+        if (output) return output;
+    }
     if (value.$binary && typeof value.$binary.base64 === 'string') {
         const output = restoreSignalSessionBuffer(value.$binary.base64, depth + 1, seen);
         if (output) return output;
     }
-    const candidates = [value.buffer, value.bytes, value.byteArray, value.data, value.value, value.binary, value.base64, value.serialized, value.record];
+    const candidates = [value.buffer, value.bytes, value.byteArray, value.data, value.value, value.binary, value.base64, value.serialized, value.serializedBuffer, value.record, value.session, value.sessionRecord, value.content, value._value];
     for (const candidate of candidates) {
         if (candidate === value || candidate === undefined || candidate === null) continue;
         const output = restoreSignalSessionBuffer(candidate, depth + 1, seen);
         if (output) return output;
     }
     return null;
+}
+
+function isBinarySignalKeyCategory(type) {
+    return ['session', 'sender-key', 'identity-key'].includes(String(type || ''));
+}
+
+function normalizeSignalBinaryValue(value) {
+    const direct = restoreSignalSessionBuffer(value);
+    if (direct && direct.length) return direct;
+    if (!value || typeof value !== 'object' || typeof BufferJSON?.replacer !== 'function' || typeof BufferJSON?.reviver !== 'function') return null;
+    try {
+        const serialized = JSON.stringify(value, BufferJSON.replacer);
+        if (!serialized) return null;
+        const restored = JSON.parse(serialized, BufferJSON.reviver);
+        const converted = restoreSignalSessionBuffer(restored);
+        return converted && converted.length ? converted : null;
+    } catch (error) {
+        return null;
+    }
+}
+
+function describeSignalSessionValue(value) {
+    if (value === null || value === undefined) return { valueType: String(value) };
+    if (Buffer.isBuffer(value)) return { valueType: 'Buffer', byteLength: value.length };
+    if (value instanceof Uint8Array) return { valueType: value.constructor?.name || 'Uint8Array', byteLength: value.byteLength };
+    if (ArrayBuffer.isView(value)) return { valueType: value.constructor?.name || 'ArrayBufferView', byteLength: value.byteLength };
+    if (value instanceof ArrayBuffer) return { valueType: 'ArrayBuffer', byteLength: value.byteLength };
+    if (Array.isArray(value)) return { valueType: 'Array', length: value.length };
+    if (typeof value !== 'object') return { valueType: typeof value };
+    let prototypeName = '';
+    try { prototypeName = value.constructor?.name || Object.getPrototypeOf(value)?.constructor?.name || ''; } catch (error) {}
+    return {
+        valueType: 'object',
+        constructor: prototypeName,
+        bsonType: String(value._bsontype || ''),
+        keys: Object.keys(value).slice(0, 16),
+        hasSerialize: typeof value.serialize === 'function',
+        hasToBuffer: typeof value.toBuffer === 'function',
+        hasToJSON: typeof value.toJSON === 'function',
+        byteLength: Number(value.byteLength || value.length || value.position || 0) || 0
+    };
+}
+
+function createDurableSignalKeyStore(store, logger = null) {
+    const cache = new Map();
+    const cacheTtlMs = 5 * 60 * 1000;
+    const cacheMaxEntries = 30000;
+    let cacheQueue = Promise.resolve();
+    const runExclusive = operation => {
+        const result = cacheQueue.then(operation, operation);
+        cacheQueue = result.catch(() => {});
+        return result;
+    };
+    const cacheKey = (type, id) => `${String(type)}:${String(id)}`;
+    const cacheSet = (type, id, value) => {
+        const key = cacheKey(type, id);
+        cache.delete(key);
+        cache.set(key, { value, at: Date.now() });
+        while (cache.size > cacheMaxEntries) cache.delete(cache.keys().next().value);
+    };
+    const cacheDelete = (type, id) => cache.delete(cacheKey(type, id));
+    return {
+        get: async (type, ids) => runExclusive(async () => {
+            const result = {};
+            const missing = [];
+            const now = Date.now();
+            for (const id of Array.isArray(ids) ? ids : []) {
+                const key = cacheKey(type, id);
+                const cached = cache.get(key);
+                if (cached && now - Number(cached.at || 0) <= cacheTtlMs) {
+                    result[id] = cached.value;
+                    continue;
+                }
+                if (cached) cache.delete(key);
+                missing.push(id);
+            }
+            if (missing.length) {
+                const fetched = await store.get(type, missing);
+                for (const id of missing) {
+                    const raw = fetched?.[id];
+                    if (raw === null || raw === undefined) continue;
+                    const value = isBinarySignalKeyCategory(type) ? normalizeSignalBinaryValue(raw) : fixBuffers(raw);
+                    if (isBinarySignalKeyCategory(type) && (!Buffer.isBuffer(value) || value.length === 0)) {
+                        console.warn('[signal-auth-cache-read-skipped-invalid-binary-key]', { category: type, keyHash: shortLogHash(id), ...describeSignalSessionValue(raw), action: 'do_not_cache_or_return_non_binary_signal_record' });
+                        continue;
+                    }
+                    result[id] = value;
+                    cacheSet(type, id, value);
+                }
+            }
+            return result;
+        }),
+        set: async data => runExclusive(async () => {
+            if (!data || typeof data !== 'object') return;
+            const normalized = {};
+            const updates = [];
+            for (const [type, entries] of Object.entries(data)) {
+                if (!entries || typeof entries !== 'object' || Array.isArray(entries)) continue;
+                normalized[type] = {};
+                for (const [id, raw] of Object.entries(entries)) {
+                    if (raw === null || raw === undefined) {
+                        normalized[type][id] = null;
+                        updates.push({ type, id, value: null });
+                        continue;
+                    }
+                    const value = isBinarySignalKeyCategory(type) ? normalizeSignalBinaryValue(raw) : fixBuffers(raw);
+                    if (isBinarySignalKeyCategory(type) && (!Buffer.isBuffer(value) || value.length === 0)) {
+                        console.error('[signal-auth-binary-key-normalization-failed]', { category: type, keyHash: shortLogHash(id), ...describeSignalSessionValue(raw), reason: 'baileys_signal_key_not_serialized_to_nonempty_bytes', action: 'reject_without_polluting_signal_cache' });
+                        throw new Error(`signal_auth_${type.replace(/[^a-z0-9_-]/gi, '')}_write_not_binary`);
+                    }
+                    normalized[type][id] = value;
+                    updates.push({ type, id, value });
+                }
+            }
+            if (!Object.keys(normalized).length) return;
+            await store.set(normalized);
+            for (const update of updates) {
+                if (update.value === null) cacheDelete(update.type, update.id);
+                else cacheSet(update.type, update.id, update.value);
+            }
+            logger?.trace?.({ categoryCount: Object.keys(normalized).length, keyCount: updates.length }, 'durable signal key store committed');
+        }),
+        clear: async () => runExclusive(async () => {
+            cache.clear();
+            if (typeof store.clear === 'function') await store.clear();
+        })
+    };
 }
 
 async function assertSessionRuntimeOwnership(sessionId, options = {}) {
@@ -3212,7 +3406,12 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
         for (const [id, value] of Object.entries(legacyData)) {
             if (value === null || value === undefined) continue;
             const targetId = `${sessionKey}_key_${type}-${id}`;
-            operations.push({ updateOne: { filter: { _id: targetId }, update: { $setOnInsert: { data: fixBuffers(value) } }, upsert: true } });
+            const migratedValue = isBinarySignalKeyCategory(type) ? normalizeSignalBinaryValue(value) : fixBuffers(value);
+            if (isBinarySignalKeyCategory(type) && (!Buffer.isBuffer(migratedValue) || migratedValue.length === 0)) {
+                console.warn('[auth-store-legacy-binary-key-skipped]', { sessionId, type, keyHash: shortLogHash(id), ...describeSignalSessionValue(value), action: 'preserve_legacy_document_without_migrating_invalid_binary' });
+                continue;
+            }
+            operations.push({ updateOne: { filter: { _id: targetId }, update: { $setOnInsert: { data: migratedValue } }, upsert: true } });
         }
         await runBulkWriteWithFallback(operations, `legacy-key-migration-${type}`);
         await collection.updateOne({ _id: markerId }, { $setOnInsert: { migrated: true, keyCount: operations.length, updatedAt: new Date() } }, { upsert: true });
@@ -3229,10 +3428,10 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
             const docs = await collection.find({ _id: { $in: dbIds } }).toArray();
             for (const doc of docs) {
                 const keyId = doc._id.substring(prefix.length);
-                let restored = type === 'session' ? restoreSignalSessionBuffer(doc.data) : fixBuffers(doc.data);
-                if (type === 'session' && (!Buffer.isBuffer(restored) || restored.length === 0)) {
-                    const storedShape = doc.data && typeof doc.data === 'object' ? Object.keys(doc.data).slice(0, 12) : [];
-                    console.warn('[signal-auth-session-record-invalid-preserved]', { sessionId, keyHash: shortLogHash(keyId), storedType: doc.data?._bsontype || (Array.isArray(doc.data) ? 'array' : typeof doc.data), storedShape, reason: 'session_record_cannot_be_restored_as_nonempty_binary', action: 'preserve_record_and_skip_until_valid_binary_representation_is_available' });
+                let restored = isBinarySignalKeyCategory(type) ? normalizeSignalBinaryValue(doc.data) : fixBuffers(doc.data);
+                if (isBinarySignalKeyCategory(type) && (!Buffer.isBuffer(restored) || restored.length === 0)) {
+                    const storedShape = doc.data && typeof doc.data === 'object' ? Object.keys(doc.data).slice(0, 16) : [];
+                    console.warn('[signal-auth-binary-key-record-invalid-preserved]', { sessionId, category: type, keyHash: shortLogHash(keyId), ...describeSignalSessionValue(doc.data), storedShape, reason: 'signal_key_record_cannot_be_restored_as_nonempty_binary', action: 'preserve_record_and_skip_until_valid_binary_representation_is_available' });
                     continue;
                 }
                 if (Buffer.isBuffer(restored) && !Buffer.isBuffer(doc.data) && doc.data?._bsontype !== 'Binary') {
@@ -3253,10 +3452,11 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
                     const dbId = `${sessionKey}_key_${type}-${id}`;
                     if (value === null || value === undefined) operations.push({ deleteOne: { filter: { _id: dbId } } });
                     else {
-                        const storedValue = type === 'session' ? restoreSignalSessionBuffer(value) : fixBuffers(value);
-                        if (type === 'session' && (!Buffer.isBuffer(storedValue) || storedValue.length === 0)) {
-                            console.error('[signal-auth-session-write-rejected]', { sessionId, keyHash: shortLogHash(id), reason: 'session_record_must_be_nonempty_binary', action: 'do_not_overwrite_existing_signal_record_with_invalid_object' });
-                            throw new Error('signal_auth_session_write_not_binary');
+                        const storedValue = isBinarySignalKeyCategory(type) ? normalizeSignalBinaryValue(value) : fixBuffers(value);
+                        if (isBinarySignalKeyCategory(type) && (!Buffer.isBuffer(storedValue) || storedValue.length === 0)) {
+                            const binaryKeyError = `signal_auth_${type.replace(/[^a-z0-9_-]/gi, '')}_write_not_binary`;
+                            console.error('[signal-auth-binary-key-write-rejected]', { sessionId, category: type, keyHash: shortLogHash(id), ...describeSignalSessionValue(value), reason: 'signal_key_record_must_be_nonempty_binary', acceptedConversions: ['Uint8Array', 'Buffer', 'BSON Binary', 'BufferJSON', 'serialized byte arrays'], action: 'reject_without_corrupting_existing_record' });
+                            throw new Error(binaryKeyError);
                         }
                         operations.push({ updateOne: { filter: { _id: dbId }, update: { $set: { data: storedValue, updatedAt: new Date() } }, upsert: true } });
                     }
@@ -7243,7 +7443,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         });
         const baileysLogger = createDashboardPinoLogger({ level: baileysLogLevel, base: { sessionId, component: 'baileys' } });
         const signalKeyStoreLogger = createDashboardPinoLogger({ level: signalStoreLogLevel, base: { sessionId, component: 'signal-key-store' } });
-        const cachedSignalKeyStore = makeCacheableSignalKeyStore(state.keys, signalKeyStoreLogger);
+        const cachedSignalKeyStore = createDurableSignalKeyStore(state.keys, signalKeyStoreLogger);
         let sock;
         sock = makeWASocket({
             version,
@@ -8270,19 +8470,41 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             }
             let liveAccountPhone = '';
             let liveAccountLid = '';
+            let ownershipReady = false;
+            let ownershipError = null;
             try {
                 if (activeSessions.get(sessionId)?.sock !== sock) return;
                 liveAccountPhone = getAuthenticatedPhoneNumber(sock.user, state.creds);
                 liveAccountLid = getAuthenticatedLid(sock.user, state.creds);
                 const liveAccountIdentity = liveAccountPhone || liveAccountLid;
                 const liveAccountLockKey = normalizeAccountRuntimeLockKey(liveAccountIdentity);
-                if (liveAccountLockKey) {
-                    const accountLock = await ensureAccountRuntimeLockForIdentity(sessionId, sock.user, state.creds);
-                    if (!accountLock.acquired) throw new Error('account_runtime_lock_not_owned');
+                for (let ownershipAttempt = 0; ownershipAttempt < 5; ownershipAttempt++) {
+                    try {
+                        if (!TFBOT_CLUSTER_ENABLED || tfbotWorkerActive && !tfbotWorkerStopping && !workerDrainingSessionIds.has(sessionId)) {
+                            if (liveAccountLockKey) {
+                                const accountLock = await ensureAccountRuntimeLockForIdentity(sessionId, sock.user, state.creds);
+                                if (!accountLock.acquired) throw new Error('account_runtime_lock_not_owned');
+                            }
+                            await assertSessionRuntimeOwnership(sessionId, { skipLiveAccountIdentityCheck: true });
+                            ownershipReady = true;
+                            break;
+                        }
+                        throw new Error('tfbot_worker_not_active');
+                    } catch (attemptError) {
+                        ownershipError = attemptError;
+                        const reason = String(attemptError?.message || attemptError);
+                        if (/tfbot_worker_not_active|duplicate_account|account_runtime_lock_conflict|session_runtime_lock_fenced|session_runtime_lock_owned_elsewhere/i.test(reason)) break;
+                        if (ownershipAttempt < 4) await new Promise(resolve => setTimeout(resolve, 180 * (ownershipAttempt + 1)));
+                    }
                 }
-                await assertSessionRuntimeOwnership(sessionId, { skipLiveAccountIdentityCheck: true });
-            } catch (ownershipError) {
-                console.error('[message-upsert-blocked-without-exclusive-session-lock]', { sessionId, error: ownershipError?.message || String(ownershipError), action: 'close_socket_and_preserve_signal_auth' });
+                if (!ownershipReady) throw ownershipError || new Error('session_runtime_ownership_not_confirmed');
+            } catch (finalOwnershipError) {
+                const reason = String(finalOwnershipError?.message || finalOwnershipError);
+                if (reason === 'tfbot_worker_not_active' || workerDrainingSessionIds.has(sessionId) || tfbotWorkerStopping || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive)) {
+                    console.info('[message-upsert-left-for-selected-worker]', { sessionId, upsertType: String(up?.type || ''), messageCount: Array.isArray(up?.messages) ? up.messages.length : 0, reason, action: 'do_not_close_or_process_on_standby_worker' });
+                    return;
+                }
+                console.error('[message-upsert-blocked-without-exclusive-session-lock]', { sessionId, error: reason, action: 'retry_lock_failure_then_close_only_when_exclusive_ownership_cannot_be_verified' });
                 await closeSessionSocketWithoutAuthFlush(sessionId, 'message_upsert_without_exclusive_runtime_lock');
                 return;
             }
@@ -8564,7 +8786,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 });
                 const messageTimestampForDedupe = Number(m.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m.messageTimestamp);
                 const messageAgeForDedupe = Number.isFinite(messageTimestampForDedupe) && messageTimestampForDedupe > 0 ? Math.floor(Date.now() / 1000) - messageTimestampForDedupe : null;
-                if (upsertType === 'append' && messageAgeForDedupe !== null && messageAgeForDedupe > 120) {
+                if (upsertType === 'append' && messageAgeForDedupe !== null && messageAgeForDedupe > 120 && !receivedParsedCommand) {
                     cacheRecentMessage(sessionId, m);
                     console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: receivedChat, messageAgeSeconds: messageAgeForDedupe, reason: 'stale_history_append_not_claimed' });
                     continue;
@@ -8605,7 +8827,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 let messageClaimed = true;
                 let messageClaimTimedOut = false;
                 try {
-                    messageClaimed = await promiseWithTimeout(claimMessageForProcessing(sessionId, msgId, receivedChat, liveAccountPhone || liveAccountLid || ''), 5000, 'message processing database claim');
+                    messageClaimed = await promiseWithTimeout(claimMessageForProcessing(sessionId, msgId, receivedChat, liveAccountPhone || liveAccountLid || '', upsertType), 7000, 'message processing database claim');
                 } catch (claimError) {
                     messageClaimTimedOut = /timed out/i.test(String(claimError?.message || claimError));
                     console.error(messageClaimTimedOut ? '[message-processing-claim-timeout]' : '[message-processing-claim-failed-open]', {
@@ -8647,6 +8869,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     databaseClaimTimedOut: messageClaimTimedOut
                 });
                 setImmediate(async () => {
+                    let messageProcessingSucceeded = true;
+                    let messageProcessingError = '';
                     try {
                         console.info('[message-processing-started]', {
                             sessionId,
@@ -8757,14 +8981,26 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 if (resolved?.phone) directPhoneCandidate = { value: resolved.phone, source: resolved.source };
                             }
                             const directPhone = normalizePhoneCacheJid(directPhoneCandidate?.value || '');
+                            const authenticatedRouteNumber = getAuthenticatedPhoneNumber(sock.user, state.creds);
+                            const authenticatedRouteLid = normalizeLidCacheKey(getAuthenticatedLid(sock.user, state.creds));
+                            const storedOwnerLid = normalizeLidCacheKey(sOwnerTop?.OwnerLid || sOwnerTop?.ownerLid || '');
+                            const mappedToOwnAccount = !!(directPhone && authenticatedRouteNumber && normalizePhoneNumber(directPhone.split('@')[0]) === authenticatedRouteNumber);
+                            const matchesStoredOwnLid = !!(storedOwnerLid && storedOwnerLid === normalizedRawChatForMapping);
+                            const matchesAuthenticatedOwnLid = !!(authenticatedRouteLid && authenticatedRouteLid === normalizedRawChatForMapping);
                             if (directPhone) {
                                 if (!isFromMe) {
                                     senderJids.push(directPhone);
                                     from = normalizedRawChatForMapping;
                                     privateReplyTargetResolution = `private_lid_preferred_pn_fallback_${directPhoneCandidate?.source || 'lid_mapping'}`;
+                                } else if (authenticatedRouteNumber && (mappedToOwnAccount || matchesStoredOwnLid || matchesAuthenticatedOwnLid)) {
+                                    from = `${authenticatedRouteNumber}@s.whatsapp.net`;
+                                    privateReplyTargetResolution = 'self_chat_lid_resolved_to_authenticated_phone';
                                 } else {
-                                    privateReplyTargetResolution = 'original_lid_preserved_for_from_me';
+                                    privateReplyTargetResolution = 'original_lid_preserved_for_from_me_non_self_chat';
                                 }
+                            } else if (isFromMe && authenticatedRouteNumber && (matchesStoredOwnLid || matchesAuthenticatedOwnLid)) {
+                                from = `${authenticatedRouteNumber}@s.whatsapp.net`;
+                                privateReplyTargetResolution = 'self_chat_lid_resolved_to_authenticated_phone_without_cached_mapping';
                             } else {
                                 privateReplyTargetResolution = 'original_lid_preferred_no_pn_mapping';
                             }
@@ -9092,13 +9328,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         }
                         }
 
-                        const modeCandidates = [sOwnerTop?.mode, sOwnerTop?.Mode, sOwnerTop?.botMode].filter(value => value !== undefined && value !== null && String(value).trim() !== '').map(value => normalizeText(value));
-                        const isPublicMode = modeCandidates.some(value => ['public', 'piblik', 'publico'].includes(value));
-                        const botMode = modeCandidates.length ? [...new Set(modeCandidates)].join('|') : 'prive';
-                        const privateModeSafeCommands = new Set(['menu', 'info', 'alive', 'ping']);
-                        const isReadOnlyMenuCommand = receivedParsedCommand?.internalCommand === 'menu';
-                        const isPrivateModeSafeCommand = privateModeSafeCommands.has(receivedParsedCommand?.internalCommand || '');
-                        const allowed = !isChannel && (isPublicMode || isOwnerReal || isPrivateModeSafeCommand);
+                        const storedModeValue = [sOwnerTop?.mode, sOwnerTop?.Mode, sOwnerTop?.botMode].find(value => value !== undefined && value !== null && String(value).trim() !== '');
+                        const normalizedStoredMode = normalizeText(storedModeValue || 'prive');
+                        const isPublicMode = ['public', 'piblik', 'publico'].includes(normalizedStoredMode);
+                        const botMode = isPublicMode ? 'public' : 'prive';
+                        const allowed = !isChannel && (isOwnerReal || isPublicMode);
 
                         const bodyRaw = earlyBody;
                         const body = bodyRaw.trim();
@@ -9139,9 +9373,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             isOwnerReal,
                             isPublicMode,
                             allowed,
-                            isReadOnlyMenuCommand,
-                            isPrivateModeSafeCommand,
-                            authorizationReason: isPublicMode ? 'public_mode' : isOwnerReal ? 'owner' : isPrivateModeSafeCommand ? 'read_only_command_allowed_in_private_mode' : 'private_mode_block',
+                            authorizationReason: isPublicMode ? 'public_mode' : isOwnerReal ? 'owner' : 'private_mode_owner_only',
                             mode: botMode,
                             bodyLength: body.length,
                             bodyPreview: body.slice(0, 240)
@@ -9260,7 +9492,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         console.info('[command-dispatch-ready]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, senderName: sName, senderJid: sender, chatJid: from, rawChatJid: rawFrom, command, internalCommand, messageLang, isPublicMode, isOwnerReal, mode: botMode, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid' });
                         console.info('[command-detected]', { sessionId, upsertType, messageId: msgId, senderName: sName, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: from, senderJid: sender, senderAliases: senderJids, messageType, messageClassification: 'recognized_command', command, internalCommand, argumentPreview: String(args || '').replace(/[\r\n\t]+/g, ' ').slice(0, 1000), isGroup, isPublicMode, isOwnerReal, mode: botMode, action: 'command_handler_started' });
 
-                        (async () => {
+                        await (async () => {
                             try {
                                 let isTyping = true;
                                 const typingInterval = setInterval(async () => {
@@ -9433,7 +9665,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 version,
                                                 logger: pino({ level: 'silent' }),
                                                 printQRInTerminal: false,
-                                                auth: { creds: tempState.creds, keys: makeCacheableSignalKeyStore(tempState.keys, pino({ level: "silent" })) },
+                                                auth: { creds: tempState.creds, keys: createDurableSignalKeyStore(tempState.keys, pino({ level: "silent" })) },
                                                 browser: Browsers.ubuntu('Chrome'),
                                                 msgRetryCounterCache: createSessionRetryCache(tempId)
                                             });
@@ -10265,7 +10497,14 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             }
                         })();
 
-                    } catch (cmdError) { console.error('[message-handler]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, messageClassification: receivedClassification, detectedCommand: receivedParsedCommand?.internalCommand || receivedParsedCommand?.command || null, incomingChatJid: rawFrom, replyTargetJid: from, action: 'message_handler_failed', error: cmdError?.message || String(cmdError) }); }
+                    } catch (cmdError) {
+                        messageProcessingSucceeded = false;
+                        messageProcessingError = cmdError?.message || String(cmdError);
+                        console.error('[message-handler]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, messageClassification: receivedClassification, detectedCommand: receivedParsedCommand?.internalCommand || receivedParsedCommand?.command || null, incomingChatJid: rawFrom, replyTargetJid: from, action: 'message_handler_failed', error: messageProcessingError });
+                    } finally {
+                        if (!messageProcessingSucceeded) processedLocalCache.delete(`${sessionId}:id:${msgId}`);
+                        await finishMessageProcessingClaim(sessionId, msgId, liveAccountPhone || liveAccountLid || '', messageProcessingSucceeded, messageProcessingError);
+                    }
                 });
                 } catch (messageDispatchError) {
                     const failedBody = String(extractBody(m) || '');
