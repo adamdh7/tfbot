@@ -32,7 +32,7 @@ const runtimeLogRenderServiceName = String(process.env.RENDER_SERVICE_NAME || pr
 const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
 const runtimeLogRenderCommit = String(process.env.RENDER_GIT_COMMIT || '').trim().slice(0, 80);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}`).slice(0, 240);
-const TFBOT_CLUSTER_CODE_REVISION = 'r36-del3-all-formats-pairing-cleanup';
+const TFBOT_CLUSTER_CODE_REVISION = 'r37-signal-pairing-del3-reliable';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-30')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
 const runtimeLogClusterId = TFBOT_CODE_RELEASE_ID;
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
@@ -458,7 +458,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-30-r36';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-30-r37';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -550,6 +550,7 @@ const CLOUDFLARE_API_BASE_URL = String(process.env.CLOUDFLARE_API_BASE_URL || ''
 const TAVILY_SEARCH_URL = String(process.env.TAVILY_SEARCH_URL || '').trim();
 const BREF_UPLOAD_URL = String(process.env.BREF_UPLOAD_URL || '').trim();
 const TF_BOT_BASE_URL = String(process.env.TF_BOT_BASE_URL || process.env.RENDER_EXTERNAL_URL || 'https://tf.bot.adamdh7.org').trim().replace(/\/+$/, '');
+const TFBOT_INTERNAL_API_BASE_URL = String(process.env.TFBOT_INTERNAL_API_URL || process.env.TF_BOT_INTERNAL_API_URL || TFBOT_CLUSTER_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || TF_BOT_BASE_URL).trim().replace(/\/+$/, '');
 const TF_REDIRECT_URL = String(process.env.TF_REDIRECT_URL || '').trim();
 const tfEvents = new EventEmitter();
 
@@ -1765,7 +1766,8 @@ async function queuedDeleteMessageWithAck(sock, jid, messageKey, delayMs = 120, 
     const destination = String(jid || '').trim();
     const messageId = String(messageKey?.id || '').trim();
     const remoteJid = String(messageKey?.remoteJid || destination).trim();
-    const participant = String(messageKey?.participant || messageKey?.participantPn || messageKey?.participantAlt || messageKey?.senderPn || '').trim();
+    const participantCandidates = [messageKey?.participant, messageKey?.participantPn, messageKey?.participantAlt, messageKey?.senderPn].map(value => String(value || '').trim()).filter(value => /@(s\.whatsapp\.net|lid)$/i.test(value));
+    const participant = participantCandidates[0] || '';
     if (!destination || !messageId || !remoteJid) throw new Error('whatsapp_delete_target_key_incomplete');
     if (/@g\.us$/i.test(remoteJid) && !messageKey?.fromMe && !participant) throw new Error('whatsapp_group_delete_participant_missing');
     const normalizedKey = {
@@ -2282,9 +2284,28 @@ function fixBuffers(obj) {
     }
     if (Buffer.isBuffer(obj)) return Buffer.from(obj);
     if (obj instanceof Uint8Array) return Buffer.from(obj);
+    if (obj instanceof ArrayBuffer) return Buffer.from(new Uint8Array(obj));
+    if (ArrayBuffer.isView(obj) && !Buffer.isBuffer(obj)) return Buffer.from(obj.buffer, obj.byteOffset, obj.byteLength);
     if (Array.isArray(obj)) return obj.map(fixBuffers);
     if (typeof obj === 'object') {
-        if (obj.type === 'Buffer' && Array.isArray(obj.data)) return Buffer.from(obj.data);
+        if (obj.type === 'Buffer' && Array.isArray(obj.data)) return Buffer.from(obj.data.map(value => Number(value) & 255));
+        if (obj.type === 'Buffer' && typeof obj.data === 'string') {
+            const encoded = obj.data.trim().replace(/-/g, '+').replace(/_/g, '/');
+            if (!encoded) return Buffer.alloc(0);
+            if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) || encoded.length % 4 === 1) return obj;
+            const normalized = encoded + '='.repeat((4 - encoded.length % 4) % 4);
+            const decoded = Buffer.from(normalized, 'base64');
+            if (!decoded.length || decoded.toString('base64').replace(/=+$/, '') !== normalized.replace(/=+$/, '')) return obj;
+            return decoded;
+        }
+        if (obj.$binary && typeof obj.$binary.base64 === 'string') {
+            const encoded = obj.$binary.base64.trim();
+            if (/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) && encoded.length % 4 !== 1) {
+                const normalized = encoded + '='.repeat((4 - encoded.length % 4) % 4);
+                const decoded = Buffer.from(normalized, 'base64');
+                if (decoded.length && decoded.toString('base64').replace(/=+$/, '') === normalized.replace(/=+$/, '')) return decoded;
+            }
+        }
         const prototype = Object.getPrototypeOf(obj);
         if (prototype !== Object.prototype && prototype !== null) return obj;
         const output = Object.create(prototype);
@@ -2903,7 +2924,7 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
                 for (const [id, value] of Object.entries(entries)) {
                     const dbId = `${sessionKey}_key_${type}-${id}`;
                     if (value === null || value === undefined) operations.push({ deleteOne: { filter: { _id: dbId } } });
-                    else operations.push({ updateOne: { filter: { _id: dbId }, update: { $set: { data: value } }, upsert: true } });
+                    else operations.push({ updateOne: { filter: { _id: dbId }, update: { $set: { data: fixBuffers(value) } }, upsert: true } });
                 }
             }
             await runBulkWriteWithFallback(operations, 'signal-keys');
@@ -3264,7 +3285,7 @@ async function removeDel3Rule(sessionId, gjid, messageFormat) {
     setBoundedMapEntry(activeDel3RulesCache, `${sessionId}_${gjid}`, next, ACTIVE_DEL2_CACHE_MAX_ENTRIES);
 }
 
-async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, senderJid, senderAliases, ownerRecord) {
+async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, senderJid, senderAliases, ownerRecord, canModerateGroup) {
     const chat = String(groupJid || message?.key?.remoteJid || '').trim();
     const messageId = String(message?.key?.id || '').trim();
     if (!/@g\.us$/i.test(chat) || !messageId || message?.key?.fromMe === true) return false;
@@ -3284,7 +3305,7 @@ async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, se
         console.info('[del3-message-skipped-stale]', { sessionId, group: chat, messageId, format, ageSeconds });
         return false;
     }
-    if (!(await canBotModerateGroup(chat))) {
+    if (typeof canModerateGroup !== 'function' || !(await canModerateGroup(chat))) {
         console.warn('[del3-message-delete-skipped]', { sessionId, group: chat, messageId, format, reason: 'bot_not_group_admin_or_group_metadata_unavailable' });
         return false;
     }
@@ -3305,11 +3326,12 @@ async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, se
         del3DeleteDedupCache.set(dedupId, Date.now());
         while (del3DeleteDedupCache.size > 12000) del3DeleteDedupCache.delete(del3DeleteDedupCache.keys().next().value);
         const sourceKey = message.key || {};
-        const participant = String(sourceKey.participant || sourceKey.participantPn || sourceKey.participantAlt || sourceKey.senderPn || senderJid || '').trim();
+        const participantCandidates = [sourceKey.participant, sourceKey.participantPn, sourceKey.participantAlt, sourceKey.senderPn, senderJid].map(value => String(value || '').trim()).filter(value => /@(s\.whatsapp\.net|lid)$/i.test(value));
+        const participant = participantCandidates[0] || '';
         const deleteKey = { ...sourceKey, remoteJid: String(sourceKey.remoteJid || chat), id: messageId, fromMe: sourceKey.fromMe === true };
-        if (participant) deleteKey.participant = participant;
-        await queuedSendMessage(sock, chat, { delete: deleteKey }, {}, 180);
-        console.info('[del3-message-format-matched]', { sessionId, group: chat, messageId, format, deleteRequestSent: true, serverAcknowledgementTracked: false, scope: 'same_group_same_whatsapp_format' });
+        if (participant && !deleteKey.fromMe) deleteKey.participant = participant;
+        const deleteResult = await queuedDeleteMessageWithAck(sock, chat, deleteKey, 180, 9000);
+        console.info('[del3-message-format-matched]', { sessionId, group: chat, messageId, format, deleteRequestSent: true, serverAcknowledgementTracked: true, acknowledgementStatus: deleteResult.acknowledgementStatus, scope: 'same_group_same_whatsapp_format' });
         return true;
     } catch (error) {
         if (claimed && db) await db.collection('processed_messages').deleteOne({ _id: dedupId }).catch(() => {});
@@ -4529,27 +4551,37 @@ async function createCodeSession(sId, format = 'pair', expectExisting = false, a
     return await startAdamBot(sId, autoExpire, normalizedFormat, expectExisting);
 }
 
-function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs = 45000) {
+function normalizePairingCode(value) {
+    const code = String(value || '').trim().toUpperCase().replace(/[\s-]/g, '');
+    if (!/^[0-9A-HJKMNP-TV-Z]{8}$/.test(code)) throw new Error('pairing_code_format_invalid');
+    return code;
+}
+
+function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs = 75000) {
     const normalizedNumber = normalizePhoneNumber(number);
     if (!/^\d{8,15}$/.test(normalizedNumber)) return Promise.reject(new Error('pairing_phone_number_invalid'));
-    if (sessionData?.authState?.creds?.registered) return Promise.reject(new Error('pairing_session_already_registered'));
-    return new Promise((resolve, reject) => {
+    const initialSession = activeSessions.get(sessionId) || sessionData;
+    if (initialSession?.authState?.creds?.registered) return Promise.reject(new Error('pairing_session_already_registered'));
+    if (initialSession?.pairingCodeRequestPromise) return initialSession.pairingCodeRequestPromise;
+    if (initialSession?.pairingCodeRequestStarted) return Promise.reject(new Error('pairing_code_request_already_started'));
+    const operation = new Promise((resolve, reject) => {
         let settled = false;
+        let requestStarted = false;
         let currentSocket = null;
         let currentHandler = null;
-        let requestRunning = false;
-        let attemptsOnSocket = 0;
-        let totalAttempts = 0;
         let retryTimer = null;
         let pollTimer = null;
         let timeoutTimer = null;
+        let requestPromise = null;
         const detachSocket = () => {
             if (currentSocket && currentHandler) {
-                try { currentSocket.ev.off('connection.update', currentHandler); } catch (error) {}
+                try {
+                    if (typeof currentSocket.ev.off === 'function') currentSocket.ev.off('connection.update', currentHandler);
+                    else if (typeof currentSocket.ev.removeListener === 'function') currentSocket.ev.removeListener('connection.update', currentHandler);
+                } catch (error) {}
             }
             currentSocket = null;
             currentHandler = null;
-            attemptsOnSocket = 0;
         };
         const finish = (error, value) => {
             if (settled) return;
@@ -4561,26 +4593,25 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
             if (error) reject(error);
             else resolve(value);
         };
-        const scheduleRequest = (delay, trigger) => {
-            if (settled || retryTimer) return;
+        const schedule = (delay, trigger) => {
+            if (settled || retryTimer || requestStarted) return;
             retryTimer = setTimeout(() => {
                 retryTimer = null;
-                void request(trigger);
+                void attempt(trigger);
             }, Math.max(100, Number(delay) || 100));
             if (typeof retryTimer.unref === 'function') retryTimer.unref();
         };
-        const attachCurrentSocket = trigger => {
-            const active = activeSessions.get(sessionId);
-            const nextSocket = active?.sock || null;
-            if (!nextSocket) return false;
-            if (currentSocket === nextSocket) return true;
+        const attachSocket = (socket, trigger) => {
+            if (!socket || socket === currentSocket || requestStarted) return;
             detachSocket();
-            currentSocket = nextSocket;
+            currentSocket = socket;
             currentHandler = update => {
-                if (settled || currentSocket !== nextSocket) return;
-                const latest = activeSessions.get(sessionId);
-                if (latest?.sock && latest.sock !== nextSocket) {
-                    scheduleRequest(250, 'replacement_socket_detected');
+                if (settled || currentSocket !== socket) return;
+                if (activeSessions.get(sessionId)?.sock && activeSessions.get(sessionId).sock !== socket) {
+                    if (!requestStarted) {
+                        detachSocket();
+                        schedule(250, 'replacement_socket_detected');
+                    }
                     return;
                 }
                 if (update?.connection === 'open') {
@@ -4589,95 +4620,96 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
                 }
                 if (update?.connection === 'close') {
                     const statusCode = Number(update?.lastDisconnect?.error?.output?.statusCode || update?.lastDisconnect?.error?.statusCode || 0);
-                    console.warn('[pairing-socket-closed-before-code]', { sessionId, statusCode: statusCode || null, action: 'wait_for_managed_reconnect_and_retry_on_replacement_socket' });
+                    if (requestStarted) {
+                        finish(new Error(`pairing_socket_closed_during_code_request:${statusCode || 'unknown'}`));
+                        return;
+                    }
                     detachSocket();
                     if ([401, 403].includes(statusCode)) {
                         finish(new Error(`pairing_socket_closed_before_code:${statusCode}`));
                         return;
                     }
-                    scheduleRequest(900, 'retry_after_socket_restart');
+                    schedule(700, 'socket_reconnected');
                     return;
                 }
-                if (update?.qr) scheduleRequest(150, 'qr_event');
-                if (update?.connection === 'connecting' && attemptsOnSocket === 0) scheduleRequest(700, 'socket_connecting');
+                if (update?.qr) schedule(150, 'pairing_challenge_received');
             };
-            try { currentSocket.ev.on('connection.update', currentHandler); } catch (error) {
+            try {
+                currentSocket.ev.on('connection.update', currentHandler);
+            } catch (error) {
                 detachSocket();
-                return false;
+                schedule(500, 'socket_listener_retry');
+                return;
             }
-            const activeQr = String(active?.qrString || '').trim();
-            scheduleRequest(activeQr ? 150 : 1000, activeQr ? 'qr_already_captured' : trigger || 'socket_attached');
-            console.info('[pairing-code-socket-attached]', { sessionId, qrAvailable: !!activeQr, socketReplaced: totalAttempts > 0 });
-            return true;
+            console.info('[pairing-code-socket-attached]', { sessionId, qrAvailable: !!activeSessions.get(sessionId)?.qrString, socketReplaced: trigger === 'replacement_socket_detected' || trigger === 'socket_reconnected' });
+            schedule(250, trigger || 'socket_attached');
         };
-        const request = async trigger => {
-            if (settled || requestRunning) return;
-            const active = activeSessions.get(sessionId);
-            if (active?.authState?.creds?.registered || sessionData?.authState?.creds?.registered) {
+        const attempt = async trigger => {
+            if (settled || requestStarted) return;
+            const active = activeSessions.get(sessionId) || sessionData;
+            if (active?.authState?.creds?.registered) {
                 finish(new Error('pairing_session_already_registered'));
                 return;
             }
-            if (!active?.sock) {
-                scheduleRequest(750, 'waiting_for_reconnect');
-                return;
-            }
-            if (!active.qrString && String(active.status || '').toLowerCase() !== 'qr_disponible') {
-                scheduleRequest(350, 'waiting_for_pairing_challenge');
-                return;
-            }
-            if (currentSocket !== active.sock) {
-                attachCurrentSocket('new_socket_after_reconnect');
-                return;
-            }
-            if (attemptsOnSocket >= 3 || totalAttempts >= 8) {
-                detachSocket();
-                if (totalAttempts >= 8) {
-                    finish(new Error('pairing_code_request_attempts_exhausted'));
-                    return;
-                }
-                scheduleRequest(1000, 'waiting_for_replacement_socket');
-                return;
-            }
-            requestRunning = true;
-            attemptsOnSocket++;
-            totalAttempts++;
-            const requestSocket = currentSocket;
-            console.info('[pairing-code-request-started]', { sessionId, attempt: totalAttempts, attemptOnSocket: attemptsOnSocket, trigger, numberLength: normalizedNumber.length, qrAvailable: !!active.qrString });
-            try {
-                const result = await requestSocket.requestPairingCode(normalizedNumber);
-                const code = String(result || '').replace(/[^0-9-]/g, '').trim();
-                if (!/^\d{4}-?\d{4}$/.test(code)) throw new Error('pairing_code_format_invalid');
-                console.info('[pairing-code-request-completed]', { sessionId, attempt: totalAttempts, codeLength: code.length });
-                finish(null, code);
-            } catch (error) {
-                console.warn('[pairing-code-request-failed]', { sessionId, attempt: totalAttempts, error: error?.message || String(error), action: 'retry_on_same_or_reconnected_socket_without_destroying_auth' });
-                if (totalAttempts >= 8) finish(error);
-                else if (activeSessions.get(sessionId)?.sock !== requestSocket) {
-                    detachSocket();
-                    scheduleRequest(350, 'retry_on_replacement_socket');
-                } else if (attemptsOnSocket >= 3) {
-                    detachSocket();
-                    scheduleRequest(1200, 'wait_for_socket_recreation');
-                } else {
-                    scheduleRequest(Math.min(5000, 1200 + attemptsOnSocket * 900), 'retry_pairing_request');
-                }
-            } finally {
-                requestRunning = false;
-            }
-        };
-        pollTimer = setInterval(() => {
-            if (settled) return;
-            const active = activeSessions.get(sessionId);
             if (active?.status === 'duplicate_account') {
                 finish(new Error('pairing_account_already_active'));
                 return;
             }
-            if (active?.sock && active.sock !== currentSocket) attachCurrentSocket('reconnected_socket_detected');
-        }, 350);
+            const socket = active?.sock || null;
+            if (!socket) {
+                schedule(500, 'waiting_for_socket');
+                return;
+            }
+            if (socket !== currentSocket) {
+                attachSocket(socket, 'replacement_socket_detected');
+                return;
+            }
+            const challengeReady = !!String(active?.qrString || '').trim() || String(active?.status || '').toLowerCase() === 'qr_disponible';
+            if (!challengeReady) {
+                schedule(350, 'waiting_for_pairing_challenge');
+                return;
+            }
+            requestStarted = true;
+            active.pairingCodeRequestStarted = true;
+            if (sessionData && sessionData !== active) sessionData.pairingCodeRequestStarted = true;
+            const requestSocket = socket;
+            console.info('[pairing-code-request-started]', { sessionId, attempt: 1, numberLength: normalizedNumber.length, qrAvailable: !!active.qrString });
+            requestPromise = Promise.resolve().then(() => requestSocket.requestPairingCode(normalizedNumber));
+            try {
+                const result = await requestPromise;
+                if (activeSessions.get(sessionId)?.sock && activeSessions.get(sessionId).sock !== requestSocket) throw new Error('pairing_socket_replaced_during_code_request');
+                const code = normalizePairingCode(result);
+                if (typeof active?.flushAuthWrites === 'function') await active.flushAuthWrites();
+                console.info('[pairing-code-request-completed]', { sessionId, attempt: 1, codeLength: code.length, codeCharacterSet: /^[0-9]{8}$/.test(code) ? 'numeric' : 'crockford_base32' });
+                finish(null, code);
+            } catch (error) {
+                console.warn('[pairing-code-request-failed]', { sessionId, attempt: 1, error: error?.message || String(error), retryable: false, action: 'start_a_fresh_pairing_session_without_overwriting_pairing_state' });
+                finish(error);
+            }
+        };
+        pollTimer = setInterval(() => {
+            if (settled || requestStarted) return;
+            const active = activeSessions.get(sessionId) || sessionData;
+            if (active?.status === 'duplicate_account') {
+                finish(new Error('pairing_account_already_active'));
+                return;
+            }
+            if (active?.sock && active.sock !== currentSocket) attachSocket(active.sock, 'replacement_socket_detected');
+            else if (active?.sock && (active?.qrString || String(active?.status || '').toLowerCase() === 'qr_disponible')) void attempt('challenge_poll');
+        }, 300);
         if (typeof pollTimer.unref === 'function') pollTimer.unref();
-        timeoutTimer = setTimeout(() => finish(new Error('pairing_code_timeout')), Math.max(20000, Number(timeoutMs) || 45000));
-        if (!attachCurrentSocket('initial_socket_ready')) scheduleRequest(500, 'waiting_for_initial_socket');
+        timeoutTimer = setTimeout(() => finish(new Error('pairing_code_timeout')), Math.max(20000, Number(timeoutMs) || 75000));
+        const current = activeSessions.get(sessionId) || sessionData;
+        if (current?.sock) attachSocket(current.sock, 'initial_socket_ready');
+        else schedule(500, 'waiting_for_initial_socket');
     });
+    if (initialSession) initialSession.pairingCodeRequestPromise = operation;
+    if (sessionData && sessionData !== initialSession) sessionData.pairingCodeRequestPromise = operation;
+    operation.finally(() => {
+        if (initialSession?.pairingCodeRequestPromise === operation) delete initialSession.pairingCodeRequestPromise;
+        if (sessionData?.pairingCodeRequestPromise === operation) delete sessionData.pairingCodeRequestPromise;
+    }).catch(() => {});
+    return operation;
 }
 
 app.all('/get-code', async (req, res) => {
@@ -7937,7 +7969,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             ownerRecordForDel3 = await db.collection('session_owners').findOne({ sessionId }).catch(() => null);
                             if (ownerRecordForDel3) sessionOwnersCache.set(sessionId, ownerRecordForDel3);
                         }
-                        await applyDel3ToIncomingMessage(sock, sessionId, m, receivedChat, receivedSenderJid, receivedSenderAliases, ownerRecordForDel3);
+                        await applyDel3ToIncomingMessage(sock, sessionId, m, receivedChat, receivedSenderJid, receivedSenderAliases, ownerRecordForDel3, canBotModerateGroup);
                     }
                     cacheRecentMessage(sessionId, m);
                     console.info('[message-awaiting-readable-content]', {
@@ -8412,7 +8444,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         });
 
                         if (isGroup && sender && !isFromMe && !isOwnerReal) {
-                            const del3Deleted = await applyDel3ToIncomingMessage(sock, sessionId, m, from, sender, senderJids, sOwnerTop);
+                            const del3Deleted = await applyDel3ToIncomingMessage(sock, sessionId, m, from, sender, senderJids, sOwnerTop, canBotModerateGroup);
                             if (del3Deleted) return;
                         }
 
@@ -9261,7 +9293,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 break;
                                             }
                                             try {
-                                                await queuedSendMessage(sock, from, { delete: quotedDel3Key }, {}, 180);
+                                                await queuedDeleteMessageWithAck(sock, from, quotedDel3Key, 180, 9000);
                                             } catch (del3SelectedDeleteError) {
                                                 console.warn('[del3-selected-message-delete-failed]', { sessionId, group: from, messageId: quotedDel3Id, format: del3Format || 'unknown', error: del3SelectedDeleteError?.message || String(del3SelectedDeleteError) });
                                                 await safeSendFormatted(sock, from, t.cmd_del3, t.del3_delete_failed || t.command_error, pushName, true, activeHostName);
@@ -9434,13 +9466,24 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 if (!TF_BOT_BASE_URL) throw new Error('tf_bot_not_configured');
                                                 const internalApiToken = String(process.env.TOKEN || process.env.ADMIN_API_TOKEN || '').trim();
                                                 if (!internalApiToken) throw new Error('internal_api_token_not_configured');
-                                                const response = await fetch(`${TF_BOT_BASE_URL}/get-code`, {
+                                                const pairingApiBase = TFBOT_INTERNAL_API_BASE_URL || TFBOT_CLUSTER_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || TF_BOT_BASE_URL;
+                                                const pairingApiUrl = new URL('/get-code', `${pairingApiBase}/`).toString();
+                                                const response = await fetch(pairingApiUrl, {
                                                     method: 'POST',
-                                                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${internalApiToken}` },
-                                                    body: JSON.stringify({ number: args.replace(/[^0-9]/g, ''), method: 'code', autoExpire: true })
+                                                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'Authorization': `Bearer ${internalApiToken}` },
+                                                    body: JSON.stringify({ number: args.replace(/[^0-9]/g, ''), method: 'code', autoExpire: true }),
+                                                    redirect: 'error',
+                                                    cache: 'no-store'
                                                 });
-                                                const data = await response.json();
+                                                const responseContentType = String(response.headers.get('content-type') || '').toLowerCase();
+                                                const responseText = await response.text();
+                                                let data = null;
+                                                try { data = JSON.parse(responseText); } catch (parseError) {
+                                                    console.error('[pairing-code-api-invalid-response]', { status: response.status, contentType: responseContentType || 'unknown', targetHost: new URL(pairingApiUrl).host, responseKind: /^\s*</.test(responseText) ? 'html' : 'non_json' });
+                                                    throw new Error(`pairing_api_non_json_response:${response.status}:${responseContentType.includes('html') ? 'html' : 'non_json'}`);
+                                                }
                                                 if (isCancelled) return;
+                                                if (!response.ok) throw new Error(String(data?.error || `pairing_api_http_${response.status}`));
                                                 if (data && data.code) {
                                                     const tfid_code = crypto.randomInt(100000000000, 999999999999);
                                                     const confirmLink_code = `${TF_BOT_BASE_URL}/TF-${tfid_code}`;
