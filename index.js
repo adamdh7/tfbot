@@ -28,15 +28,18 @@ let runtimeLogPruneCounter = 0;
 let runtimeLogSequence = 0;
 const runtimeLogInstanceId = `${Date.now()}-${process.pid}`;
 const runtimeLogStartedAt = new Date();
+const runtimeLogPort = String(process.env.PORT || '7000').trim().slice(0, 20);
+const LOG_DASHBOARD_DEPLOYMENT_JOIN_WINDOW_MS = 5 * 60 * 1000;
+let runtimeLogDeploymentStartedAt = runtimeLogStartedAt;
 const runtimeLogRenderServiceId = String(process.env.RENDER_SERVICE_ID || 'local').trim().slice(0, 120);
 const runtimeLogRenderServiceName = String(process.env.RENDER_SERVICE_NAME || process.env.RENDER_SERVICE_TYPE || 'local').trim().slice(0, 120);
 const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
 const runtimeLogRenderCommit = String(process.env.RENDER_GIT_COMMIT || '').trim().slice(0, 80);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}:${shortLogHash(runtimeLogInstanceId)}`).slice(0, 240);
-const TFBOT_CLUSTER_CODE_REVISION = 'r55-session-owner-isolation-command-only-qr-fast-pair-expiry-and-log-reset';
+const TFBOT_CLUSTER_CODE_REVISION = 'r56-deploy-window-log-reset-authenticated-session-no-read-image-preserve-and-priority-failover';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
 const runtimeLogClusterId = `${runtimeLogDeploymentId}:${shortLogHash(runtimeLogInstanceId)}`.slice(0, 240);
-const runtimeLogDeploymentGroupId = String(TFBOT_CLUSTER_CODE_REVISION).normalize('NFKC').replace(/[\p{Cc}\p{Cf}]/gu, '').trim().slice(0, 240);
+const runtimeLogDeploymentGroupId = `${String(TFBOT_CLUSTER_CODE_REVISION).normalize('NFKC').replace(/[\p{Cc}\p{Cf}]/gu, '').trim().slice(0, 200)}:port-${runtimeLogPort}`;
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
 const runtimeLogSecrets = Object.entries(process.env)
     .filter(([key, value]) => /TOKEN|SECRET|PASSWORD|PASSWD|API.?KEY|MONGO_URI|URI$|CF_ACCOUNTS|TAVILY|OWNER_?NUMBER|TFBOT_OWNER/i.test(key) && String(value || '').length >= 6)
@@ -129,9 +132,10 @@ function scheduleRuntimeLogPersistence(delayMs = 40) {
 function attachRuntimeLogPersistence(collection) {
     runtimeLogPersistenceCollection = collection || null;
     if (!runtimeLogPersistenceCollection) return;
+    runtimeLogPendingWrites.splice(0, runtimeLogPendingWrites.length, ...runtimeLogPendingWrites.filter(item => new Date(item?.createdAt || item?.at || 0).getTime() >= runtimeLogDeploymentStartedAt.getTime()));
     const pendingIds = new Set(runtimeLogPendingWrites.map(item => String(item?._id || '')));
     for (const entry of runtimeLogBuffer) {
-        if (!entry?.id || pendingIds.has(String(entry.id))) continue;
+        if (!entry?.id || (Date.parse(String(entry.at || '')) || 0) < runtimeLogDeploymentStartedAt.getTime() || pendingIds.has(String(entry.id))) continue;
         pendingIds.add(String(entry.id));
         runtimeLogPendingWrites.push({
             _id: entry.id,
@@ -142,7 +146,8 @@ function attachRuntimeLogPersistence(collection) {
             serviceName: runtimeLogRenderServiceName,
             renderInstanceId: runtimeLogRenderInstanceId,
             renderCommit: runtimeLogRenderCommit || null,
-            deploymentStartedAt: runtimeLogStartedAt,
+            deploymentStartedAt: runtimeLogDeploymentStartedAt,
+            port: runtimeLogPort,
             clusterId: runtimeLogClusterId,
             instanceUrl: runtimeLogInstanceUrl || null,
             sequence: Number(String(entry.id).split(':').pop()) || 0,
@@ -160,12 +165,15 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
     if (!collection || typeof collection.deleteMany !== 'function' || !db) return 0;
     if (runtimeLogInitialCleanupCompleted) return 0;
     const markerCollection = db.collection('cluster_router');
-    const markerId = `runtime-logs-cleanup:${shortLogHash(runtimeLogDeploymentGroupId)}`;
+    const markerId = `runtime-logs-active-deployment:port-${shortLogHash(runtimeLogPort)}`;
     const claimOwner = processInstanceId;
     for (let attempt = 0; attempt < 140; attempt++) {
         const now = new Date();
         const existing = await markerCollection.findOne({ _id: markerId }).catch(() => null);
-        if (existing?.completed === true) {
+        const existingStartedAt = new Date(existing?.deploymentStartedAt || existing?.startedAt || existing?.completedAt || 0);
+        const existingAgeMs = now.getTime() - existingStartedAt.getTime();
+        if (existing?.completed === true && String(existing.releaseId || '') === TFBOT_CODE_RELEASE_ID && String(existing.port || '') === runtimeLogPort && Number.isFinite(existingStartedAt.getTime()) && existingAgeMs >= 0 && existingAgeMs <= LOG_DASHBOARD_DEPLOYMENT_JOIN_WINDOW_MS) {
+            runtimeLogDeploymentStartedAt = existingStartedAt;
             runtimeLogInitialCleanupCompleted = true;
             return 0;
         }
@@ -174,7 +182,6 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
             await markerCollection.updateOne(
                 {
                     _id: markerId,
-                    completed: { $ne: true },
                     $or: [
                         { leaseUntil: { $lte: now } },
                         { leaseUntil: { $exists: false } },
@@ -182,8 +189,23 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
                     ]
                 },
                 {
-                    $set: { owner: claimOwner, leaseUntil, deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, releaseId: TFBOT_CODE_RELEASE_ID, updatedAt: now, status: 'running' },
-                    $setOnInsert: { completed: false, createdAt: now }
+                    $set: {
+                        owner: claimOwner,
+                        leaseUntil,
+                        deploymentId: runtimeLogDeploymentId,
+                        deploymentGroupId: runtimeLogDeploymentGroupId,
+                        releaseId: TFBOT_CODE_RELEASE_ID,
+                        port: runtimeLogPort,
+                        serviceId: runtimeLogRenderServiceId,
+                        serviceName: runtimeLogRenderServiceName,
+                        renderCommit: runtimeLogRenderCommit || null,
+                        deploymentStartedAt: now,
+                        startedAt: now,
+                        updatedAt: now,
+                        status: 'running',
+                        completed: false
+                    },
+                    $setOnInsert: { createdAt: now }
                 },
                 { upsert: true }
             );
@@ -195,7 +217,9 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
             throw claimError;
         }
         const claim = await markerCollection.findOne({ _id: markerId }).catch(() => null);
-        if (claim?.completed === true) {
+        if (claim?.completed === true && String(claim.releaseId || '') === TFBOT_CODE_RELEASE_ID && String(claim.port || '') === runtimeLogPort) {
+            const sharedStartedAt = new Date(claim.deploymentStartedAt || claim.startedAt || claim.completedAt || now);
+            runtimeLogDeploymentStartedAt = sharedStartedAt;
             runtimeLogInitialCleanupCompleted = true;
             return 0;
         }
@@ -203,6 +227,7 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
             await new Promise(resolve => setTimeout(resolve, 250));
             continue;
         }
+        runtimeLogDeploymentStartedAt = new Date(claim?.deploymentStartedAt || now);
         const rawAppCollection = mongoClient?.db(TFBOT_DATABASE_NAME)?.collection(TFBOT_APP_DATA_COLLECTION);
         if (!rawAppCollection) throw new Error('runtime_log_physical_collection_unavailable');
         const logicalBefore = await collection.countDocuments({}).catch(() => 0);
@@ -217,15 +242,45 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
         };
         const legacyBefore = await rawAppCollection.countDocuments(legacyLogFilter).catch(() => 0);
         const legacyPurge = await rawAppCollection.deleteMany(legacyLogFilter);
-        const logicalAfter = await collection.countDocuments({}).catch(() => -1);
+        const staleLogicalFilter = {
+            $or: [
+                { deploymentGroupId: { $ne: runtimeLogDeploymentGroupId } },
+                { deploymentStartedAt: { $ne: runtimeLogDeploymentStartedAt } }
+            ]
+        };
+        const concurrentStalePurge = await collection.deleteMany(staleLogicalFilter).catch(() => ({ deletedCount: 0 }));
+        const concurrentLegacyPurge = await rawAppCollection.deleteMany(legacyLogFilter).catch(() => ({ deletedCount: 0 }));
+        const logicalAfter = await collection.countDocuments(staleLogicalFilter).catch(() => -1);
         const legacyAfter = await rawAppCollection.countDocuments(legacyLogFilter).catch(() => -1);
-        const removed = Number(logicalPurge?.deletedCount || 0) + Number(legacyPurge?.deletedCount || 0);
-        if (logicalAfter > 0 || legacyAfter > 0) throw new Error(`runtime_log_cleanup_incomplete:logical=${logicalAfter}:legacy=${legacyAfter}`);
-        console.info('[runtime-log-physical-cleanup-verified]', { logicalBefore, logicalRemoved: Number(logicalPurge?.deletedCount || 0), legacyBefore, legacyRemoved: Number(legacyPurge?.deletedCount || 0), logicalAfter, legacyAfter, serviceId: runtimeLogRenderServiceId, deploymentGroupId: runtimeLogDeploymentGroupId, markerId, action: 'remove_all_prior_server_runtime_log_documents_before_current_deploy_log_attach' });
+        const removed = Number(logicalPurge?.deletedCount || 0) + Number(legacyPurge?.deletedCount || 0) + Number(concurrentStalePurge?.deletedCount || 0) + Number(concurrentLegacyPurge?.deletedCount || 0);
+        if (logicalAfter > 0 || legacyAfter > 0) console.warn('[runtime-log-stale-documents-remain-hidden]', { logicalAfter, legacyAfter, action: 'dashboard_filters_to_current_deployment_timestamp_and_port' });
+        console.info('[runtime-log-physical-cleanup-verified]', {
+            logicalBefore,
+            logicalRemoved: Number(logicalPurge?.deletedCount || 0) + Number(concurrentStalePurge?.deletedCount || 0),
+            legacyBefore,
+            legacyRemoved: Number(legacyPurge?.deletedCount || 0) + Number(concurrentLegacyPurge?.deletedCount || 0),
+            logicalAfter,
+            legacyAfter,
+            serviceId: runtimeLogRenderServiceId,
+            deploymentGroupId: runtimeLogDeploymentGroupId,
+            port: runtimeLogPort,
+            deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(),
+            action: 'purge_all_previous_runtime_log_documents_then_share_one_timestamp_window_across_instances_on_this_port'
+        });
         await markerCollection.updateOne(
             { _id: markerId, owner: claimOwner, completed: { $ne: true } },
             {
-                $set: { completed: true, status: 'completed', removedCount: removed, completedAt: new Date(), updatedAt: new Date() },
+                $set: {
+                    completed: true,
+                    status: 'completed',
+                    port: runtimeLogPort,
+                    releaseId: TFBOT_CODE_RELEASE_ID,
+                    deploymentGroupId: runtimeLogDeploymentGroupId,
+                    deploymentStartedAt: runtimeLogDeploymentStartedAt,
+                    removedCount: removed,
+                    completedAt: new Date(),
+                    updatedAt: new Date()
+                },
                 $unset: { leaseUntil: 1 }
             }
         );
@@ -233,14 +288,14 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
         return removed;
     }
     const finalMarker = await markerCollection.findOne({ _id: markerId }).catch(() => null);
-    if (finalMarker?.completed === true) {
+    if (finalMarker?.completed === true && String(finalMarker.releaseId || '') === TFBOT_CODE_RELEASE_ID && String(finalMarker.port || '') === runtimeLogPort) {
+        runtimeLogDeploymentStartedAt = new Date(finalMarker.deploymentStartedAt || finalMarker.startedAt || finalMarker.completedAt || Date.now());
         runtimeLogInitialCleanupCompleted = true;
         return 0;
     }
-    console.error('[runtime-log-deploy-cleanup-not-acquired]', { deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, owner: finalMarker?.owner || null, status: finalMarker?.status || 'unknown', action: 'cleanup_not_verified_before_log_persistence_attach' });
+    console.error('[runtime-log-deploy-cleanup-not-acquired]', { deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, port: runtimeLogPort, owner: finalMarker?.owner || null, status: finalMarker?.status || 'unknown', action: 'cleanup_not_verified_before_log_persistence_attach' });
     return 0;
 }
-
 async function flushRuntimeLogPersistence() {
     if (runtimeLogPersistenceRunning || !runtimeLogPersistenceCollection || !runtimeLogPendingWrites.length) return;
     runtimeLogPersistenceRunning = true;
@@ -262,7 +317,7 @@ async function flushRuntimeLogPersistence() {
             if (runtimeLogPruneCounter >= 1000) {
                 runtimeLogPruneCounter = 0;
                 try {
-                    const currentReleaseFilter = { deploymentGroupId: runtimeLogDeploymentGroupId };
+                    const currentReleaseFilter = { deploymentGroupId: runtimeLogDeploymentGroupId, deploymentStartedAt: runtimeLogDeploymentStartedAt };
                     const cutoff = await runtimeLogPersistenceCollection.find(currentReleaseFilter, { projection: { _id: 1, createdAt: 1 } })
                         .sort({ createdAt: -1, _id: -1 }).skip(LOG_DASHBOARD_PERSIST_MAX_ENTRIES).limit(1).next();
                     if (cutoff?.createdAt) {
@@ -303,7 +358,7 @@ function recordRuntimeLog(level, args) {
         const at = new Date().toISOString();
         const normalizedLevel = String(level || 'log').toLowerCase();
         const id = `${runtimeLogInstanceId}:${sequence}`;
-        const entry = { id, at, level: normalizedLevel, text, serviceId: runtimeLogRenderServiceId, deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId };
+        const entry = { id, at, level: normalizedLevel, text, serviceId: runtimeLogRenderServiceId, deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, deploymentStartedAt: runtimeLogDeploymentStartedAt, port: runtimeLogPort };
         runtimeLogBuffer.push(entry);
         if (runtimeLogBuffer.length > LOG_DASHBOARD_MAX_ENTRIES) runtimeLogBuffer.splice(0, runtimeLogBuffer.length - LOG_DASHBOARD_MAX_ENTRIES);
 
@@ -317,7 +372,8 @@ function recordRuntimeLog(level, args) {
                 serviceName: runtimeLogRenderServiceName,
                 renderInstanceId: runtimeLogRenderInstanceId,
                 renderCommit: runtimeLogRenderCommit || null,
-                deploymentStartedAt: runtimeLogStartedAt,
+                deploymentStartedAt: runtimeLogDeploymentStartedAt,
+                port: runtimeLogPort,
                 clusterId: runtimeLogClusterId,
                 instanceUrl: runtimeLogInstanceUrl || null,
                 sequence,
@@ -459,8 +515,7 @@ const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 const EventEmitter = require('events');
-let sharp = null;
-try { sharp = require('sharp'); } catch (error) {}
+
 
 function applyBaileysLidPnDecryptRetryPatch() {
     const marker = 'primary identity failed to decrypt, retrying with stanza-provided PN/LID pairing';
@@ -705,7 +760,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r55';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r56';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -868,7 +923,7 @@ const reconnectTimers = new Map();
 const sessionStartPromises = new Map();
 const SESSION_HEALTH_CHECK_INTERVAL_MS = Math.max(15000, Number(process.env.SESSION_HEALTH_CHECK_INTERVAL_MS) || 30000);
 const SESSION_WS_PONG_TIMEOUT_MS = Math.max(60000, Number(process.env.SESSION_WS_PONG_TIMEOUT_MS) || 120000);
-const SESSION_UNCONNECTED_TTL_MS = Math.max(120000, Math.min(3600000, Number(process.env.SESSION_UNCONNECTED_TTL_MS) || 300000));
+const SESSION_UNCONNECTED_TTL_MS = 184000;
 const PAIRING_SESSION_TTL_MS = 184000;
 const GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS = Math.max(60000, Number(process.env.GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS) || 6 * 60 * 60 * 1000);
 const GROUP_SENDER_KEY_RESET_EVERY_SEND = String(process.env.GROUP_SENDER_KEY_RESET_EVERY_SEND || 'false').trim().toLowerCase() === 'true';
@@ -930,6 +985,7 @@ const activeDel3RulesCache = new Map();
 const del3DeleteDedupCache = new Map();
 const msgRetryCounterCache = new Map();
 const msgRetryCounterExpiryCache = new Map();
+const retryMessageMissLogTimes = new Map();
 const MSG_RETRY_COUNTER_TTL_MS = Math.max(60000, Math.min(86400000, Number(process.env.BAILEYS_MSG_RETRY_COUNTER_TTL_MS || 3600000)));
 const MSG_RETRY_COUNTER_MAX_ENTRIES = Math.max(1000, Math.min(50000, Number(process.env.BAILEYS_MSG_RETRY_COUNTER_MAX_ENTRIES || 20000)));
 const activeSessions = new Map();
@@ -2525,7 +2581,7 @@ async function connectMongo(options = {}) {
         } else {
             attachRuntimeLogPersistence(runtimeLogsCollection);
         }
-        console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', source: 'deployment-group-cleanup', serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, clusterId: runtimeLogClusterId, releaseId: TFBOT_CODE_RELEASE_ID, deploymentStartedAt: runtimeLogStartedAt.toISOString(), removedPreviousDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousServiceDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousCodeLogCount: removedPreviousServiceDeployLogs, retentionDays: LOG_DASHBOARD_RETENTION_DAYS, maxEntries: LOG_DASHBOARD_PERSIST_MAX_ENTRIES, dashboardHistoryLimit: LOG_DASHBOARD_MAX_ENTRIES, role: coordinatorOnly ? 'coordinator-cleanup-only' : 'active-serving', persistenceAttached: !coordinatorOnly });
+        console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', source: 'deployment-group-cleanup', serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, clusterId: runtimeLogClusterId, releaseId: TFBOT_CODE_RELEASE_ID, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), removedPreviousDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousServiceDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousCodeLogCount: removedPreviousServiceDeployLogs, retentionDays: LOG_DASHBOARD_RETENTION_DAYS, maxEntries: LOG_DASHBOARD_PERSIST_MAX_ENTRIES, dashboardHistoryLimit: LOG_DASHBOARD_MAX_ENTRIES, role: coordinatorOnly ? 'coordinator-cleanup-only' : 'active-serving', persistenceAttached: !coordinatorOnly });
         await db.collection('cluster_router').createIndex({ updatedAt: -1 }, { name: 'cluster_router_updated_desc' });
         await db.collection('processed_messages').createIndex({ ts: 1 });
         await db.collection('processed_messages').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'processed_messages_expire_at_ttl' });
@@ -4335,6 +4391,10 @@ async function probeTfbotServingDomain(domain) {
             console.warn('[tfbot-router-domain-suspended]', { host: domain.host, status: response.status, reason: 'render_owner_suspension_message', action: 'try_next_domain_in_priority_order' });
             return { ok: false, suspended: true, host: domain.host, url: domain.url, workerActive: false, workerState: 'suspended', checkedAt: new Date(), rootStatus: response.status };
         }
+        if (!response.ok) {
+            console.warn('[tfbot-router-domain-http-unavailable]', { host: domain.host, status: response.status, action: 'try_next_domain_in_priority_order' });
+            return null;
+        }
         let payload = null;
         const healthController = new AbortController();
         const healthTimer = setTimeout(() => healthController.abort(), Math.min(2200, TFBOT_ROUTER_COORDINATOR_TIMEOUT_MS));
@@ -4363,19 +4423,25 @@ async function probeTfbotServingDomain(domain) {
             clearTimeout(healthTimer);
         }
         const validHealthPayload = !!(payload && payload.ok === true && payload.service === 'tfbot-router-node' && normalizeTfbotHost(payload.host) === domain.host && payload.database === TFBOT_DATABASE_NAME);
-        if (validHealthPayload && String(payload.workerState || '') === 'error') {
-            console.warn('[tfbot-router-worker-reported-error]', { host: domain.host, action: 'keep_url_valid_but_attempt_activation' });
+        if (!validHealthPayload) {
+            console.warn('[tfbot-router-health-unverified]', { host: domain.host, rootStatus: response.status, healthStatus: payload ? 'invalid-payload' : 'no-valid-health-response', action: 'try_next_domain_in_priority_order' });
+            return null;
+        }
+        const reportedWorkerState = String(payload.workerState || 'standby').toLowerCase();
+        if (reportedWorkerState === 'error' || reportedWorkerState === 'drain_failed' || payload.draining === true) {
+            console.warn('[tfbot-router-worker-unavailable]', { host: domain.host, workerState: reportedWorkerState, draining: payload.draining === true, action: 'try_next_domain_in_priority_order' });
+            return null;
         }
         return {
             ok: true,
             host: domain.host,
             url: domain.url,
-            workerActive: validHealthPayload && payload.workerActive === true,
-            workerState: validHealthPayload ? String(payload.workerState || 'standby') : 'unverified',
-            activeHost: validHealthPayload ? normalizeTfbotHost(payload.activeHost || '') : '',
-            generation: validHealthPayload ? String(payload.generation || '') : '',
-            activeSessionCount: validHealthPayload ? Number(payload.activeSessionCount || 0) : 0,
-            healthVerified: validHealthPayload,
+            workerActive: payload.workerActive === true,
+            workerState: String(payload.workerState || 'standby'),
+            activeHost: normalizeTfbotHost(payload.activeHost || ''),
+            generation: String(payload.generation || ''),
+            activeSessionCount: Number(payload.activeSessionCount || 0),
+            healthVerified: true,
             rootStatus: response.status,
             checkedAt: new Date()
         };
@@ -4390,7 +4456,7 @@ async function probeTfbotServingDomain(domain) {
 async function sendTfbotWorkerControl(domain, selection) {
     if (!TFBOT_CLUSTER_TOKEN || !domain?.host || !domain?.url) return null;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), Math.max(15000, TFBOT_ROUTER_COORDINATOR_TIMEOUT_MS));
+    const timer = setTimeout(() => controller.abort(), Math.max(1800, Math.min(5000, TFBOT_ROUTER_COORDINATOR_TIMEOUT_MS)));
     try {
         const response = await fetch(`${domain.url}${TFBOT_WORKER_CONTROL_PATH}`, {
             method: 'GET',
@@ -4443,77 +4509,37 @@ async function refreshTfbotActiveDomain(force = false) {
     if (!force && !tfbotCoordinatorSelectionCache && tfbotCoordinatorSelectionAt && nowMs - tfbotCoordinatorSelectionAt < TFBOT_ROUTER_COORDINATOR_CACHE_MS) return null;
     if (tfbotCoordinatorSelectionPromise) return tfbotCoordinatorSelectionPromise;
     tfbotCoordinatorSelectionPromise = (async () => {
-        let selectionPhase = 'initialize';
+        let selectionPhase = 'priority-probe';
         try {
             const checked = [];
             const previousSelection = tfbotCoordinatorSelectionCache || tfbotActiveDomainCache || null;
             const previousHost = normalizeTfbotHost(previousSelection?.host || '');
             const previousIndex = TFBOT_ROUTER_SERVING_DOMAINS.findIndex(item => item.host === previousHost);
             let selectedItem = null;
-            if (previousIndex >= 0) {
-                const previousDomain = TFBOT_ROUTER_SERVING_DOMAINS[previousIndex];
-                selectionPhase = `probe-current-domain:${previousDomain.host}`;
-                const currentProbe = await probeTfbotServingDomain(previousDomain);
-                checked.push({ domain: previousDomain, health: currentProbe });
-                if (!currentProbe?.suspended) {
-                    const retainedHealth = currentProbe || {
-                        ok: true,
-                        host: previousDomain.host,
-                        url: previousDomain.url,
-                        workerActive: previousSelection?.workerActive === true,
-                        workerState: String(previousSelection?.workerState || 'unverified-keep-current'),
-                        activeHost: previousDomain.host,
-                        generation: String(previousSelection?.generation || ''),
-                        activeSessionCount: Number(previousSelection?.activeSessionCount || 0),
-                        checkedAt: new Date(),
-                        retainedWithoutSuspensionResponse: true
-                    };
-                    selectedItem = { domain: previousDomain, health: retainedHealth };
-                    if (!currentProbe) {
-                        console.warn('[tfbot-router-current-domain-no-response-retained]', {
-                            host: previousDomain.host,
-                            action: 'keep_current_domain_unless_render_returns_explicit_owner_suspension'
-                        });
-                    }
+            for (const domain of TFBOT_ROUTER_SERVING_DOMAINS) {
+                selectionPhase = `probe-priority-domain:${domain.host}`;
+                const domainHealth = await probeTfbotServingDomain(domain);
+                checked.push({ domain, health: domainHealth });
+                if (domainHealth?.ok === true && !domainHealth.suspended) {
+                    selectedItem = { domain, health: domainHealth };
+                    break;
                 }
             }
             if (!selectedItem) {
-                for (const domain of TFBOT_ROUTER_SERVING_DOMAINS) {
-                    if (domain.host === previousHost) continue;
-                    selectionPhase = `probe-failover-domain:${domain.host}`;
-                    const domainProbeResult = await probeTfbotServingDomain(domain);
-                    checked.push({ domain, health: domainProbeResult });
-                    if (domainProbeResult && !domainProbeResult.suspended) {
-                        selectedItem = { domain, health: domainProbeResult };
-                        break;
-                    }
-                }
-            }
-            if (!selectedItem) {
-                const primaryDomain = TFBOT_ROUTER_SERVING_DOMAINS[0];
-                const primaryProbe = checked.find(item => item.domain.host === primaryDomain.host)?.health || null;
-                selectedItem = {
-                    domain: primaryDomain,
-                    health: primaryProbe && !primaryProbe.suspended ? primaryProbe : {
-                        ok: true,
-                        host: primaryDomain.host,
-                        url: primaryDomain.url,
-                        workerActive: false,
-                        workerState: 'unconfirmed-last-resort',
-                        activeHost: '',
-                        generation: '',
-                        activeSessionCount: 0,
-                        checkedAt: new Date(),
-                        lastResort: true
-                    }
-                };
-                console.warn('[tfbot-router-returned-to-primary-last-resort]', {
+                const checkedAt = new Date();
+                tfbotCoordinatorSelectionCache = null;
+                tfbotActiveDomainCache = null;
+                tfbotCoordinatorSelectionAt = Date.now();
+                tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
+                await persistTfbotCoordinatorSelection({ host: '', generation: crypto.randomUUID() }, 'unavailable');
+                console.error('[tfbot-router-no-serving-domain]', {
                     coordinator: TFBOT_COORDINATOR_HOST,
                     checkedHosts: checked.map(item => item.domain.host),
-                    primaryHost: primaryDomain.host,
-                    reason: 'all_failover_domains_returned_suspension_or_no_response',
-                    action: 'select_primary_domain_as_last_resort'
+                    probeResults: checked.map(item => ({ host: item.domain.host, ok: item.health?.ok === true, status: item.health?.rootStatus || null, suspended: item.health?.suspended === true })),
+                    checkedAt,
+                    action: 'no_redirect_target_is_selected_until_a_priority_domain_responds'
                 });
+                return null;
             }
             const checkedAt = new Date();
             const selected = selectedItem.domain;
@@ -4527,10 +4553,10 @@ async function refreshTfbotActiveDomain(force = false) {
                 healthy: true,
                 workerActive: selectedProbeResult.workerActive === true,
                 workerState: String(selectedProbeResult.workerState || 'starting'),
-                source: sameSelection ? 'tfbot7-sticky-current-domain-unless-explicit-suspension' : 'tfbot7-explicit-suspension-failover',
+                source: 'tfbot7-strict-priority-health-probe',
                 selectedBy: TFBOT_COORDINATOR_HOST,
                 healthyHosts: [selected.host],
-                probeResults: checked.map(item => ({ host: item.domain.host, ok: !!item.health?.ok, suspended: item.health?.suspended === true, workerState: item.health?.workerState || (item.health?.suspended ? 'suspended' : 'no-response'), checkedAt }))
+                probeResults: checked.map(item => ({ host: item.domain.host, ok: item.health?.ok === true, suspended: item.health?.suspended === true, workerState: item.health?.workerState || (item.health?.suspended ? 'suspended' : 'no-response'), checkedAt }))
             };
             let previousControl = null;
             if (previousIndex >= 0 && previousHost !== selected.host) {
@@ -4539,9 +4565,9 @@ async function refreshTfbotActiveDomain(force = false) {
                 tfbotActiveDomainCache = null;
                 tfbotCoordinatorSelectionAt = Date.now();
                 tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
-                await persistTfbotCoordinatorSelection(null, 'switching_after_explicit_suspension');
+                await persistTfbotCoordinatorSelection(null, 'switching_after_priority_health_failure');
                 const stopped = await sendTfbotWorkerControl(previousDomain, { host: '', generation });
-                previousControl = { host: previousDomain.host, deactivated: !!stopped, state: stopped?.state || 'unavailable_after_suspension' };
+                previousControl = { host: previousDomain.host, deactivated: !!stopped, state: stopped?.state || 'unavailable_after_health_failure' };
             }
             tfbotCoordinatorSelectionCache = result;
             tfbotActiveDomainCache = result;
@@ -4551,8 +4577,8 @@ async function refreshTfbotActiveDomain(force = false) {
             selectionPhase = 'persist-selected';
             await persistTfbotCoordinatorSelection(result, 'selected');
             const alreadyActive = sameSelection && selectedProbeResult.workerActive === true && selectedProbeResult.activeHost === selected.host && selectedProbeResult.generation === generation;
-            let control = { host: selected.host, unchanged: true, state: selectedProbeResult.workerState || 'unknown' };
-            if (!alreadyActive && selectedProbeResult.workerState !== 'starting') {
+            let control = { host: selected.host, unchanged: alreadyActive, state: selectedProbeResult.workerState || 'unknown' };
+            if (!alreadyActive) {
                 selectionPhase = `activate-worker:${selected.host}`;
                 const applied = await sendTfbotWorkerControl(selected, result);
                 control = { host: selected.host, applied: !!applied, state: applied?.state || 'unconfirmed' };
@@ -4567,7 +4593,7 @@ async function refreshTfbotActiveDomain(force = false) {
                 coordinator: TFBOT_COORDINATOR_HOST,
                 generation,
                 pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS,
-                selectionMode: 'sticky-current-url-unless-exact-render-owner-suspension',
+                selectionMode: 'strict-priority-tf-bot-then-tfbot2-then-tfbot3-and-later-only-after-no-response',
                 controls: [previousControl, control].filter(Boolean)
             });
             selectionPhase = 'complete';
@@ -4589,7 +4615,6 @@ async function refreshTfbotActiveDomain(force = false) {
         tfbotCoordinatorSelectionPromise = null;
     }
 }
-
 async function resolveActiveTfbotDomain() {
     if (!TFBOT_CLUSTER_ENABLED) {
         const local = TFBOT_ROUTER_DOMAIN_BY_HOST.get(TFBOT_CLUSTER_INSTANCE_HOST) || TFBOT_PRIMARY_DOMAIN;
@@ -5067,7 +5092,7 @@ async function activateTfbotWorker() {
             const removedPreviousRuntimeLogs = await clearPreviousRuntimeLogsForCurrentDeployment(activeRuntimeLogCollection);
             attachRuntimeLogPersistence(activeRuntimeLogCollection);
             pendingRuntimeLogPersistenceCollection = null;
-            console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', role: 'active-serving-only', host: TFBOT_CLUSTER_INSTANCE_HOST, serviceId: runtimeLogRenderServiceId, deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, instanceId: runtimeLogInstanceId, deploymentStartedAt: runtimeLogStartedAt.toISOString(), removedPreviousDeployLogCount: removedPreviousRuntimeLogs });
+            console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', role: 'active-serving-only', host: TFBOT_CLUSTER_INSTANCE_HOST, serviceId: runtimeLogRenderServiceId, deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, instanceId: runtimeLogInstanceId, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), removedPreviousDeployLogCount: removedPreviousRuntimeLogs });
             tfbotWorkerActive = true;
             tfbotWorkerStarting = false;
             tfbotWorkerState = 'active';
@@ -5481,7 +5506,7 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
                 return;
             }
             const socketReadyState = socket?.ws?.readyState ?? socket?.ws?._socket?.readyState ?? socket?.socket?.readyState;
-            const challengeReady = !!String(active?.qrString || '').trim() || String(active?.status || '').toLowerCase() === 'qr_disponible' || Number(socketReadyState) === 1 || String(socket?.ws?.readyState || '').toUpperCase() === 'OPEN';
+            const challengeReady = !!String(active?.qrString || '').trim() || String(active?.status || '').toLowerCase() === 'qr_disponible';
             if (!challengeReady) {
                 schedule(350, 'waiting_for_pairing_challenge');
                 return;
@@ -5491,7 +5516,7 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
             active.pairingCodeRequestStarted = true;
             if (sessionData && sessionData !== active) sessionData.pairingCodeRequestStarted = true;
             const requestSocket = socket;
-            console.info('[pairing-code-request-started]', { sessionId, attempt: requestAttempts, numberLength: normalizedNumber.length, qrAvailable: !!active.qrString, websocketReady: Number(socketReadyState) === 1 });
+            console.info('[pairing-code-request-started]', { sessionId, attempt: requestAttempts, numberLength: normalizedNumber.length, qrAvailable: !!active.qrString, websocketReady: socket?.ws?.isOpen === true || Number(socketReadyState) === 1 || String(socketReadyState).toUpperCase() === 'OPEN' });
             try {
                 const result = await requestSocket.requestPairingCode(normalizedNumber);
                 if (activeSessions.get(sessionId)?.sock && activeSessions.get(sessionId).sock !== requestSocket) throw new Error('pairing_socket_replaced_during_code_request');
@@ -5526,7 +5551,7 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
                 return;
             }
             if (active?.sock && active.sock !== currentSocket) attachSocket(active.sock, 'replacement_socket_detected');
-            else if (active?.sock && (active?.qrString || String(active?.status || '').toLowerCase() === 'qr_disponible' || Number(active?.sock?.ws?.readyState ?? active?.sock?.ws?._socket?.readyState ?? active?.sock?.socket?.readyState) === 1 || String(active?.sock?.ws?.readyState || '').toUpperCase() === 'OPEN')) void attempt('challenge_poll');
+            else if (active?.sock && (active?.qrString || String(active?.status || '').toLowerCase() === 'qr_disponible')) void attempt('challenge_poll');
         }, 300);
         if (typeof pollTimer.unref === 'function') pollTimer.unref();
         timeoutTimer = setTimeout(() => finish(new Error('pairing_code_timeout')), Math.max(20000, Number(timeoutMs) || 75000));
@@ -5629,7 +5654,7 @@ app.all('/get-code', async (req, res) => {
             const ownerState = await db.collection('session_owners').findOne({ sessionId: sId }, { projection: { connectionStatus: 1, pairingPending: 1 } }).catch(() => null);
             const runtimeStatus = String(checkSess?.status || '').toLowerCase();
             const socketReadyState = checkSess?.sock?.ws?.readyState ?? checkSess?.sock?.ws?._socket?.readyState;
-            const socketIsLive = !!checkSess?.sock && (Number(socketReadyState) === 1 || String(socketReadyState).toUpperCase() === 'OPEN');
+            const socketIsLive = !!checkSess?.sock && (checkSess.sock.ws?.isOpen === true || Number(socketReadyState) === 1 || String(socketReadyState).toUpperCase() === 'OPEN');
             const isConnected = ['connecte', 'connected'].includes(runtimeStatus) && socketIsLive;
             if (isConnected || ownerState?.pairingPending !== true) return;
             try { await cleanupSocket(sId); } catch (error) { console.warn('[pairing-session-expiry-socket-cleanup-failed]', { sessionId: sId, error: error?.message || String(error) }); }
@@ -5943,40 +5968,15 @@ function splitCaptionBodies(type, text, userName, maxChars = MAX_WHATSAPP_CAPTIO
     return bodies.length ? bodies : [''];
 }
 
-const outgoingImageNormalizationCache = new WeakMap();
-
 async function normalizeOutgoingImageBuffer(imageBuffer) {
-    if (!Buffer.isBuffer(imageBuffer) && !(imageBuffer instanceof Uint8Array)) return null;
-    const source = Buffer.isBuffer(imageBuffer) ? imageBuffer : Buffer.from(imageBuffer);
-    if (!source.length) return null;
-    const cached = outgoingImageNormalizationCache.get(source);
-    if (cached) return cached;
-    const normalization = (async () => {
-        if (sharp) {
-            const normalized = await sharp(source, { failOn: 'none' }).rotate().png().toBuffer();
-            const metadata = await sharp(normalized).metadata();
-            if (!normalized.length || metadata.format !== 'png' || !Number(metadata.width) || !Number(metadata.height)) throw new Error('outgoing_image_png_validation_failed');
-            return normalized;
-        }
-        const isPng = source.length >= 8 && source.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-        const isJpeg = source.length >= 3 && source[0] === 255 && source[1] === 216 && source[2] === 255;
-        const isWebp = source.length >= 12 && source.toString('ascii', 0, 4) === 'RIFF' && source.toString('ascii', 8, 12) === 'WEBP';
-        return isPng || isJpeg || isWebp ? source : null;
-    })();
-    outgoingImageNormalizationCache.set(source, normalization);
-    try {
-        const result = await normalization;
-        outgoingImageNormalizationCache.set(source, Promise.resolve(result));
-        return result;
-    } catch (error) {
-        outgoingImageNormalizationCache.delete(source);
-        console.warn('[whatsapp-outgoing-image-invalid]', { error: error?.message || String(error), action: 'send_caption_as_text_without_invalid_media' });
-        return null;
-    }
+    if (Buffer.isBuffer(imageBuffer)) return imageBuffer.length ? imageBuffer : null;
+    if (imageBuffer instanceof Uint8Array) return imageBuffer.length ? Buffer.from(imageBuffer.buffer, imageBuffer.byteOffset, imageBuffer.byteLength) : null;
+    return null;
 }
 
 async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, sendOptions = {}) {
-    const deliveryImageBuffer = imageBuffer ? await normalizeOutgoingImageBuffer(imageBuffer) : null;
+    const deliveryImageBuffer = await normalizeOutgoingImageBuffer(imageBuffer);
+    if (!deliveryImageBuffer) throw new Error('outgoing_image_buffer_unavailable');
     const bodies = splitCaptionBodies(type, text, userName);
     let lastResult = null;
     for (const body of bodies) {
@@ -5985,57 +5985,28 @@ async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, 
         if (Array.isArray(sendOptions.mentions) && sendOptions.mentions.length) {
             options.mentions = sendOptions.mentions.filter(mention => body.includes(`@${String(mention).split('@')[0]}`));
         }
-        const content = deliveryImageBuffer
-            ? { image: deliveryImageBuffer, caption, ...options }
-            : { text: caption, ...options };
         try {
-            lastResult = await queuedSendMessage(sock, jid, content, sendOptions.messageOptions || {}, 220);
+            lastResult = await queuedSendMessage(sock, jid, { image: deliveryImageBuffer, caption, ...options }, sendOptions.messageOptions || {}, 220);
         } catch (error) {
-            console.error('[whatsapp-send]', { action: String(type || 'Message'), error: error?.message || String(error) });
-            if (deliveryImageBuffer) {
-                try {
-                    lastResult = await queuedSendMessage(sock, jid, { text: caption, ...options }, sendOptions.messageOptions || {}, 180);
-                    continue;
-                } catch (fallbackError) {
-                    console.error('[whatsapp-send-text-fallback]', fallbackError?.message || fallbackError);
-                }
-            }
+            console.error('[whatsapp-send]', { action: String(type || 'Message'), error: error?.message || String(error), imageBytes: deliveryImageBuffer.length, actionOnFailure: 'do_not_transform_image_and_do_not_send_text_fallback' });
             throw error;
         }
     }
     return lastResult;
 }
-
 const logoPath = path.join(__dirname, 'adamdh7.png');
 let adamLogoBuffer = fs.existsSync(logoPath) ? fs.readFileSync(logoPath) : null;
 let logoOptimizationResult = 'not_checked';
 
 async function optimizeAdamLogoForBandwidth() {
     if (!Buffer.isBuffer(adamLogoBuffer) || !adamLogoBuffer.length) {
-        logoOptimizationResult = 'logo_missing';
+        logoOptimizationResult = 'logo_missing_no_text_fallback';
+        console.warn('[logo-image-source-unavailable]', { action: 'keep_image_send_disabled_without_text_fallback' });
         return false;
     }
-    if (!sharp) {
-        adamLogoBuffer = null;
-        logoOptimizationResult = 'invalid_logo_text_fallback';
-        console.warn('[logo-image-normalization-failed]', { reason: 'sharp_unavailable', action: 'disable_invalid_image_and_send_text_only' });
-        return false;
-    }
-    const originalBytes = adamLogoBuffer.length;
-    try {
-        const normalizedBuffer = await sharp(adamLogoBuffer, { failOn: 'none' }).rotate().png().toBuffer();
-        const metadata = await sharp(normalizedBuffer).metadata();
-        if (!normalizedBuffer.length || metadata.format !== 'png' || !Number(metadata.width) || !Number(metadata.height)) throw new Error('logo_png_validation_failed');
-        adamLogoBuffer = normalizedBuffer;
-        logoOptimizationResult = 'validated_png';
-        console.info('[logo-image-normalized]', { originalBytes, normalizedBytes: normalizedBuffer.length, width: metadata.width, height: metadata.height, format: metadata.format, action: 'send_validated_png_buffer' });
-        return true;
-    } catch (error) {
-        adamLogoBuffer = null;
-        logoOptimizationResult = 'invalid_logo_text_fallback';
-        console.warn('[logo-image-normalization-failed]', { error: error?.message || String(error), action: 'disable_invalid_image_and_send_text_only' });
-        return false;
-    }
+    logoOptimizationResult = 'original_image_bytes_preserved';
+    console.info('[logo-image-source-preserved]', { originalBytes: adamLogoBuffer.length, action: 'send_original_image_buffer_without_resize_reencode_or_text_fallback' });
+    return true;
 }
 
 app.get('/sitemap.xml', (req, res) => res.sendFile(path.join(__dirname, 'sitemap.xml')));
@@ -6052,7 +6023,7 @@ async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIM
     let databaseReadError = null;
     try {
         if (db) {
-            const filter = { deploymentGroupId: runtimeLogDeploymentGroupId };
+            const filter = { deploymentGroupId: runtimeLogDeploymentGroupId, deploymentStartedAt: runtimeLogDeploymentStartedAt };
             if (incremental) filter.createdAt = { $gte: new Date(Math.max(0, since - 2000)) };
             const cursor = db.collection('server_runtime_logs')
                 .find(filter, { projection: { at: 1, level: 1, text: 1, createdAt: 1, clusterId: 1, deploymentId: 1, deploymentGroupId: 1, serviceId: 1, serviceName: 1, instance: 1, renderInstanceId: 1 } })
@@ -6077,7 +6048,7 @@ async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIM
     }
     for (const item of runtimeLogBuffer) {
         const atMs = Date.parse(String(item.at || '')) || 0;
-        if (atMs >= runtimeLogStartedAt.getTime() && (!incremental || atMs >= Math.max(runtimeLogStartedAt.getTime(), since - 2000))) byId.set(String(item.id), item);
+        if (atMs >= runtimeLogDeploymentStartedAt.getTime() && (!incremental || atMs >= Math.max(runtimeLogDeploymentStartedAt.getTime(), since - 2000))) byId.set(String(item.id), item);
     }
     let logs = Array.from(byId.values())
         .sort((a, b) => String(a.at).localeCompare(String(b.at)) || String(a.id).localeCompare(String(b.id)));
@@ -6133,10 +6104,10 @@ app.get(LOG_DASHBOARD_PATH, async (req, res) => {
         const requestedLimit = Math.max(20, Math.min(250, Number(req.query?.limit) || LOG_DASHBOARD_PAGE_LIMIT));
         const since = Math.max(0, Number(req.query?.since) || 0);
         const snapshot = await collectRuntimeLogSnapshot(requestedLimit, since);
-        return res.status(200).json({ ok: true, count: snapshot.logs.length, logs: snapshot.logs, nextSince: snapshot.nextSince, deploymentStartedAt: runtimeLogStartedAt.toISOString(), deploymentId: runtimeLogDeploymentId, instanceId: runtimeLogInstanceId, serverTime: new Date().toISOString() });
+        return res.status(200).json({ ok: true, count: snapshot.logs.length, logs: snapshot.logs, nextSince: snapshot.nextSince, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, port: runtimeLogPort, instanceId: runtimeLogInstanceId, serverTime: new Date().toISOString() });
     }
 
-    const initialLogs = runtimeLogBuffer.slice(-Math.min(30, LOG_DASHBOARD_PAGE_LIMIT));
+    const initialLogs = runtimeLogBuffer.filter(item => (Date.parse(String(item.at || '')) || 0) >= runtimeLogDeploymentStartedAt.getTime()).slice(-Math.min(30, LOG_DASHBOARD_PAGE_LIMIT));
     const firstPaintLogs = initialLogs.length ? initialLogs : [{
         id: `dashboard-loading:${runtimeLogInstanceId}`,
         at: new Date().toISOString(),
@@ -7738,8 +7709,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             cachedGroupMetadata: async groupJid => getGroupMetadataCached(sessionId, sock, groupJid),
             browser: connectionFormat === 'pair' ? Browsers.macOS('Chrome') : Browsers.ubuntu('Chrome'),
             defaultQueryTimeoutMs: Math.max(30000, Math.min(120000, Number(process.env.BAILEYS_QUERY_TIMEOUT_MS || 120000))),
-            markOnlineOnConnect: connectionFormat === 'pair',
-            generateHighQualityLinkPreview: true,
+            markOnlineOnConnect: false,
+            fireInitQueries: false,
+            generateHighQualityLinkPreview: false,
             msgRetryCounterCache: createSessionRetryCache(sessionId),
             retryRequestDelayMs: 250,
             maxMsgRetryCount: 10,
@@ -7749,6 +7721,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             keepAliveIntervalMs: 15000,
                         getMessage: async (key) => {
                 const requestedChatJid = String(key?.remoteJid || '').trim();
+                const logRetryCacheMiss = (databaseAvailable) => {
+                    const retryMissKey = `${sessionId}:${String(key?.id || 'missing-id')}`;
+                    const now = Date.now();
+                    const lastLoggedAt = Number(retryMessageMissLogTimes.get(retryMissKey) || 0);
+                    if (now - lastLoggedAt < 30000) return;
+                    retryMessageMissLogTimes.set(retryMissKey, now);
+                    while (retryMessageMissLogTimes.size > 4000) retryMessageMissLogTimes.delete(retryMessageMissLogTimes.keys().next().value);
+                    console.info('[message-retry-cache-miss]', { sessionId, messageId: key?.id || null, requestedChatJid: requestedChatJid || null, databaseAvailable, repeatedRetryLogSuppressedForMs: 30000 });
+                };
                 let exactRecentMessage = null;
                 for (let i = recentMsgsCache.length - 1; i >= 0; i--) {
                     const found = recentMsgsCache[i];
@@ -7765,7 +7746,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     return exactRecentMessage.message;
                 }
                 if (!key?.id || !db) {
-                    console.info('[message-retry-cache-miss]', { sessionId, messageId: key?.id || null, requestedChatJid: requestedChatJid || null, databaseAvailable: !!db });
+                    logRetryCacheMiss(!!db);
                     return undefined;
                 }
                 try {
@@ -7794,7 +7775,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 } catch (error) {
                     console.warn('[message-retry-store-read-failed]', { sessionId, messageId: String(key.id), error: error?.message || String(error) });
                 }
-                console.info('[message-retry-cache-miss]', { sessionId, messageId: String(key.id), requestedChatJid: requestedChatJid || null, databaseAvailable: true });
+                logRetryCacheMiss(true);
                 return undefined;
             }
         });
@@ -7819,13 +7800,20 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         sock.ev.on('creds.update', () => {
             const liveUser = sock.user || null;
             const hasIdentity = !!(getAuthenticatedPhoneNumber(liveUser, state.creds) || getAuthenticatedLid(liveUser, state.creds));
-            if (!hasIdentity) {
-                void saveCreds().catch(error => console.error('[auth-bootstrap-creds-write-failed]', { sessionId, identityKnown: false, error: error?.message || String(error) }));
-                return;
-            }
-            void ensureAccountRuntimeLockForIdentity(sessionId, liveUser, state.creds)
-                .then(() => saveCreds())
-                .catch(error => console.error('[auth-bootstrap-identity-lock-before-creds-failed]', { sessionId, error: error?.message || String(error) }));
+            const persistCredentialUpdate = hasIdentity
+                ? ensureAccountRuntimeLockForIdentity(sessionId, liveUser, state.creds).then(() => saveCreds())
+                : saveCreds();
+            persistCredentialUpdate.then(() => {
+                const currentRuntime = activeSessions.get(sessionId);
+                if (state.creds?.registered !== true || !hasIdentity || currentRuntime?.sock !== sock || !['synchronisation', 'opening', 'initialisation'].includes(String(currentRuntime.status || '').toLowerCase())) return;
+                const retryTimer = setTimeout(() => {
+                    const latestRuntime = activeSessions.get(sessionId);
+                    if (latestRuntime?.sock !== sock || state.creds?.registered !== true || serverShuttingDown) return;
+                    try { sock.ev.emit('connection.update', { connection: 'open' }); }
+                    catch (error) { console.warn('[session-open-auth-ready-retry-failed]', { sessionId, error: error?.message || String(error) }); }
+                }, 80);
+                if (typeof retryTimer.unref === 'function') retryTimer.unref();
+            }).catch(error => console.error(hasIdentity ? '[auth-bootstrap-identity-lock-before-creds-failed]' : '[auth-bootstrap-creds-write-failed]', { sessionId, identityKnown: hasIdentity, error: error?.message || String(error) }));
         });
         sock.ev.on('connection.update', update => {
             const current = activeSessions.get(sessionId);
@@ -8131,9 +8119,37 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             if (connection === 'open') {
                 const openingSession = activeSessions.get(sessionId);
                 if (!openingSession || openingSession.sock !== sock || openingSession.status === 'opening' || openingSession.status === 'connecte') return;
-                const openedAccountPhone = getAuthenticatedPhoneNumber(sock.user, state.creds);
-                const openedAccountLid = getAuthenticatedLid(sock.user, state.creds);
-                const openedAccountIdentity = openedAccountPhone || openedAccountLid;
+                let openedAccountPhone = getAuthenticatedPhoneNumber(sock.user, state.creds);
+                let openedAccountLid = getAuthenticatedLid(sock.user, state.creds);
+                let openedAccountIdentity = openedAccountPhone || openedAccountLid;
+                for (let readinessAttempt = 0; readinessAttempt < 20 && state.creds?.registered !== true; readinessAttempt++) {
+                    await new Promise(resolve => setTimeout(resolve, 200));
+                    if (activeSessions.get(sessionId)?.sock !== sock) return;
+                    openedAccountPhone = getAuthenticatedPhoneNumber(sock.user, state.creds);
+                    openedAccountLid = getAuthenticatedLid(sock.user, state.creds);
+                    openedAccountIdentity = openedAccountPhone || openedAccountLid;
+                }
+                const openedSocketReadyState = sock?.ws?.readyState ?? sock?.ws?._socket?.readyState ?? sock?.socket?.readyState;
+                const openedSocketReady = sock?.ws?.isOpen === true || Number(openedSocketReadyState) === 1 || String(openedSocketReadyState).toUpperCase() === 'OPEN';
+                if (state.creds?.registered !== true || !openedAccountIdentity || !openedSocketReady) {
+                    openingSession.status = 'synchronisation';
+                    openingSession.active = false;
+                    openingSession.lastConnectionTransitionAt = Date.now();
+                    sessionData.active = false;
+                    const pendingStartedAt = openingSession.unconnectedSinceAt || new Date();
+                    openingSession.unconnectedSinceAt = pendingStartedAt;
+                    sessionData.unconnectedSinceAt = pendingStartedAt;
+                    await db.collection('session_owners').updateOne(
+                        { sessionId },
+                        { $set: { connectionStatus: 'synchronisation', statusUpdatedAt: pendingStartedAt, updatedAt: pendingStartedAt, pairingPending: true, pairingStartedAt: pendingStartedAt, unconnectedSinceAt: pendingStartedAt, reauthRequired: false } , $setOnInsert: { createdAt: new Date() } },
+                        { upsert: true }
+                    ).catch(error => console.warn('[session-open-pending-state-save-failed]', { sessionId, error: error?.message || String(error) }));
+                    console.warn('[session-open-not-authenticated-kept-pending]', { sessionId, registered: state.creds?.registered === true, identityAvailable: !!openedAccountIdentity, socketReady: openedSocketReady, expiryMs: PAIRING_SESSION_TTL_MS, action: 'do_not_mark_connected_or_process_messages_until_registered_auth_identity_is_ready' });
+                    return;
+                }
+                const latestOpeningSession = activeSessions.get(sessionId);
+                if (latestOpeningSession !== openingSession || openingSession.sock !== sock || ['opening', 'connecte'].includes(String(openingSession.status || '').toLowerCase())) return;
+                openingSession.status = 'opening';
                 const openedAccountLockKey = normalizeAccountRuntimeLockKey(openedAccountIdentity);
                 if (openedAccountLockKey) {
                     try {
@@ -8151,11 +8167,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             await closeSessionSocketWithoutAuthFlush(sessionId, 'account_lock_conflict_on_connection_open', { status: 'duplicate_account', scheduleRetry: false });
                             return;
                         }
+                        openingSession.status = 'synchronisation';
+                        openingSession.active = false;
                         throw accountLockError;
                     }
                 }
                 await assertSessionRuntimeOwnership(sessionId, { skipLiveAccountIdentityCheck: true });
-                openingSession.status = 'opening';
                 console.info('[whatsapp] connection open', { sessionId, number: sock.user ? sock.user.id.split(':')[0] : null, accountRuntimeLockHeld: !!sessionAccountRuntimeLocks.get(sessionId) });
                 const botId = String(sock.user?.id || '').replace(/:\d+(?=@)/, '');
                 sessionData.ownerJid = botId;
@@ -8218,6 +8235,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         format: connectionFormat,
                         Format: connectionFormat,
                         connectedSince: Number(existingRecord?.connectedSince || 0) || now,
+                        statusUpdatedAt: new Date(now),
+                        updatedAt: new Date(now),
                         reauthRequired: false,
                         connectionStatus: 'connected',
                         lastAuthFailure: null,
@@ -8229,7 +8248,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     if (!existingRecord?.lang) updateData.lang = globalLang;
                     if (currentBotName) updateData.Name = currentBotName;
                     if (accountRebound) console.warn('[session-owner-account-rebound]', { sessionId, action: 'bind_owner_record_to_current_session_auth_only', staleNameCleared: !currentBotName, staleLidCleared: !currentBotLid });
-                    const ownerUnset = { duplicateAccountOf: '', duplicateAccountDetectedAt: '', duplicateAccountIdentityHash: '' };
+                    const ownerUnset = { duplicateAccountOf: '', duplicateAccountDetectedAt: '', duplicateAccountIdentityHash: '', unconnectedSinceAt: '' };
                     if (accountRebound && !currentBotName) ownerUnset.Name = '';
                     if (accountRebound && !currentBotLid) ownerUnset.OwnerLid = '';
                     updateData.pairingPending = false;
@@ -8260,6 +8279,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const currentSession = activeSessions.get(sessionId);
                 if (currentSession) {
                     currentSession.number = currentBotNum || null;
+                    currentSession.active = true;
                     currentSession.status = 'connecte';
                     currentSession.format = connectionFormat;
                     currentSession.sock = sock;
@@ -8268,6 +8288,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     currentSession.lastSocketActivityAt = Date.now();
                     currentSession.receivedPong = false;
                     currentSession.disconnectTime = null;
+                    currentSession.unconnectedSinceAt = null;
                     currentSession.reconnectAttempts = 0;
                     const reconnectTimer = reconnectTimers.get(sessionId);
                     if (reconnectTimer) clearTimeout(reconnectTimer);
@@ -8868,21 +8889,19 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
             for (const m of rawBatch) {
                 try {
-                const messageKeyForRead = m?.key || null;
-                const messageChatForRead = String(messageKeyForRead?.remoteJid || messageKeyForRead?.remoteJidAlt || '').trim();
-                const messageIdForRead = String(messageKeyForRead?.id || '').trim();
-                if (messageKeyForRead && !messageKeyForRead.fromMe && messageChatForRead && messageIdForRead && messageChatForRead !== 'status@broadcast') {
-                    const readKey = { remoteJid: messageChatForRead, id: messageIdForRead, fromMe: false };
-                    if (messageKeyForRead.participant) readKey.participant = messageKeyForRead.participant;
-                    Promise.resolve().then(() => sock.readMessages([readKey])).then(() => {
-                        console.info('[whatsapp-incoming-message-marked-read]', { sessionId, messageId: messageIdForRead, chatJid: messageChatForRead, action: 'mark_received_message_as_seen_before_dispatch' });
-                    }).catch(readError => {
-                        console.warn('[whatsapp-incoming-message-read-failed]', { sessionId, messageId: messageIdForRead, error: readError?.message || String(readError) });
-                    });
-                }
                 if (m?.key?.fromMe === true) {
                     const linkedDeviceMessage = hasLinkedDeviceSentEnvelope(m?.message);
-                    console.info(linkedDeviceMessage ? '[companion-device-message-seen-and-ignored]' : '[own-account-message-echo-ignored]', { sessionId, messageId: messageIdForRead || null, chatJid: messageChatForRead || null, action: 'ignore_outgoing_account_message_before_command_or_ai_dispatch' });
+                    console.info(linkedDeviceMessage ? '[companion-device-message-ignored]' : '[own-account-message-echo-ignored]', { sessionId, messageId: m?.key?.id || null, chatJid: m?.key?.remoteJid || m?.key?.remoteJidAlt || null, action: 'ignore_outgoing_account_message_before_command_or_ai_dispatch' });
+                    continue;
+                }
+                const activeMessageSession = activeSessions.get(sessionId);
+                const activeMessageCredentials = activeMessageSession?.authState?.creds;
+                const activeMessageIdentity = getAuthenticatedPhoneNumber(sock.user, activeMessageCredentials) || getAuthenticatedLid(sock.user, activeMessageCredentials);
+                const activeMessageReadyState = sock?.ws?.readyState ?? sock?.ws?._socket?.readyState ?? sock?.socket?.readyState;
+                const activeMessageSocketReady = activeMessageReadyState === undefined || activeMessageReadyState === null || Number(activeMessageReadyState) === 1 || String(activeMessageReadyState).toUpperCase() === 'OPEN';
+                const activeMessageAuthenticated = activeMessageSession?.sock === sock && activeMessageSession.status === 'connecte' && activeMessageCredentials?.registered === true && !!activeMessageIdentity && activeMessageSocketReady;
+                if (!activeMessageAuthenticated) {
+                    console.info('[message-ignored]', { sessionId, messageId: m?.key?.id || null, chatJid: m?.key?.remoteJid || m?.key?.remoteJidAlt || null, reason: 'session_not_authenticated_and_active', registered: activeMessageCredentials?.registered === true, identityAvailable: !!activeMessageIdentity, socketReady: activeMessageSocketReady });
                     continue;
                 }
                 const liveSessionForMessage = activeSessions.get(sessionId);
@@ -10921,9 +10940,10 @@ async function cleanupExpiredUnconnectedSessions() {
 async function cleanupExpiredUnconnectedSessionsInternal() {
     if (!db || serverShuttingDown || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive) || tfbotWorkerStopping) return 0;
     const collection = db.collection('baileys_auth');
-    const cleanupStatuses = ['pairing_expired', 'pairing_error', 'reauth_required', 'qr_disponible', 'synchronisation', 'initialisation', 'deconnecte', 'disconnected', 'pairing_starting', 'pairing', 'duplicate_account'];
+    const cleanupStatuses = ['pairing_expired', 'pairing_error', 'reauth_required', 'qr_disponible', 'synchronisation', 'synchronizing', 'initialisation', 'deconnecte', 'disconnected', 'connecting', 'opening', 'pending', 'paused', 'pairing_starting', 'pairing', 'duplicate_account', 'connected', 'connecte', 'active', 'online'];
     const staleCandidates = await db.collection('session_owners').find({
         $or: [
+            { connectionStatus: { $nin: ['connecte', 'connected'] } },
             { connectionStatus: { $in: cleanupStatuses } },
             { pairingPending: true },
             { reauthRequired: true },
@@ -10941,27 +10961,41 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
         const runtime = activeSessions.get(staleSessionId);
         const runtimeStatus = String(runtime?.status || '').toLowerCase();
         const runtimeSocketState = runtime?.sock?.ws?.readyState ?? runtime?.sock?.ws?._socket?.readyState ?? runtime?.sock?.socket?.readyState;
-        const runtimeSocketLive = !!runtime?.sock && (Number(runtimeSocketState) === 1 || String(runtimeSocketState).toUpperCase() === 'OPEN');
-        if (['connecte', 'connected', 'active', 'online'].includes(runtimeStatus) && runtimeSocketLive) continue;
+        const runtimeSocketStateUsable = runtime?.sock?.ws?.isOpen === true || Number(runtimeSocketState) === 1 || String(runtimeSocketState).toUpperCase() === 'OPEN';
+        const runtimeCredentials = runtime?.authState?.creds;
+        const runtimeIdentity = getAuthenticatedPhoneNumber(runtime?.sock?.user, runtimeCredentials) || getAuthenticatedLid(runtime?.sock?.user, runtimeCredentials);
+        const runtimeSocketLive = !!runtime?.sock && runtimeSocketStateUsable && runtimeCredentials?.registered === true && !!runtimeIdentity && ['connecte', 'connected', 'active', 'online'].includes(runtimeStatus);
+        if (runtimeSocketLive) continue;
         const ownerStatus = String(owner.connectionStatus || owner.status || (owner.reauthRequired ? 'reauth_required' : '')).toLowerCase();
         const statusCandidate = runtimeStatus && runtimeStatus !== 'deconnecte' ? runtimeStatus : ownerStatus;
-        const status = owner.pairingPending === true && !runtimeSocketLive && ['connecte', 'connected', 'active', 'online'].includes(statusCandidate) ? 'pairing' : statusCandidate;
-        if (['connecte', 'connected', 'active', 'online'].includes(status) && runtimeSocketLive) continue;
-        if (['connecte', 'connected', 'active', 'online'].includes(status) && owner.pairingPending !== true) continue;
-        const pairingStatus = ['pairing_expired', 'pairing_error', 'qr_disponible', 'synchronisation', 'initialisation', 'pairing_starting', 'pairing'].includes(status);
-        const isPendingPairingCandidate = owner.pairingPending === true || pairingStatus;
+        const status = ['connecte', 'connected', 'active', 'online'].includes(statusCandidate)
+            ? 'synchronisation'
+            : statusCandidate || 'synchronisation';
+        const pairingStatus = ['pairing_expired', 'pairing_error', 'qr_disponible', 'synchronisation', 'synchronizing', 'initialisation', 'connecting', 'opening', 'pending', 'paused', 'pairing_starting', 'pairing'].includes(status);
+        const isPendingPairingCandidate = owner.pairingPending === true || pairingStatus || !runtimeSocketLive;
+        if (!owner.unconnectedSinceAt && !['deconnecte', 'disconnected'].includes(status)) {
+            const unconnectedSinceAt = new Date(cleanupNow);
+            await db.collection('session_owners').updateOne(
+                { sessionId: staleSessionId, unconnectedSinceAt: { $exists: false } },
+                { $set: { unconnectedSinceAt, statusUpdatedAt: unconnectedSinceAt, updatedAt: unconnectedSinceAt, connectionStatus: status, pairingPending: true } }
+            ).catch(() => {});
+            owner.unconnectedSinceAt = unconnectedSinceAt;
+            owner.statusUpdatedAt = unconnectedSinceAt;
+            owner.connectionStatus = status;
+            owner.pairingPending = true;
+        }
         if (!cleanupStatuses.includes(status) && owner.reauthRequired !== true && !owner.duplicateAccountOf && !isPendingPairingCandidate) continue;
         const idTimestamp = Number(staleSessionId.match(/^session_(\d+)/)?.[1] || 0);
         const timestampCandidates = status === 'reauth_required' || owner.reauthRequired === true
-            ? [owner.lastAuthFailureAt, owner.disconnectTime, owner.statusUpdatedAt, owner.updatedAt, owner.createdAt]
+            ? [owner.lastAuthFailureAt, owner.statusUpdatedAt, owner.disconnectTime, owner.updatedAt, owner.createdAt]
             : status === 'duplicate_account' || owner.duplicateAccountOf
                 ? [owner.duplicateAccountDetectedAt, owner.statusUpdatedAt, owner.updatedAt, owner.createdAt]
                 : ['deconnecte', 'disconnected'].includes(status) && !isPendingPairingCandidate
-                    ? [owner.disconnectTime, owner.statusUpdatedAt, owner.updatedAt, owner.createdAt]
-                    : [owner.pairingStartedAt, owner.statusUpdatedAt, owner.disconnectTime, owner.updatedAt, owner.createdAt];
+                    ? [owner.unconnectedSinceAt, owner.disconnectTime, owner.statusUpdatedAt, owner.updatedAt, owner.createdAt, owner.connectedSince]
+                    : [owner.unconnectedSinceAt, owner.pairingStartedAt, owner.statusUpdatedAt, owner.disconnectTime, owner.updatedAt, owner.createdAt, owner.connectedSince];
         const sessionTimestamp = timestampCandidates.map(value => value instanceof Date ? value.getTime() : Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : new Date(value || 0).getTime()).find(value => Number.isFinite(value) && value > 0) || idTimestamp || 0;
         const sessionAgeMs = sessionTimestamp ? cleanupNow - sessionTimestamp : 0;
-        const sessionExpiryMs = isPendingPairingCandidate ? PAIRING_SESSION_TTL_MS : SESSION_UNCONNECTED_TTL_MS;
+        const sessionExpiryMs = SESSION_UNCONNECTED_TTL_MS;
         if (!sessionTimestamp || sessionAgeMs < sessionExpiryMs) continue;
         const isPendingPairingExpired = isPendingPairingCandidate && sessionAgeMs >= PAIRING_SESSION_TTL_MS;
         const ownerLeaseUntil = new Date(owner.ownerLeaseUntil || 0).getTime();
@@ -10991,17 +11025,14 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
             const duplicateTarget = String(owner.duplicateAccountOf || owner.duplicateOfSessionId || owner.mergedIntoSessionId || '').trim();
             if (duplicateTarget && duplicateTarget !== staleSessionId) {
                 const targetExists = await db.collection('session_owners').findOne({ sessionId: duplicateTarget }, { projection: { sessionId: 1 } }).catch(() => null);
-                if (!targetExists) {
-                    console.warn('[session-duplicate-target-missing-preserved]', { sourceSessionId: staleSessionId, targetSessionId: duplicateTarget, action: 'preserve_source_and_all_linked_data_until_target_is_available' });
-                    continue;
+                if (targetExists) {
+                    await mergeSessionScopedData(staleSessionId, duplicateTarget);
+                } else {
+                    console.warn('[session-duplicate-target-missing-removing-expired-source]', { sourceSessionId: staleSessionId, targetSessionId: duplicateTarget, action: 'remove_expired_unconnected_source_and_all_associated_data' });
                 }
-                await mergeSessionScopedData(staleSessionId, duplicateTarget);
             }
-            if (hasRecoverableAccountCredentials && !isReauthExpired && !duplicateTarget && !shouldRemoveExpiredPairing) {
-                console.info('[session-expiry-preserved-account-credentials]', { sessionId: staleSessionId, status, ageMs: sessionAgeMs, credentialsRegistered, credentialsHaveIdentity, ownerHasAccountIdentity, action: 'keep_auth_and_all_linked_session_data_for_reconnect' });
-                continue;
-            }
-            if (!isReauthExpired && !duplicateTarget && !shouldRemoveExpiredPairing && !isUnregisteredDisconnectedExpired) continue;
+            const removeExpiredUnconnectedSession = sessionAgeMs >= SESSION_UNCONNECTED_TTL_MS;
+            if (!removeExpiredUnconnectedSession) continue;
             const pendingReconnect = reconnectTimers.get(staleSessionId);
             if (pendingReconnect) {
                 clearTimeout(pendingReconnect);
@@ -11181,7 +11212,7 @@ setInterval(async () => {
     } catch (e) {
         console.error('[maintenance]', e?.message || e);
     }
-}, 60000);
+}, 15000);
 
 setInterval(async () => {
     if (!db || serverShuttingDown || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive) || tfbotWorkerStopping) return;
@@ -11199,7 +11230,19 @@ setInterval(async () => {
             continue;
         }
         const readyState = currentSocket.ws?.readyState ?? currentSocket.ws?._socket?.readyState ?? currentSocket.socket?.readyState;
-        const socketClosed = readyState !== undefined && readyState !== null && Number(readyState) !== 1;
+        const socketIsOpen = currentSocket.ws?.isOpen === true || Number(readyState) === 1 || String(readyState).toUpperCase() === 'OPEN';
+        const socketClosed = !socketIsOpen;
+        const healthCredentials = sess.authState?.creds;
+        const healthIdentity = getAuthenticatedPhoneNumber(currentSocket.user, healthCredentials) || getAuthenticatedLid(currentSocket.user, healthCredentials);
+        if (healthCredentials?.registered !== true || !healthIdentity) {
+            sess.status = 'synchronisation';
+            sess.active = false;
+            sess.lastConnectionTransitionAt = now;
+            sess.unconnectedSinceAt = sess.unconnectedSinceAt || now;
+            await db.collection('session_owners').updateOne({ sessionId: sId }, { $set: { connectionStatus: 'synchronisation', statusUpdatedAt: new Date(sess.unconnectedSinceAt), updatedAt: new Date(now), pairingPending: true, unconnectedSinceAt: new Date(sess.unconnectedSinceAt), pairingStartedAt: new Date(sess.unconnectedSinceAt) } }).catch(() => {});
+            console.warn('[session-health-demoted-not-authenticated]', { sessionId: sId, registered: healthCredentials?.registered === true, identityAvailable: !!healthIdentity, expiryMs: SESSION_UNCONNECTED_TTL_MS, action: 'stop_message_dispatch_and_expire_if_not_authenticated_within_184_seconds' });
+            continue;
+        }
         const hasObservedPong = sess.wsPongMonitoring && sess.receivedPong === true;
         const lastPongAt = Number(sess.lastPongAt || sess.connectedAt || sess.readyAt || now);
         const pongAge = Math.max(0, now - lastPongAt);
@@ -11315,14 +11358,14 @@ async function main() {
         clusterDomainRouter: true,
         clusterDomainDetectionUsesRenderDefaults: true,
         clusterDomainSelectionPriority: 'tf-bot-then-tfbot2-through-tfbot6',
-        clusterDomainSelectionMode: 'switch-only-on-render-owner-suspension; any-other-http-response-is-valid',
+        clusterDomainSelectionMode: 'strict-priority-tf-bot-then-tfbot2-then-tfbot3-only-when-previous-domain-does-not-respond',
         clusterWorkerCoordinatorPollMs: TFBOT_WORKER_COORDINATOR_POLL_MS,
         clusterNonActiveDomainsRedirectStatus: 307,
         clusterPollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS,
         clusterInactiveWorkersConnectMongo: false,
         clusterCoordinatorConnectMongo: TFBOT_CLUSTER_COORDINATOR_ONLY,
         clusterInactiveWorkersRestoreSessions: false,
-        logoTransformation: 'validated-png-or-text-fallback',
+        logoTransformation: 'original-image-bytes-preserved-no-reencode-no-text-fallback',
         clusterInstanceId: TFBOT_CLUSTER_INSTANCE_ID,
         clusterHealthCacheMs: TFBOT_CLUSTER_HEALTH_CACHE_MS,
         clusterHealthProbeLimit: TFBOT_CLUSTER_HEALTH_PROBE_LIMIT,
@@ -11331,12 +11374,12 @@ async function main() {
         pairAccountLockedBeforeSocket: true,
         pairActiveSessionReusedWithoutSocketReplacement: true,
         sharedLogicalLeaseTtlIndex: 'leaseUntil_single_field',
-        pairCodeWaitsForFreshQrEvent: false,
-        pairCodeRequestedProactively: true,
+        pairCodeWaitsForFreshQrEvent: true,
+        pairCodeRequestedProactively: false,
         pairCodeTransientRetryLimit: 5,
         ownerPrivilegeScope: 'exact-session-id-only',
         ordinaryTextDispatch: 'ignore-unless-explicit-ai-command',
-        companionDeviceMessages: 'seen-and-ignored',
+        companionDeviceMessages: 'ignored-before-command-dispatch-without-read-receipt',
         pairingPendingSessionTtlMs: PAIRING_SESSION_TTL_MS,
         pairingConnectedSocketStates: [1, 'OPEN'],
         pairingProxyTimeoutMs: TFBOT_PAIRING_PROXY_TIMEOUT_MS,
@@ -11359,6 +11402,8 @@ async function main() {
         activeGroupFetchHealthProbe: false,
         runtimeLogDeploymentId: runtimeLogDeploymentId,
         previousDeploymentLogsPruned: true,
+        runtimeLogDeploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(),
+        runtimeLogPort: runtimeLogPort,
         publicModeAcceptsOtherBotOwnersAsOrdinaryUsers: true,
         exclusiveAccountRuntimeLocks: true,
         accountLockIncludesPnAndLidAliases: true,
@@ -11385,7 +11430,7 @@ async function main() {
     });
     if (TFBOT_CLUSTER_ENABLED) {
         if (!TFBOT_CLUSTER_TOKEN) console.error('[tfbot-cluster-token-missing]', { host: TFBOT_CLUSTER_INSTANCE_HOST || null, action: 'keep_cluster_node_in_standby_without_mongodb_or_session_restore' });
-        console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, renderServiceId: runtimeLogRenderServiceId, renderServiceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, deploymentStartedAt: runtimeLogStartedAt.toISOString() });
+        console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, renderServiceId: runtimeLogRenderServiceId, renderServiceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), port: runtimeLogPort });
     httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
         if (TFBOT_CLUSTER_COORDINATOR_ONLY) {
             tfbotWorkerActive = false;
