@@ -16,7 +16,6 @@ const LOG_DASHBOARD_MAX_ENTRIES = Math.max(100, Math.min(5000, Number(process.en
 const LOG_DASHBOARD_PAGE_LIMIT = Math.max(80, Math.min(250, Number(process.env.LOG_DASHBOARD_PAGE_LIMIT || 120)));
 const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(process.env.MESSAGE_QUEUE_TASK_TIMEOUT_MS || 45000)));
 const LOG_DASHBOARD_RETENTION_DAYS = Math.max(1, Math.min(30, Number(process.env.LOG_DASHBOARD_RETENTION_DAYS || 7)));
-const LOG_DASHBOARD_DEPLOYMENT_JOIN_WINDOW_MS = Math.max(60000, Math.min(15 * 60 * 1000, Number(process.env.LOG_DASHBOARD_DEPLOYMENT_JOIN_WINDOW_MS || 5 * 60 * 1000)));
 const LOG_DASHBOARD_PERSIST_MAX_ENTRIES = Math.max(5000, Math.min(200000, Number(process.env.LOG_DASHBOARD_PERSIST_MAX_ENTRIES || 50000)));
 const runtimeLogBuffer = [];
 const runtimeLogPendingWrites = [];
@@ -40,10 +39,11 @@ const runtimeLogRenderExternalHost = String(process.env.RENDER_EXTERNAL_HOSTNAME
 const runtimeLogServiceScope = [runtimeLogRenderExternalHost ? `host:${runtimeLogRenderExternalHost}` : '', runtimeLogRenderServiceNameExplicit ? `name:${runtimeLogRenderServiceNameExplicit}` : ''].filter(Boolean).join('|') || `local:${runtimeLogPort}`;
 const runtimeLogServiceScopeHash = shortLogHash(runtimeLogServiceScope);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}:${shortLogHash(runtimeLogInstanceId)}`).slice(0, 240);
-const TFBOT_CLUSTER_CODE_REVISION = 'r58-router-health-first-owner-self-chat-command-dispatch';
+let runtimeLogDeploymentGroupId = 'cluster-pending';
+const TFBOT_CLUSTER_CODE_REVISION = 'r59-explicit-ai-only-active-worker-probe-global-deploy-log-cutoff';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
+runtimeLogDeploymentGroupId = `${TFBOT_CLUSTER_CODE_REVISION}:cluster-pending`;
 const runtimeLogClusterId = `${runtimeLogDeploymentId}:${shortLogHash(runtimeLogInstanceId)}`.slice(0, 240);
-const runtimeLogDeploymentGroupId = `${String(TFBOT_CLUSTER_CODE_REVISION).normalize('NFKC').replace(/[\p{Cc}\p{Cf}]/gu, '').trim().slice(0, 160)}:service-${runtimeLogServiceScopeHash}:port-${runtimeLogPort}`;
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
 const runtimeLogSecrets = Object.entries(process.env)
     .filter(([key, value]) => /TOKEN|SECRET|PASSWORD|PASSWD|API.?KEY|MONGO_URI|URI$|CF_ACCOUNTS|TAVILY|OWNER_?NUMBER|TFBOT_OWNER/i.test(key) && String(value || '').length >= 6)
@@ -136,7 +136,13 @@ function scheduleRuntimeLogPersistence(delayMs = 40) {
 function attachRuntimeLogPersistence(collection) {
     runtimeLogPersistenceCollection = collection || null;
     if (!runtimeLogPersistenceCollection) return;
-    runtimeLogPendingWrites.splice(0, runtimeLogPendingWrites.length, ...runtimeLogPendingWrites.filter(item => new Date(item?.createdAt || item?.at || 0).getTime() >= runtimeLogDeploymentStartedAt.getTime()));
+    runtimeLogPendingWrites.splice(0, runtimeLogPendingWrites.length, ...runtimeLogPendingWrites.filter(item => new Date(item?.createdAt || item?.at || 0).getTime() >= runtimeLogDeploymentStartedAt.getTime()).map(item => ({ ...item, deploymentGroupId: runtimeLogDeploymentGroupId, deploymentStartedAt: runtimeLogDeploymentStartedAt })));
+    for (const entry of runtimeLogBuffer) {
+        if ((Date.parse(String(entry?.at || '')) || 0) >= runtimeLogDeploymentStartedAt.getTime()) {
+            entry.deploymentGroupId = runtimeLogDeploymentGroupId;
+            entry.deploymentStartedAt = runtimeLogDeploymentStartedAt;
+        }
+    }
     const pendingIds = new Set(runtimeLogPendingWrites.map(item => String(item?._id || '')));
     for (const entry of runtimeLogBuffer) {
         if (!entry?.id || (Date.parse(String(entry.at || '')) || 0) < runtimeLogDeploymentStartedAt.getTime() || pendingIds.has(String(entry.id))) continue;
@@ -170,16 +176,58 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
     if (!collection || typeof collection.deleteMany !== 'function' || !db) return 0;
     if (runtimeLogInitialCleanupCompleted) return 0;
     const markerCollection = db.collection('cluster_router');
-    const markerId = `runtime-logs-active-deployment:${shortLogHash(`${runtimeLogServiceScope}:port:${runtimeLogPort}`)}`;
+    const markerId = 'runtime-logs-active-cluster-deployment';
+    const isCoordinator = TFBOT_CLUSTER_COORDINATOR_ONLY || !TFBOT_CLUSTER_ENABLED;
+    const adoptMarker = marker => {
+        const startedAt = new Date(marker?.deploymentStartedAt || marker?.startedAt || marker?.completedAt || runtimeLogStartedAt);
+        runtimeLogDeploymentStartedAt = Number.isFinite(startedAt.getTime()) ? startedAt : runtimeLogStartedAt;
+        runtimeLogDeploymentGroupId = String(marker?.deploymentGroupId || `${TFBOT_CLUSTER_CODE_REVISION}:cluster-${shortLogHash(`${marker?.coordinatorInstanceId || runtimeLogRenderInstanceId}:${marker?.releaseId || TFBOT_CODE_RELEASE_ID}`)}`);
+        runtimeLogInitialCleanupCompleted = true;
+        return runtimeLogDeploymentStartedAt;
+    };
+    const applyBoundaryToPendingLogs = () => {
+        const cutoffMs = runtimeLogDeploymentStartedAt.getTime();
+        runtimeLogPendingWrites.splice(0, runtimeLogPendingWrites.length, ...runtimeLogPendingWrites.filter(item => new Date(item?.createdAt || item?.at || 0).getTime() >= cutoffMs).map(item => ({ ...item, deploymentGroupId: runtimeLogDeploymentGroupId, deploymentStartedAt: runtimeLogDeploymentStartedAt })));
+        for (const entry of runtimeLogBuffer) {
+            if ((Date.parse(String(entry?.at || '')) || 0) < cutoffMs) continue;
+            entry.deploymentGroupId = runtimeLogDeploymentGroupId;
+            entry.deploymentStartedAt = runtimeLogDeploymentStartedAt;
+        }
+    };
+    if (!isCoordinator) {
+        for (let attempt = 0; attempt < 20; attempt++) {
+            const marker = await markerCollection.findOne({ _id: markerId }).catch(() => null);
+            if (marker?.completed === true && marker?.deploymentStartedAt) {
+                adoptMarker(marker);
+                applyBoundaryToPendingLogs();
+                console.info('[runtime-log-deployment-boundary-loaded]', {
+                    host: TFBOT_CLUSTER_INSTANCE_HOST,
+                    deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(),
+                    deploymentGroupId: runtimeLogDeploymentGroupId,
+                    coordinatorInstanceId: marker.coordinatorInstanceId || null,
+                    action: 'use_coordinator_deployment_timestamp_without_probing_or_purging_other_instances'
+                });
+                return 0;
+            }
+            await new Promise(resolve => setTimeout(resolve, 250));
+        }
+        runtimeLogDeploymentStartedAt = runtimeLogStartedAt;
+        runtimeLogDeploymentGroupId = `${TFBOT_CLUSTER_CODE_REVISION}:cluster-boundary-unavailable`;
+        runtimeLogInitialCleanupCompleted = true;
+        console.warn('[runtime-log-deployment-boundary-unavailable]', {
+            host: TFBOT_CLUSTER_INSTANCE_HOST,
+            action: 'keep_runtime_logs_buffered_until_coordinator_boundary_is_available'
+        });
+        return 0;
+    }
     const claimOwner = processInstanceId;
+    const coordinatorInstanceId = String(runtimeLogRenderInstanceId || runtimeLogInstanceId);
     for (let attempt = 0; attempt < 140; attempt++) {
         const now = new Date();
         const existing = await markerCollection.findOne({ _id: markerId }).catch(() => null);
-        const existingStartedAt = new Date(existing?.deploymentStartedAt || existing?.startedAt || existing?.completedAt || 0);
-        const existingAgeMs = now.getTime() - existingStartedAt.getTime();
-        if (existing?.completed === true && String(existing.releaseId || '') === TFBOT_CODE_RELEASE_ID && String(existing.port || '') === runtimeLogPort && String(existing.serviceScope || '') === runtimeLogServiceScope && Number.isFinite(existingStartedAt.getTime()) && existingAgeMs >= 0 && existingAgeMs <= LOG_DASHBOARD_DEPLOYMENT_JOIN_WINDOW_MS) {
-            runtimeLogDeploymentStartedAt = existingStartedAt;
-            runtimeLogInitialCleanupCompleted = true;
+        if (existing?.completed === true && String(existing.releaseId || '') === TFBOT_CODE_RELEASE_ID && String(existing.coordinatorInstanceId || '') === coordinatorInstanceId) {
+            adoptMarker(existing);
+            applyBoundaryToPendingLogs();
             return 0;
         }
         const leaseUntil = new Date(now.getTime() + 30000);
@@ -197,16 +245,11 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
                     $set: {
                         owner: claimOwner,
                         leaseUntil,
+                        coordinatorInstanceId,
                         deploymentId: runtimeLogDeploymentId,
-                        deploymentGroupId: runtimeLogDeploymentGroupId,
                         releaseId: TFBOT_CODE_RELEASE_ID,
-                        port: runtimeLogPort,
-                        serviceId: runtimeLogRenderServiceId,
-                        serviceName: runtimeLogRenderServiceName,
-                        serviceScope: runtimeLogServiceScope,
-                        renderCommit: runtimeLogRenderCommit || null,
-                        deploymentStartedAt: now,
-                        startedAt: now,
+                        deploymentStartedAt: runtimeLogStartedAt,
+                        startedAt: runtimeLogStartedAt,
                         updatedAt: now,
                         status: 'running',
                         completed: false
@@ -223,26 +266,28 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
             throw claimError;
         }
         const claim = await markerCollection.findOne({ _id: markerId }).catch(() => null);
-        if (claim?.completed === true && String(claim.releaseId || '') === TFBOT_CODE_RELEASE_ID && String(claim.port || '') === runtimeLogPort && String(claim.serviceScope || '') === runtimeLogServiceScope) {
-            runtimeLogDeploymentStartedAt = new Date(claim.deploymentStartedAt || claim.startedAt || claim.completedAt || now);
-            runtimeLogInitialCleanupCompleted = true;
+        if (claim?.completed === true && String(claim.releaseId || '') === TFBOT_CODE_RELEASE_ID && String(claim.coordinatorInstanceId || '') === coordinatorInstanceId) {
+            adoptMarker(claim);
+            applyBoundaryToPendingLogs();
             return 0;
         }
         if (String(claim?.owner || '') !== claimOwner) {
             await new Promise(resolve => setTimeout(resolve, 250));
             continue;
         }
-        runtimeLogDeploymentStartedAt = new Date(claim?.deploymentStartedAt || now);
+        runtimeLogDeploymentStartedAt = runtimeLogStartedAt;
+        runtimeLogDeploymentGroupId = `${TFBOT_CLUSTER_CODE_REVISION}:cluster-${shortLogHash(`${coordinatorInstanceId}:${TFBOT_CODE_RELEASE_ID}:${runtimeLogDeploymentStartedAt.getTime()}`)}`;
         const rawAppCollection = mongoClient?.db(TFBOT_DATABASE_NAME)?.collection(TFBOT_APP_DATA_COLLECTION);
         if (!rawAppCollection) throw new Error('runtime_log_physical_collection_unavailable');
-        const legacyCurrentPortOrUnmarked = { $or: [{ port: runtimeLogPort }, { port: { $exists: false } }, { port: null }, { port: '' }] };
-        const serviceScopeBranches = [{ serviceScope: runtimeLogServiceScope, port: runtimeLogPort }];
-        if (runtimeLogRenderServiceId !== 'local') serviceScopeBranches.push({ serviceId: runtimeLogRenderServiceId, ...legacyCurrentPortOrUnmarked });
-        if (runtimeLogRenderServiceNameExplicit) serviceScopeBranches.push({ serviceName: runtimeLogRenderServiceNameExplicit, ...legacyCurrentPortOrUnmarked });
-        if (runtimeLogRenderExternalHost) serviceScopeBranches.push({ instanceUrl: { $regex: `^https?:\/\/${runtimeLogRenderExternalHost.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[:/]|$)`, $options: 'i' }, ...legacyCurrentPortOrUnmarked });
-        const serviceScopeCriteria = { $or: serviceScopeBranches };
-        const logicalBefore = await collection.countDocuments(serviceScopeCriteria).catch(() => 0);
-        const logicalPurge = await collection.deleteMany(serviceScopeCriteria);
+        const cutoff = runtimeLogDeploymentStartedAt;
+        const logicalOldLogs = {
+            $or: [
+                { createdAt: { $lt: cutoff } },
+                { createdAt: { $exists: false }, at: { $lt: cutoff.toISOString() } }
+            ]
+        };
+        const logicalBefore = await collection.countDocuments(logicalOldLogs).catch(() => 0);
+        const logicalPurge = await collection.deleteMany(logicalOldLogs);
         const legacyLogFilter = {
             $and: [
                 { $or: [
@@ -251,30 +296,29 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
                     { _id: { $regex: '^server_runtime_logs:' }, level: { $exists: true }, text: { $exists: true } },
                     { _id: { $regex: '^(?:runtime[-_]?logs?|logs)[:::_-]' }, level: { $exists: true }, text: { $exists: true }, createdAt: { $exists: true } }
                 ] },
-                serviceScopeCriteria
+                { $or: [
+                    { createdAt: { $lt: cutoff } },
+                    { createdAt: { $exists: false }, at: { $lt: cutoff.toISOString() } }
+                ] }
             ]
         };
         const legacyBefore = await rawAppCollection.countDocuments(legacyLogFilter).catch(() => 0);
         const legacyPurge = await rawAppCollection.deleteMany(legacyLogFilter);
-        const logicalAfter = await collection.countDocuments(serviceScopeCriteria).catch(() => -1);
+        const logicalAfter = await collection.countDocuments(logicalOldLogs).catch(() => -1);
         const legacyAfter = await rawAppCollection.countDocuments(legacyLogFilter).catch(() => -1);
         const removed = Number(logicalPurge?.deletedCount || 0) + Number(legacyPurge?.deletedCount || 0);
-        if (logicalAfter > 0 || legacyAfter > 0) console.warn('[runtime-log-stale-documents-remain-hidden]', { logicalAfter, legacyAfter, serviceScopeHash: runtimeLogServiceScopeHash, port: runtimeLogPort, action: 'keep_other_services_and_ports_untouched_filter_dashboard_to_current_deployment' });
-        console.info('[runtime-log-physical-cleanup-verified]', {
+        if (logicalAfter > 0 || legacyAfter > 0) console.error('[runtime-log-old-documents-cleanup-incomplete]', { logicalAfter, legacyAfter, deploymentStartedAt: cutoff.toISOString(), action: 'dashboard_filters_all_old_entries_by_global_deployment_timestamp' });
+        console.info('[runtime-log-deployment-cleanup-verified]', {
             logicalBefore,
             logicalRemoved: Number(logicalPurge?.deletedCount || 0),
             legacyBefore,
             legacyRemoved: Number(legacyPurge?.deletedCount || 0),
             logicalAfter,
             legacyAfter,
-            serviceId: runtimeLogRenderServiceId,
-            serviceName: runtimeLogRenderServiceNameExplicit || null,
-            serviceScopeHash: runtimeLogServiceScopeHash,
             deploymentGroupId: runtimeLogDeploymentGroupId,
-            port: runtimeLogPort,
-            deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(),
-            joinWindowMs: LOG_DASHBOARD_DEPLOYMENT_JOIN_WINDOW_MS,
-            action: 'purge_previous_logs_for_this_render_service_and_port_then_share_only_the_current_deployment_window'
+            coordinatorInstanceId,
+            deploymentStartedAt: cutoff.toISOString(),
+            action: 'delete_every_persisted_runtime_log_older_than_the_current_coordinator_deployment_across_all_instances'
         });
         await markerCollection.updateOne(
             { _id: markerId, owner: claimOwner, completed: { $ne: true } },
@@ -282,13 +326,10 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
                 $set: {
                     completed: true,
                     status: 'completed',
-                    port: runtimeLogPort,
-                    serviceId: runtimeLogRenderServiceId,
-                    serviceName: runtimeLogRenderServiceName,
-                    serviceScope: runtimeLogServiceScope,
+                    coordinatorInstanceId,
                     releaseId: TFBOT_CODE_RELEASE_ID,
                     deploymentGroupId: runtimeLogDeploymentGroupId,
-                    deploymentStartedAt: runtimeLogDeploymentStartedAt,
+                    deploymentStartedAt: cutoff,
                     removedCount: removed,
                     completedAt: new Date(),
                     updatedAt: new Date()
@@ -297,15 +338,16 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
             }
         );
         runtimeLogInitialCleanupCompleted = true;
+        applyBoundaryToPendingLogs();
         return removed;
     }
     const finalMarker = await markerCollection.findOne({ _id: markerId }).catch(() => null);
-    if (finalMarker?.completed === true && String(finalMarker.releaseId || '') === TFBOT_CODE_RELEASE_ID && String(finalMarker.port || '') === runtimeLogPort && String(finalMarker.serviceScope || '') === runtimeLogServiceScope) {
-        runtimeLogDeploymentStartedAt = new Date(finalMarker.deploymentStartedAt || finalMarker.startedAt || finalMarker.completedAt || Date.now());
-        runtimeLogInitialCleanupCompleted = true;
+    if (finalMarker?.completed === true && String(finalMarker.releaseId || '') === TFBOT_CODE_RELEASE_ID && String(finalMarker.coordinatorInstanceId || '') === coordinatorInstanceId) {
+        adoptMarker(finalMarker);
+        applyBoundaryToPendingLogs();
         return 0;
     }
-    console.error('[runtime-log-deploy-cleanup-not-acquired]', { deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, serviceScopeHash: runtimeLogServiceScopeHash, port: runtimeLogPort, owner: finalMarker?.owner || null, status: finalMarker?.status || 'unknown', action: 'cleanup_not_verified_before_log_persistence_attach' });
+    console.error('[runtime-log-deployment-cleanup-not-acquired]', { deploymentId: runtimeLogDeploymentId, coordinatorInstanceId, owner: finalMarker?.owner || null, status: finalMarker?.status || 'unknown', action: 'do_not_attach_old_logs_as_current_deployment' });
     return 0;
 }
 async function flushRuntimeLogPersistence() {
@@ -329,17 +371,17 @@ async function flushRuntimeLogPersistence() {
             if (runtimeLogPruneCounter >= 1000) {
                 runtimeLogPruneCounter = 0;
                 try {
-                    const currentReleaseFilter = { deploymentGroupId: runtimeLogDeploymentGroupId, deploymentStartedAt: runtimeLogDeploymentStartedAt, serviceScope: runtimeLogServiceScope, port: runtimeLogPort };
+                    const currentReleaseFilter = { createdAt: { $gte: runtimeLogDeploymentStartedAt } };
                     const cutoff = await runtimeLogPersistenceCollection.find(currentReleaseFilter, { projection: { _id: 1, createdAt: 1 } })
                         .sort({ createdAt: -1, _id: -1 }).skip(LOG_DASHBOARD_PERSIST_MAX_ENTRIES).limit(1).next();
                     if (cutoff?.createdAt) {
                         await runtimeLogPersistenceCollection.deleteMany({
-                            deploymentGroupId: runtimeLogDeploymentGroupId,
-                            serviceScope: runtimeLogServiceScope,
-                            port: runtimeLogPort,
-                            $or: [
-                                { createdAt: { $lt: cutoff.createdAt } },
-                                { createdAt: cutoff.createdAt, _id: { $lt: cutoff._id } }
+                            $and: [
+                                { createdAt: { $gte: runtimeLogDeploymentStartedAt } },
+                                { $or: [
+                                    { createdAt: { $lt: cutoff.createdAt } },
+                                    { createdAt: cutoff.createdAt, _id: { $lt: cutoff._id } }
+                                ] }
                             ]
                         });
                     }
@@ -775,7 +817,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r58';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r59';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -855,6 +897,8 @@ let tfbotActiveDomainCache = null;
 let tfbotActiveDomainCacheAt = 0;
 let tfbotCoordinatorSelectionCache = null;
 let tfbotCoordinatorSelectionAt = 0;
+let tfbotCoordinatorFallbackCursor = 0;
+let tfbotCoordinatorLastProbeHost = '';
 let tfbotCoordinatorActiveProbeAt = 0;
 let tfbotCoordinatorSelectionPromise = null;
 let tfbotCoordinatorPublicRefreshAt = 0;
@@ -4484,10 +4528,16 @@ async function persistTfbotCoordinatorSelection(selection, state = 'ready') {
     if (!TFBOT_CLUSTER_COORDINATOR_ONLY || !db) return false;
     const now = new Date();
     const host = normalizeTfbotHost(selection?.host || '');
+    const domainCount = Math.max(1, TFBOT_ROUTER_SERVING_DOMAINS.length);
+    const requestedCursor = Number(selection?.fallbackCursor);
+    const fallbackCursor = Number.isInteger(requestedCursor) ? ((requestedCursor % domainCount) + domainCount) % domainCount : tfbotCoordinatorFallbackCursor;
+    const lastProbeHost = normalizeTfbotHost(selection?.lastProbeHost || host || tfbotCoordinatorLastProbeHost);
+    tfbotCoordinatorFallbackCursor = fallbackCursor;
+    if (lastProbeHost) tfbotCoordinatorLastProbeHost = lastProbeHost;
     try {
         await db.collection('cluster_router').updateOne(
             { _id: TFBOT_ROUTER_STATE_ID },
-            { $set: { activeHost: host, activeUrl: host ? `https://${host}` : '', generation: String(selection?.generation || ''), releaseId: TFBOT_CODE_RELEASE_ID, state, checkedAt: now, updatedAt: now, coordinator: TFBOT_COORDINATOR_HOST } },
+            { $set: { activeHost: host, activeUrl: host ? `https://${host}` : '', generation: String(selection?.generation || ''), fallbackCursor, lastProbeHost: lastProbeHost || '', releaseId: TFBOT_CODE_RELEASE_ID, state, checkedAt: now, updatedAt: now, coordinator: TFBOT_COORDINATOR_HOST } },
             { upsert: true }
         );
         return true;
@@ -4504,15 +4554,33 @@ async function refreshTfbotActiveDomain(force = false) {
     if (!force && !tfbotCoordinatorSelectionCache && tfbotCoordinatorSelectionAt && nowMs - tfbotCoordinatorSelectionAt < TFBOT_ROUTER_COORDINATOR_CACHE_MS) return null;
     if (tfbotCoordinatorSelectionPromise) return tfbotCoordinatorSelectionPromise;
     tfbotCoordinatorSelectionPromise = (async () => {
-        let selectionPhase = 'priority-probe';
+        let selectionPhase = 'load-current-selection';
         try {
-            const checked = [];
-            const previousSelection = tfbotCoordinatorSelectionCache || tfbotActiveDomainCache || null;
+            let previousSelection = tfbotCoordinatorSelectionCache || tfbotActiveDomainCache || null;
+            let storedRouterState = null;
+            if (!previousSelection && db) {
+                storedRouterState = await db.collection('cluster_router').findOne({ _id: TFBOT_ROUTER_STATE_ID }).catch(() => null);
+                previousSelection = normalizeTfbotActiveDomainRecord(storedRouterState, 'mongodb-active-selection');
+                const storedFallbackCursor = Number(storedRouterState?.fallbackCursor);
+                if (Number.isInteger(storedFallbackCursor)) tfbotCoordinatorFallbackCursor = ((storedFallbackCursor % TFBOT_ROUTER_SERVING_DOMAINS.length) + TFBOT_ROUTER_SERVING_DOMAINS.length) % TFBOT_ROUTER_SERVING_DOMAINS.length;
+                tfbotCoordinatorLastProbeHost = normalizeTfbotHost(storedRouterState?.lastProbeHost || tfbotCoordinatorLastProbeHost);
+                if (previousSelection) {
+                    tfbotCoordinatorSelectionCache = previousSelection;
+                    tfbotActiveDomainCache = previousSelection;
+                }
+            }
             const previousHost = normalizeTfbotHost(previousSelection?.host || '');
             const previousIndex = TFBOT_ROUTER_SERVING_DOMAINS.findIndex(item => item.host === previousHost);
+            const fallbackIndex = previousIndex >= 0
+                ? (previousIndex + 1) % TFBOT_ROUTER_SERVING_DOMAINS.length
+                : ((tfbotCoordinatorFallbackCursor % TFBOT_ROUTER_SERVING_DOMAINS.length) + TFBOT_ROUTER_SERVING_DOMAINS.length) % TFBOT_ROUTER_SERVING_DOMAINS.length;
+            const probeOrder = previousIndex >= 0
+                ? [TFBOT_ROUTER_SERVING_DOMAINS[previousIndex], TFBOT_ROUTER_SERVING_DOMAINS[fallbackIndex]]
+                : [TFBOT_ROUTER_SERVING_DOMAINS[fallbackIndex]];
+            const checked = [];
             let selectedItem = null;
-            for (const domain of TFBOT_ROUTER_SERVING_DOMAINS) {
-                selectionPhase = `probe-priority-domain:${domain.host}`;
+            for (const domain of probeOrder) {
+                selectionPhase = `probe-active-or-fallback:${domain.host}`;
                 const domainHealth = await probeTfbotServingDomain(domain);
                 checked.push({ domain, health: domainHealth });
                 if (domainHealth?.ok === true && !domainHealth.suspended) {
@@ -4522,22 +4590,34 @@ async function refreshTfbotActiveDomain(force = false) {
             }
             if (!selectedItem) {
                 const checkedAt = new Date();
+                const failedFallbackIndex = fallbackIndex;
+                const nextFallbackCursor = (failedFallbackIndex + 1) % TFBOT_ROUTER_SERVING_DOMAINS.length;
+                const lastProbeHost = checked.length ? checked[checked.length - 1].domain.host : TFBOT_ROUTER_SERVING_DOMAINS[failedFallbackIndex].host;
+                tfbotCoordinatorFallbackCursor = nextFallbackCursor;
+                tfbotCoordinatorLastProbeHost = lastProbeHost;
                 tfbotCoordinatorSelectionCache = null;
                 tfbotActiveDomainCache = null;
                 tfbotCoordinatorSelectionAt = Date.now();
                 tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
-                await persistTfbotCoordinatorSelection({ host: '', generation: crypto.randomUUID() }, 'unavailable');
+                await persistTfbotCoordinatorSelection({ host: '', generation: crypto.randomUUID(), fallbackCursor: nextFallbackCursor, lastProbeHost }, 'unavailable');
                 console.error('[tfbot-router-no-serving-domain]', {
                     coordinator: TFBOT_COORDINATOR_HOST,
+                    previousActiveHost: previousHost || null,
                     checkedHosts: checked.map(item => item.domain.host),
+                    nextFallbackHost: TFBOT_ROUTER_SERVING_DOMAINS[nextFallbackCursor].host,
+                    fallbackCursor: nextFallbackCursor,
                     probeResults: checked.map(item => ({ host: item.domain.host, ok: item.health?.ok === true, status: item.health?.healthStatus || item.health?.rootStatus || null, healthStatus: item.health?.healthStatus || null, workerState: item.health?.workerState || (item.health?.suspended ? 'suspended' : 'no-response'), suspended: item.health?.suspended === true })),
                     checkedAt,
-                    action: 'no_redirect_target_is_selected_until_an_authenticated_worker_health_endpoint_responds'
+                    action: previousHost ? 'active_host_failed_then_one_fallback_checked_next_candidate_queued' : 'one_fallback_candidate_checked_next_candidate_queued'
                 });
                 return null;
             }
             const checkedAt = new Date();
             const selected = selectedItem.domain;
+            const selectedIndex = TFBOT_ROUTER_SERVING_DOMAINS.findIndex(item => item.host === selected.host);
+            const nextFallbackCursor = (selectedIndex + 1) % TFBOT_ROUTER_SERVING_DOMAINS.length;
+            tfbotCoordinatorFallbackCursor = nextFallbackCursor;
+            tfbotCoordinatorLastProbeHost = selected.host;
             const sameSelection = previousHost === selected.host && !!previousSelection?.generation;
             const generation = sameSelection ? String(previousSelection.generation) : crypto.randomUUID();
             const selectedProbeResult = selectedItem.health;
@@ -4548,28 +4628,19 @@ async function refreshTfbotActiveDomain(force = false) {
                 healthy: true,
                 workerActive: selectedProbeResult.workerActive === true,
                 workerState: String(selectedProbeResult.workerState || 'starting'),
-                source: 'tfbot7-strict-priority-health-probe',
+                source: 'tfbot7-active-host-health-with-fallback-on-failure',
                 selectedBy: TFBOT_COORDINATOR_HOST,
                 healthyHosts: [selected.host],
                 probeResults: checked.map(item => ({ host: item.domain.host, ok: item.health?.ok === true, healthStatus: item.health?.healthStatus || null, suspended: item.health?.suspended === true, workerState: item.health?.workerState || (item.health?.suspended ? 'suspended' : 'no-response'), checkedAt }))
             };
-            let previousControl = null;
-            if (previousIndex >= 0 && previousHost !== selected.host) {
-                const previousDomain = TFBOT_ROUTER_SERVING_DOMAINS[previousIndex];
-                tfbotCoordinatorSelectionCache = null;
-                tfbotActiveDomainCache = null;
-                tfbotCoordinatorSelectionAt = Date.now();
-                tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
-                await persistTfbotCoordinatorSelection(null, 'switching_after_priority_health_failure');
-                const stopped = await sendTfbotWorkerControl(previousDomain, { host: '', generation });
-                previousControl = { host: previousDomain.host, deactivated: !!stopped, state: stopped?.state || 'unavailable_after_health_failure' };
-            }
             tfbotCoordinatorSelectionCache = result;
             tfbotActiveDomainCache = result;
             tfbotCoordinatorSelectionAt = Date.now();
             tfbotActiveDomainCacheAt = Date.now();
             tfbotCoordinatorActiveProbeAt = tfbotCoordinatorSelectionAt;
             selectionPhase = 'persist-selected';
+            result.fallbackCursor = nextFallbackCursor;
+            result.lastProbeHost = selected.host;
             await persistTfbotCoordinatorSelection(result, 'selected');
             const alreadyActive = sameSelection && selectedProbeResult.workerActive === true && selectedProbeResult.activeHost === selected.host && selectedProbeResult.generation === generation;
             let control = { host: selected.host, unchanged: alreadyActive, state: selectedProbeResult.workerState || 'unknown' };
@@ -4584,12 +4655,14 @@ async function refreshTfbotActiveDomain(force = false) {
             }
             console.info('[tfbot-router-selection-updated]', {
                 activeHost: selected.host,
+                previousActiveHost: previousHost || null,
                 checkedHosts: checked.map(item => item.domain.host),
                 coordinator: TFBOT_COORDINATOR_HOST,
                 generation,
                 pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS,
-                selectionMode: 'strict-priority-authenticated-health-probe-tf-bot-then-tfbot2-then-tfbot3-and-later',
-                controls: [previousControl, control].filter(Boolean)
+                selectionMode: previousIndex >= 0 ? 'probe-current-active-host-first-then-one-fallback-only-if-active-fails' : 'probe-one-persisted-fallback-candidate-per-cycle-until-healthy',
+                nextFallbackHost: TFBOT_ROUTER_SERVING_DOMAINS[nextFallbackCursor].host,
+                controls: [control]
             });
             selectionPhase = 'complete';
             return result;
@@ -4616,7 +4689,9 @@ async function resolveActiveTfbotDomain() {
         return { ...local, source: 'local-default', generation: '' };
     }
     if (TFBOT_CLUSTER_COORDINATOR_ONLY) {
-        if (!tfbotCoordinatorSelectionCache || Date.now() - tfbotCoordinatorSelectionAt >= TFBOT_ROUTER_COORDINATOR_CACHE_MS) return refreshTfbotActiveDomain(true);
+        const cacheExpired = !tfbotCoordinatorSelectionAt || Date.now() - tfbotCoordinatorSelectionAt >= TFBOT_ROUTER_COORDINATOR_CACHE_MS;
+        if (!tfbotCoordinatorSelectionCache && !cacheExpired) return null;
+        if (cacheExpired) return refreshTfbotActiveDomain(true);
         return tfbotCoordinatorSelectionCache;
     }
     return tfbotActiveDomainCache;
@@ -4959,7 +5034,8 @@ app.get(TFBOT_ROUTER_RESOLVE_PATH, async (req, res) => {
         const refreshRequested = String(req.query?.refresh || '') === '1';
         const privateRefresh = isValidClusterToken(req);
         const publicRefreshAllowed = refreshRequested && Date.now() - tfbotCoordinatorPublicRefreshAt >= TFBOT_ROUTER_ACTIVE_PROBE_MS;
-        const force = (privateRefresh && refreshRequested) || publicRefreshAllowed || !tfbotCoordinatorSelectionCache;
+        const unavailableCacheExpired = !tfbotCoordinatorSelectionCache && (!tfbotCoordinatorSelectionAt || Date.now() - tfbotCoordinatorSelectionAt >= TFBOT_ROUTER_COORDINATOR_CACHE_MS);
+        const force = (privateRefresh && refreshRequested) || publicRefreshAllowed || unavailableCacheExpired;
         if (publicRefreshAllowed && !privateRefresh) tfbotCoordinatorPublicRefreshAt = Date.now();
         let selected = await refreshTfbotActiveDomain(force);
         if (!selected) return res.status(503).json({ ok: false, error: 'no_ready_domain_selection_available', retryAfterMs: TFBOT_WORKER_COORDINATOR_POLL_MS, pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS });
@@ -4995,8 +5071,9 @@ app.get(TFBOT_WORKER_POLL_PATH, async (req, res) => {
     if (!tfbotCoordinatorStorageReady) return res.status(503).json({ ok: false, error: 'tfbot_coordinator_initializing', retryAfterMs: 1200, releaseId: TFBOT_CODE_RELEASE_ID });
     try {
         let selected = tfbotCoordinatorSelectionCache;
-        if (!selected) selected = await refreshTfbotActiveDomain(true);
-        if (!selected) return res.status(503).json({ ok: false, error: 'tfbot_active_server_unavailable', retryAfterMs: TFBOT_WORKER_COORDINATOR_POLL_MS, releaseId: TFBOT_CODE_RELEASE_ID });
+        const unavailableCacheExpired = !selected && (!tfbotCoordinatorSelectionAt || Date.now() - tfbotCoordinatorSelectionAt >= TFBOT_ROUTER_COORDINATOR_CACHE_MS);
+        if (!selected && unavailableCacheExpired) selected = await refreshTfbotActiveDomain(true);
+        if (!selected) return res.status(503).json({ ok: false, error: 'tfbot_active_server_unavailable', retryAfterMs: TFBOT_WORKER_COORDINATOR_POLL_MS, releaseId: TFBOT_CODE_RELEASE_ID, nextFallbackProbeInMs: Math.max(0, TFBOT_ROUTER_COORDINATOR_CACHE_MS - (Date.now() - tfbotCoordinatorSelectionAt)) });
         res.setHeader('Cache-Control', 'no-store, max-age=0');
         return res.status(200).json({ ok: true, host: selected.host, url: selected.url, activeHost: selected.host, activeUrl: selected.url, generation: selected.generation, releaseId: TFBOT_CODE_RELEASE_ID, source: 'tfbot7-worker-poll', pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS });
     } catch (error) {
@@ -6018,7 +6095,7 @@ async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIM
     let databaseReadError = null;
     try {
         if (db) {
-            const filter = { deploymentGroupId: runtimeLogDeploymentGroupId, deploymentStartedAt: runtimeLogDeploymentStartedAt, serviceScope: runtimeLogServiceScope, serviceId: runtimeLogRenderServiceId, port: runtimeLogPort, createdAt: { $gte: runtimeLogDeploymentStartedAt } };
+            const filter = { createdAt: { $gte: runtimeLogDeploymentStartedAt } };
             if (incremental) filter.createdAt = { $gte: new Date(Math.max(runtimeLogDeploymentStartedAt.getTime(), since - 2000)) };
             const cursor = db.collection('server_runtime_logs')
                 .find(filter, { projection: { at: 1, level: 1, text: 1, createdAt: 1, clusterId: 1, deploymentId: 1, deploymentGroupId: 1, deploymentStartedAt: 1, serviceId: 1, serviceName: 1, serviceScope: 1, port: 1, instance: 1, renderInstanceId: 1 } })
@@ -6048,7 +6125,7 @@ async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIM
     }
     for (const item of runtimeLogBuffer) {
         const atMs = Date.parse(String(item.at || '')) || 0;
-        if (atMs >= runtimeLogDeploymentStartedAt.getTime() && item.deploymentGroupId === runtimeLogDeploymentGroupId && item.serviceScope === runtimeLogServiceScope && String(item.port || '') === runtimeLogPort && (!incremental || atMs >= Math.max(runtimeLogDeploymentStartedAt.getTime(), since - 2000))) byId.set(String(item.id), item);
+        if (atMs >= runtimeLogDeploymentStartedAt.getTime() && (!incremental || atMs >= Math.max(runtimeLogDeploymentStartedAt.getTime(), since - 2000))) byId.set(String(item.id), item);
     }
     let logs = Array.from(byId.values())
         .sort((a, b) => String(a.at).localeCompare(String(b.at)) || String(a.id).localeCompare(String(b.id)));
@@ -6107,7 +6184,7 @@ app.get(LOG_DASHBOARD_PATH, async (req, res) => {
         return res.status(200).json({ ok: true, count: snapshot.logs.length, logs: snapshot.logs, nextSince: snapshot.nextSince, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, serviceScope: runtimeLogServiceScope, port: runtimeLogPort, instanceId: runtimeLogInstanceId, serverTime: new Date().toISOString() });
     }
 
-    const initialLogs = runtimeLogBuffer.filter(item => (Date.parse(String(item.at || '')) || 0) >= runtimeLogDeploymentStartedAt.getTime() && item.deploymentGroupId === runtimeLogDeploymentGroupId && item.serviceScope === runtimeLogServiceScope && String(item.port || '') === runtimeLogPort).slice(-Math.min(30, LOG_DASHBOARD_PAGE_LIMIT));
+    const initialLogs = runtimeLogBuffer.filter(item => (Date.parse(String(item.at || '')) || 0) >= runtimeLogDeploymentStartedAt.getTime()).slice(-Math.min(30, LOG_DASHBOARD_PAGE_LIMIT));
     const firstPaintLogs = initialLogs.length ? initialLogs : [{
         id: `dashboard-loading:${runtimeLogInstanceId}`,
         at: new Date().toISOString(),
@@ -6162,10 +6239,6 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
 (() => {
  const endpoint = location.pathname;
      const deploymentStartedAtMs = ${runtimeLogDeploymentStartedAt.getTime()};
-     const expectedDeploymentGroupId = ${JSON.stringify(runtimeLogDeploymentGroupId)};
-     const expectedServiceScope = ${JSON.stringify(runtimeLogServiceScope)};
-     const expectedServiceId = ${JSON.stringify(runtimeLogRenderServiceId)};
-     const expectedPort = ${JSON.stringify(runtimeLogPort)};
  const logsNode = document.getElementById('logs');
  const jumpButton = document.getElementById('jump');
  const copyAllButton = document.getElementById('copy-all');
@@ -6225,7 +6298,7 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
  }
  function render(nextLogs){
    const oldIds=new Set(allLogs.map(item=>textOf(item.id)));
-   const incoming=(Array.isArray(nextLogs)?nextLogs:[]).filter(item=>!textOf(item.id).startsWith('dashboard-loading:')&&(Date.parse(textOf(item.at))||0)>=deploymentStartedAtMs&&item.deploymentGroupId===expectedDeploymentGroupId&&item.serviceScope===expectedServiceScope&&String(item.port||'')===expectedPort);
+   const incoming=(Array.isArray(nextLogs)?nextLogs:[]).filter(item=>!textOf(item.id).startsWith('dashboard-loading:')&&(Date.parse(textOf(item.at))||0)>=deploymentStartedAtMs);
    const merged=new Map(allLogs.map(item=>[textOf(item.id),item]));
    for(const item of incoming)merged.set(textOf(item.id),item);
    const next=Array.from(merged.values()).sort((a,b)=>textOf(a.at).localeCompare(textOf(b.at))||textOf(a.id).localeCompare(textOf(b.id))).slice(-clientBufferLimit);
@@ -6256,7 +6329,7 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
      if(!response.ok)throw new Error('HTTP '+response.status);
      const payload=await response.json();
      if(!payload||payload.ok!==true||!Array.isArray(payload.logs))throw new Error('invalid_log_response');
-     if(payload.deploymentGroupId!==expectedDeploymentGroupId||payload.serviceScope!==expectedServiceScope||String(payload.serviceId||'')!==expectedServiceId||String(payload.port||'')!==expectedPort)throw new Error('deployment_or_port_mismatch');
+     if((Date.parse(textOf(payload.deploymentStartedAt))||0)!==deploymentStartedAtMs)throw new Error('deployment_timestamp_mismatch');
      lastFetchError='';
      if(Number.isFinite(Number(payload.nextSince)))logCursor=Math.max(logCursor,Number(payload.nextSince));
      initialLoadDone=true;
@@ -8960,11 +9033,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const receivedOwnLid = getAuthenticatedLid(sock.user, activeMessageCredentials);
                 const receivedOwnAccountJids = [...new Set([sock.user?.id, receivedOwnPhoneNumber ? `${receivedOwnPhoneNumber}@s.whatsapp.net` : '', receivedOwnLid].filter(Boolean).map(String))];
                 const receivedChatAliases = [...new Set([receivedChat, m?.key?.remoteJidAlt].filter(Boolean).map(String))];
-                const receivedIsOwnerSelfChat = m?.key?.fromMe === true && !receivedIsGroup && !receivedIsChannel
-                    && receivedChatAliases.some(chatJid => receivedOwnAccountJids.some(accountJid => areEquivalentWhatsAppChatJids(sessionId, chatJid, accountJid)));
-                const receivedParsedCommand = receivedExplicitParsedCommand || (receivedIsOwnerSelfChat && String(receivedBody || '').trim()
-                    ? { command: 'ai', internalCommand: 'ai', args: clipLongText(String(receivedBody || '').trim(), AI_MAX_INPUT_CHARS), implicitOwnerSelfChat: true }
-                    : null);
+                const receivedParsedCommand = receivedExplicitParsedCommand;
                 if (receivedIsGroup && m?.key?.fromMe && m?.message) cacheRecentMessage(sessionId, m);
                 const recentOutgoingIdEcho = !!m?.key?.fromMe && isRecentOutgoingMessageId(sessionId, receivedId);
                 const outgoingTextEcho = !!m?.key?.fromMe && !receivedExplicitParsedCommand
@@ -9091,7 +9160,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         internalCommand: receivedParsedCommand.internalCommand,
                         argumentPreview: String(receivedParsedCommand.args || '').slice(0, 1000),
                         stage: 'before_deduplication_policy_and_execution',
-                        implicitOwnerSelfChatAI: receivedParsedCommand.implicitOwnerSelfChat === true,
+                        aiDispatchRequiresExplicitCommandPrefix: true,
                         action: 'recognized_not_yet_authorized_or_executed'
                     });
                 }
