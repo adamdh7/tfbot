@@ -41,7 +41,7 @@ const runtimeLogServiceScope = [runtimeLogRenderExternalHost ? `host:${runtimeLo
 const runtimeLogServiceScopeHash = shortLogHash(runtimeLogServiceScope);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}:${shortLogHash(runtimeLogInstanceId)}`).slice(0, 240);
 let runtimeLogDeploymentGroupId = 'cluster-pending';
-const TFBOT_CLUSTER_CODE_REVISION = 'r65-same-account-session-retirement-settings-migration-per-chat-queue-isolation';
+const TFBOT_CLUSTER_CODE_REVISION = 'r66-baileys-outgoing-retry-preflight-before-relay';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 runtimeLogDeploymentGroupId = `${TFBOT_CLUSTER_CODE_REVISION}:cluster-pending`;
 const runtimeLogClusterId = `${runtimeLogDeploymentId}:${shortLogHash(runtimeLogInstanceId)}`.slice(0, 240);
@@ -765,27 +765,41 @@ function applyBaileysOutgoingRetryPreflightPatch() {
             path.join(directory, 'Socket', 'messages-send.js'),
             path.join(directory, 'socket', 'messages-send.js'),
             path.join(directory, 'Socket', 'messages-send.cjs'),
-            path.join(directory, 'Socket', 'messages-send.ts')
+            path.join(directory, 'socket', 'messages-send.cjs'),
+            path.join(directory, 'Socket', 'messages-send.ts'),
+            path.join(directory, 'socket', 'messages-send.ts')
         ]))];
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
         if (!filePath) return { applied: false, reason: 'messages_send_module_not_found' };
         const source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath) };
-        const anchorPattern = /(?=\n[ \t]*const\s+isEventMsg\s*=\s*['"]event['"]\s+in\s+content\s*&&\s*!!content\.event\s*;?)/;
-        const anchor = source.search(anchorPattern);
-        if (anchor < 0) return { applied: false, reason: 'generated_message_before_relay_anchor_not_found', file: path.basename(filePath) };
-        const relayAfterAnchor = source.slice(anchor).search(/await\s+relayMessage\s*\(\s*jid\s*,\s*fullMsg\.message/);
-        if (relayAfterAnchor < 0) return { applied: false, reason: 'relay_after_generated_message_not_found', file: path.basename(filePath) };
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), sourceFormat: 'sendMessage-before-relay' };
+
+        const sendMessageMatch = /\bsendMessage\s*:\s*async\s*\(/.exec(source) || /\basync\s+sendMessage\s*\(/.exec(source);
+        if (!sendMessageMatch) return { applied: false, reason: 'send_message_method_anchor_not_found', file: path.basename(filePath) };
+        const searchStart = sendMessageMatch.index;
+        const fullMessageMatch = /\bconst\s+fullMsg\s*=\s*await\b/.exec(source.slice(searchStart));
+        if (!fullMessageMatch) return { applied: false, reason: 'generated_full_message_declaration_not_found', file: path.basename(filePath) };
+        const fullMessageStart = searchStart + fullMessageMatch.index;
+        const generatorStart = source.indexOf('generateWAMessage', fullMessageStart);
+        if (generatorStart < 0 || generatorStart - fullMessageStart > 1800) return { applied: false, reason: 'message_generator_anchor_not_found', file: path.basename(filePath) };
+
+        const relayPattern = /await\s+relayMessage\s*\(\s*jid\s*,\s*fullMsg\.message\s*,/g;
+        relayPattern.lastIndex = generatorStart;
+        const relayMatch = relayPattern.exec(source);
+        if (!relayMatch || relayMatch.index - fullMessageStart > 16000) return { applied: false, reason: 'relay_after_generated_full_message_not_found', file: path.basename(filePath) };
+
         const insertion = `\n\t\t\tif (typeof config.persistOutgoingMessage === 'function') {\n\t\t\t\tawait config.persistOutgoingMessage(jid, fullMsg);\n\t\t\t}\n`;
-        const patchedSource = source.slice(0, anchor) + insertion + source.slice(anchor);
-        if (!patchedSource.includes(marker) || patchedSource.indexOf(marker) > patchedSource.indexOf('await relayMessage(jid, fullMsg.message')) return { applied: false, reason: 'preflight_patch_verification_failed', file: path.basename(filePath) };
+        const patchedSource = source.slice(0, relayMatch.index) + insertion + source.slice(relayMatch.index);
+        const persistedIndex = patchedSource.indexOf(marker, fullMessageStart);
+        const relayIndex = patchedSource.indexOf(relayMatch[0], relayMatch.index + insertion.length);
+        if (persistedIndex < fullMessageStart || relayIndex < 0 || persistedIndex >= relayIndex) return { applied: false, reason: 'preflight_patch_verification_failed', file: path.basename(filePath) };
+
         fs.writeFileSync(filePath, patchedSource, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath) };
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), sourceFormat: 'sendMessage-before-relay', persistedBeforeRelay: true };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
 }
-
 const baileysLidPnDecryptPatchStatus = applyBaileysLidPnDecryptRetryPatch();
 const baileysSignalTransactionPatchStatus = applyBaileysSignalTransactionPatch();
 const baileysOutgoingRetryPreflightPatchStatus = applyBaileysOutgoingRetryPreflightPatch();
@@ -1006,7 +1020,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r65';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r66';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
