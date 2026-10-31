@@ -32,7 +32,7 @@ const runtimeLogRenderServiceName = String(process.env.RENDER_SERVICE_NAME || pr
 const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
 const runtimeLogRenderCommit = String(process.env.RENDER_GIT_COMMIT || '').trim().slice(0, 80);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}`).slice(0, 240);
-const TFBOT_CLUSTER_CODE_REVISION = 'r38-signal-auth-pairing-del3-fix';
+const TFBOT_CLUSTER_CODE_REVISION = 'r39-signal-retry-current-deploy-logs';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-30')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
 const runtimeLogClusterId = TFBOT_CODE_RELEASE_ID;
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
@@ -134,10 +134,12 @@ async function flushRuntimeLogPersistence() {
             if (runtimeLogPruneCounter >= 1000) {
                 runtimeLogPruneCounter = 0;
                 try {
-                    const cutoff = await runtimeLogPersistenceCollection.find({}, { projection: { _id: 1, createdAt: 1 } })
+                    const currentReleaseFilter = { clusterId: runtimeLogClusterId };
+                    const cutoff = await runtimeLogPersistenceCollection.find(currentReleaseFilter, { projection: { _id: 1, createdAt: 1 } })
                         .sort({ createdAt: -1, _id: -1 }).skip(LOG_DASHBOARD_PERSIST_MAX_ENTRIES).limit(1).next();
                     if (cutoff?.createdAt) {
                         await runtimeLogPersistenceCollection.deleteMany({
+                            clusterId: runtimeLogClusterId,
                             $or: [
                                 { createdAt: { $lt: cutoff.createdAt } },
                                 { createdAt: cutoff.createdAt, _id: { $lt: cutoff._id } }
@@ -239,8 +241,9 @@ const SIGNAL_RECOVERY_COOLDOWN_MS = Math.max(60000, Math.min(3600000, Number(pro
 function isSignalDecryptionFailure(args) {
     return /Failed to decrypt message|failed to decrypt message|Session error:.*Bad MAC|Bad MAC|MessageCounterError|Key used already or never filled|SessionError:\s*No sessions|No session found to decrypt message|No sessions|Chain closed|Decrypted message with closed session|calculateMAC|Cannot read properties of null \(reading ['\"]constructor['\"]\)/i.test(getSignalLogText(args));
 }
-function logSignalDecryptionFailure(args) {
+function logSignalDecryptionFailure(args, context = null) {
     const raw = getSignalLogText(args);
+    const contextDetails = context && typeof context === 'object' ? getSignalRecoveryPeerDetails(context) : null;
     const now = Date.now();
     const kind = /MessageCounterError|Key used already or never filled/i.test(raw) ? 'message_counter_error'
         : /Chain closed|Decrypted message with closed session/i.test(raw) ? 'signal_chain_closed'
@@ -249,10 +252,10 @@ function logSignalDecryptionFailure(args) {
         : /Bad MAC/i.test(raw) ? 'bad_mac'
         : /Failed to decrypt message with any known session/i.test(raw) ? 'decrypt_failed'
         : 'signal_decryption_error';
-    const peerMatch = raw.match(/\b\d{5,25}(?::\d+)?@(?:s\.whatsapp\.net|lid|g\.us)\b/i);
+    const peerMatch = raw.match(/\b[A-Za-z0-9._-]{1,100}(?::\d{1,4})?@(?:s\.whatsapp\.net|lid|g\.us)\b/i);
     const messageMatch = raw.match(/(?:msgId|messageId|message id|["']?id["']?)\s*[:=]\s*["']?([A-F0-9]{8,40})\b/i);
-    const peerJid = peerMatch ? peerMatch[0] : null;
-    const messageId = messageMatch ? messageMatch[1] : null;
+    const peerJid = peerMatch ? peerMatch[0] : contextDetails?.peerJid || null;
+    const messageId = messageMatch ? messageMatch[1] : contextDetails?.messageId || null;
     const fromMeMatch = raw.match(/["']?fromMe["']?\s*[:=]\s*(true|false)/i);
     const fromMe = fromMeMatch ? fromMeMatch[1].toLowerCase() === 'true' : null;
     const diagnosticKey = `${kind}:${peerJid || 'unknown'}:${messageId || 'no-message-id'}`;
@@ -339,18 +342,63 @@ const { MongoClient } = require('mongodb');
 const { Writable } = require('stream');
 const zlib = require('zlib');
 
+function collectSignalJidHints(value, field = '', depth = 0, seen = new WeakSet(), output = []) {
+    if (depth > 7 || value === null || value === undefined) return output;
+    if (typeof value === 'string') {
+        const expression = /[A-Za-z0-9._-]{1,100}(?::[0-9]{1,4})?@(?:s\.whatsapp\.net|lid|g\.us)/gi;
+        for (const match of value.matchAll(expression)) output.push({ jid: String(match[0]).trim(), field: String(field || '').toLowerCase() });
+        return output;
+    }
+    if (typeof value !== 'object' || Buffer.isBuffer(value) || value instanceof Uint8Array || seen.has(value)) return output;
+    seen.add(value);
+    if (Array.isArray(value)) {
+        for (const item of value.slice(0, 40)) collectSignalJidHints(item, field, depth + 1, seen, output);
+        return output;
+    }
+    for (const [key, child] of Object.entries(value).slice(0, 100)) {
+        if (/^(?:text|body|caption|messageText|messageBody|stack|binary|content)$/i.test(key)) continue;
+        collectSignalJidHints(child, key, depth + 1, seen, output);
+    }
+    return output;
+}
+
 function getSignalRecoveryPeerDetails(parsed) {
     const key = parsed?.key && typeof parsed.key === 'object' ? parsed.key : {};
-    const remoteJid = String(key.remoteJid || key.remoteJidAlt || parsed?.fromJid || parsed?.remoteJid || '').trim();
+    const hints = collectSignalJidHints(parsed);
+    const directRemote = [key.remoteJid, key.remoteJidAlt, parsed?.remoteJid, parsed?.chatJid, parsed?.groupJid, parsed?.fromJid, parsed?.msgAttrs?.from, parsed?.node?.attrs?.from]
+        .map(value => String(value || '').trim()).find(value => /@(?:s\.whatsapp\.net|lid|g\.us)$/i.test(value)) || '';
+    const remoteJid = directRemote || hints.find(item => /@g\.us$/i.test(item.jid))?.jid || hints.find(item => /(?:remote|chat|group|from)/i.test(item.field))?.jid || '';
     const isGroup = /@g\.us$/i.test(remoteJid);
-    const participantCandidates = [key.participant, key.participantAlt, key.participantPn, key.senderPn].map(value => String(value || '').trim()).filter(Boolean);
-    const privateCandidates = [key.remoteJidAlt, key.senderPn, key.participantPn, remoteJid].map(value => String(value || '').trim()).filter(Boolean);
+    const participantCandidates = [
+        key.participant,
+        key.participantAlt,
+        key.participantPn,
+        key.senderPn,
+        parsed?.participant,
+        parsed?.participantJid,
+        parsed?.senderJid,
+        parsed?.authorJid,
+        parsed?.peerJid,
+        parsed?.msgAttrs?.participant,
+        parsed?.node?.attrs?.participant
+    ].map(value => String(value || '').trim()).filter(value => /@(?:s\.whatsapp\.net|lid)$/i.test(value));
+    for (const item of hints) {
+        if (!/@(?:s\.whatsapp\.net|lid)$/i.test(item.jid)) continue;
+        if (/participant|sender|author|peer|member/i.test(item.field)) participantCandidates.push(item.jid);
+    }
+    const privateCandidates = [key.remoteJidAlt, key.senderPn, key.participantPn, parsed?.peerJid, parsed?.fromJid, parsed?.remoteJid, remoteJid]
+        .map(value => String(value || '').trim()).filter(value => /@(?:s\.whatsapp\.net|lid)$/i.test(value));
+    for (const item of hints) {
+        if (/@(?:s\.whatsapp\.net|lid)$/i.test(item.jid) && !/@g\.us$/i.test(item.jid)) privateCandidates.push(item.jid);
+    }
+    const aliases = [...new Set((isGroup ? participantCandidates : privateCandidates).filter(Boolean))];
+    const peerJid = isGroup ? (aliases[0] || '') : (aliases.find(value => /@(?:s\.whatsapp\.net|lid)$/i.test(value)) || '');
     return {
         remoteJid,
         isGroup,
-        peerJid: isGroup ? (participantCandidates[0] || '') : (privateCandidates.find(value => /@(?:s\.whatsapp\.net|lid)$/i.test(value)) || ''),
-        aliases: [...new Set((isGroup ? participantCandidates : privateCandidates).filter(value => /@(?:s\.whatsapp\.net|lid)$/i.test(value)))],
-        messageId: String(key.id || parsed?.msgId || parsed?.messageId || '')
+        peerJid,
+        aliases,
+        messageId: String(key.id || parsed?.msgId || parsed?.messageId || parsed?.msgAttrs?.id || parsed?.node?.attrs?.id || '')
     };
 }
 
@@ -390,10 +438,16 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
     previous.count++;
     signalRecoveryCounters.set(peerKey, previous);
     while (signalRecoveryCounters.size > 2000) signalRecoveryCounters.delete(signalRecoveryCounters.keys().next().value);
-    if (previous.count < SIGNAL_RECOVERY_THRESHOLD) return;
+    const failureText = getSignalLogText([parsed?.msg || parsed?.message || '', parsed]);
+    const requiredAttempts = /SessionError:\s*No sessions|No sessions|No session found to decrypt message/i.test(failureText) ? 1 : SIGNAL_RECOVERY_THRESHOLD;
+    if (previous.count < requiredAttempts) {
+        console.warn('[signal-peer-recovery-observed]', { sessionId, peer: details.peerJid, groupJid: details.isGroup ? details.remoteJid : null, attempts: previous.count, requiredAttempts, action: 'wait_for_repeat_failure_without_clearing_account_auth' });
+        return;
+    }
     const cooldownUntil = Number(signalRecoveryCooldowns.get(peerKey) || 0);
     if (cooldownUntil > now || signalRecoveryTimers.has(peerKey)) return;
     signalRecoveryCooldowns.set(peerKey, now + SIGNAL_RECOVERY_COOLDOWN_MS);
+    console.warn('[signal-peer-recovery-queued]', { sessionId, peer: details.peerJid, groupJid: details.isGroup ? details.remoteJid : null, messageId: details.messageId || null, attempts: previous.count, delayMs: 250, action: 'refresh_only_affected_peer_session' });
     const timer = setTimeout(async () => {
         signalRecoveryTimers.delete(peerKey);
         const active = activeSessions.get(sessionId);
@@ -441,7 +495,9 @@ function createDashboardPinoLogger(options = {}) {
                     try { parsed = JSON.parse(line); } catch (error) { parsed = { msg: line }; }
                     const diagnosticArgs = [parsed?.msg || parsed?.message || '', parsed];
                     if (isSignalDecryptionFailure(diagnosticArgs)) {
-                        logSignalDecryptionFailure(diagnosticArgs);
+                        const recoverySessionId = String(parsed?.sessionId || options?.base?.sessionId || '').trim();
+                        if (recoverySessionId) scheduleSignalRecoveryFromLog(recoverySessionId, parsed);
+                        logSignalDecryptionFailure(diagnosticArgs, parsed);
                         continue;
                     }
                     if (isSensitiveSignalLog(diagnosticArgs)) continue;
@@ -458,7 +514,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-30-r38';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-30-r39';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1030,7 +1086,12 @@ async function flushAuthWritesForSession(sessionId) {
     for (let attempt = 0; attempt < 10; attempt++) {
         const pending = authWriteQueues.get(key);
         if (!pending) return;
-        await promiseWithTimeout(pending, 20000, 'Signal auth-store flush');
+        try {
+            await promiseWithTimeout(pending, 20000, 'Signal auth-store flush');
+        } catch (error) {
+            if (authWriteQueues.get(key) === pending) authWriteQueues.delete(key);
+            throw error;
+        }
         if (authWriteQueues.get(key) === pending) {
             authWriteQueues.delete(key);
             return;
@@ -1653,6 +1714,9 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             destinationType: destinationJid.endsWith('@g.us') ? 'group' : destinationJid.endsWith('@newsletter') ? 'channel' : destinationJid.endsWith('@s.whatsapp.net') ? 'private_pn' : destinationJid.endsWith('@lid') ? 'private_lid' : 'other'
         });
         const sendTo = async targetJid => {
+            if (sessionId && /@g\.us$/i.test(String(targetJid || '').trim())) {
+                await resetGroupSenderKeyMemoryBeforeSend(sessionId, targetJid);
+            }
             const echoToken = rememberOutgoingTextEcho(sessionId, targetJid, outgoingContent);
             try {
                 return await sock.sendMessage(targetJid, outgoingContent, options);
@@ -2280,6 +2344,15 @@ function fixBuffers(obj) {
             const length = Number.isInteger(obj.position) && obj.position >= 0 ? Math.min(obj.position, binaryValue.length) : binaryValue.length;
             return Buffer.from(binaryValue.subarray ? binaryValue.subarray(0, length) : binaryValue.slice(0, length));
         }
+        if (Array.isArray(binaryValue) && binaryValue.every(value => Number.isInteger(value) && value >= 0 && value <= 255)) return Buffer.from(binaryValue);
+        if (typeof binaryValue === 'string') {
+            const encoded = binaryValue.trim().replace(/-/g, '+').replace(/_/g, '/');
+            if (encoded && /^[A-Za-z0-9+/]*={0,2}$/.test(encoded) && encoded.length % 4 !== 1) {
+                const normalized = encoded + '='.repeat((4 - encoded.length % 4) % 4);
+                const decoded = Buffer.from(normalized, 'base64');
+                if (decoded.length && decoded.toString('base64').replace(/=+$/, '') === normalized.replace(/=+$/, '')) return decoded;
+            }
+        }
     }
     if (Buffer.isBuffer(obj)) return Buffer.from(obj);
     if (obj instanceof Uint8Array) return Buffer.from(obj);
@@ -2849,8 +2922,7 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
             await assertSessionRuntimeOwnership(sessionId, { allowAccountBootstrap: !phone && !lid, skipLiveAccountIdentityCheck: true });
             return operation();
         });
-        const settled = run.catch(() => {});
-        authWriteQueues.set(sessionId, settled);
+        authWriteQueues.set(sessionId, run);
         return run;
     };
     const flushAuthWrites = () => flushAuthWritesForSession(sessionId);
@@ -10240,7 +10312,7 @@ async function main() {
         lockRenewMs: SESSION_RUNTIME_LOCK_RENEW_MS,
         authWritesFencedByRuntimeLock: true,
         retryStoreExactSessionIdFallback: true,
-        targetedSignalPeerRecovery: false,
+        targetedSignalPeerRecovery: true,
         selfChatPhonePreferred: false,
         lidPhoneMappingFreshMs: LID_PHONE_MAPPING_FRESH_MS,
         sessionScopedLidMappings: true,
