@@ -33,10 +33,10 @@ const runtimeLogRenderServiceName = String(process.env.RENDER_SERVICE_NAME || pr
 const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
 const runtimeLogRenderCommit = String(process.env.RENDER_GIT_COMMIT || '').trim().slice(0, 80);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}:${shortLogHash(runtimeLogInstanceId)}`).slice(0, 240);
-const TFBOT_CLUSTER_CODE_REVISION = 'r49-private-owner-identity-and-deploy-log-cleanup';
+const TFBOT_CLUSTER_CODE_REVISION = 'r50-lid-pn-decrypt-retry-and-ai-chat-dispatch';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
 const runtimeLogClusterId = `${runtimeLogDeploymentId}:${shortLogHash(runtimeLogInstanceId)}`.slice(0, 240);
-const runtimeLogDeploymentGroupId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderCommit || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`).slice(0, 240);
+const runtimeLogDeploymentGroupId = String(`${runtimeLogRenderCommit || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`).slice(0, 240);
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
 const runtimeLogSecrets = Object.entries(process.env)
     .filter(([key, value]) => /TOKEN|SECRET|PASSWORD|PASSWD|API.?KEY|MONGO_URI|URI$|CF_ACCOUNTS|TAVILY|OWNER_?NUMBER|TFBOT_OWNER/i.test(key) && String(value || '').length >= 6)
@@ -49,6 +49,18 @@ function shortLogHash(value) {
 
 function normalizeTfbotReleaseId(value) {
     return String(value || '').normalize('NFKC').replace(/[\p{Cc}\p{Cf}]/gu, '').replace(/\s+/gu, ' ').trim();
+}
+
+function getTfbotReleaseCompatibilityKey(value) {
+    const normalized = normalizeTfbotReleaseId(value);
+    const match = normalized.match(/:([^:]+):(r\d+[-a-z0-9_]+)$/i);
+    return match ? `${match[1]}:${match[2].toLowerCase()}` : normalized;
+}
+
+function areTfbotReleasesCompatible(first, second) {
+    const firstKey = getTfbotReleaseCompatibilityKey(first);
+    const secondKey = getTfbotReleaseCompatibilityKey(second);
+    return !!firstKey && firstKey === secondKey;
 }
 
 function sanitizeRuntimeLogString(value) {
@@ -446,6 +458,56 @@ const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 const EventEmitter = require('events');
+
+function applyBaileysLidPnDecryptRetryPatch() {
+    const marker = 'primary identity failed to decrypt, retrying with stanza-provided PN/LID pairing';
+    try {
+        const entryPath = require.resolve('@whiskeysockets/baileys');
+        const entryDirectory = path.dirname(entryPath);
+        const searchDirectories = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
+        const candidates = [...new Set(searchDirectories.flatMap(directory => [
+            path.join(directory, 'Utils', 'decode-wa-message.js'),
+            path.join(directory, 'utils', 'decode-wa-message.js'),
+            path.join(directory, 'Utils', 'decode-wa-message.cjs'),
+            path.join(directory, 'Utils', 'decode-wa-message.ts')
+        ]))];
+        const filePath = candidates.find(candidate => fs.existsSync(candidate));
+        if (!filePath) return { applied: false, reason: 'decrypt_module_not_found' };
+        const source = fs.readFileSync(filePath, 'utf8');
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath) };
+        const casePattern = /case\s+(['\"])pkmsg\1\s*:\s*case\s+(['\"])msg\2\s*:/;
+        const caseStart = source.search(casePattern);
+        if (caseStart < 0) return { applied: false, reason: 'decrypt_case_not_found', file: path.basename(filePath) };
+        const caseBlock = source.slice(caseStart);
+        if (!/const\s+user\s*=/.test(caseBlock.slice(0, 1000))) return { applied: false, reason: 'decrypt_user_selection_not_found', file: path.basename(filePath) };
+        const decryptCallPattern = /msgBuffer\s*=\s*await\s+repository\.decryptMessage\(\s*\{\s*jid:\s*user,\s*type:\s*e2eType,\s*ciphertext:\s*content\s*\}\s*\)\s*;?/;
+        if (!decryptCallPattern.test(caseBlock.slice(0, 2500))) return { applied: false, reason: 'decrypt_call_pattern_not_found', file: path.basename(filePath) };
+        const replacement = `try {
+    msgBuffer = await repository.decryptMessage({ jid: user, type: e2eType, ciphertext: content });
+} catch (decryptError) {
+    const userIsLid = /@(?:hosted\.)?lid$/i.test(String(user));
+    const altUser = String(userIsLid ? (stanza.attrs.participant_pn || stanza.attrs.sender_pn || '') : (stanza.attrs.participant_lid || stanza.attrs.sender_lid || '')).trim();
+    if (!altUser || altUser === user) throw decryptError;
+    logger.debug({ key: fullMessage.key, primary: user, retryWith: altUser }, '${marker}');
+    try {
+        msgBuffer = await repository.decryptMessage({ jid: altUser, type: e2eType, ciphertext: content });
+    } catch {
+        throw decryptError;
+    }
+}`;
+        const patchedCaseBlock = caseBlock.replace(decryptCallPattern, replacement);
+        const patchedSource = source.slice(0, caseStart) + patchedCaseBlock;
+        if (!patchedSource.includes(marker)) return { applied: false, reason: 'patch_verification_failed', file: path.basename(filePath) };
+        fs.writeFileSync(filePath, patchedSource, 'utf8');
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath) };
+    } catch (error) {
+        return { applied: false, reason: String(error?.message || error).slice(0, 180) };
+    }
+}
+
+const baileysLidPnDecryptPatchStatus = applyBaileysLidPnDecryptRetryPatch();
+console.info('[baileys-lid-pn-decrypt-retry-patch]', { ...baileysLidPnDecryptPatchStatus, action: baileysLidPnDecryptPatchStatus.applied ? 'retry_with_whatsapp_paired_lid_or_phone_identity' : 'leave_installed_baileys_source_unchanged' });
+
 const {
     default: makeWASocket,
     fetchLatestBaileysVersion,
@@ -571,7 +633,12 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
     signalRecoveryCounters.set(peerKey, previous);
     while (signalRecoveryCounters.size > 2000) signalRecoveryCounters.delete(signalRecoveryCounters.keys().next().value);
     const failureText = getSignalLogText([parsed?.msg || parsed?.message || '', parsed]);
-    const requiredAttempts = /SessionError:\s*No sessions|No sessions|No session found to decrypt message/i.test(failureText) ? 1 : SIGNAL_RECOVERY_THRESHOLD;
+    const missingSessionFailure = /SessionError:\s*No sessions|No sessions|No session found to decrypt message/i.test(failureText);
+    if (!details.isGroup && !missingSessionFailure) {
+        console.warn('[signal-peer-session-preserved]', { sessionId, peer: details.peerJid, messageId: details.messageId || null, attempts: previous.count, action: 'preserve_existing_lid_and_phone_signal_sessions_after_bad_mac_or_counter_error', reason: 'decrypt_failure_does_not_prove_session_corruption' });
+        return;
+    }
+    const requiredAttempts = missingSessionFailure ? 1 : SIGNAL_RECOVERY_THRESHOLD;
     if (previous.count < requiredAttempts) {
         console.warn('[signal-peer-recovery-observed]', { sessionId, peer: details.peerJid, groupJid: details.isGroup ? details.remoteJid : null, attempts: previous.count, requiredAttempts, action: 'wait_for_repeat_failure_without_clearing_account_auth' });
         return;
@@ -658,7 +725,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r49';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r50';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -4296,7 +4363,7 @@ function isPreviousDeploymentOwnerOnCurrentHost(owner) {
     const ownerHost = normalizeTfbotHost(owner.ownerInstanceUrl || '');
     if (!ownerHost || ownerHost !== TFBOT_CLUSTER_INSTANCE_HOST) return false;
     const ownerRelease = String(owner.ownerDeploymentId || '').trim();
-    return !ownerRelease || ownerRelease !== TFBOT_CODE_RELEASE_ID;
+    return !ownerRelease || !areTfbotReleasesCompatible(ownerRelease, TFBOT_CODE_RELEASE_ID);
 }
 
 function getClusterSessionOwnerFields() {
@@ -4687,7 +4754,7 @@ async function probeClusterInstance(instance) {
             return null;
         }
         const payload = await response.json().catch(() => null);
-        if (!payload || payload.ok !== true || payload.workerActive !== true || payload.service !== 'tfbot-cluster' || payload.database !== TFBOT_DATABASE_NAME || String(payload.instanceId || '') !== instanceId || String(payload.releaseId || '') !== TFBOT_CODE_RELEASE_ID) {
+        if (!payload || payload.ok !== true || payload.workerActive !== true || payload.service !== 'tfbot-cluster' || payload.database !== TFBOT_DATABASE_NAME || String(payload.instanceId || '') !== instanceId || !areTfbotReleasesCompatible(payload.releaseId, TFBOT_CODE_RELEASE_ID)) {
             clusterHealthCache.set(cacheKey, { value: null, expiresAt: Date.now() + 3000 });
             return null;
         }
@@ -4717,7 +4784,7 @@ async function getHealthyClusterCandidates(excludedIds = []) {
     const candidates = [];
     const eligibleRows = rows.filter(row => {
         const id = String(row._id || '');
-        return id && row.role !== 'coordinator' && normalizeTfbotHost(row.host || '') !== TFBOT_COORDINATOR_HOST && !excluded.has(id) && row.url && (!row.releaseId || row.releaseId === TFBOT_CODE_RELEASE_ID);
+        return id && row.role !== 'coordinator' && normalizeTfbotHost(row.host || '') !== TFBOT_COORDINATOR_HOST && !excluded.has(id) && row.url && (!row.releaseId || areTfbotReleasesCompatible(row.releaseId, TFBOT_CODE_RELEASE_ID));
     });
     const desiredHealthyCount = Math.max(1, Math.min(TFBOT_CLUSTER_HEALTH_PROBE_LIMIT, eligibleRows.length));
     for (let offset = 0; offset < eligibleRows.length && candidates.length < desiredHealthyCount; offset += TFBOT_CLUSTER_HEALTH_PROBE_LIMIT) {
@@ -5237,8 +5304,10 @@ async function pollTfbotCoordinatorSelection() {
             if (!response.ok || !payload || payload.ok !== true) return false;
             const coordinatorReleaseId = normalizeTfbotReleaseId(payload.releaseId);
             const workerReleaseId = normalizeTfbotReleaseId(TFBOT_CODE_RELEASE_ID);
-            if (coordinatorReleaseId && workerReleaseId && coordinatorReleaseId !== workerReleaseId) {
-                console.warn('[tfbot-worker-coordinator-release-mismatch]', { host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorReleaseId, workerReleaseId, coordinatorReleaseHash: shortLogHash(coordinatorReleaseId), workerReleaseHash: shortLogHash(workerReleaseId), coordinatorReleaseLength: coordinatorReleaseId.length, workerReleaseLength: workerReleaseId.length, action: 'honor_explicit_active_host_and_generation_without_forcing_shutdown' });
+            const coordinatorCompatibilityKey = getTfbotReleaseCompatibilityKey(coordinatorReleaseId);
+            const workerCompatibilityKey = getTfbotReleaseCompatibilityKey(workerReleaseId);
+            if (coordinatorReleaseId && workerReleaseId && coordinatorCompatibilityKey !== workerCompatibilityKey) {
+                console.warn('[tfbot-worker-coordinator-release-mismatch]', { host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorCodeRelease: coordinatorCompatibilityKey, workerCodeRelease: workerCompatibilityKey, coordinatorReleaseHash: shortLogHash(coordinatorCompatibilityKey), workerReleaseHash: shortLogHash(workerCompatibilityKey), action: 'honor_explicit_active_host_and_generation_without_forcing_shutdown' });
             }
             const selectedHost = normalizeTfbotHost(payload.activeHost || payload.host || '');
             const selectedDomain = TFBOT_ROUTER_DOMAIN_BY_HOST.get(selectedHost);
@@ -7535,6 +7604,14 @@ function parseIncomingCommand(body, language, context = {}) {
     return { command, internalCommand, args: parsedArgs };
 }
 
+function resolveIncomingMessageCommand(body, language, context = {}) {
+    const parsed = parseIncomingCommand(body, language, context);
+    if (parsed) return parsed;
+    const plainText = clipLongText(String(body || '').trim(), AI_MAX_INPUT_CHARS);
+    if (!plainText) return null;
+    return { command: 'ai', internalCommand: 'ai', args: plainText, automatic: true };
+}
+
 async function sendFormatted(sock, from, type, text, pushName, isAI = false, hostName = "Adam D'H7", sendOptions = {}) {
     return sendImageCaptioned(sock, from, adamLogoBuffer, type, text, pushName || 'Inconnu', sendOptions);
 }
@@ -9701,10 +9778,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             }
                         }
 
-                        const parsedCommand = receivedParsedCommand || parseIncomingCommand(body, messageLang, getCommandParsingContext(m?.message));
+                        const parsedCommand = receivedParsedCommand || resolveIncomingMessageCommand(body, messageLang, getCommandParsingContext(m?.message));
                         if (!parsedCommand) {
-                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, senderAliases: senderJids, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', messageType, messageLang, messageClassification: 'text_not_recognized_as_command', detectedCommand: null, isPublicMode, botMode, bodyLength: body.length, bodyPreview: body.slice(0, 240), action: 'message_logged_no_command_executed', reason: 'not_a_recognized_command', expected: 'Use an explicit recognized command; plain text is not sent to AI.' });
+                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, senderAliases: senderJids, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', messageType, messageLang, messageClassification: 'no_text_or_caption', detectedCommand: null, isPublicMode, botMode, bodyLength: body.length, bodyPreview: body.slice(0, 240), action: 'message_logged_no_command_executed', reason: 'empty_message_body' });
                             return;
+                        }
+                        if (parsedCommand.automatic === true) {
+                            console.info('[message-auto-ai-dispatch]', { sessionId, messageId: msgId, chatJid: from, isGroup, isOwnerReal, isPublicMode, bodyLength: body.length, action: 'send_unrecognized_plain_text_to_asistan_ai' });
                         }
                         const command = parsedCommand.command;
                         const args = parsedCommand.args;
@@ -11276,7 +11356,7 @@ async function main() {
     });
     if (TFBOT_CLUSTER_ENABLED) {
         if (!TFBOT_CLUSTER_TOKEN) console.error('[tfbot-cluster-token-missing]', { host: TFBOT_CLUSTER_INSTANCE_HOST || null, action: 'keep_cluster_node_in_standby_without_mongodb_or_session_restore' });
-        console.info('[tfbot-build-active]', { revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, renderServiceId: runtimeLogRenderServiceId, renderServiceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, deploymentStartedAt: runtimeLogStartedAt.toISOString() });
+        console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, renderServiceId: runtimeLogRenderServiceId, renderServiceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, deploymentStartedAt: runtimeLogStartedAt.toISOString() });
     httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
         if (TFBOT_CLUSTER_COORDINATOR_ONLY) {
             tfbotWorkerActive = false;
