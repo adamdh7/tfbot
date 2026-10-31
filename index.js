@@ -12,11 +12,9 @@ const LOG_DASHBOARD_PATH = (() => {
     const normalized = (configured.startsWith('/') ? configured : `/${configured}`).replace(/\/+$/, '');
     return /^\/[A-Za-z0-9_./=-]{12,180}$/.test(normalized) ? normalized : '/adamdh7=modpas/adamdh7';
 })();
-const LOG_DASHBOARD_MAX_ENTRIES = Math.max(100, Math.min(5000, Number(process.env.LOG_DASHBOARD_MAX_ENTRIES || 3000)));
+const LOG_DASHBOARD_MAX_ENTRIES = Math.max(1000, Math.min(10000, Number(process.env.LOG_DASHBOARD_MAX_ENTRIES || 5000)));
 const LOG_DASHBOARD_PAGE_LIMIT = Math.max(80, Math.min(250, Number(process.env.LOG_DASHBOARD_PAGE_LIMIT || 120)));
 const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(process.env.MESSAGE_QUEUE_TASK_TIMEOUT_MS || 45000)));
-const LOG_DASHBOARD_RETENTION_DAYS = Math.max(1, Math.min(30, Number(process.env.LOG_DASHBOARD_RETENTION_DAYS || 7)));
-const LOG_DASHBOARD_PERSIST_MAX_ENTRIES = Math.max(5000, Math.min(200000, Number(process.env.LOG_DASHBOARD_PERSIST_MAX_ENTRIES || 50000)));
 const runtimeLogBuffer = [];
 const runtimeLogPendingWrites = [];
 let runtimeLogInitialCleanupCompleted = false;
@@ -42,7 +40,7 @@ const runtimeLogServiceScope = [runtimeLogRenderExternalHost ? `host:${runtimeLo
 const runtimeLogServiceScopeHash = shortLogHash(runtimeLogServiceScope);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}:${shortLogHash(runtimeLogInstanceId)}`).slice(0, 240);
 let runtimeLogDeploymentGroupId = 'cluster-pending';
-const TFBOT_CLUSTER_CODE_REVISION = 'r61-compatible-global-log-boundary-targeted-group-signal-recovery';
+const TFBOT_CLUSTER_CODE_REVISION = 'r63-cross-device-retry-outbox-session-stability-full-log-history';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 runtimeLogDeploymentGroupId = `${TFBOT_CLUSTER_CODE_REVISION}:cluster-pending`;
 const runtimeLogClusterId = `${runtimeLogDeploymentId}:${shortLogHash(runtimeLogInstanceId)}`.slice(0, 240);
@@ -72,9 +70,17 @@ function areTfbotReleasesCompatible(first, second) {
     return !!firstKey && firstKey === secondKey;
 }
 
+function getTfbotReleaseCommit(value) {
+    const normalized = normalizeTfbotReleaseId(value);
+    const match = normalized.match(/:([a-f0-9]{7,40}):r\d+[-a-z0-9_]+$/i);
+    return match ? match[1].toLowerCase() : '';
+}
+
 function isRuntimeLogBoundaryCompatible(marker) {
     if (!marker || marker.completed !== true || !marker.deploymentStartedAt) return false;
     const recordedRevision = normalizeTfbotReleaseId(marker.codeRevision || marker.revision || '').toLowerCase();
+    const markerCommit = String(marker.renderCommit || getTfbotReleaseCommit(marker.releaseId || '')).trim().toLowerCase();
+    if (runtimeLogRenderCommit && markerCommit && runtimeLogRenderCommit.toLowerCase() === markerCommit) return true;
     if (recordedRevision) return recordedRevision === TFBOT_CLUSTER_CODE_REVISION.toLowerCase();
     return areTfbotReleasesCompatible(marker.releaseId, TFBOT_CODE_RELEASE_ID);
 }
@@ -173,7 +179,6 @@ function attachRuntimeLogPersistence(collection) {
             sequence: Number(String(entry.id).split(':').pop()) || 0,
             at: entry.at,
             createdAt: new Date(entry.at),
-            expireAt: new Date(Date.now() + LOG_DASHBOARD_RETENTION_DAYS * 24 * 60 * 60 * 1000),
             level: entry.level,
             text: entry.text
         });
@@ -267,8 +272,9 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
                         deploymentId: runtimeLogDeploymentId,
                         releaseId: TFBOT_CODE_RELEASE_ID,
                         codeRevision: TFBOT_CLUSTER_CODE_REVISION,
-                        deploymentStartedAt: runtimeLogStartedAt,
-                        startedAt: runtimeLogStartedAt,
+                        renderCommit: runtimeLogRenderCommit || null,
+                        deploymentStartedAt: runtimeLogDeploymentReadyAt instanceof Date && Number.isFinite(runtimeLogDeploymentReadyAt.getTime()) ? runtimeLogDeploymentReadyAt : runtimeLogStartedAt,
+                        startedAt: runtimeLogDeploymentReadyAt instanceof Date && Number.isFinite(runtimeLogDeploymentReadyAt.getTime()) ? runtimeLogDeploymentReadyAt : runtimeLogStartedAt,
                         updatedAt: now,
                         status: 'running',
                         completed: false
@@ -294,7 +300,7 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
             await new Promise(resolve => setTimeout(resolve, 250));
             continue;
         }
-        runtimeLogDeploymentStartedAt = runtimeLogStartedAt;
+        runtimeLogDeploymentStartedAt = runtimeLogDeploymentReadyAt instanceof Date && Number.isFinite(runtimeLogDeploymentReadyAt.getTime()) ? runtimeLogDeploymentReadyAt : runtimeLogStartedAt;
         runtimeLogDeploymentGroupId = `${TFBOT_CLUSTER_CODE_REVISION}:cluster-${shortLogHash(`${coordinatorInstanceId}:${TFBOT_CODE_RELEASE_ID}:${runtimeLogDeploymentStartedAt.getTime()}`)}`;
         const rawAppCollection = mongoClient?.db(TFBOT_DATABASE_NAME)?.collection(TFBOT_APP_DATA_COLLECTION);
         if (!rawAppCollection) throw new Error('runtime_log_physical_collection_unavailable');
@@ -348,6 +354,7 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
                     coordinatorInstanceId,
                     releaseId: TFBOT_CODE_RELEASE_ID,
                     codeRevision: TFBOT_CLUSTER_CODE_REVISION,
+                    renderCommit: runtimeLogRenderCommit || null,
                     deploymentGroupId: runtimeLogDeploymentGroupId,
                     deploymentStartedAt: cutoff,
                     removedCount: removed,
@@ -381,6 +388,7 @@ function scheduleRuntimeLogBoundaryRetry(collection, delayMs = 5000) {
         try {
             await clearPreviousRuntimeLogsForCurrentDeployment(target);
             if (runtimeLogInitialCleanupCompleted) {
+                await target.updateMany({ expireAt: { $exists: true } }, { $unset: { expireAt: 1 } }).catch(error => console.warn('[runtime-log-expiry-field-removal-failed]', { host: TFBOT_CLUSTER_INSTANCE_HOST, error: error?.message || String(error) }));
                 attachRuntimeLogPersistence(target);
                 if (pendingRuntimeLogPersistenceCollection === target) pendingRuntimeLogPersistenceCollection = null;
                 runtimeLogBoundaryRetryCollection = null;
@@ -417,28 +425,6 @@ async function flushRuntimeLogPersistence() {
                 if (!duplicateOnly) throw error;
             }
             runtimeLogPendingWrites.splice(0, batch.length);
-            runtimeLogPruneCounter += batch.length;
-            if (runtimeLogPruneCounter >= 1000) {
-                runtimeLogPruneCounter = 0;
-                try {
-                    const currentReleaseFilter = { createdAt: { $gte: runtimeLogDeploymentStartedAt } };
-                    const cutoff = await runtimeLogPersistenceCollection.find(currentReleaseFilter, { projection: { _id: 1, createdAt: 1 } })
-                        .sort({ createdAt: -1, _id: -1 }).skip(LOG_DASHBOARD_PERSIST_MAX_ENTRIES).limit(1).next();
-                    if (cutoff?.createdAt) {
-                        await runtimeLogPersistenceCollection.deleteMany({
-                            $and: [
-                                { createdAt: { $gte: runtimeLogDeploymentStartedAt } },
-                                { $or: [
-                                    { createdAt: { $lt: cutoff.createdAt } },
-                                    { createdAt: cutoff.createdAt, _id: { $lt: cutoff._id } }
-                                ] }
-                            ]
-                        });
-                    }
-                } catch (pruneError) {
-                    originalConsoleWarn('[runtime-log-retention-prune-failed]', pruneError?.message || String(pruneError));
-                }
-            }
         }
     } catch (error) {
         nextRetryDelay = 5000;
@@ -486,11 +472,9 @@ function recordRuntimeLog(level, args) {
                 sequence,
                 at,
                 createdAt: new Date(at),
-                expireAt: new Date(Date.now() + LOG_DASHBOARD_RETENTION_DAYS * 24 * 60 * 60 * 1000),
-                level: normalizedLevel,
+                    level: normalizedLevel,
                 text
             });
-            if (runtimeLogPendingWrites.length > 20000) runtimeLogPendingWrites.splice(0, runtimeLogPendingWrites.length - 15000);
             scheduleRuntimeLogPersistence();
         }
     } catch (error) {}
@@ -895,7 +879,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r61';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r63';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1708,7 +1692,7 @@ function cacheRecentMessage(sessionId, message) {
     if (recentMsgsCache.length > 1000) recentMsgsCache.splice(0, recentMsgsCache.length - 1000);
 }
 
-async function persistOutgoingRetryMessage(sessionId, jid, message, jidAliases = [], accountPhone = '', accountJid = '') {
+async function persistOutgoingRetryMessage(sessionId, jid, message, jidAliases = [], accountPhone = '', accountJid = '', accountLid = '') {
     if (!db || !sessionId || !message?.key?.id || !message?.message) return false;
     const messageId = String(message.key.id);
     const remoteJid = String(message.key.remoteJid || jid || '');
@@ -1719,6 +1703,7 @@ async function persistOutgoingRetryMessage(sessionId, jid, message, jidAliases =
         sessionId,
         accountPhone: normalizePhoneNumber(accountPhone),
         accountJid: String(accountJid || ''),
+        accountLid: normalizeLidCacheKey(accountLid || ''),
         messageId,
         remoteJid,
         remoteJidAlt,
@@ -2244,10 +2229,10 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             }
             if (result?.message) {
                 cacheRecentMessage(sessionId, result);
-                const outgoingAccountPhone = normalizedJidNumber(sock.user?.id || sock.user?.phoneNumber || '');
+                const outgoingAccountPhone = getAuthenticatedPhoneNumber(sock.user, activeSessions.get(sessionId)?.authState?.creds) || normalizedJidNumber(sock.user?.id || sock.user?.phoneNumber || '');
                 const outgoingAccountJid = String(sock.user?.id || sock.user?.phoneNumber || '');
                 const outgoingAliases = [originalDestinationJid, destinationJid, alternateDestinationJid, isSelfChatDestination ? ownLidJid : '', result.key?.remoteJidAlt, result.key?.participant, result.key?.participantAlt, result.key?.participantPn].filter(Boolean);
-                await persistOutgoingRetryMessage(sessionId, sentDestinationJid, result, outgoingAliases, outgoingAccountPhone, outgoingAccountJid);
+                await persistOutgoingRetryMessage(sessionId, sentDestinationJid, result, outgoingAliases, outgoingAccountPhone, outgoingAccountJid, getAuthenticatedLid(sock.user, activeSessions.get(sessionId)?.authState?.creds));
             }
         }
         return result;
@@ -2715,13 +2700,15 @@ async function connectMongo(options = {}) {
             return true;
         }
         const removedPreviousServiceDeployLogs = await clearPreviousRuntimeLogsForCurrentDeployment(runtimeLogsCollection);
-        if (coordinatorOnly) {
-            runtimeLogPersistenceCollection = null;
-            pendingRuntimeLogPersistenceCollection = null;
-        } else {
+        if (runtimeLogInitialCleanupCompleted) {
+            await runtimeLogsCollection.updateMany({ expireAt: { $exists: true } }, { $unset: { expireAt: 1 } }).catch(error => console.warn('[runtime-log-expiry-field-removal-failed]', { error: error?.message || String(error) }));
             attachRuntimeLogPersistence(runtimeLogsCollection);
+        } else {
+            runtimeLogPersistenceCollection = null;
+            pendingRuntimeLogPersistenceCollection = runtimeLogsCollection;
+            if (!coordinatorOnly) scheduleRuntimeLogBoundaryRetry(runtimeLogsCollection, 5000);
         }
-        console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', source: 'deployment-group-cleanup', serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, clusterId: runtimeLogClusterId, releaseId: TFBOT_CODE_RELEASE_ID, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), removedPreviousDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousServiceDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousCodeLogCount: removedPreviousServiceDeployLogs, retentionDays: LOG_DASHBOARD_RETENTION_DAYS, maxEntries: LOG_DASHBOARD_PERSIST_MAX_ENTRIES, dashboardHistoryLimit: LOG_DASHBOARD_MAX_ENTRIES, role: coordinatorOnly ? 'coordinator-cleanup-only' : 'active-serving', persistenceAttached: !coordinatorOnly });
+        console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', source: 'deployment-group-cleanup', serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, clusterId: runtimeLogClusterId, releaseId: TFBOT_CODE_RELEASE_ID, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), removedPreviousDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousServiceDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousCodeLogCount: removedPreviousServiceDeployLogs, role: coordinatorOnly ? 'coordinator-log-writer-and-router' : 'active-serving', persistenceAttached: !!runtimeLogPersistenceCollection });
         await db.collection('cluster_router').createIndex({ updatedAt: -1 }, { name: 'cluster_router_updated_desc' });
         await db.collection('processed_messages').createIndex({ ts: 1 });
         await db.collection('processed_messages').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'processed_messages_expire_at_ttl' });
@@ -2745,6 +2732,8 @@ async function connectMongo(options = {}) {
                 if (!['IndexNotFound', 'NamespaceNotFound'].includes(String(indexDropError?.codeName || '')) && ![26, 27].includes(Number(indexDropError?.code))) console.warn('[obsolete-index-cleanup-skipped]', { collectionName, indexName, error: indexDropError?.message || String(indexDropError) });
             }
         }
+        await db.collection('baileys_outgoing_messages').createIndex({ accountPhone: 1, messageId: 1, fromMe: 1, createdAt: -1 }, { name: 'baileys_retry_account_message_lookup' });
+        await db.collection('baileys_outgoing_messages').createIndex({ accountLid: 1, messageId: 1, fromMe: 1, createdAt: -1 }, { name: 'baileys_retry_lid_message_lookup' });
         await db.collection('session_owners').createIndex({ Number: 1 }, { name: 'session_owners_account_number_lookup' });
         await db.collection('session_owners').createIndex({ OwnerLid: 1 }, { name: 'session_owners_owner_lid_lookup' });
         try {
@@ -4000,7 +3989,7 @@ async function consolidateDuplicateSessionsForAccount(targetSessionId, user, cre
     if (lid) clauses.push({ OwnerLid: lid }, { ownerLid: lid }, { AccountJid: lid }, { accountJid: lid });
     if (!clauses.length) return 0;
     const owners = await db.collection('session_owners').find({ sessionId: { $ne: targetSessionId }, $or: clauses }).limit(100).toArray();
-    let merged = 0;
+    let marked = 0;
     for (const owner of owners) {
         const sourceSessionId = String(owner.sessionId || '');
         if (!sourceSessionId || sourceSessionId === targetSessionId) continue;
@@ -4011,28 +4000,22 @@ async function consolidateDuplicateSessionsForAccount(targetSessionId, user, cre
         if (!sameIdentity) continue;
         const liveLeaseUntil = new Date(owner.ownerLeaseUntil || 0).getTime();
         if (owner.ownerInstanceId && owner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && liveLeaseUntil > Date.now() && owner.connectionStatus !== 'duplicate_account' && !owner.duplicateAccountOf && owner.reauthRequired !== true) {
-            console.warn('[session-account-merge-skipped-live-owner]', { sourceSessionId, targetSessionId, ownerLeaseUntil: new Date(liveLeaseUntil).toISOString(), reason: 'another_render_instance_still_owns_session' });
+            console.warn('[session-account-duplicate-preserved-live-owner]', { sourceSessionId, targetSessionId, ownerLeaseUntil: new Date(liveLeaseUntil).toISOString(), reason: 'another_render_instance_still_owns_session' });
             continue;
         }
         const oldRuntime = activeSessions.get(sourceSessionId);
         if (oldRuntime?.sock && ['connecte', 'connected'].includes(String(oldRuntime.status || '').toLowerCase())) {
-            console.warn('[session-account-merge-skipped-live-session]', { sourceSessionId, targetSessionId, reason: 'source_socket_still_connected' });
+            console.warn('[session-account-duplicate-preserved-live-session]', { sourceSessionId, targetSessionId, reason: 'source_socket_still_connected', authDocumentsPreserved: true });
             continue;
         }
-        try {
-            if (oldRuntime?.sock) {
-                await cleanupSocket(sourceSessionId).catch(() => {});
-                await flushAuthWritesForSession(sourceSessionId).catch(() => {});
-            }
-            await mergeSessionScopedData(sourceSessionId, targetSessionId);
-            await deleteMongoSession(sourceSessionId);
-            merged++;
-            console.info('[session-duplicate-removed-after-merge]', { sourceSessionId, targetSessionId, sourceStatus: owner.connectionStatus || null, accountIdentityMatched: true, oldAuthDeleted: true });
-        } catch (error) {
-            console.error('[session-account-merge-failed]', { sourceSessionId, targetSessionId, error: error?.message || String(error), oldSessionPreserved: true });
-        }
+        const result = await db.collection('session_owners').updateOne(
+            { sessionId: sourceSessionId },
+            { $set: { connectionStatus: 'duplicate_account', duplicateAccountOf: targetSessionId, duplicateAccountDetectedAt: owner.duplicateAccountDetectedAt || new Date(), duplicateAccountIdentityHash: shortLogHash(phone || lid), duplicateAuthPreserved: true, updatedAt: new Date() } }
+        ).catch(error => { console.warn('[session-duplicate-owner-preserve-marker-failed]', { sourceSessionId, targetSessionId, error: error?.message || String(error) }); return null; });
+        if (result?.matchedCount || result?.upsertedCount) marked++;
+        console.warn('[session-duplicate-auth-preserved-not-merged]', { sourceSessionId, targetSessionId, authDocumentsPreserved: true, sessionIdUnchanged: true, action: 'do_not_merge_or_delete_whatsapp_signal_credentials' });
     }
-    return merged;
+    return marked;
 }
 
 async function getGroupSetting(sessionId, gjid, key) {
@@ -5286,6 +5269,7 @@ async function activateTfbotWorker() {
             const activeRuntimeLogCollection = pendingRuntimeLogPersistenceCollection || db.collection('server_runtime_logs');
             const removedPreviousRuntimeLogs = await clearPreviousRuntimeLogsForCurrentDeployment(activeRuntimeLogCollection);
             if (runtimeLogInitialCleanupCompleted) {
+                await activeRuntimeLogCollection.updateMany({ expireAt: { $exists: true } }, { $unset: { expireAt: 1 } }).catch(error => console.warn('[runtime-log-expiry-field-removal-failed]', { host: TFBOT_CLUSTER_INSTANCE_HOST, error: error?.message || String(error) }));
                 attachRuntimeLogPersistence(activeRuntimeLogCollection);
                 pendingRuntimeLogPersistenceCollection = null;
                 console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', role: 'active-serving-only', host: TFBOT_CLUSTER_INSTANCE_HOST, serviceId: runtimeLogRenderServiceId, deploymentId: runtimeLogDeploymentId, releaseId: TFBOT_CODE_RELEASE_ID, deploymentGroupId: runtimeLogDeploymentGroupId, instanceId: runtimeLogInstanceId, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), removedPreviousDeployLogCount: removedPreviousRuntimeLogs });
@@ -6227,23 +6211,47 @@ app.get('/sw.js', (req, res) => res.sendFile(path.join(__dirname, 'sw.js')));
 app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s Us Adam D’H7"));
 app.get('/ok', (req, res) => res.send('ok'));
 
-async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIMIT, sinceValue = 0) {
+async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIMIT, sinceValue = 0, olderCursorValue = null) {
     const limit = Math.max(20, Math.min(250, Number(requestedLimit) || LOG_DASHBOARD_PAGE_LIMIT));
     const since = Math.max(0, Number(sinceValue) || 0);
-    const incremental = since > 0;
+    const beforeAt = olderCursorValue && typeof olderCursorValue === 'object' ? new Date(olderCursorValue.beforeAt || 0) : null;
+    const beforeId = String(olderCursorValue?.beforeId || '').trim();
+    const older = !!(beforeAt && Number.isFinite(beforeAt.getTime()) && beforeAt.getTime() >= runtimeLogDeploymentStartedAt.getTime() && beforeId);
+    const incremental = !older && since > 0;
     const byId = new Map();
     let databaseReadError = null;
+    let hasOlder = false;
+    let nextOlderCursor = null;
     try {
         if (db && runtimeLogInitialCleanupCompleted) {
             const filter = { createdAt: { $gte: runtimeLogDeploymentStartedAt }, deploymentGroupId: runtimeLogDeploymentGroupId };
-            if (incremental) filter.createdAt = { $gte: new Date(Math.max(runtimeLogDeploymentStartedAt.getTime(), since - 2000)) };
+            if (older) {
+                filter.$and = [
+                    { createdAt: { $gte: runtimeLogDeploymentStartedAt } },
+                    { $or: [
+                        { createdAt: { $lt: beforeAt } },
+                        { createdAt: beforeAt, _id: { $lt: beforeId } }
+                    ] }
+                ];
+            } else if (incremental) {
+                filter.createdAt = { $gte: new Date(Math.max(runtimeLogDeploymentStartedAt.getTime(), since - 2000)) };
+            }
             const cursor = db.collection('server_runtime_logs')
                 .find(filter, { projection: { at: 1, level: 1, text: 1, createdAt: 1, clusterId: 1, deploymentId: 1, deploymentGroupId: 1, deploymentStartedAt: 1, serviceId: 1, serviceName: 1, serviceScope: 1, port: 1, instance: 1, renderInstanceId: 1 } })
                 .sort(incremental ? { createdAt: 1, _id: 1 } : { createdAt: -1, _id: -1 })
-                .limit(limit);
-            if (typeof cursor.maxTimeMS === 'function') cursor.maxTimeMS(1800);
+                .limit(older || !incremental ? limit + 1 : limit);
+            if (typeof cursor.maxTimeMS === 'function') cursor.maxTimeMS(2500);
             const persisted = await cursor.toArray();
-            for (const item of persisted) {
+            const page = older || !incremental ? persisted.slice(0, limit) : persisted;
+            hasOlder = !incremental && persisted.length > limit;
+            if (!incremental && page.length) {
+                const oldest = page[page.length - 1];
+                nextOlderCursor = {
+                    beforeAt: new Date(oldest.createdAt || oldest.at || 0).toISOString(),
+                    beforeId: String(oldest._id || '')
+                };
+            }
+            for (const item of page) {
                 const id = String(item._id);
                 byId.set(id, {
                     id,
@@ -6263,13 +6271,16 @@ async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIM
     } catch (error) {
         databaseReadError = String(error?.message || error || 'lecture MongoDB impossible').slice(0, 180);
     }
-    for (const item of runtimeLogBuffer) {
-        const atMs = Date.parse(String(item.at || '')) || 0;
-        if (atMs >= runtimeLogDeploymentStartedAt.getTime() && (!incremental || atMs >= Math.max(runtimeLogDeploymentStartedAt.getTime(), since - 2000))) byId.set(String(item.id), item);
+    if (!older) {
+        for (const item of runtimeLogBuffer) {
+            const atMs = Date.parse(String(item.at || '')) || 0;
+            if (atMs >= runtimeLogDeploymentStartedAt.getTime() && (!incremental || atMs >= Math.max(runtimeLogDeploymentStartedAt.getTime(), since - 2000))) byId.set(String(item.id), item);
+        }
     }
     let logs = Array.from(byId.values())
         .sort((a, b) => String(a.at).localeCompare(String(b.at)) || String(a.id).localeCompare(String(b.id)));
-    if (!incremental) logs = logs.slice(-limit);
+    if (!older && !incremental) logs = logs.slice(-limit);
+    else if (older) logs = logs.slice(0, limit);
     else logs = logs.slice(0, limit);
     if (databaseReadError) {
         logs.push({
@@ -6279,7 +6290,7 @@ async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIM
             text: `[runtime-log-dashboard] lecture historique impossible: ${databaseReadError}`
         });
     }
-    if (!logs.length && !incremental) {
+    if (!logs.length && !incremental && !older) {
         logs.push({
             id: `dashboard-empty:${runtimeLogInstanceId}`,
             at: new Date().toISOString(),
@@ -6288,7 +6299,7 @@ async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIM
         });
     }
     const nextSince = logs.reduce((latest, item) => Math.max(latest, Date.parse(String(item.at || '')) || 0), since);
-    return { logs, nextSince };
+    return { logs, nextSince, hasOlder: older || !incremental ? hasOlder : null, olderCursor: older || !incremental ? nextOlderCursor : null };
 }
 
 app.get(LOG_DASHBOARD_PATH, async (req, res) => {
@@ -6315,13 +6326,16 @@ app.get(LOG_DASHBOARD_PATH, async (req, res) => {
             if (logDashboardRateLimits.size <= 1800) break;
         }
     }
-    if (rate.count > 150) return res.status(429).type('text/plain').send('Trop de requêtes.');
+    if (rate.count > 600) return res.status(429).type('text/plain').send('Trop de requêtes.');
 
     if (String(req.query?.format || '').toLowerCase() === 'json') {
         const requestedLimit = Math.max(20, Math.min(250, Number(req.query?.limit) || LOG_DASHBOARD_PAGE_LIMIT));
         const since = Math.max(0, Number(req.query?.since) || 0);
-        const snapshot = await collectRuntimeLogSnapshot(requestedLimit, since);
-        return res.status(200).json({ ok: true, count: snapshot.logs.length, logs: snapshot.logs, nextSince: snapshot.nextSince, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, serviceScope: runtimeLogServiceScope, port: runtimeLogPort, instanceId: runtimeLogInstanceId, serverTime: new Date().toISOString() });
+        const olderRequested = String(req.query?.older || '') === '1';
+        const olderCursor = olderRequested ? { beforeAt: String(req.query?.beforeAt || ''), beforeId: String(req.query?.beforeId || '') } : null;
+        if (olderRequested && (!Number.isFinite(new Date(olderCursor.beforeAt).getTime()) || !olderCursor.beforeId)) return res.status(400).json({ ok: false, error: 'invalid_older_log_cursor' });
+        const snapshot = await collectRuntimeLogSnapshot(requestedLimit, since, olderCursor);
+        return res.status(200).json({ ok: true, count: snapshot.logs.length, logs: snapshot.logs, nextSince: snapshot.nextSince, hasOlder: snapshot.hasOlder, olderCursor: snapshot.olderCursor, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, serviceScope: runtimeLogServiceScope, port: runtimeLogPort, instanceId: runtimeLogInstanceId, serverTime: new Date().toISOString() });
     }
 
     const initialLogs = runtimeLogBuffer.filter(item => (Date.parse(String(item.at || '')) || 0) >= runtimeLogDeploymentStartedAt.getTime()).slice(-Math.min(30, LOG_DASHBOARD_PAGE_LIMIT));
@@ -6352,7 +6366,9 @@ app.get(LOG_DASHBOARD_PATH, async (req, res) => {
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;padding:0;width:100%;min-height:100%;background:#000;color:#fff;overscroll-behavior:none;overscroll-behavior-x:none}
 body{min-height:100vh;min-height:100svh;overflow-x:hidden;touch-action:pan-y}
-#logs{width:100%;padding:52px 8px max(22px,env(safe-area-inset-bottom));overscroll-behavior:none}
+#load-older{position:sticky;top:0;z-index:9;display:none;margin:8px auto 0;padding:9px 14px;border:1px solid #555;border-radius:8px;background:#111;color:#fff;font:600 12px/1.35 system-ui,-apple-system,sans-serif;cursor:pointer}
+#load-older.visible{display:block}#load-older:disabled{opacity:.6;cursor:wait}
+#logs{width:100%;padding:14px 8px max(22px,env(safe-area-inset-bottom));overscroll-behavior:none}
 .log{position:relative;width:100%;padding:8px 2px 10px;color:#fff;white-space:normal;overflow-wrap:anywhere}
 .meta{display:flex;align-items:center;gap:6px;min-height:19px;padding-right:34px;font-size:11px;line-height:1.45}
 .level{font-weight:800;font-style:italic;white-space:nowrap;color:#fff}
@@ -6372,6 +6388,7 @@ body{min-height:100vh;min-height:100svh;overflow-x:hidden;touch-action:pan-y}
 </head>
 <body>
 <button id="copy-all" type="button" aria-label="Copier tous les logs"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg></button>
+<button id="load-older" type="button">Charger les anciens logs</button>
 <main id="logs" aria-live="off">${initialRowsHtml}</main>
 <button id="jump" type="button" aria-label="Aller aux nouveaux logs ou en bas"><span id="unseen-count" aria-live="off"></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v15M6 13l6 6 6-6"/></svg></button>
 <script>
@@ -6382,6 +6399,7 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
  const logsNode = document.getElementById('logs');
  const jumpButton = document.getElementById('jump');
  const copyAllButton = document.getElementById('copy-all');
+ const loadOlderButton = document.getElementById('load-older');
  const unseenCountNode = document.getElementById('unseen-count');
  let allLogs = Array.isArray(window.__SERVER_LOG_SNAPSHOT__) ? window.__SERVER_LOG_SNAPSHOT__ : [];
  let lastFetchError = '';
@@ -6393,8 +6411,10 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
  let hasRendered = false;
  let logCursor = 0;
  let initialLoadDone = false;
+ let olderCursor = null;
+ let hasOlder = false;
+ let olderRequestRunning = false;
  const maxRows = ${LOG_DASHBOARD_PAGE_LIMIT};
- const clientBufferLimit = 1600;
  const textOf = value => String(value == null ? '' : value);
  const levelClass = value => textOf(value).toLowerCase().replace(/[^a-z0-9_-]/g,'');
  function atBottom(){return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 8;}
@@ -6416,9 +6436,15 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
    const area=document.createElement('textarea');area.value=value;area.setAttribute('readonly','');area.style.position='fixed';area.style.left='-9999px';area.style.top='0';document.body.appendChild(area);area.select();const copied=document.execCommand('copy');area.remove();if(!copied)throw new Error('clipboard_unavailable');return true;
  }
  async function copyAll(){
-   try{await writeClipboard(allLogs.map(copyText).join('\\n\\n'));copyAllButton.style.opacity='.5';window.setTimeout(()=>{copyAllButton.style.opacity='1';},500);}catch(error){}
+   try{
+     while(hasOlder&&olderCursor){const loaded=await loadOlder(true);if(!loaded)throw new Error('older_log_page_unavailable');}
+     await writeClipboard(allLogs.map(copyText).join('\\n\\n'));
+     copyAllButton.style.opacity='.5';window.setTimeout(()=>{copyAllButton.style.opacity='1';},500);
+   }catch(error){copyAllButton.style.opacity='1';}
  }
  copyAllButton.addEventListener('click',copyAll);
+ loadOlderButton.addEventListener('click',()=>{void loadOlder(false);});
+ function updateOlderButton(){loadOlderButton.classList.toggle('visible',hasOlder&&!!olderCursor);loadOlderButton.disabled=olderRequestRunning;loadOlderButton.textContent=olderRequestRunning?'Chargement des anciens logs…':hasOlder?'Charger les anciens logs':'Tous les logs sont chargés';}
  function makeRow(item){
    const row=document.createElement('article');row.className='log';row.dataset.id=textOf(item.id);
    const meta=document.createElement('header');meta.className='meta';
@@ -6436,16 +6462,16 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
  async function copyOne(item,button){
    try{await writeClipboard(copyText(item));button.style.opacity='.45';window.setTimeout(()=>{button.style.opacity='.9';},550);}catch(error){}
  }
- function render(nextLogs){
+ function render(nextLogs, options={}){
    const oldIds=new Set(allLogs.map(item=>textOf(item.id)));
    const incoming=(Array.isArray(nextLogs)?nextLogs:[]).filter(item=>!textOf(item.id).startsWith('dashboard-loading:')&&(Date.parse(textOf(item.at))||0)>=deploymentStartedAtMs);
    const merged=new Map(allLogs.map(item=>[textOf(item.id),item]));
    for(const item of incoming)merged.set(textOf(item.id),item);
-   const next=Array.from(merged.values()).sort((a,b)=>textOf(a.at).localeCompare(textOf(b.at))||textOf(a.id).localeCompare(textOf(b.id))).slice(-clientBufferLimit);
+   const next=Array.from(merged.values()).sort((a,b)=>textOf(a.at).localeCompare(textOf(b.at))||textOf(a.id).localeCompare(textOf(b.id)));
    const added=next.filter(item=>!oldIds.has(textOf(item.id))&&!textOf(item.id).startsWith('dashboard-loading:'));
-   const wasAtBottom=!hasRendered||atBottom();
+   const wasAtBottom=options.older?false:(!hasRendered||atBottom());
    const anchor=wasAtBottom?null:visibleAnchor();
-   if(!wasAtBottom&&added.length){if(!firstUnseenId)firstUnseenId=textOf(added[0].id);unseenCount+=added.length;}
+   if(!options.older&&!wasAtBottom&&added.length){if(!firstUnseenId)firstUnseenId=textOf(added[0].id);unseenCount+=added.length;}
    allLogs=next;
    const fragment=document.createDocumentFragment();
    for(const item of allLogs)fragment.appendChild(makeRow(item));
@@ -6459,6 +6485,28 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
      if(restored){const nextTop=restored.getBoundingClientRect().top;window.scrollBy(0,nextTop-anchor.top);}
    }
    updateJump();
+   updateOlderButton();
+ }
+ async function loadOlder(fromCopy=false){
+   if(!hasOlder||!olderCursor||olderRequestRunning)return false;
+   olderRequestRunning=true;updateOlderButton();
+   try{
+     const query='?format=json&limit='+maxRows+'&older=1&beforeAt='+encodeURIComponent(olderCursor.beforeAt)+'&beforeId='+encodeURIComponent(olderCursor.beforeId);
+     const response=await fetch(endpoint+query,{cache:'no-store',credentials:'same-origin',headers:{'Accept':'application/json'}});
+     if(!response.ok)throw new Error('HTTP '+response.status);
+     const payload=await response.json();
+     if(!payload||payload.ok!==true||!Array.isArray(payload.logs))throw new Error('invalid_older_log_response');
+     if((Date.parse(textOf(payload.deploymentStartedAt))||0)!==deploymentStartedAtMs)throw new Error('deployment_timestamp_mismatch');
+     render(payload.logs,{older:true});
+     olderCursor=payload.olderCursor||null;
+     hasOlder=payload.hasOlder===true;
+     updateOlderButton();
+     return true;
+   }catch(error){
+     loadOlderButton.textContent='Erreur : réessayer';
+     if(fromCopy)throw error;
+     return false;
+   }finally{olderRequestRunning=false;updateOlderButton();}
  }
  async function load(){
    if(requestRunning)return;
@@ -6472,8 +6520,10 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
      if((Date.parse(textOf(payload.deploymentStartedAt))||0)!==deploymentStartedAtMs)throw new Error('deployment_timestamp_mismatch');
      lastFetchError='';
      if(Number.isFinite(Number(payload.nextSince)))logCursor=Math.max(logCursor,Number(payload.nextSince));
+     if(!initialLoadDone){hasOlder=payload.hasOlder===true;olderCursor=payload.olderCursor||null;}
      initialLoadDone=true;
-     if(payload.logs.length)render(payload.logs,false);
+     if(payload.logs.length)render(payload.logs);
+     updateOlderButton();
    }catch(error){
      const detail='dashboard_fetch_failed: '+textOf(error&&error.message?error.message:error).slice(0,180);
      if(detail!==lastFetchError){
@@ -6508,6 +6558,7 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
  document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&['+','=','-','0'].includes(String(event.key).toLowerCase()))event.preventDefault();});
  document.addEventListener('visibilitychange',()=>{if(!document.hidden)void load();});
  void load();
+ updateOlderButton();
  pollTimer=window.setInterval(load,30000);
  window.addEventListener('pagehide',()=>{if(pollTimer)window.clearInterval(pollTimer);});
 })();
@@ -7970,11 +8021,27 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         { _id: `${sessionId}:${String(key.id)}` },
                         { projection }
                     );
-                    const lookupScope = 'same_session';
+                    let lookupScope = 'same_session';
+                    const retryMayReferToOwnMessage = key?.fromMe === true || key?.fromMe === undefined || key?.fromMe === null;
+                    if (!stored?.message && retryMayReferToOwnMessage) {
+                        const retryAccountPhone = getAuthenticatedPhoneNumber(sock.user, state.creds) || '';
+                        const retryAccountLid = getAuthenticatedLid(sock.user, state.creds) || '';
+                        const retryAccountJid = String(sock.user?.id || state.creds?.me?.id || '').trim();
+                        const sameAccountClauses = [];
+                        if (retryAccountPhone) sameAccountClauses.push({ accountPhone: retryAccountPhone });
+                        if (retryAccountLid) sameAccountClauses.push({ accountLid: retryAccountLid });
+                        if (!sameAccountClauses.length && retryAccountJid) sameAccountClauses.push({ accountJid: retryAccountJid });
+                        if (sameAccountClauses.length) {
+                            stored = await retryCollection.findOne(
+                                { sessionId: { $ne: sessionId }, messageId: String(key.id), fromMe: true, $or: sameAccountClauses },
+                                { projection, sort: { createdAt: -1 } }
+                            );
+                            if (stored?.message) lookupScope = 'same_authenticated_account_other_session';
+                        }
+                    }
                     const storedChatAliases = [...new Set([stored?.remoteJid, stored?.remoteJidAlt, ...(Array.isArray(stored?.remoteJidAliases) ? stored.remoteJidAliases : [])].map(value => String(value || '').trim()).filter(Boolean))];
                     const storedChatMatches = !requestedChatJid || storedChatAliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, requestedChatJid));
-                    const retryMayReferToOwnMessage = key?.fromMe === true || key?.fromMe === undefined || key?.fromMe === null;
-                    if (stored?.message && stored.sessionId === sessionId && stored.fromMe === true && retryMayReferToOwnMessage) {
+                    if (stored?.message && stored.fromMe === true && retryMayReferToOwnMessage && (stored.sessionId === sessionId || lookupScope === 'same_authenticated_account_other_session')) {
                         const restoredMessage = fixBuffers(stored.message);
                         cacheRecentMessage(sessionId, { key: { id: key.id, remoteJid: stored.remoteJid || requestedChatJid || '', remoteJidAlt: stored.remoteJidAlt || '', fromMe: true }, message: restoredMessage, messageTimestamp: stored.messageTimestamp || Math.floor(Date.now() / 1000) });
                         if (storedChatMatches) {
@@ -8411,41 +8478,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const currentBotAccountJid = currentBotNum ? `${currentBotNum}@s.whatsapp.net` : currentBotLid || String(sock.user?.id || '');
                 const currentBotName = sanitizeSessionDisplayName(sock.user?.name);
                 if (currentBotNum || /@lid$/i.test(currentBotLid)) {
-                    for (const [otherSessionId, otherSession] of activeSessions.entries()) {
-                        const storedOtherNumber = normalizePhoneNumber(otherSession?.number || '');
-                        const otherNumber = /^\d{6,20}$/.test(storedOtherNumber) ? storedOtherNumber : getAuthenticatedPhoneNumber(otherSession?.sock?.user, otherSession?.authState?.creds);
-                        const otherLid = getAuthenticatedLid(otherSession?.sock?.user, otherSession?.authState?.creds);
-                        if (otherSessionId !== sessionId && ((currentBotNum && otherNumber === currentBotNum) || (currentBotLid && otherLid === currentBotLid))) {
-                            try {
-                                if (otherSession.sock) {
-                                    otherSession.sock.ev.removeAllListeners();
-                                    if (otherSession.sock.ws) otherSession.sock.ws.close();
-                                }
-                            } catch (e) {}
-                            otherSession.status = 'duplicate_account';
-                            otherSession.disconnectTime = Date.now();
-                            otherSession.sock = null;
-                            try {
-                                const oldFlush = otherSession.flushAuthWrites || otherSession.authState?.flushAuthWrites;
-                                if (typeof oldFlush === 'function') await promiseWithTimeout(oldFlush(), 20000, 'Flush duplicate account Signal keys');
-                                else await flushAuthWritesForSession(otherSessionId);
-                            } catch (flushError) {
-                                console.error('[duplicate-session-auth-flush-failed]', { sessionId: otherSessionId, error: flushError?.message || String(flushError), action: 'preserve_mongodb_auth_documents_without_overwrite' });
-                            }
-                            const oldTimer = reconnectTimers.get(otherSessionId);
-                            if (oldTimer) clearTimeout(oldTimer);
-                            reconnectTimers.delete(otherSessionId);
-                            await db.collection('session_owners').updateOne(
-                                { sessionId: otherSessionId },
-                                { $set: { connectionStatus: 'duplicate_account', duplicateAccountOf: sessionId, duplicateAccountDetectedAt: new Date(), duplicateAccountIdentityHash: shortLogHash(currentBotAccountJid) } },
-                                { upsert: true }
-                            ).catch(error => console.warn('[duplicate-session-owner-marker-failed]', { sessionId: otherSessionId, error: error?.message || String(error) }));
-                            await releaseSessionRuntimeLock(otherSessionId);
-                            activeSessions.delete(otherSessionId);
-                            cleanupSessionVolatileCaches(otherSessionId);
-                            console.warn('[whatsapp-duplicate-live-socket-closed]', { replacedSessionId: otherSessionId, activeSessionId: sessionId, ownerRecordsPreserved: true, automaticRestoreDisabledForDuplicate: true });
-                        }
-                    }
                     const ownerCol = db.collection('session_owners');
                     const now = Date.now();
                     const existingRecord = await ownerCol.findOne({ sessionId });
@@ -8484,7 +8516,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     for (const field of Object.keys(ownerUnset)) delete finalRecord[field];
                     sessionOwnersCache.set(sessionId, finalRecord);
                     const consolidatedAccountSessions = await consolidateDuplicateSessionsForAccount(sessionId, sock.user, state.creds);
-                    if (consolidatedAccountSessions) console.info('[session-account-duplicates-consolidated-after-connect]', { sessionId, removedDuplicates: consolidatedAccountSessions });
+                    if (consolidatedAccountSessions) console.info('[session-account-duplicates-marked-after-connect]', { sessionId, markedDuplicateSessions: consolidatedAccountSessions, authDocumentsDeleted: false });
                     const openedSession = activeSessions.get(sessionId);
                     if (openedSession) {
                         openedSession.number = currentBotNum || null;
@@ -8535,7 +8567,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 sessionData.qrString = null;
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 const disconnectReason = String(lastDisconnect?.error?.message || 'unknown').slice(0, 180);
-                const requiresReauthentication = statusCode === DisconnectReason.loggedOut || statusCode === 401 || statusCode === 403;
+                const requiresReauthentication = statusCode === DisconnectReason.loggedOut || statusCode === 401;
                 console.warn('[whatsapp] connection closed', {
                     sessionId,
                     connectedAccountJid: sock.user?.id || null,
@@ -9155,7 +9187,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const receivedOwnAccountJids = [...new Set([sock.user?.id, receivedOwnPhoneNumber ? `${receivedOwnPhoneNumber}@s.whatsapp.net` : '', receivedOwnLid].filter(Boolean).map(String))];
                 const receivedChatAliases = [...new Set([receivedChat, m?.key?.remoteJidAlt].filter(Boolean).map(String))];
                 const receivedParsedCommand = receivedExplicitParsedCommand;
-                if (receivedIsGroup && m?.key?.fromMe && m?.message) cacheRecentMessage(sessionId, m);
+                if (m?.key?.fromMe === true && m?.message && receivedId !== 'missing-id') {
+                    cacheRecentMessage(sessionId, m);
+                    const alreadySentByBot = outgoingMessageCache.has(`${sessionId}:id:${receivedId}`)
+                        || outgoingMessageCache.has(`${sessionId}:${receivedChat}:${receivedId}`)
+                        || isRecentOutgoingMessageId(sessionId, receivedId);
+                    if (!alreadySentByBot) {
+                        await persistOutgoingRetryMessage(sessionId, receivedChat, m, receivedChatAliases, receivedOwnPhoneNumber, sock.user?.id || '', receivedOwnLid);
+                    }
+                }
                 const recentOutgoingIdEcho = !!m?.key?.fromMe && isRecentOutgoingMessageId(sessionId, receivedId);
                 const outgoingTextEcho = !!m?.key?.fromMe && !receivedExplicitParsedCommand
                     && consumeOutgoingTextEcho(sessionId, m?.key?.remoteJid || receivedChat, receivedBody);
@@ -11197,10 +11237,11 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
         const runtime = activeSessions.get(staleSessionId);
         const runtimeStatus = String(runtime?.status || '').toLowerCase();
         const runtimeSocketState = runtime?.sock?.ws?.readyState ?? runtime?.sock?.ws?._socket?.readyState ?? runtime?.sock?.socket?.readyState;
+        const runtimeSocketStateKnown = typeof runtime?.sock?.ws?.isOpen === 'boolean' || runtimeSocketState !== undefined && runtimeSocketState !== null;
         const runtimeSocketStateUsable = runtime?.sock?.ws?.isOpen === true || Number(runtimeSocketState) === 1 || String(runtimeSocketState).toUpperCase() === 'OPEN';
         const runtimeCredentials = runtime?.authState?.creds;
         const runtimeIdentity = getAuthenticatedPhoneNumber(runtime?.sock?.user, runtimeCredentials) || getAuthenticatedLid(runtime?.sock?.user, runtimeCredentials);
-        const runtimeSocketLive = !!runtime?.sock && runtimeSocketStateUsable && runtimeCredentials?.registered === true && !!runtimeIdentity && ['connecte', 'connected', 'active', 'online'].includes(runtimeStatus);
+        const runtimeSocketLive = !!runtime?.sock && (!runtimeSocketStateKnown || runtimeSocketStateUsable) && runtimeCredentials?.registered === true && !!runtimeIdentity && ['connecte', 'connected', 'active', 'online'].includes(runtimeStatus);
         if (runtimeSocketLive) continue;
         const ownerStatus = String(owner.connectionStatus || owner.status || (owner.reauthRequired ? 'reauth_required' : '')).toLowerCase();
         const statusCandidate = runtimeStatus && runtimeStatus !== 'deconnecte' ? runtimeStatus : ownerStatus;
@@ -11241,7 +11282,24 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
         const liveAccountLock = await db.collection('session_account_runtime_locks').findOne({ sessionId: staleSessionId, leaseUntil: { $gt: new Date(cleanupNow) } }, { projection: { _id: 1, owner: 1 } }).catch(() => null);
         if (liveAccountLock && liveAccountLock.owner !== processInstanceId) continue;
         try {
+            const credsDoc = await collection.findOne({ _id: `auth-${staleSessionId}-creds` }, { projection: { 'creds.registered': 1, 'creds.me.id': 1, 'creds.me.lid': 1 } }).catch(() => null);
+            const credentialsRegistered = credsDoc?.creds?.registered === true;
+            const credentialsHaveIdentity = !!(credsDoc?.creds?.me?.id || credsDoc?.creds?.me?.lid);
+            const ownerHasAccountIdentity = !!(owner.Number || owner.AccountJid || owner.OwnerLid || owner.accountJid || owner.phoneNumber);
+            const hasRecoverableAccountCredentials = credentialsRegistered || credentialsHaveIdentity || ownerHasAccountIdentity;
+            const isReauthExpired = status === 'reauth_required' || owner.reauthRequired === true;
+            if (hasRecoverableAccountCredentials) {
+                if ((!runtime || !runtime.sock) && !reconnectTimers.has(staleSessionId) && !isReauthExpired && status !== 'duplicate_account' && !owner.duplicateAccountOf) {
+                    scheduleSessionReconnect(staleSessionId, false, owner.format || owner.Format || 'pair');
+                }
+                console.warn('[session-expired-cleanup-auth-preserved]', { sessionId: staleSessionId, status, ageMs: sessionAgeMs, credentialsRegistered, credentialsHaveIdentity, ownerHasAccountIdentity, socketExists: !!runtime?.sock, socketStateKnown: runtimeSocketStateKnown, socketOpen: runtimeSocketStateUsable, action: 'preserve_all_whatsapp_auth_and_session_data_regardless_of_offline_duration' });
+                continue;
+            }
             if (runtime?.sock) {
+                if (!runtimeSocketStateKnown || runtimeSocketStateUsable) {
+                    console.info('[session-expired-cleanup-socket-preserved]', { sessionId: staleSessionId, status, socketStateKnown: runtimeSocketStateKnown, socketOpen: runtimeSocketStateUsable, action: 'do_not_close_socket_without_confirmed_closed_state' });
+                    continue;
+                }
                 await cleanupSocket(staleSessionId);
                 runtime.status = 'deconnecte';
                 runtime.disconnectTime = cleanupNow;
@@ -11249,12 +11307,6 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
             } else if (liveSessionLock?.owner === processInstanceId || liveAccountLock?.owner === processInstanceId) {
                 await releaseSessionRuntimeLock(staleSessionId);
             }
-            const credsDoc = await collection.findOne({ _id: `auth-${staleSessionId}-creds` }, { projection: { 'creds.registered': 1, 'creds.me.id': 1, 'creds.me.lid': 1 } }).catch(() => null);
-            const credentialsRegistered = credsDoc?.creds?.registered === true;
-            const credentialsHaveIdentity = !!(credsDoc?.creds?.me?.id || credsDoc?.creds?.me?.lid);
-            const ownerHasAccountIdentity = !!(owner.Number || owner.AccountJid || owner.OwnerLid || owner.accountJid || owner.phoneNumber);
-            const hasRecoverableAccountCredentials = credentialsRegistered || credentialsHaveIdentity || ownerHasAccountIdentity;
-            const isReauthExpired = status === 'reauth_required' || owner.reauthRequired === true;
             const isPendingPairingStatus = ['pairing_expired', 'pairing_error', 'qr_disponible', 'synchronisation', 'initialisation', 'pairing_starting', 'pairing'].includes(status);
             const shouldRemoveExpiredPairing = isPendingPairingExpired || (isPendingPairingStatus && sessionAgeMs >= PAIRING_SESSION_TTL_MS);
             const isUnregisteredDisconnectedExpired = !credentialsRegistered && ['deconnecte', 'disconnected'].includes(status);
@@ -11267,7 +11319,7 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
                     console.warn('[session-duplicate-target-missing-removing-expired-source]', { sourceSessionId: staleSessionId, targetSessionId: duplicateTarget, action: 'remove_expired_unconnected_source_and_all_associated_data' });
                 }
             }
-            const removeExpiredUnconnectedSession = sessionAgeMs >= SESSION_UNCONNECTED_TTL_MS;
+            const removeExpiredUnconnectedSession = sessionAgeMs >= SESSION_UNCONNECTED_TTL_MS && !hasRecoverableAccountCredentials;
             if (!removeExpiredUnconnectedSession) continue;
             const pendingReconnect = reconnectTimers.get(staleSessionId);
             if (pendingReconnect) {
@@ -11381,11 +11433,13 @@ async function loadExistingSessions() {
                 continue;
             }
             try {
-                await mergeSessionScopedData(duplicate.sessionId, selectedSession.sessionId);
-                await deleteMongoSession(duplicate.sessionId);
-                console.info('[session-restore-duplicate-merged-and-removed]', { identityGroupSize: group.length, keptSessionId: selectedSession.sessionId, removedSessionId: duplicate.sessionId, accountDataMigrated: true, signalAuthCopied: false });
+                await db.collection('session_owners').updateOne(
+                    { sessionId: duplicate.sessionId },
+                    { $set: { connectionStatus: 'duplicate_account', duplicateAccountOf: selectedSession.sessionId, duplicateAccountDetectedAt: duplicateOwner.duplicateAccountDetectedAt || new Date(), duplicateAccountIdentityHash: shortLogHash(duplicate.number || duplicate.lid || selectedSession.sessionId), duplicateAuthPreserved: true, updatedAt: new Date() } }
+                );
+                console.warn('[session-restore-duplicate-auth-preserved]', { identityGroupSize: group.length, activeSessionId: selectedSession.sessionId, preservedSessionId: duplicate.sessionId, authDocumentsPreserved: true, sessionIdUnchanged: true, action: 'do_not_merge_or_delete_signal_session_data' });
             } catch (error) {
-                console.error('[session-restore-duplicate-merge-failed]', { keptSessionId: selectedSession.sessionId, preservedSessionId: duplicate.sessionId, error: error?.message || String(error) });
+                console.error('[session-restore-duplicate-preserve-marker-failed]', { activeSessionId: selectedSession.sessionId, preservedSessionId: duplicate.sessionId, error: error?.message || String(error) });
             }
         }
     }
@@ -11470,7 +11524,8 @@ setInterval(async () => {
         }
         const readyState = currentSocket.ws?.readyState ?? currentSocket.ws?._socket?.readyState ?? currentSocket.socket?.readyState;
         const socketIsOpen = currentSocket.ws?.isOpen === true || Number(readyState) === 1 || String(readyState).toUpperCase() === 'OPEN';
-        const socketClosed = !socketIsOpen;
+        const socketStateKnown = typeof currentSocket.ws?.isOpen === 'boolean' || readyState !== undefined && readyState !== null;
+        const socketClosed = socketStateKnown && !socketIsOpen;
         const healthCredentials = sess.authState?.creds;
         const healthIdentity = getAuthenticatedPhoneNumber(currentSocket.user, healthCredentials) || getAuthenticatedLid(currentSocket.user, healthCredentials);
         if (healthCredentials?.registered !== true || !healthIdentity) {
@@ -11668,6 +11723,10 @@ async function main() {
         sameHostDeploymentHandoff: true,
         authWritesFencedByRuntimeLock: true,
         retryStoreExactSessionIdFallback: true,
+        retryStoreSameAuthenticatedAccountFallback: true,
+        runtimeLogHistoryPagination: true,
+        runtimeLogRetentionAfterCoordinatorHttpListening: true,
+        authenticatedSessionAuthDeletionOnOfflineTimeout: false,
         targetedSignalPeerRecovery: true,
         selfChatPhonePreferred: false,
         lidPhoneMappingFreshMs: LID_PHONE_MAPPING_FRESH_MS,
@@ -11678,7 +11737,7 @@ async function main() {
     if (TFBOT_CLUSTER_ENABLED) {
         if (!TFBOT_CLUSTER_TOKEN) console.error('[tfbot-cluster-token-missing]', { host: TFBOT_CLUSTER_INSTANCE_HOST || null, action: 'keep_cluster_node_in_standby_without_mongodb_or_session_restore' });
         console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, renderServiceId: runtimeLogRenderServiceId, renderServiceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), port: runtimeLogPort });
-    httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
+    httpServer = app.listen(PORT, () => { runtimeLogDeploymentReadyAt = new Date(); console.log(`[server] listening on ${PORT}`); });
         if (TFBOT_CLUSTER_COORDINATOR_ONLY) {
             tfbotWorkerActive = false;
             tfbotWorkerState = 'coordinator';
