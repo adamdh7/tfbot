@@ -41,7 +41,7 @@ const runtimeLogServiceScope = [runtimeLogRenderExternalHost ? `host:${runtimeLo
 const runtimeLogServiceScopeHash = shortLogHash(runtimeLogServiceScope);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}:${shortLogHash(runtimeLogInstanceId)}`).slice(0, 240);
 let runtimeLogDeploymentGroupId = 'cluster-pending';
-const TFBOT_CLUSTER_CODE_REVISION = 'r64-atomic-signal-transactions-retry-preflight-startup-log-purge';
+const TFBOT_CLUSTER_CODE_REVISION = 'r65-same-account-session-retirement-settings-migration-per-chat-queue-isolation';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 runtimeLogDeploymentGroupId = `${TFBOT_CLUSTER_CODE_REVISION}:cluster-pending`;
 const runtimeLogClusterId = `${runtimeLogDeploymentId}:${shortLogHash(runtimeLogInstanceId)}`.slice(0, 240);
@@ -1006,7 +1006,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r64';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r65';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1657,12 +1657,18 @@ function cacheMessageIdentityAliases(sessionId, message) {
     return saved;
 }
 
-function getMessageQueue(queueKey) {
+function getMessageQueue(queueKey, partitionKey = '') {
     if (!queueKey || (typeof queueKey !== 'object' && typeof queueKey !== 'function')) return fallbackMessageQueue;
-    let queue = messageQueues.get(queueKey);
+    let queues = messageQueues.get(queueKey);
+    if (!queues) {
+        queues = new Map();
+        messageQueues.set(queueKey, queues);
+    }
+    const key = String(partitionKey || '__session__');
+    let queue = queues.get(key);
     if (!queue) {
-        queue = { tasks: [], isSendingQueue: false };
-        messageQueues.set(queueKey, queue);
+        queue = { tasks: [], isSendingQueue: false, partitionKey: key };
+        queues.set(key, queue);
     }
     return queue;
 }
@@ -1674,28 +1680,35 @@ async function processMessageQueue(queue) {
         while (queue.tasks.length > 0) {
             const task = queue.tasks.shift();
             const startedAt = Date.now();
+            const operation = Promise.resolve().then(() => task.execute());
             try {
-                const operation = Promise.resolve().then(() => task.execute());
                 const result = await promiseWithTimeout(operation, MESSAGE_QUEUE_TASK_TIMEOUT_MS, 'WhatsApp queued operation');
                 task.resolve(result);
             } catch (error) {
                 const timedOut = /timed out/i.test(String(error?.message || error));
                 if (timedOut) {
+                    task.reject(error);
                     console.error('[message-queue-task-timeout]', {
                         taskId: task.id,
                         durationMs: Date.now() - startedAt,
                         timeoutMs: MESSAGE_QUEUE_TASK_TIMEOUT_MS,
                         remainingTasks: queue.tasks.length,
-                        action: 'release_queue_and_continue_next_task'
+                        partition: queue.partitionKey || '__session__',
+                        action: 'fence_the_session_if_needed_and_do_not_start_another_send_to_this_chat_until_the_timed_out_send_settles'
                     });
+                    if (typeof task.onTimeout === 'function') {
+                        await Promise.resolve().then(() => task.onTimeout(error)).catch(timeoutError => console.error('[message-queue-timeout-handler-failed]', { taskId: task.id, error: timeoutError?.message || String(timeoutError) }));
+                    }
+                    await operation.catch(() => {});
                 } else {
                     console.warn('[message-queue-task-failed]', {
                         taskId: task.id,
                         durationMs: Date.now() - startedAt,
+                        partition: queue.partitionKey || '__session__',
                         error: error?.message || String(error)
                     });
+                    task.reject(error);
                 }
-                task.reject(error);
             }
             const delay = Number.isFinite(task.delay) ? Math.max(0, task.delay) : 0;
             if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
@@ -1706,16 +1719,16 @@ async function processMessageQueue(queue) {
     }
 }
 
-function queueMessage(executeFn, delayMs = 150, queueKey = null) {
-    const queue = getMessageQueue(queueKey);
+function queueMessage(executeFn, delayMs = 150, queueKey = null, partitionKey = '', onTimeout = null) {
+    const queue = getMessageQueue(queueKey, partitionKey);
     return new Promise((resolve, reject) => {
         if (queue.tasks.length >= 300) {
             const error = new Error('whatsapp_message_queue_overloaded');
-            console.error('[message-queue-overloaded]', { pendingTasks: queue.tasks.length, action: 'reject_new_task_to_prevent_unbounded_backlog' });
+            console.error('[message-queue-overloaded]', { pendingTasks: queue.tasks.length, partition: queue.partitionKey || '__session__', action: 'reject_new_task_to_prevent_unbounded_backlog' });
             reject(error);
             return;
         }
-        queue.tasks.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, execute: executeFn, delay: delayMs, resolve, reject });
+        queue.tasks.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, execute: executeFn, delay: delayMs, resolve, reject, onTimeout });
         void processMessageQueue(queue);
     });
 }
@@ -2145,19 +2158,34 @@ function consumeOutgoingTextEcho(sessionId, jid, text) {
 }
 
 async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180) {
-    return queueMessage(async () => {
-        let sessionId = null;
-        let activeSession = null;
-        for (const [id, session] of activeSessions.entries()) {
-            if (session.sock === sock) {
-                sessionId = id;
-                activeSession = session;
-                break;
-            }
+    let sessionId = null;
+    let activeSession = null;
+    for (const [id, session] of activeSessions.entries()) {
+        if (session.sock === sock) {
+            sessionId = id;
+            activeSession = session;
+            break;
         }
+    }
+    if (!sessionId || !activeSession) throw new Error('whatsapp_socket_session_replaced');
+    const expectedSessionId = sessionId;
+    const expectedSession = activeSession;
+    const originalDestinationJid = String(jid || '').trim();
+    return queueMessage(async () => {
+        const currentSession = activeSessions.get(expectedSessionId);
+        if (currentSession !== expectedSession || currentSession?.sock !== sock || !['connecte', 'connected', 'active', 'online'].includes(String(currentSession?.status || '').toLowerCase())) {
+            throw new Error('whatsapp_socket_session_replaced');
+        }
+        const ownAuthCreds = currentSession?.authState?.creds || sock.authState?.creds || null;
+        if (ownAuthCreds?.registered !== true) throw new Error('whatsapp_session_not_authenticated');
+        await assertSessionRuntimeOwnership(expectedSessionId);
+        const socketReadyState = sock.ws?.readyState ?? sock.ws?._socket?.readyState ?? sock.socket?.readyState;
+        const socketStateKnown = typeof sock.ws?.isOpen === 'boolean' || socketReadyState !== undefined && socketReadyState !== null;
+        const socketIsOpen = sock.ws?.isOpen === true || Number(socketReadyState) === 1 || String(socketReadyState).toUpperCase() === 'OPEN';
+        if (socketStateKnown && !socketIsOpen) throw new Error('whatsapp_socket_not_open');
+        sessionId = expectedSessionId;
+        activeSession = currentSession;
         const outgoingContent = content;
-        const originalDestinationJid = String(jid || '').trim();
-        const ownAuthCreds = activeSession?.authState?.creds || sock.authState?.creds || null;
         const ownPhoneNumber = getAuthenticatedPhoneNumber(sock.user || null, ownAuthCreds);
         const ownPhoneJid = normalizePhoneCacheJid(ownPhoneNumber ? `${ownPhoneNumber}@s.whatsapp.net` : (sock.user?.id || sock.user?.phoneNumber || ''));
         let ownLidJid = getAuthenticatedLid(sock.user || null, ownAuthCreds);
@@ -2370,7 +2398,18 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             }
         }
         return result;
-    }, delayMs, sock);
+    }, delayMs, sock, originalDestinationJid, async timeoutError => {
+        const latestSession = activeSessions.get(expectedSessionId);
+        if (latestSession === expectedSession && latestSession.sock === sock) {
+            console.error('[outbound-chat-queue-session-fenced]', { sessionId: expectedSessionId, destinationType: originalDestinationJid.endsWith('@g.us') ? 'group' : originalDestinationJid.endsWith('@lid') ? 'private_lid' : 'private_or_other', reason: timeoutError?.message || String(timeoutError), action: 'close_only_the_timed_out_session_socket_and_stop_late_messages_from_this_session' });
+            await closeSessionSocketWithoutAuthFlush(expectedSessionId, 'outbound_chat_queue_timeout', { status: 'synchronisation', scheduleRetry: true });
+            const unconnectedAt = new Date();
+            await db.collection('session_owners').updateOne(
+                { sessionId: expectedSessionId },
+                { $set: { connectionStatus: 'synchronisation', socketAuthenticated: false, socketReady: false, pairingPending: true, unconnectedSinceAt: unconnectedAt, statusUpdatedAt: unconnectedAt, updatedAt: unconnectedAt } }
+            ).catch(error => console.warn('[outbound-chat-timeout-status-save-failed]', { sessionId: expectedSessionId, error: error?.message || String(error) }));
+        }
+    });
 }
 
 async function queuedDeleteMessageWithAck(sock, jid, messageKey, delayMs = 120, timeoutMs = 6500) {
@@ -4062,69 +4101,152 @@ async function mergeSessionScopedData(sourceSessionId, targetSessionId) {
     const sourceOwner = await ownerCollection.findOne({ sessionId: sourceSessionId });
     const targetOwner = await ownerCollection.findOne({ sessionId: targetSessionId });
     if (sourceOwner) {
-        const ownerFields = ['Name', 'name', 'lang', 'mode', 'Mode', 'botMode', 'ownerName'];
-        const missing = {};
-        for (const field of ownerFields) {
-            const current = targetOwner?.[field];
-            const previous = sourceOwner[field];
-            if ((current === undefined || current === null || current === '') && previous !== undefined && previous !== null && previous !== '') missing[field] = previous;
+        const ownerUpdates = {};
+        const sourceMode = [sourceOwner.mode, sourceOwner.Mode, sourceOwner.botMode].map(value => String(value || '').trim()).find(Boolean);
+        if (sourceMode) {
+            ownerUpdates.mode = sourceMode;
+            ownerUpdates.Mode = sourceMode;
+            ownerUpdates.botMode = sourceMode;
         }
-        if (Object.keys(missing).length) await ownerCollection.updateOne({ sessionId: targetSessionId }, { $set: missing, $setOnInsert: { sessionId: targetSessionId, createdAt: sourceOwner.createdAt || new Date() } }, { upsert: true });
+        const sourceLanguage = [sourceOwner.lang, sourceOwner.language, sourceOwner.Lang].map(value => String(value || '').trim()).find(Boolean);
+        if (sourceLanguage) {
+            ownerUpdates.lang = sourceLanguage;
+            ownerUpdates.language = sourceLanguage;
+        }
+        for (const field of ['Name', 'name', 'ownerName', 'OwnerLid', 'ownerLid', 'AccountJid', 'accountJid', 'Number', 'number']) {
+            const previous = sourceOwner[field];
+            const current = targetOwner?.[field];
+            if ((current === undefined || current === null || current === '') && previous !== undefined && previous !== null && previous !== '') ownerUpdates[field] = previous;
+        }
+        if (Object.keys(ownerUpdates).length) {
+            await ownerCollection.updateOne(
+                { sessionId: targetSessionId },
+                { $set: ownerUpdates, $setOnInsert: { sessionId: targetSessionId, createdAt: sourceOwner.createdAt || new Date() } },
+                { upsert: true }
+            );
+        }
     }
     const groupSettings = await db.collection('group_settings').find({ sessionId: sourceSessionId }).toArray();
     for (const source of groupSettings) {
-        const target = await db.collection('group_settings').findOne({ sessionId: targetSessionId, gjid: source.gjid });
-        const fields = {};
-        for (const [key, value] of Object.entries(source)) {
-            if (['_id', 'sessionId', 'gjid', 'createdAt'].includes(key)) continue;
-            if (!target || target[key] === undefined || target[key] === null) fields[key] = value;
-        }
-        if (!target) await db.collection('group_settings').insertOne({ ...Object.fromEntries(Object.entries(source).filter(([key]) => key !== '_id')), sessionId: targetSessionId, migratedFromSessionId: sourceSessionId });
-        else if (Object.keys(fields).length) await db.collection('group_settings').updateOne({ _id: target._id }, { $set: fields });
+        const selector = { sessionId: targetSessionId, gjid: source.gjid };
+        const fields = Object.fromEntries(Object.entries(source).filter(([key]) => !['_id', 'sessionId', 'gjid', 'createdAt'].includes(key)));
+        if (!Object.keys(fields).length) continue;
+        await db.collection('group_settings').updateOne(
+            selector,
+            { $set: { ...fields, migratedFromSessionId: sourceSessionId }, $setOnInsert: { createdAt: source.createdAt || new Date() } },
+            { upsert: true }
+        );
     }
     const del2Targets = await db.collection('group_del2').find({ sessionId: sourceSessionId }).toArray();
     for (const source of del2Targets) {
         const selector = { sessionId: targetSessionId, gjid: source.gjid, targetJid: source.targetJid };
-        const document = { ...Object.fromEntries(Object.entries(source).filter(([key]) => key !== '_id')), ...selector, migratedFromSessionId: sourceSessionId };
-        await db.collection('group_del2').updateOne(selector, { $setOnInsert: document }, { upsert: true });
+        const fields = Object.fromEntries(Object.entries(source).filter(([key]) => !['_id', 'sessionId', 'gjid', 'targetJid', 'createdAt'].includes(key)));
+        await db.collection('group_del2').updateOne(
+            selector,
+            { $set: { ...fields, migratedFromSessionId: sourceSessionId }, $setOnInsert: { createdAt: source.createdAt || new Date() } },
+            { upsert: true }
+        );
     }
     const del3Rules = await db.collection('group_del3').find({ sessionId: sourceSessionId }).toArray();
     for (const source of del3Rules) {
         const selector = { sessionId: targetSessionId, gjid: source.gjid, messageFormat: source.messageFormat };
-        const document = { ...Object.fromEntries(Object.entries(source).filter(([key]) => key !== '_id')), ...selector, migratedFromSessionId: sourceSessionId };
-        await db.collection('group_del3').updateOne(selector, { $setOnInsert: document }, { upsert: true });
+        const fields = Object.fromEntries(Object.entries(source).filter(([key]) => !['_id', 'sessionId', 'gjid', 'messageFormat', 'createdAt'].includes(key)));
+        await db.collection('group_del3').updateOne(
+            selector,
+            { $set: { ...fields, migratedFromSessionId: sourceSessionId }, $setOnInsert: { createdAt: source.createdAt || new Date() } },
+            { upsert: true }
+        );
     }
     const preferences = await db.collection('user_preferences').find({ sessionId: sourceSessionId }).toArray();
     for (const source of preferences) {
         if (!source.sender) continue;
         const selector = { sessionId: targetSessionId, sender: source.sender };
-        const target = await db.collection('user_preferences').findOne(selector);
-        if (!target) {
-            const document = { ...Object.fromEntries(Object.entries(source).filter(([key]) => key !== '_id')), ...selector, migratedFromSessionId: sourceSessionId };
-            await db.collection('user_preferences').updateOne(selector, { $setOnInsert: document }, { upsert: true });
-        } else {
-            const fields = {};
-            for (const [key, value] of Object.entries(source)) {
-                if (['_id', 'sessionId', 'sender', 'createdAt'].includes(key)) continue;
-                if (target[key] === undefined || target[key] === null || target[key] === '') fields[key] = value;
-            }
-            if (Object.keys(fields).length) await db.collection('user_preferences').updateOne(selector, { $set: fields });
-        }
+        const fields = Object.fromEntries(Object.entries(source).filter(([key]) => !['_id', 'sessionId', 'sender', 'createdAt'].includes(key)));
+        await db.collection('user_preferences').updateOne(
+            selector,
+            { $set: { ...fields, migratedFromSessionId: sourceSessionId }, $setOnInsert: { createdAt: source.createdAt || new Date() } },
+            { upsert: true }
+        );
     }
     const mappings = await db.collection('lid_phone_mappings').find({ sessionId: sourceSessionId }).toArray();
     for (const source of mappings) {
         const oldPrefix = `${sourceSessionId}:`;
         const oldId = String(source._id || '');
         const newId = oldId.startsWith(oldPrefix) ? `${targetSessionId}:${oldId.slice(oldPrefix.length)}` : `${targetSessionId}:${oldId.split(':').pop()}`;
-        const document = { ...Object.fromEntries(Object.entries(source).filter(([key]) => key !== '_id')), _id: newId, sessionId: targetSessionId, lastSessionId: targetSessionId, migratedFromSessionId: sourceSessionId };
-        await db.collection('lid_phone_mappings').updateOne({ _id: newId }, { $setOnInsert: document }, { upsert: true });
+        const existing = await db.collection('lid_phone_mappings').findOne({ _id: newId }, { projection: { updatedAt: 1 } });
+        const sourceTime = new Date(source.updatedAt || source.createdAt || 0).getTime() || 0;
+        const targetTime = new Date(existing?.updatedAt || 0).getTime() || 0;
+        if (!existing || sourceTime >= targetTime) {
+            const fields = Object.fromEntries(Object.entries(source).filter(([key]) => !['_id', 'createdAt'].includes(key)));
+            await db.collection('lid_phone_mappings').updateOne(
+                { _id: newId },
+                { $set: { ...fields, sessionId: targetSessionId, lastSessionId: targetSessionId, migratedFromSessionId: sourceSessionId }, $setOnInsert: { createdAt: source.createdAt || new Date() } },
+                { upsert: true }
+            );
+        }
     }
     cleanupSessionVolatileCaches(sourceSessionId);
     cleanupSessionVolatileCaches(targetSessionId);
     sessionOwnersCache.delete(sourceSessionId);
     sessionOwnersCache.delete(targetSessionId);
-    console.info('[session-account-data-merged]', { sourceSessionId, targetSessionId, groupSettings: groupSettings.length, del2Targets: del2Targets.length, del3Rules: del3Rules.length, userPreferences: preferences.length, lidPhoneMappings: mappings.length, signalAuthKeysCopied: false, authStoreStrategy: 'keep_only_target_session_signal_keys' });
+    console.info('[session-account-data-migrated]', { sourceSessionId, targetSessionId, groupSettings: groupSettings.length, del2Targets: del2Targets.length, del3Rules: del3Rules.length, userPreferences: preferences.length, lidPhoneMappings: mappings.length, sourceAccountSettingsPreferred: true, signalAuthKeysCopied: false, authStoreStrategy: 'keep_only_target_session_signal_keys' });
     return { migrated: true, groupSettings: groupSettings.length, del2Targets: del2Targets.length, del3Rules: del3Rules.length, userPreferences: preferences.length, lidPhoneMappings: mappings.length };
+}
+
+async function retireDuplicateAccountSession(sourceSessionId, targetSessionId, reason = 'same_authenticated_account_reconnected') {
+    if (!db || !sourceSessionId || !targetSessionId || sourceSessionId === targetSessionId) return { retired: false, reason: 'invalid_session_pair' };
+    const ownerCollection = db.collection('session_owners');
+    const [sourceOwner, targetOwner, sourceCredsDoc, targetCredsDoc] = await Promise.all([
+        ownerCollection.findOne({ sessionId: sourceSessionId }),
+        ownerCollection.findOne({ sessionId: targetSessionId }),
+        db.collection('baileys_auth').findOne({ _id: `auth-${sourceSessionId}-creds` }),
+        db.collection('baileys_auth').findOne({ _id: `auth-${targetSessionId}-creds` })
+    ]);
+    if (!sourceOwner || !targetOwner) return { retired: false, reason: 'owner_record_missing' };
+    const sourceCreds = sourceCredsDoc?.creds ? fixBuffers(sourceCredsDoc.creds) : null;
+    const targetCreds = targetCredsDoc?.creds ? fixBuffers(targetCredsDoc.creds) : null;
+    const sourceRuntime = activeSessions.get(sourceSessionId) || null;
+    const targetRuntime = activeSessions.get(targetSessionId) || null;
+    const sourcePhone = getAuthenticatedPhoneNumber(sourceRuntime?.sock?.user || null, sourceCreds) || normalizePhoneNumber(sourceOwner.Number || sourceOwner.number || sourceOwner.PairingNumber || '') || getAuthenticatedPhoneNumber({ id: sourceOwner.AccountJid || sourceOwner.accountJid || '' }, null);
+    const targetPhone = getAuthenticatedPhoneNumber(targetRuntime?.sock?.user || null, targetCreds) || normalizePhoneNumber(targetOwner.Number || targetOwner.number || targetOwner.PairingNumber || '') || getAuthenticatedPhoneNumber({ id: targetOwner.AccountJid || targetOwner.accountJid || '' }, null);
+    const sourceLid = getAuthenticatedLid(sourceRuntime?.sock?.user || null, sourceCreds) || normalizeLidCacheKey(sourceOwner.OwnerLid || sourceOwner.ownerLid || sourceOwner.AccountJid || sourceOwner.accountJid || '');
+    const targetLid = getAuthenticatedLid(targetRuntime?.sock?.user || null, targetCreds) || normalizeLidCacheKey(targetOwner.OwnerLid || targetOwner.ownerLid || targetOwner.AccountJid || targetOwner.accountJid || '');
+    if (targetCreds?.registered !== true || (!targetPhone && !targetLid)) return { retired: false, reason: 'target_account_not_authenticated' };
+    const samePhone = !!(sourcePhone && targetPhone && sourcePhone === targetPhone);
+    const sameLid = !!(sourceLid && targetLid && /@lid$/i.test(sourceLid) && sourceLid === targetLid);
+    if (!samePhone && !sameLid) return { retired: false, reason: 'authenticated_account_identity_mismatch' };
+    const now = new Date();
+    const targetLockKey = normalizeAccountRuntimeLockKey(targetPhone || targetLid);
+    const targetAccountLock = targetLockKey ? await db.collection('session_account_runtime_locks').findOne({ _id: targetLockKey, sessionId: targetSessionId, leaseUntil: { $gt: now } }, { projection: { _id: 1, owner: 1 } }) : null;
+    if (!targetAccountLock) return { retired: false, reason: 'target_account_runtime_lock_not_held' };
+    const sourceRuntimeLock = await db.collection('session_runtime_locks').findOne({ _id: sourceSessionId, leaseUntil: { $gt: now } }, { projection: { owner: 1, leaseUntil: 1 } });
+    if (sourceRuntimeLock && sourceRuntimeLock.owner !== processInstanceId) return { retired: false, reason: 'source_runtime_owned_by_another_instance' };
+    const sourceAccountLock = await db.collection('session_account_runtime_locks').findOne({ sessionId: sourceSessionId, leaseUntil: { $gt: now } }, { projection: { owner: 1, _id: 1 } });
+    if (sourceAccountLock && sourceAccountLock.owner !== processInstanceId) return { retired: false, reason: 'source_account_lock_owned_by_another_instance' };
+    if (sourceRuntime?.sock) {
+        const runtimePhone = getAuthenticatedPhoneNumber(sourceRuntime.sock.user, sourceRuntime.authState?.creds);
+        const runtimeLid = getAuthenticatedLid(sourceRuntime.sock.user, sourceRuntime.authState?.creds);
+        const runtimeMatches = !!((samePhone && runtimePhone === targetPhone) || (sameLid && runtimeLid === targetLid));
+        if (!runtimeMatches) return { retired: false, reason: 'source_live_socket_identity_unverified' };
+        const sourceSocketClosed = await closeSessionSocketWithoutAuthFlush(sourceSessionId, 'same_account_session_replaced', { status: 'duplicate_account', scheduleRetry: false });
+        if (!sourceSocketClosed) return { retired: false, reason: 'source_socket_close_not_confirmed' };
+    } else {
+        const pendingReconnect = reconnectTimers.get(sourceSessionId);
+        if (pendingReconnect) clearTimeout(pendingReconnect);
+        reconnectTimers.delete(sourceSessionId);
+        await releaseSessionRuntimeLock(sourceSessionId);
+    }
+    const duplicateAt = sourceOwner.duplicateAccountDetectedAt || now;
+    await ownerCollection.updateOne(
+        { sessionId: sourceSessionId },
+        { $set: { connectionStatus: 'duplicate_account', duplicateAccountOf: targetSessionId, duplicateAccountDetectedAt: duplicateAt, duplicateAccountIdentityHash: shortLogHash(targetPhone || targetLid), duplicateAuthPreserved: true, reauthRequired: false, socketAuthenticated: false, socketReady: false, pairingPending: false, unconnectedSinceAt: duplicateAt, statusUpdatedAt: now, updatedAt: now } }
+    );
+    sessionOwnersCache.delete(sourceSessionId);
+    const migrated = await mergeSessionScopedData(sourceSessionId, targetSessionId);
+    if (!migrated?.migrated) return { retired: false, reason: migrated?.reason || 'session_settings_migration_failed' };
+    await deleteMongoSession(sourceSessionId);
+    console.warn('[session-account-duplicate-retired]', { sourceSessionId, targetSessionId, reason, samePhone, sameLid, migratedGroupSettings: migrated.groupSettings, migratedDel2Targets: migrated.del2Targets, migratedDel3Rules: migrated.del3Rules, migratedLidPhoneMappings: migrated.lidPhoneMappings, oldAuthDocumentsDeleted: true, targetSignalCredentialsPreserved: true });
+    return { retired: true, migrated };
 }
 
 async function consolidateDuplicateSessionsForAccount(targetSessionId, user, creds) {
@@ -4136,33 +4258,23 @@ async function consolidateDuplicateSessionsForAccount(targetSessionId, user, cre
     if (lid) clauses.push({ OwnerLid: lid }, { ownerLid: lid }, { AccountJid: lid }, { accountJid: lid });
     if (!clauses.length) return 0;
     const owners = await db.collection('session_owners').find({ sessionId: { $ne: targetSessionId }, $or: clauses }).limit(100).toArray();
-    let marked = 0;
+    let retired = 0;
     for (const owner of owners) {
         const sourceSessionId = String(owner.sessionId || '');
         if (!sourceSessionId || sourceSessionId === targetSessionId) continue;
-        const sourceNumber = normalizePhoneNumber(owner.Number || owner.number || owner.PairingNumber || '');
+        const sourceNumber = normalizePhoneNumber(owner.Number || owner.number || owner.PairingNumber || '') || getAuthenticatedPhoneNumber({ id: owner.AccountJid || owner.accountJid || '' }, null);
         const sourceJid = String(owner.AccountJid || owner.accountJid || '').trim();
         const sourceLid = normalizeLidCacheKey(owner.OwnerLid || owner.ownerLid || sourceJid);
-        const sameIdentity = !!((phone && (sourceNumber === phone || getAuthenticatedPhoneNumber({ id: sourceJid }, null) === phone)) || (lid && sourceLid === lid));
+        const sameIdentity = !!((phone && sourceNumber === phone) || (lid && sourceLid === lid));
         if (!sameIdentity) continue;
-        const liveLeaseUntil = new Date(owner.ownerLeaseUntil || 0).getTime();
-        if (owner.ownerInstanceId && owner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && liveLeaseUntil > Date.now() && owner.connectionStatus !== 'duplicate_account' && !owner.duplicateAccountOf && owner.reauthRequired !== true) {
-            console.warn('[session-account-duplicate-preserved-live-owner]', { sourceSessionId, targetSessionId, ownerLeaseUntil: new Date(liveLeaseUntil).toISOString(), reason: 'another_render_instance_still_owns_session' });
-            continue;
-        }
-        const oldRuntime = activeSessions.get(sourceSessionId);
-        if (oldRuntime?.sock && ['connecte', 'connected'].includes(String(oldRuntime.status || '').toLowerCase())) {
-            console.warn('[session-account-duplicate-preserved-live-session]', { sourceSessionId, targetSessionId, reason: 'source_socket_still_connected', authDocumentsPreserved: true });
-            continue;
-        }
-        const result = await db.collection('session_owners').updateOne(
-            { sessionId: sourceSessionId },
-            { $set: { connectionStatus: 'duplicate_account', duplicateAccountOf: targetSessionId, duplicateAccountDetectedAt: owner.duplicateAccountDetectedAt || new Date(), duplicateAccountIdentityHash: shortLogHash(phone || lid), duplicateAuthPreserved: true, updatedAt: new Date() } }
-        ).catch(error => { console.warn('[session-duplicate-owner-preserve-marker-failed]', { sourceSessionId, targetSessionId, error: error?.message || String(error) }); return null; });
-        if (result?.matchedCount || result?.upsertedCount) marked++;
-        console.warn('[session-duplicate-auth-preserved-not-merged]', { sourceSessionId, targetSessionId, authDocumentsPreserved: true, sessionIdUnchanged: true, action: 'do_not_merge_or_delete_whatsapp_signal_credentials' });
+        const result = await retireDuplicateAccountSession(sourceSessionId, targetSessionId, 'authenticated_connection_open_replaced_previous_session').catch(error => {
+            console.error('[session-account-duplicate-retirement-failed]', { sourceSessionId, targetSessionId, error: error?.message || String(error) });
+            return { retired: false, reason: error?.message || 'retirement_failed' };
+        });
+        if (result?.retired) retired++;
+        else console.warn('[session-account-duplicate-retirement-deferred]', { sourceSessionId, targetSessionId, reason: result?.reason || 'unknown' });
     }
-    return marked;
+    return retired;
 }
 
 async function getGroupSetting(sessionId, gjid, key) {
@@ -8344,7 +8456,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     sessionId,
                     connectedAccountJid: sock.user?.id || null,
                     sessionStatus: activeSessions.get(sessionId)?.status || null,
-                    socketReadyState: Number.isFinite(Number(sock.ws?.readyState)) ? Number(sock.ws.readyState) : null,
+                    socketReadyState: sock.ws?.readyState ?? sock.ws?._socket?.readyState ?? sock.socket?.readyState ?? null,
+                    socketIsOpen: sock.ws?.isOpen === true || Number(sock.ws?.readyState ?? sock.ws?._socket?.readyState ?? sock.socket?.readyState) === 1,
                     upsertType: earlyUpsertType,
                     messageCount: earlyMessages.length,
                     messages: earlyMessages.slice(0, 30).map(entry => {
@@ -8736,7 +8849,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     for (const field of Object.keys(ownerUnset)) delete finalRecord[field];
                     sessionOwnersCache.set(sessionId, finalRecord);
                     const consolidatedAccountSessions = await consolidateDuplicateSessionsForAccount(sessionId, sock.user, state.creds);
-                    if (consolidatedAccountSessions) console.info('[session-account-duplicates-marked-after-connect]', { sessionId, markedDuplicateSessions: consolidatedAccountSessions, authDocumentsDeleted: false });
+                    if (consolidatedAccountSessions) console.info('[session-account-duplicates-retired-after-connect]', { sessionId, retiredDuplicateSessions: consolidatedAccountSessions, previousAuthDocumentsDeleted: true, retainedSettingsMigrated: true, activeSignalCredentialsPreserved: true });
                     const openedSession = activeSessions.get(sessionId);
                     if (openedSession) {
                         openedSession.number = currentBotNum || null;
@@ -9312,7 +9425,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 sessionId,
                 connectedAccountJid: sock.user?.id || null,
                 sessionStatus: activeSessions.get(sessionId)?.status || null,
-                socketReadyState: Number.isFinite(Number(sock.ws?.readyState)) ? Number(sock.ws.readyState) : null,
+                socketReadyState: sock.ws?.readyState ?? sock.ws?._socket?.readyState ?? sock.socket?.readyState ?? null,
+                    socketIsOpen: sock.ws?.isOpen === true || Number(sock.ws?.readyState ?? sock.ws?._socket?.readyState ?? sock.socket?.readyState) === 1,
                 upsertType,
                 messageCount: rawBatch.length,
                 messages: rawBatch.slice(0, 30).map(entry => {
@@ -9457,7 +9571,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     sessionId,
                     connectedAccountJid: sock.user?.id || null,
                     sessionStatus: activeSessions.get(sessionId)?.status || null,
-                    socketReadyState: Number.isFinite(Number(sock.ws?.readyState)) ? Number(sock.ws.readyState) : null,
+                    socketReadyState: sock.ws?.readyState ?? sock.ws?._socket?.readyState ?? sock.socket?.readyState ?? null,
+                    socketIsOpen: sock.ws?.isOpen === true || Number(sock.ws?.readyState ?? sock.ws?._socket?.readyState ?? sock.socket?.readyState) === 1,
                     upsertType,
                     messageId: receivedId,
                     chatJid: receivedChat,
@@ -11464,6 +11579,19 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
         const staleSessionId = String(owner.sessionId || '').trim();
         if (!staleSessionId) continue;
         const runtime = activeSessions.get(staleSessionId);
+        const duplicateTarget = String(owner.duplicateAccountOf || owner.duplicateOfSessionId || owner.mergedIntoSessionId || '').trim();
+        if (duplicateTarget && duplicateTarget !== staleSessionId) {
+            const duplicateResult = await retireDuplicateAccountSession(staleSessionId, duplicateTarget, 'periodic_duplicate_session_cleanup').catch(error => {
+                console.warn('[session-duplicate-cleanup-retirement-failed]', { sourceSessionId: staleSessionId, targetSessionId: duplicateTarget, error: error?.message || String(error) });
+                return { retired: false, reason: error?.message || 'retirement_failed' };
+            });
+            if (duplicateResult?.retired) {
+                staleRemoved++;
+                continue;
+            }
+            console.info('[session-duplicate-cleanup-deferred]', { sourceSessionId: staleSessionId, targetSessionId: duplicateTarget, reason: duplicateResult?.reason || 'target_not_ready', action: 'preserve_target_auth_and_old_config_until_target_owns_authenticated_account_lock' });
+            continue;
+        }
         const runtimeStatus = String(runtime?.status || '').toLowerCase();
         const runtimeSocketState = runtime?.sock?.ws?.readyState ?? runtime?.sock?.ws?._socket?.readyState ?? runtime?.sock?.socket?.readyState;
         const runtimeSocketStateKnown = typeof runtime?.sock?.ws?.isOpen === 'boolean' || runtimeSocketState !== undefined && runtimeSocketState !== null;
@@ -11539,15 +11667,6 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
             const isPendingPairingStatus = ['pairing_expired', 'pairing_error', 'qr_disponible', 'synchronisation', 'initialisation', 'pairing_starting', 'pairing'].includes(status);
             const shouldRemoveExpiredPairing = isPendingPairingExpired || (isPendingPairingStatus && sessionAgeMs >= PAIRING_SESSION_TTL_MS);
             const isUnregisteredDisconnectedExpired = !credentialsRegistered && ['deconnecte', 'disconnected'].includes(status);
-            const duplicateTarget = String(owner.duplicateAccountOf || owner.duplicateOfSessionId || owner.mergedIntoSessionId || '').trim();
-            if (duplicateTarget && duplicateTarget !== staleSessionId) {
-                const targetExists = await db.collection('session_owners').findOne({ sessionId: duplicateTarget }, { projection: { sessionId: 1 } }).catch(() => null);
-                if (targetExists) {
-                    await mergeSessionScopedData(staleSessionId, duplicateTarget);
-                } else {
-                    console.warn('[session-duplicate-target-missing-removing-expired-source]', { sourceSessionId: staleSessionId, targetSessionId: duplicateTarget, action: 'remove_expired_unconnected_source_and_all_associated_data' });
-                }
-            }
             const removeExpiredUnconnectedSession = sessionAgeMs >= SESSION_UNCONNECTED_TTL_MS && !hasRecoverableAccountCredentials;
             if (!removeExpiredUnconnectedSession) continue;
             const pendingReconnect = reconnectTimers.get(staleSessionId);
@@ -11649,7 +11768,7 @@ async function loadExistingSessions() {
             console.warn('[session-account-group-no-restorable-session]', { sessionCount: group.length, sessions: group.map(item => { const owner = owners.get(item.sessionId) || {}; return { sessionId: item.sessionId, status: String(owner.connectionStatus || owner.status || 'unknown'), reauthRequired: owner.reauthRequired === true, duplicate: !!owner.duplicateAccountOf, ownerLeaseActive: new Date(owner.ownerLeaseUntil || 0).getTime() > now, previousDeploymentOnThisHost: isPreviousDeploymentOwnerOnCurrentHost(owner) }; }), action: 'preserve_auth_and_report_exact_restore_block_reason' });
             continue;
         }
-        eligible.sort((a, b) => b.timestampFromId - a.timestampFromId || Number(owners.get(b.sessionId)?.connectedSince || 0) - Number(owners.get(a.sessionId)?.connectedSince || 0));
+        eligible.sort((a, b) => Number(b.credentials?.registered === true) - Number(a.credentials?.registered === true) || b.timestampFromId - a.timestampFromId || Number(owners.get(b.sessionId)?.connectedSince || 0) - Number(owners.get(a.sessionId)?.connectedSince || 0));
         const selectedSession = eligible[0];
         const selectedOwner = owners.get(selectedSession.sessionId) || {};
         sessionsToRestore.push({ sessionId: selectedSession.sessionId, format: normalizeConnectionFormat(selectedOwner.format || selectedOwner.Format || 'pair') });
@@ -11664,9 +11783,9 @@ async function loadExistingSessions() {
             try {
                 await db.collection('session_owners').updateOne(
                     { sessionId: duplicate.sessionId },
-                    { $set: { connectionStatus: 'duplicate_account', duplicateAccountOf: selectedSession.sessionId, duplicateAccountDetectedAt: duplicateOwner.duplicateAccountDetectedAt || new Date(), duplicateAccountIdentityHash: shortLogHash(duplicate.number || duplicate.lid || selectedSession.sessionId), duplicateAuthPreserved: true, updatedAt: new Date() } }
+                    { $set: { connectionStatus: 'duplicate_account', duplicateAccountOf: selectedSession.sessionId, duplicateAccountDetectedAt: duplicateOwner.duplicateAccountDetectedAt || new Date(), duplicateAccountIdentityHash: shortLogHash(duplicate.number || duplicate.lid || selectedSession.sessionId), duplicateAuthPreserved: true, reauthRequired: false, socketAuthenticated: false, socketReady: false, pairingPending: false, updatedAt: new Date() } }
                 );
-                console.warn('[session-restore-duplicate-auth-preserved]', { identityGroupSize: group.length, activeSessionId: selectedSession.sessionId, preservedSessionId: duplicate.sessionId, authDocumentsPreserved: true, sessionIdUnchanged: true, action: 'do_not_merge_or_delete_signal_session_data' });
+                console.warn('[session-restore-duplicate-marked-for-retirement]', { identityGroupSize: group.length, activeSessionId: selectedSession.sessionId, duplicateSessionId: duplicate.sessionId, authDocumentsPreservedUntilTargetLock: true, action: 'migrate_session_settings_then_delete_only_duplicate_auth_after_target_account_lock_is_held' });
             } catch (error) {
                 console.error('[session-restore-duplicate-preserve-marker-failed]', { activeSessionId: selectedSession.sessionId, preservedSessionId: duplicate.sessionId, error: error?.message || String(error) });
             }
