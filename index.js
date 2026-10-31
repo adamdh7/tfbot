@@ -16,6 +16,7 @@ const LOG_DASHBOARD_MAX_ENTRIES = Math.max(100, Math.min(5000, Number(process.en
 const LOG_DASHBOARD_PAGE_LIMIT = Math.max(80, Math.min(250, Number(process.env.LOG_DASHBOARD_PAGE_LIMIT || 120)));
 const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(process.env.MESSAGE_QUEUE_TASK_TIMEOUT_MS || 45000)));
 const LOG_DASHBOARD_RETENTION_DAYS = Math.max(1, Math.min(30, Number(process.env.LOG_DASHBOARD_RETENTION_DAYS || 7)));
+const LOG_DASHBOARD_DEPLOYMENT_JOIN_WINDOW_MS = Math.max(60000, Math.min(15 * 60 * 1000, Number(process.env.LOG_DASHBOARD_DEPLOYMENT_JOIN_WINDOW_MS || 5 * 60 * 1000)));
 const LOG_DASHBOARD_PERSIST_MAX_ENTRIES = Math.max(5000, Math.min(200000, Number(process.env.LOG_DASHBOARD_PERSIST_MAX_ENTRIES || 50000)));
 const runtimeLogBuffer = [];
 const runtimeLogPendingWrites = [];
@@ -29,17 +30,20 @@ let runtimeLogSequence = 0;
 const runtimeLogInstanceId = `${Date.now()}-${process.pid}`;
 const runtimeLogStartedAt = new Date();
 const runtimeLogPort = String(process.env.PORT || '7000').trim().slice(0, 20);
-const LOG_DASHBOARD_DEPLOYMENT_JOIN_WINDOW_MS = 5 * 60 * 1000;
 let runtimeLogDeploymentStartedAt = runtimeLogStartedAt;
 const runtimeLogRenderServiceId = String(process.env.RENDER_SERVICE_ID || 'local').trim().slice(0, 120);
-const runtimeLogRenderServiceName = String(process.env.RENDER_SERVICE_NAME || process.env.RENDER_SERVICE_TYPE || 'local').trim().slice(0, 120);
+const runtimeLogRenderServiceNameExplicit = String(process.env.RENDER_SERVICE_NAME || '').trim().slice(0, 120);
+const runtimeLogRenderServiceName = String(runtimeLogRenderServiceNameExplicit || process.env.RENDER_SERVICE_TYPE || 'local').trim().slice(0, 120);
 const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
 const runtimeLogRenderCommit = String(process.env.RENDER_GIT_COMMIT || '').trim().slice(0, 80);
+const runtimeLogRenderExternalHost = String(process.env.RENDER_EXTERNAL_HOSTNAME || (() => { try { return new URL(process.env.RENDER_EXTERNAL_URL || '').hostname; } catch (error) { return ''; } })()).trim().toLowerCase().slice(0, 180);
+const runtimeLogServiceScope = [runtimeLogRenderExternalHost ? `host:${runtimeLogRenderExternalHost}` : '', runtimeLogRenderServiceNameExplicit ? `name:${runtimeLogRenderServiceNameExplicit}` : ''].filter(Boolean).join('|') || `local:${runtimeLogPort}`;
+const runtimeLogServiceScopeHash = shortLogHash(runtimeLogServiceScope);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}:${shortLogHash(runtimeLogInstanceId)}`).slice(0, 240);
-const TFBOT_CLUSTER_CODE_REVISION = 'r56-deploy-window-log-reset-authenticated-session-no-read-image-preserve-and-priority-failover';
+const TFBOT_CLUSTER_CODE_REVISION = 'r57-owner-fromme-service-port-log-isolation-live-session-and-del3-identity';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
 const runtimeLogClusterId = `${runtimeLogDeploymentId}:${shortLogHash(runtimeLogInstanceId)}`.slice(0, 240);
-const runtimeLogDeploymentGroupId = `${String(TFBOT_CLUSTER_CODE_REVISION).normalize('NFKC').replace(/[\p{Cc}\p{Cf}]/gu, '').trim().slice(0, 200)}:port-${runtimeLogPort}`;
+const runtimeLogDeploymentGroupId = `${String(TFBOT_CLUSTER_CODE_REVISION).normalize('NFKC').replace(/[\p{Cc}\p{Cf}]/gu, '').trim().slice(0, 160)}:service-${runtimeLogServiceScopeHash}:port-${runtimeLogPort}`;
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
 const runtimeLogSecrets = Object.entries(process.env)
     .filter(([key, value]) => /TOKEN|SECRET|PASSWORD|PASSWD|API.?KEY|MONGO_URI|URI$|CF_ACCOUNTS|TAVILY|OWNER_?NUMBER|TFBOT_OWNER/i.test(key) && String(value || '').length >= 6)
@@ -144,6 +148,7 @@ function attachRuntimeLogPersistence(collection) {
             deploymentGroupId: runtimeLogDeploymentGroupId,
             serviceId: runtimeLogRenderServiceId,
             serviceName: runtimeLogRenderServiceName,
+            serviceScope: runtimeLogServiceScope,
             renderInstanceId: runtimeLogRenderInstanceId,
             renderCommit: runtimeLogRenderCommit || null,
             deploymentStartedAt: runtimeLogDeploymentStartedAt,
@@ -165,14 +170,14 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
     if (!collection || typeof collection.deleteMany !== 'function' || !db) return 0;
     if (runtimeLogInitialCleanupCompleted) return 0;
     const markerCollection = db.collection('cluster_router');
-    const markerId = `runtime-logs-active-deployment:port-${shortLogHash(runtimeLogPort)}`;
+    const markerId = `runtime-logs-active-deployment:${shortLogHash(`${runtimeLogServiceScope}:port:${runtimeLogPort}`)}`;
     const claimOwner = processInstanceId;
     for (let attempt = 0; attempt < 140; attempt++) {
         const now = new Date();
         const existing = await markerCollection.findOne({ _id: markerId }).catch(() => null);
         const existingStartedAt = new Date(existing?.deploymentStartedAt || existing?.startedAt || existing?.completedAt || 0);
         const existingAgeMs = now.getTime() - existingStartedAt.getTime();
-        if (existing?.completed === true && String(existing.releaseId || '') === TFBOT_CODE_RELEASE_ID && String(existing.port || '') === runtimeLogPort && Number.isFinite(existingStartedAt.getTime()) && existingAgeMs >= 0 && existingAgeMs <= LOG_DASHBOARD_DEPLOYMENT_JOIN_WINDOW_MS) {
+        if (existing?.completed === true && String(existing.releaseId || '') === TFBOT_CODE_RELEASE_ID && String(existing.port || '') === runtimeLogPort && String(existing.serviceScope || '') === runtimeLogServiceScope && Number.isFinite(existingStartedAt.getTime()) && existingAgeMs >= 0 && existingAgeMs <= LOG_DASHBOARD_DEPLOYMENT_JOIN_WINDOW_MS) {
             runtimeLogDeploymentStartedAt = existingStartedAt;
             runtimeLogInitialCleanupCompleted = true;
             return 0;
@@ -198,6 +203,7 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
                         port: runtimeLogPort,
                         serviceId: runtimeLogRenderServiceId,
                         serviceName: runtimeLogRenderServiceName,
+                        serviceScope: runtimeLogServiceScope,
                         renderCommit: runtimeLogRenderCommit || null,
                         deploymentStartedAt: now,
                         startedAt: now,
@@ -217,9 +223,8 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
             throw claimError;
         }
         const claim = await markerCollection.findOne({ _id: markerId }).catch(() => null);
-        if (claim?.completed === true && String(claim.releaseId || '') === TFBOT_CODE_RELEASE_ID && String(claim.port || '') === runtimeLogPort) {
-            const sharedStartedAt = new Date(claim.deploymentStartedAt || claim.startedAt || claim.completedAt || now);
-            runtimeLogDeploymentStartedAt = sharedStartedAt;
+        if (claim?.completed === true && String(claim.releaseId || '') === TFBOT_CODE_RELEASE_ID && String(claim.port || '') === runtimeLogPort && String(claim.serviceScope || '') === runtimeLogServiceScope) {
+            runtimeLogDeploymentStartedAt = new Date(claim.deploymentStartedAt || claim.startedAt || claim.completedAt || now);
             runtimeLogInitialCleanupCompleted = true;
             return 0;
         }
@@ -230,42 +235,46 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
         runtimeLogDeploymentStartedAt = new Date(claim?.deploymentStartedAt || now);
         const rawAppCollection = mongoClient?.db(TFBOT_DATABASE_NAME)?.collection(TFBOT_APP_DATA_COLLECTION);
         if (!rawAppCollection) throw new Error('runtime_log_physical_collection_unavailable');
-        const logicalBefore = await collection.countDocuments({}).catch(() => 0);
-        const logicalPurge = await collection.deleteMany({});
+        const legacyCurrentPortOrUnmarked = { $or: [{ port: runtimeLogPort }, { port: { $exists: false } }, { port: null }, { port: '' }] };
+        const serviceScopeBranches = [{ serviceScope: runtimeLogServiceScope, port: runtimeLogPort }];
+        if (runtimeLogRenderServiceId !== 'local') serviceScopeBranches.push({ serviceId: runtimeLogRenderServiceId, ...legacyCurrentPortOrUnmarked });
+        if (runtimeLogRenderServiceNameExplicit) serviceScopeBranches.push({ serviceName: runtimeLogRenderServiceNameExplicit, ...legacyCurrentPortOrUnmarked });
+        if (runtimeLogRenderExternalHost) serviceScopeBranches.push({ instanceUrl: { $regex: `^https?:\/\/${runtimeLogRenderExternalHost.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[:/]|$)`, $options: 'i' }, ...legacyCurrentPortOrUnmarked });
+        const serviceScopeCriteria = { $or: serviceScopeBranches };
+        const logicalBefore = await collection.countDocuments(serviceScopeCriteria).catch(() => 0);
+        const logicalPurge = await collection.deleteMany(serviceScopeCriteria);
         const legacyLogFilter = {
-            $or: [
-                { __tfbotBucket: 'server_runtime_logs' },
-                { _id: { $regex: '^server_runtime_logs::' } },
-                { _id: { $regex: '^server_runtime_logs:' }, level: { $exists: true }, text: { $exists: true } },
-                { _id: { $regex: '^(?:runtime[-_]?logs?|logs)[:::_-]' }, level: { $exists: true }, text: { $exists: true }, createdAt: { $exists: true } }
+            $and: [
+                { $or: [
+                    { __tfbotBucket: 'server_runtime_logs' },
+                    { _id: { $regex: '^server_runtime_logs::' } },
+                    { _id: { $regex: '^server_runtime_logs:' }, level: { $exists: true }, text: { $exists: true } },
+                    { _id: { $regex: '^(?:runtime[-_]?logs?|logs)[:::_-]' }, level: { $exists: true }, text: { $exists: true }, createdAt: { $exists: true } }
+                ] },
+                serviceScopeCriteria
             ]
         };
         const legacyBefore = await rawAppCollection.countDocuments(legacyLogFilter).catch(() => 0);
         const legacyPurge = await rawAppCollection.deleteMany(legacyLogFilter);
-        const staleLogicalFilter = {
-            $or: [
-                { deploymentGroupId: { $ne: runtimeLogDeploymentGroupId } },
-                { deploymentStartedAt: { $ne: runtimeLogDeploymentStartedAt } }
-            ]
-        };
-        const concurrentStalePurge = await collection.deleteMany(staleLogicalFilter).catch(() => ({ deletedCount: 0 }));
-        const concurrentLegacyPurge = await rawAppCollection.deleteMany(legacyLogFilter).catch(() => ({ deletedCount: 0 }));
-        const logicalAfter = await collection.countDocuments(staleLogicalFilter).catch(() => -1);
+        const logicalAfter = await collection.countDocuments(serviceScopeCriteria).catch(() => -1);
         const legacyAfter = await rawAppCollection.countDocuments(legacyLogFilter).catch(() => -1);
-        const removed = Number(logicalPurge?.deletedCount || 0) + Number(legacyPurge?.deletedCount || 0) + Number(concurrentStalePurge?.deletedCount || 0) + Number(concurrentLegacyPurge?.deletedCount || 0);
-        if (logicalAfter > 0 || legacyAfter > 0) console.warn('[runtime-log-stale-documents-remain-hidden]', { logicalAfter, legacyAfter, action: 'dashboard_filters_to_current_deployment_timestamp_and_port' });
+        const removed = Number(logicalPurge?.deletedCount || 0) + Number(legacyPurge?.deletedCount || 0);
+        if (logicalAfter > 0 || legacyAfter > 0) console.warn('[runtime-log-stale-documents-remain-hidden]', { logicalAfter, legacyAfter, serviceScopeHash: runtimeLogServiceScopeHash, port: runtimeLogPort, action: 'keep_other_services_and_ports_untouched_filter_dashboard_to_current_deployment' });
         console.info('[runtime-log-physical-cleanup-verified]', {
             logicalBefore,
-            logicalRemoved: Number(logicalPurge?.deletedCount || 0) + Number(concurrentStalePurge?.deletedCount || 0),
+            logicalRemoved: Number(logicalPurge?.deletedCount || 0),
             legacyBefore,
-            legacyRemoved: Number(legacyPurge?.deletedCount || 0) + Number(concurrentLegacyPurge?.deletedCount || 0),
+            legacyRemoved: Number(legacyPurge?.deletedCount || 0),
             logicalAfter,
             legacyAfter,
             serviceId: runtimeLogRenderServiceId,
+            serviceName: runtimeLogRenderServiceNameExplicit || null,
+            serviceScopeHash: runtimeLogServiceScopeHash,
             deploymentGroupId: runtimeLogDeploymentGroupId,
             port: runtimeLogPort,
             deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(),
-            action: 'purge_all_previous_runtime_log_documents_then_share_one_timestamp_window_across_instances_on_this_port'
+            joinWindowMs: LOG_DASHBOARD_DEPLOYMENT_JOIN_WINDOW_MS,
+            action: 'purge_previous_logs_for_this_render_service_and_port_then_share_only_the_current_deployment_window'
         });
         await markerCollection.updateOne(
             { _id: markerId, owner: claimOwner, completed: { $ne: true } },
@@ -274,6 +283,9 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
                     completed: true,
                     status: 'completed',
                     port: runtimeLogPort,
+                    serviceId: runtimeLogRenderServiceId,
+                    serviceName: runtimeLogRenderServiceName,
+                    serviceScope: runtimeLogServiceScope,
                     releaseId: TFBOT_CODE_RELEASE_ID,
                     deploymentGroupId: runtimeLogDeploymentGroupId,
                     deploymentStartedAt: runtimeLogDeploymentStartedAt,
@@ -288,12 +300,12 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
         return removed;
     }
     const finalMarker = await markerCollection.findOne({ _id: markerId }).catch(() => null);
-    if (finalMarker?.completed === true && String(finalMarker.releaseId || '') === TFBOT_CODE_RELEASE_ID && String(finalMarker.port || '') === runtimeLogPort) {
+    if (finalMarker?.completed === true && String(finalMarker.releaseId || '') === TFBOT_CODE_RELEASE_ID && String(finalMarker.port || '') === runtimeLogPort && String(finalMarker.serviceScope || '') === runtimeLogServiceScope) {
         runtimeLogDeploymentStartedAt = new Date(finalMarker.deploymentStartedAt || finalMarker.startedAt || finalMarker.completedAt || Date.now());
         runtimeLogInitialCleanupCompleted = true;
         return 0;
     }
-    console.error('[runtime-log-deploy-cleanup-not-acquired]', { deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, port: runtimeLogPort, owner: finalMarker?.owner || null, status: finalMarker?.status || 'unknown', action: 'cleanup_not_verified_before_log_persistence_attach' });
+    console.error('[runtime-log-deploy-cleanup-not-acquired]', { deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, serviceScopeHash: runtimeLogServiceScopeHash, port: runtimeLogPort, owner: finalMarker?.owner || null, status: finalMarker?.status || 'unknown', action: 'cleanup_not_verified_before_log_persistence_attach' });
     return 0;
 }
 async function flushRuntimeLogPersistence() {
@@ -317,12 +329,14 @@ async function flushRuntimeLogPersistence() {
             if (runtimeLogPruneCounter >= 1000) {
                 runtimeLogPruneCounter = 0;
                 try {
-                    const currentReleaseFilter = { deploymentGroupId: runtimeLogDeploymentGroupId, deploymentStartedAt: runtimeLogDeploymentStartedAt };
+                    const currentReleaseFilter = { deploymentGroupId: runtimeLogDeploymentGroupId, deploymentStartedAt: runtimeLogDeploymentStartedAt, serviceScope: runtimeLogServiceScope, port: runtimeLogPort };
                     const cutoff = await runtimeLogPersistenceCollection.find(currentReleaseFilter, { projection: { _id: 1, createdAt: 1 } })
                         .sort({ createdAt: -1, _id: -1 }).skip(LOG_DASHBOARD_PERSIST_MAX_ENTRIES).limit(1).next();
                     if (cutoff?.createdAt) {
                         await runtimeLogPersistenceCollection.deleteMany({
                             deploymentGroupId: runtimeLogDeploymentGroupId,
+                            serviceScope: runtimeLogServiceScope,
+                            port: runtimeLogPort,
                             $or: [
                                 { createdAt: { $lt: cutoff.createdAt } },
                                 { createdAt: cutoff.createdAt, _id: { $lt: cutoff._id } }
@@ -358,7 +372,7 @@ function recordRuntimeLog(level, args) {
         const at = new Date().toISOString();
         const normalizedLevel = String(level || 'log').toLowerCase();
         const id = `${runtimeLogInstanceId}:${sequence}`;
-        const entry = { id, at, level: normalizedLevel, text, serviceId: runtimeLogRenderServiceId, deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, deploymentStartedAt: runtimeLogDeploymentStartedAt, port: runtimeLogPort };
+        const entry = { id, at, level: normalizedLevel, text, serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, serviceScope: runtimeLogServiceScope, deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, deploymentStartedAt: runtimeLogDeploymentStartedAt, port: runtimeLogPort };
         runtimeLogBuffer.push(entry);
         if (runtimeLogBuffer.length > LOG_DASHBOARD_MAX_ENTRIES) runtimeLogBuffer.splice(0, runtimeLogBuffer.length - LOG_DASHBOARD_MAX_ENTRIES);
 
@@ -370,6 +384,7 @@ function recordRuntimeLog(level, args) {
                 deploymentGroupId: runtimeLogDeploymentGroupId,
                 serviceId: runtimeLogRenderServiceId,
                 serviceName: runtimeLogRenderServiceName,
+                serviceScope: runtimeLogServiceScope,
                 renderInstanceId: runtimeLogRenderInstanceId,
                 renderCommit: runtimeLogRenderCommit || null,
                 deploymentStartedAt: runtimeLogDeploymentStartedAt,
@@ -760,7 +775,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r56';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r57';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -4013,7 +4028,7 @@ async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, se
     if (!format) return false;
     const rules = await getDel3Rules(sessionId, chat);
     if (!rules.some(rule => rule.format === format)) return false;
-    const ownerIdentityAvailable = !!(ownerRecord && typeof ownerRecord === 'object' && [ownerRecord.Number, ownerRecord.number, ownerRecord.OwnerNumber, ownerRecord.ownerNumber, ownerRecord.PairingNumber, ownerRecord.AccountJid, ownerRecord.accountJid, ownerRecord.OwnerLid, ownerRecord.ownerLid, ownerRecord.Name, ownerRecord.name, ownerRecord.ownerName].some(value => String(value || '').trim()));
+    const ownerIdentityAvailable = !!(ownerRecord && typeof ownerRecord === 'object' && [ownerRecord.Number, ownerRecord.number, ownerRecord.OwnerNumber, ownerRecord.ownerNumber, ownerRecord.PairingNumber, ownerRecord.AccountJid, ownerRecord.accountJid, ownerRecord.OwnerLid, ownerRecord.ownerLid].some(value => String(value || '').trim()));
     if (!ownerIdentityAvailable) {
         console.warn('[del3-message-protected]', { sessionId, group: chat, messageId, format, reason: 'owner_identity_record_unavailable_fail_closed' });
         return false;
@@ -6023,10 +6038,10 @@ async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIM
     let databaseReadError = null;
     try {
         if (db) {
-            const filter = { deploymentGroupId: runtimeLogDeploymentGroupId, deploymentStartedAt: runtimeLogDeploymentStartedAt };
-            if (incremental) filter.createdAt = { $gte: new Date(Math.max(0, since - 2000)) };
+            const filter = { deploymentGroupId: runtimeLogDeploymentGroupId, deploymentStartedAt: runtimeLogDeploymentStartedAt, serviceScope: runtimeLogServiceScope, serviceId: runtimeLogRenderServiceId, port: runtimeLogPort, createdAt: { $gte: runtimeLogDeploymentStartedAt } };
+            if (incremental) filter.createdAt = { $gte: new Date(Math.max(runtimeLogDeploymentStartedAt.getTime(), since - 2000)) };
             const cursor = db.collection('server_runtime_logs')
-                .find(filter, { projection: { at: 1, level: 1, text: 1, createdAt: 1, clusterId: 1, deploymentId: 1, deploymentGroupId: 1, serviceId: 1, serviceName: 1, instance: 1, renderInstanceId: 1 } })
+                .find(filter, { projection: { at: 1, level: 1, text: 1, createdAt: 1, clusterId: 1, deploymentId: 1, deploymentGroupId: 1, deploymentStartedAt: 1, serviceId: 1, serviceName: 1, serviceScope: 1, port: 1, instance: 1, renderInstanceId: 1 } })
                 .sort(incremental ? { createdAt: 1, _id: 1 } : { createdAt: -1, _id: -1 })
                 .limit(limit);
             if (typeof cursor.maxTimeMS === 'function') cursor.maxTimeMS(1800);
@@ -6037,7 +6052,12 @@ async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIM
                     id,
                     at: String(item.at || item.createdAt?.toISOString?.() || ''),
                     level: String(item.level || 'log'),
-                    text: String(item.text || '')
+                    text: String(item.text || ''),
+                    deploymentGroupId: String(item.deploymentGroupId || ''),
+                    serviceId: String(item.serviceId || ''),
+                    serviceName: String(item.serviceName || ''),
+                    serviceScope: String(item.serviceScope || ''),
+                    port: String(item.port || '')
                 });
             }
         } else {
@@ -6048,7 +6068,7 @@ async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIM
     }
     for (const item of runtimeLogBuffer) {
         const atMs = Date.parse(String(item.at || '')) || 0;
-        if (atMs >= runtimeLogDeploymentStartedAt.getTime() && (!incremental || atMs >= Math.max(runtimeLogDeploymentStartedAt.getTime(), since - 2000))) byId.set(String(item.id), item);
+        if (atMs >= runtimeLogDeploymentStartedAt.getTime() && item.deploymentGroupId === runtimeLogDeploymentGroupId && item.serviceScope === runtimeLogServiceScope && String(item.port || '') === runtimeLogPort && (!incremental || atMs >= Math.max(runtimeLogDeploymentStartedAt.getTime(), since - 2000))) byId.set(String(item.id), item);
     }
     let logs = Array.from(byId.values())
         .sort((a, b) => String(a.at).localeCompare(String(b.at)) || String(a.id).localeCompare(String(b.id)));
@@ -6104,10 +6124,10 @@ app.get(LOG_DASHBOARD_PATH, async (req, res) => {
         const requestedLimit = Math.max(20, Math.min(250, Number(req.query?.limit) || LOG_DASHBOARD_PAGE_LIMIT));
         const since = Math.max(0, Number(req.query?.since) || 0);
         const snapshot = await collectRuntimeLogSnapshot(requestedLimit, since);
-        return res.status(200).json({ ok: true, count: snapshot.logs.length, logs: snapshot.logs, nextSince: snapshot.nextSince, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, port: runtimeLogPort, instanceId: runtimeLogInstanceId, serverTime: new Date().toISOString() });
+        return res.status(200).json({ ok: true, count: snapshot.logs.length, logs: snapshot.logs, nextSince: snapshot.nextSince, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, serviceScope: runtimeLogServiceScope, port: runtimeLogPort, instanceId: runtimeLogInstanceId, serverTime: new Date().toISOString() });
     }
 
-    const initialLogs = runtimeLogBuffer.filter(item => (Date.parse(String(item.at || '')) || 0) >= runtimeLogDeploymentStartedAt.getTime()).slice(-Math.min(30, LOG_DASHBOARD_PAGE_LIMIT));
+    const initialLogs = runtimeLogBuffer.filter(item => (Date.parse(String(item.at || '')) || 0) >= runtimeLogDeploymentStartedAt.getTime() && item.deploymentGroupId === runtimeLogDeploymentGroupId && item.serviceScope === runtimeLogServiceScope && String(item.port || '') === runtimeLogPort).slice(-Math.min(30, LOG_DASHBOARD_PAGE_LIMIT));
     const firstPaintLogs = initialLogs.length ? initialLogs : [{
         id: `dashboard-loading:${runtimeLogInstanceId}`,
         at: new Date().toISOString(),
@@ -6161,7 +6181,11 @@ body{min-height:100vh;min-height:100svh;overflow-x:hidden;touch-action:pan-y}
 window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
 (() => {
  const endpoint = location.pathname;
- const deploymentStartedAtMs = ${runtimeLogStartedAt.getTime()};
+     const deploymentStartedAtMs = ${runtimeLogDeploymentStartedAt.getTime()};
+     const expectedDeploymentGroupId = ${JSON.stringify(runtimeLogDeploymentGroupId)};
+     const expectedServiceScope = ${JSON.stringify(runtimeLogServiceScope)};
+     const expectedServiceId = ${JSON.stringify(runtimeLogRenderServiceId)};
+     const expectedPort = ${JSON.stringify(runtimeLogPort)};
  const logsNode = document.getElementById('logs');
  const jumpButton = document.getElementById('jump');
  const copyAllButton = document.getElementById('copy-all');
@@ -6221,7 +6245,7 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
  }
  function render(nextLogs){
    const oldIds=new Set(allLogs.map(item=>textOf(item.id)));
-   const incoming=(Array.isArray(nextLogs)?nextLogs:[]).filter(item=>!textOf(item.id).startsWith('dashboard-loading:')&&(Date.parse(textOf(item.at))||0)>=deploymentStartedAtMs);
+   const incoming=(Array.isArray(nextLogs)?nextLogs:[]).filter(item=>!textOf(item.id).startsWith('dashboard-loading:')&&(Date.parse(textOf(item.at))||0)>=deploymentStartedAtMs&&item.deploymentGroupId===expectedDeploymentGroupId&&item.serviceScope===expectedServiceScope&&String(item.port||'')===expectedPort);
    const merged=new Map(allLogs.map(item=>[textOf(item.id),item]));
    for(const item of incoming)merged.set(textOf(item.id),item);
    const next=Array.from(merged.values()).sort((a,b)=>textOf(a.at).localeCompare(textOf(b.at))||textOf(a.id).localeCompare(textOf(b.id))).slice(-clientBufferLimit);
@@ -6252,6 +6276,7 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
      if(!response.ok)throw new Error('HTTP '+response.status);
      const payload=await response.json();
      if(!payload||payload.ok!==true||!Array.isArray(payload.logs))throw new Error('invalid_log_response');
+     if(payload.deploymentGroupId!==expectedDeploymentGroupId||payload.serviceScope!==expectedServiceScope||String(payload.serviceId||'')!==expectedServiceId||String(payload.port||'')!==expectedPort)throw new Error('deployment_or_port_mismatch');
      lastFetchError='';
      if(Number.isFinite(Number(payload.nextSince)))logCursor=Math.max(logCursor,Number(payload.nextSince));
      initialLoadDone=true;
@@ -6454,9 +6479,26 @@ app.get('/list', async (req, res) => {
         if (ownerDoc.connectedSince) aliveStr = getUptimeString(Math.max(0, now - Number(ownerDoc.connectedSince)));
         else if (localSession?.createdAt) aliveStr = getUptimeString(Math.max(0, now - Number(localSession.createdAt)));
         const ownerLease = new Date(ownerDoc.ownerLeaseUntil || 0).getTime();
-        const remoteOwnerExpired = !!(ownerDoc.ownerInstanceId && ownerDoc.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && ownerLease && ownerLease <= now);
+        const remoteOwner = !!(ownerDoc.ownerInstanceId && ownerDoc.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID);
+        const remoteOwnerLive = remoteOwner && ownerLease > now && ownerDoc.socketAuthenticated === true && ownerDoc.socketReady === true;
         let status = localSession?.status || ownerDoc.connectionStatus || 'deconnecte';
-        if (remoteOwnerExpired && ['connected', 'connecte'].includes(String(status).toLowerCase())) status = 'reconnexion';
+        if (localSession) {
+            const localReadyState = localSession?.sock?.ws?.readyState ?? localSession?.sock?.ws?._socket?.readyState ?? localSession?.sock?.socket?.readyState;
+            const localSocketReady = !!localSession?.sock && (localSession.sock.ws?.isOpen === true || Number(localReadyState) === 1 || String(localReadyState).toUpperCase() === 'OPEN');
+            const localIdentity = getAuthenticatedPhoneNumber(localSession.sock?.user, localSession.authState?.creds) || getAuthenticatedLid(localSession.sock?.user, localSession.authState?.creds);
+            const localAuthenticated = localSession.authState?.creds?.registered === true && !!localIdentity && localSocketReady && ['connecte', 'connected'].includes(String(localSession.status || '').toLowerCase());
+            if (localAuthenticated) status = 'connecte';
+            else {
+                status = localSession.sock ? 'synchronisation' : (localSession.status === 'reauth_required' ? 'reauth_required' : 'deconnecte');
+                localSession.active = false;
+                if (['connecte', 'connected'].includes(String(localSession.status || '').toLowerCase())) localSession.status = status;
+                localSession.unconnectedSinceAt = localSession.unconnectedSinceAt || new Date(now);
+                void ownerCol.updateOne({ sessionId }, { $set: { connectionStatus: status, socketAuthenticated: false, socketReady: localSocketReady, statusUpdatedAt: new Date(now), updatedAt: new Date(now), unconnectedSinceAt: localSession.unconnectedSinceAt, pairingPending: true } }).catch(() => {});
+            }
+        } else if (['connected', 'connecte'].includes(String(status).toLowerCase())) {
+            status = remoteOwnerLive ? 'connecte' : ownerLease > now ? 'synchronisation' : 'reconnexion';
+        }
+        if (remoteOwner && ownerLease <= now && ['connected', 'connecte'].includes(String(status).toLowerCase())) status = 'reconnexion';
         sessionsList.push({
           ID: sessionId,
           Sessions: status,
@@ -6469,7 +6511,11 @@ app.get('/list', async (req, res) => {
       }
       for (const localSession of activeSessions.values()) {
         if (ownerIds.has(localSession.id)) continue;
-        sessionsList.push({ ID: localSession.id, Sessions: localSession.status || 'connecte', Numero: localSession.number || 'N/A', Name: "Adam D'H7", Format: normalizeConnectionFormat(localSession.format || 'pair'), Mode: 'prive', Alive: localSession.createdAt ? getUptimeString(now - localSession.createdAt) : '0s' });
+        const readyState = localSession?.sock?.ws?.readyState ?? localSession?.sock?.ws?._socket?.readyState ?? localSession?.sock?.socket?.readyState;
+        const socketReady = !!localSession?.sock && (localSession.sock.ws?.isOpen === true || Number(readyState) === 1 || String(readyState).toUpperCase() === 'OPEN');
+        const identity = getAuthenticatedPhoneNumber(localSession.sock?.user, localSession.authState?.creds) || getAuthenticatedLid(localSession.sock?.user, localSession.authState?.creds);
+        const isAuthenticated = localSession.authState?.creds?.registered === true && !!identity && socketReady && ['connecte', 'connected'].includes(String(localSession.status || '').toLowerCase());
+        sessionsList.push({ ID: localSession.id, Sessions: isAuthenticated ? 'connecte' : localSession.sock ? 'synchronisation' : (localSession.status || 'deconnecte'), Numero: localSession.number || 'N/A', Name: "Adam D'H7", Format: normalizeConnectionFormat(localSession.format || 'pair'), Mode: 'prive', Alive: localSession.createdAt ? getUptimeString(now - localSession.createdAt) : '0s' });
       }
       const html = `<!DOCTYPE html>
 <html lang="fr">
@@ -8141,7 +8187,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     sessionData.unconnectedSinceAt = pendingStartedAt;
                     await db.collection('session_owners').updateOne(
                         { sessionId },
-                        { $set: { connectionStatus: 'synchronisation', statusUpdatedAt: pendingStartedAt, updatedAt: pendingStartedAt, pairingPending: true, pairingStartedAt: pendingStartedAt, unconnectedSinceAt: pendingStartedAt, reauthRequired: false } , $setOnInsert: { createdAt: new Date() } },
+                        { $set: { connectionStatus: 'synchronisation', socketAuthenticated: false, socketReady: openedSocketReady, statusUpdatedAt: pendingStartedAt, updatedAt: pendingStartedAt, pairingPending: true, pairingStartedAt: pendingStartedAt, unconnectedSinceAt: pendingStartedAt, reauthRequired: false } , $setOnInsert: { createdAt: new Date() } },
                         { upsert: true }
                     ).catch(error => console.warn('[session-open-pending-state-save-failed]', { sessionId, error: error?.message || String(error) }));
                     console.warn('[session-open-not-authenticated-kept-pending]', { sessionId, registered: state.creds?.registered === true, identityAvailable: !!openedAccountIdentity, socketReady: openedSocketReady, expiryMs: PAIRING_SESSION_TTL_MS, action: 'do_not_mark_connected_or_process_messages_until_registered_auth_identity_is_ready' });
@@ -8239,6 +8285,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         updatedAt: new Date(now),
                         reauthRequired: false,
                         connectionStatus: 'connected',
+                        socketAuthenticated: true,
+                        socketReady: true,
+                        socketAuthenticatedAt: new Date(now),
+                        lastSessionHealthAt: new Date(now),
                         lastAuthFailure: null,
                         ...getClusterSessionOwnerFields()
                     };
@@ -8298,13 +8348,16 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             if (connection === 'close') {
                 sessionData.active = false;
                 const currentSession = activeSessions.get(sessionId);
+                const previousStatus = currentSession?.status || null;
+                const closeAt = Date.now();
                 if (currentSession) {
                     currentSession.status = 'deconnecte';
-                    currentSession.disconnectTime = Date.now();
+                    currentSession.active = false;
+                    currentSession.disconnectTime = closeAt;
+                    currentSession.unconnectedSinceAt = currentSession.unconnectedSinceAt || new Date(closeAt);
                     currentSession.qrString = null;
                 }
                 sessionData.qrString = null;
-                const previousStatus = currentSession?.status || null;
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 const disconnectReason = String(lastDisconnect?.error?.message || 'unknown').slice(0, 180);
                 const requiresReauthentication = statusCode === DisconnectReason.loggedOut || statusCode === 401 || statusCode === 403;
@@ -8333,12 +8386,14 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const numToBackup = currentRecord ? currentRecord.number : null;
                         await db.collection('session_owners').updateOne(
                             { sessionId },
-                            { $set: { reauthRequired: true, connectionStatus: 'reauth_required', lastAuthFailureAt: new Date(), lastAuthFailure: disconnectReason } },
+                            { $set: { reauthRequired: true, connectionStatus: 'reauth_required', socketAuthenticated: false, socketReady: false, statusUpdatedAt: new Date(closeAt), updatedAt: new Date(closeAt), disconnectTime: new Date(closeAt), unconnectedSinceAt: new Date(closeAt), pairingPending: true, lastAuthFailureAt: new Date(closeAt), lastAuthFailure: disconnectReason } },
                             { upsert: true }
                         );
                         if (currentRecord) {
                             currentRecord.status = 'reauth_required';
-                            currentRecord.disconnectTime = Date.now();
+                            currentRecord.active = false;
+                            currentRecord.disconnectTime = closeAt;
+                            currentRecord.unconnectedSinceAt = new Date(closeAt);
                             currentRecord.sock = null;
                         }
                         const logoutTimer = reconnectTimers.get(sessionId);
@@ -8350,6 +8405,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         console.error('[whatsapp-reauth-state]', { sessionId, error: logoutCleanupError?.message || String(logoutCleanupError) });
                     }
                 } else {
+                    await db.collection('session_owners').updateOne(
+                        { sessionId },
+                        { $set: { connectionStatus: 'deconnecte', socketAuthenticated: false, socketReady: false, statusUpdatedAt: new Date(closeAt), updatedAt: new Date(closeAt), disconnectTime: new Date(closeAt), unconnectedSinceAt: currentSession?.unconnectedSinceAt || new Date(closeAt), pairingPending: true, reauthRequired: false } },
+                        { upsert: true }
+                    ).catch(error => console.warn('[session-close-state-save-failed]', { sessionId, error: error?.message || String(error) }));
                     scheduleSessionReconnect(sessionId, autoExpire, connectionFormat);
                 }
             }
@@ -8648,9 +8708,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             const botNumbers = botIdentities.filter(value => !/@lid(?:$|:)/i.test(value)).map(normalizedJidNumber).filter(Boolean);
             const targetNumbers = identityValues.filter(value => !/@lid(?:$|:)/i.test(value)).map(normalizedJidNumber).filter(Boolean);
             if (targetNumbers.some(number => ownerNumbers.includes(number) || botNumbers.includes(number))) return true;
-            const ownerNames = [ownerDocument?.Name, ownerDocument?.name, ownerDocument?.ownerName].map(normalizePersonName).filter(Boolean);
-            const targetNames = identityValues.map(value => normalizePersonName(userInfo.get(value)?.pseudo || '')).filter(Boolean);
-            return ownerNames.some(ownerName => targetNames.includes(ownerName));
+            return false;
         };
 
         const resolveTargets = async (arg, m, metadata = null, ownerDocument = null, currentBotJid = null) => {
@@ -8889,16 +8947,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
             for (const m of rawBatch) {
                 try {
-                if (m?.key?.fromMe === true) {
-                    const linkedDeviceMessage = hasLinkedDeviceSentEnvelope(m?.message);
-                    console.info(linkedDeviceMessage ? '[companion-device-message-ignored]' : '[own-account-message-echo-ignored]', { sessionId, messageId: m?.key?.id || null, chatJid: m?.key?.remoteJid || m?.key?.remoteJidAlt || null, action: 'ignore_outgoing_account_message_before_command_or_ai_dispatch' });
-                    continue;
-                }
                 const activeMessageSession = activeSessions.get(sessionId);
                 const activeMessageCredentials = activeMessageSession?.authState?.creds;
                 const activeMessageIdentity = getAuthenticatedPhoneNumber(sock.user, activeMessageCredentials) || getAuthenticatedLid(sock.user, activeMessageCredentials);
                 const activeMessageReadyState = sock?.ws?.readyState ?? sock?.ws?._socket?.readyState ?? sock?.socket?.readyState;
-                const activeMessageSocketReady = activeMessageReadyState === undefined || activeMessageReadyState === null || Number(activeMessageReadyState) === 1 || String(activeMessageReadyState).toUpperCase() === 'OPEN';
+                const activeMessageSocketReady = activeMessageSession?.sock === sock && (sock?.ws?.isOpen === true || Number(activeMessageReadyState) === 1 || String(activeMessageReadyState).toUpperCase() === 'OPEN');
                 const activeMessageAuthenticated = activeMessageSession?.sock === sock && activeMessageSession.status === 'connecte' && activeMessageCredentials?.registered === true && !!activeMessageIdentity && activeMessageSocketReady;
                 if (!activeMessageAuthenticated) {
                     console.info('[message-ignored]', { sessionId, messageId: m?.key?.id || null, chatJid: m?.key?.remoteJid || m?.key?.remoteJidAlt || null, reason: 'session_not_authenticated_and_active', registered: activeMessageCredentials?.registered === true, identityAvailable: !!activeMessageIdentity, socketReady: activeMessageSocketReady });
@@ -9114,7 +9167,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 }
                 const msgCacheKey = `${sessionId}:id:${msgId}`;
                 const msgChatCacheKey = `${sessionId}:${receivedChat}:${msgId}`;
-                if (m.key.fromMe && consumeOutgoingTextEcho(sessionId, m.key.remoteJid || '', extractBody(m))) {
+                if (m.key.fromMe && !receivedParsedCommand && consumeOutgoingTextEcho(sessionId, m.key.remoteJid || '', extractBody(m))) {
                     console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'outgoing_text_echo' });
                     continue;
                 }
@@ -9221,8 +9274,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         let from = rawFrom;
                         let privateReplyTargetResolution = /@lid$/i.test(rawFrom) ? 'original_chat_jid_lid_preferred' : 'original_chat_jid_pn_preferred';
                         const earlyBody = extractBody(m);
-                        if (isFromMe && (/(?:^|\n)\s*>\s*\*Adam D'H7\*/i.test(earlyBody) || /^\s*[*_`]*\s*[○●]\s*/u.test(earlyBody))) {
-                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: from, fromMe: true, bodyPreview: String(earlyBody || '').replace(/[\r\n\t]+/g, ' ').slice(0, 180), reason: 'own_bot_response_echo' });
+                        const isBotFormattedResponseEcho = /(?:^|\n)\s*>\s*\*Adam D'H7\*/i.test(String(earlyBody || ''))
+                            || (/(?:^|\n)\s*\*Adam D'H7\*\s*\n\s*Utilisateur\s*:/i.test(String(earlyBody || '')) && /(?:^|\n)\s*Propriétaire\s*:\s*Adam D'H7/i.test(String(earlyBody || '')));
+                        if (isFromMe && isBotFormattedResponseEcho) {
+                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: from, fromMe: true, bodyPreview: String(earlyBody || '').replace(/[\r\n\t]+/g, ' ').slice(0, 180), reason: 'own_bot_formatted_response_echo' });
                             return;
                         }
                         
@@ -11223,7 +11278,10 @@ setInterval(async () => {
         if (!currentSocket) {
             console.warn('[session-health] connected session has no socket', { sessionId: sId, action: 'flush_signal_store_then_schedule_reconnect' });
             sess.status = 'deconnecte';
+            sess.active = false;
             sess.disconnectTime = now;
+            sess.unconnectedSinceAt = sess.unconnectedSinceAt || new Date(now);
+            await db.collection('session_owners').updateOne({ sessionId: sId }, { $set: { connectionStatus: 'deconnecte', socketAuthenticated: false, socketReady: false, statusUpdatedAt: new Date(now), updatedAt: new Date(now), disconnectTime: new Date(now), unconnectedSinceAt: sess.unconnectedSinceAt, pairingPending: true } }).catch(() => {});
             await flushAuthWritesForSession(sId).catch(error => console.warn('[signal-auth-store-flush-failed]', { sessionId: sId, error: error?.message || String(error) }));
             await releaseSessionRuntimeLock(sId);
             scheduleSessionReconnect(sId, false, sess.format || 'pair');
@@ -11239,7 +11297,7 @@ setInterval(async () => {
             sess.active = false;
             sess.lastConnectionTransitionAt = now;
             sess.unconnectedSinceAt = sess.unconnectedSinceAt || now;
-            await db.collection('session_owners').updateOne({ sessionId: sId }, { $set: { connectionStatus: 'synchronisation', statusUpdatedAt: new Date(sess.unconnectedSinceAt), updatedAt: new Date(now), pairingPending: true, unconnectedSinceAt: new Date(sess.unconnectedSinceAt), pairingStartedAt: new Date(sess.unconnectedSinceAt) } }).catch(() => {});
+            await db.collection('session_owners').updateOne({ sessionId: sId }, { $set: { connectionStatus: 'synchronisation', socketAuthenticated: false, socketReady: socketIsOpen, statusUpdatedAt: new Date(sess.unconnectedSinceAt), updatedAt: new Date(now), lastSessionHealthAt: new Date(now), pairingPending: true, unconnectedSinceAt: new Date(sess.unconnectedSinceAt), pairingStartedAt: new Date(sess.unconnectedSinceAt) } }).catch(() => {});
             console.warn('[session-health-demoted-not-authenticated]', { sessionId: sId, registered: healthCredentials?.registered === true, identityAvailable: !!healthIdentity, expiryMs: SESSION_UNCONNECTED_TTL_MS, action: 'stop_message_dispatch_and_expire_if_not_authenticated_within_184_seconds' });
             continue;
         }
@@ -11259,7 +11317,10 @@ setInterval(async () => {
             action: 'flush_signal_store_then_recreate_socket_preserving_mongodb_auth'
         });
         sess.status = 'deconnecte';
+        sess.active = false;
         sess.disconnectTime = now;
+        sess.unconnectedSinceAt = sess.unconnectedSinceAt || new Date(now);
+        await db.collection('session_owners').updateOne({ sessionId: sId }, { $set: { connectionStatus: 'deconnecte', socketAuthenticated: false, socketReady: false, statusUpdatedAt: new Date(now), updatedAt: new Date(now), lastSessionHealthAt: new Date(now), disconnectTime: new Date(now), unconnectedSinceAt: sess.unconnectedSinceAt, pairingPending: true } }).catch(() => {});
         try {
             await cleanupSocket(sId);
         } catch (cleanupError) {
