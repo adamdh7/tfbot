@@ -32,7 +32,7 @@ const runtimeLogRenderServiceName = String(process.env.RENDER_SERVICE_NAME || pr
 const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
 const runtimeLogRenderCommit = String(process.env.RENDER_GIT_COMMIT || '').trim().slice(0, 80);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}`).slice(0, 240);
-const TFBOT_CLUSTER_CODE_REVISION = 'r37-signal-pairing-del3-reliable';
+const TFBOT_CLUSTER_CODE_REVISION = 'r38-signal-auth-pairing-del3-fix';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-30')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
 const runtimeLogClusterId = TFBOT_CODE_RELEASE_ID;
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
@@ -458,7 +458,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-30-r37';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-30-r38';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -550,7 +550,7 @@ const CLOUDFLARE_API_BASE_URL = String(process.env.CLOUDFLARE_API_BASE_URL || ''
 const TAVILY_SEARCH_URL = String(process.env.TAVILY_SEARCH_URL || '').trim();
 const BREF_UPLOAD_URL = String(process.env.BREF_UPLOAD_URL || '').trim();
 const TF_BOT_BASE_URL = String(process.env.TF_BOT_BASE_URL || process.env.RENDER_EXTERNAL_URL || 'https://tf.bot.adamdh7.org').trim().replace(/\/+$/, '');
-const TFBOT_INTERNAL_API_BASE_URL = String(process.env.TFBOT_INTERNAL_API_URL || process.env.TF_BOT_INTERNAL_API_URL || TFBOT_CLUSTER_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || TF_BOT_BASE_URL).trim().replace(/\/+$/, '');
+const TFBOT_INTERNAL_API_BASE_URL = String(TFBOT_CLUSTER_INSTANCE_URL || process.env.TFBOT_INTERNAL_API_URL || process.env.TF_BOT_INTERNAL_API_URL || process.env.RENDER_EXTERNAL_URL || TF_BOT_BASE_URL).trim().replace(/\/+$/, '');
 const TF_REDIRECT_URL = String(process.env.TF_REDIRECT_URL || '').trim();
 const tfEvents = new EventEmitter();
 
@@ -1766,8 +1766,7 @@ async function queuedDeleteMessageWithAck(sock, jid, messageKey, delayMs = 120, 
     const destination = String(jid || '').trim();
     const messageId = String(messageKey?.id || '').trim();
     const remoteJid = String(messageKey?.remoteJid || destination).trim();
-    const participantCandidates = [messageKey?.participant, messageKey?.participantPn, messageKey?.participantAlt, messageKey?.senderPn].map(value => String(value || '').trim()).filter(value => /@(s\.whatsapp\.net|lid)$/i.test(value));
-    const participant = participantCandidates[0] || '';
+    const participant = String(messageKey?.participant || messageKey?.participantPn || messageKey?.participantAlt || messageKey?.senderPn || '').trim();
     if (!destination || !messageId || !remoteJid) throw new Error('whatsapp_delete_target_key_incomplete');
     if (/@g\.us$/i.test(remoteJid) && !messageKey?.fromMe && !participant) throw new Error('whatsapp_group_delete_participant_missing');
     const normalizedKey = {
@@ -2275,7 +2274,7 @@ function fixBuffers(obj) {
         let binaryValue = null;
         try {
             if (typeof obj.value === 'function') binaryValue = obj.value(true);
-        } catch (e) {}
+        } catch (error) {}
         if (!binaryValue && obj.buffer) binaryValue = obj.buffer;
         if (binaryValue && (Buffer.isBuffer(binaryValue) || binaryValue instanceof Uint8Array)) {
             const length = Number.isInteger(obj.position) && obj.position >= 0 ? Math.min(obj.position, binaryValue.length) : binaryValue.length;
@@ -2288,7 +2287,12 @@ function fixBuffers(obj) {
     if (ArrayBuffer.isView(obj) && !Buffer.isBuffer(obj)) return Buffer.from(obj.buffer, obj.byteOffset, obj.byteLength);
     if (Array.isArray(obj)) return obj.map(fixBuffers);
     if (typeof obj === 'object') {
-        if (obj.type === 'Buffer' && Array.isArray(obj.data)) return Buffer.from(obj.data.map(value => Number(value) & 255));
+        if (obj.type === 'Buffer' && Array.isArray(obj.data) && obj.data.every(value => Number.isInteger(Number(value)) && Number(value) >= 0 && Number(value) <= 255)) return Buffer.from(obj.data.map(Number));
+        if (obj.type === 'Buffer' && obj.data && typeof obj.data === 'object' && !Array.isArray(obj.data)) {
+            const dataKeys = Object.keys(obj.data).filter(key => key !== 'length');
+            const dataLength = Number.isInteger(obj.data.length) ? obj.data.length : dataKeys.length;
+            if (dataLength > 0 && dataKeys.length === dataLength && dataKeys.every((key, index) => key === String(index)) && dataKeys.every(key => Number.isInteger(Number(obj.data[key])) && Number(obj.data[key]) >= 0 && Number(obj.data[key]) <= 255)) return Buffer.from(dataKeys.map(key => Number(obj.data[key])));
+        }
         if (obj.type === 'Buffer' && typeof obj.data === 'string') {
             const encoded = obj.data.trim().replace(/-/g, '+').replace(/_/g, '/');
             if (!encoded) return Buffer.alloc(0);
@@ -2306,6 +2310,10 @@ function fixBuffers(obj) {
                 if (decoded.length && decoded.toString('base64').replace(/=+$/, '') === normalized.replace(/=+$/, '')) return decoded;
             }
         }
+        const numericKeys = Object.keys(obj);
+        if (numericKeys.length && numericKeys.every((key, index) => key === String(index)) && numericKeys.every(key => Number.isInteger(obj[key]) && obj[key] >= 0 && obj[key] <= 255)) {
+            return Buffer.from(numericKeys.map(key => obj[key]));
+        }
         const prototype = Object.getPrototypeOf(obj);
         if (prototype !== Object.prototype && prototype !== null) return obj;
         const output = Object.create(prototype);
@@ -2314,7 +2322,6 @@ function fixBuffers(obj) {
     }
     return obj;
 }
-
 async function assertSessionRuntimeOwnership(sessionId, options = {}) {
     if (TFBOT_CLUSTER_COORDINATOR_ONLY || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping))) throw new Error('tfbot_worker_not_active');
     if (sessionFenceClosureInFlight.has(sessionId)) throw new Error('session_runtime_lock_fenced');
@@ -2906,10 +2913,23 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
             const docs = await collection.find({ _id: { $in: dbIds } }).toArray();
             for (const doc of docs) {
                 const keyId = doc._id.substring(prefix.length);
-                const restored = fixBuffers(doc.data);
+                let restored = fixBuffers(doc.data);
+                if (type === 'session' && Array.isArray(restored) && restored.every(value => Number.isInteger(value) && value >= 0 && value <= 255)) restored = Buffer.from(restored);
+                if (type === 'session' && typeof restored === 'string') {
+                    const encoded = restored.trim().replace(/-/g, '+').replace(/_/g, '/');
+                    if (/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) && encoded.length > 0 && encoded.length % 4 !== 1) {
+                        const normalized = encoded + '='.repeat((4 - encoded.length % 4) % 4);
+                        const decoded = Buffer.from(normalized, 'base64');
+                        if (decoded.length && decoded.toString('base64').replace(/=+$/, '') === normalized.replace(/=+$/, '')) restored = decoded;
+                    }
+                }
                 if (type === 'session' && (!restored || (!Buffer.isBuffer(restored) && !(restored instanceof Uint8Array)) || restored.length === 0)) {
-                    console.warn('[signal-auth-session-record-invalid-preserved]', { sessionId, keyHash: shortLogHash(keyId), reason: 'session_record_is_not_a_nonempty_serialized_buffer', action: 'skip_invalid_value_without_deleting_persisted_record' });
+                    console.warn('[signal-auth-session-record-invalid-preserved]', { sessionId, keyHash: shortLogHash(keyId), storedType: doc.data?._bsontype || (Array.isArray(doc.data) ? 'array' : typeof doc.data), reason: 'session_record_cannot_be_restored_as_nonempty_binary', action: 'skip_without_deleting_persisted_record' });
                     continue;
+                }
+                if (Buffer.isBuffer(restored) && !Buffer.isBuffer(doc.data) && doc.data?._bsontype !== 'Binary') {
+                    await collection.updateOne({ _id: doc._id }, { $set: { data: restored, normalizedAt: new Date() } }, { writeConcern: { w: 'majority', wtimeout: 10000 } });
+                    console.info('[signal-auth-record-normalized]', { sessionId, keyHash: shortLogHash(keyId), category: type, byteLength: restored.length });
                 }
                 result[keyId] = restored;
             }
@@ -2924,7 +2944,7 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
                 for (const [id, value] of Object.entries(entries)) {
                     const dbId = `${sessionKey}_key_${type}-${id}`;
                     if (value === null || value === undefined) operations.push({ deleteOne: { filter: { _id: dbId } } });
-                    else operations.push({ updateOne: { filter: { _id: dbId }, update: { $set: { data: fixBuffers(value) } }, upsert: true } });
+                    else operations.push({ updateOne: { filter: { _id: dbId }, update: { $set: { data: fixBuffers(value), updatedAt: new Date() } }, upsert: true } });
                 }
             }
             await runBulkWriteWithFallback(operations, 'signal-keys');
@@ -3285,7 +3305,7 @@ async function removeDel3Rule(sessionId, gjid, messageFormat) {
     setBoundedMapEntry(activeDel3RulesCache, `${sessionId}_${gjid}`, next, ACTIVE_DEL2_CACHE_MAX_ENTRIES);
 }
 
-async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, senderJid, senderAliases, ownerRecord, canModerateGroup) {
+async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, senderJid, senderAliases, ownerRecord) {
     const chat = String(groupJid || message?.key?.remoteJid || '').trim();
     const messageId = String(message?.key?.id || '').trim();
     if (!/@g\.us$/i.test(chat) || !messageId || message?.key?.fromMe === true) return false;
@@ -3305,7 +3325,7 @@ async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, se
         console.info('[del3-message-skipped-stale]', { sessionId, group: chat, messageId, format, ageSeconds });
         return false;
     }
-    if (typeof canModerateGroup !== 'function' || !(await canModerateGroup(chat))) {
+    if (!(await canBotModerateGroup(chat))) {
         console.warn('[del3-message-delete-skipped]', { sessionId, group: chat, messageId, format, reason: 'bot_not_group_admin_or_group_metadata_unavailable' });
         return false;
     }
@@ -3326,12 +3346,11 @@ async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, se
         del3DeleteDedupCache.set(dedupId, Date.now());
         while (del3DeleteDedupCache.size > 12000) del3DeleteDedupCache.delete(del3DeleteDedupCache.keys().next().value);
         const sourceKey = message.key || {};
-        const participantCandidates = [sourceKey.participant, sourceKey.participantPn, sourceKey.participantAlt, sourceKey.senderPn, senderJid].map(value => String(value || '').trim()).filter(value => /@(s\.whatsapp\.net|lid)$/i.test(value));
-        const participant = participantCandidates[0] || '';
+        const participant = String(sourceKey.participant || sourceKey.participantPn || sourceKey.participantAlt || sourceKey.senderPn || senderJid || '').trim();
         const deleteKey = { ...sourceKey, remoteJid: String(sourceKey.remoteJid || chat), id: messageId, fromMe: sourceKey.fromMe === true };
-        if (participant && !deleteKey.fromMe) deleteKey.participant = participant;
-        const deleteResult = await queuedDeleteMessageWithAck(sock, chat, deleteKey, 180, 9000);
-        console.info('[del3-message-format-matched]', { sessionId, group: chat, messageId, format, deleteRequestSent: true, serverAcknowledgementTracked: true, acknowledgementStatus: deleteResult.acknowledgementStatus, scope: 'same_group_same_whatsapp_format' });
+        if (participant) deleteKey.participant = participant;
+        const deleteResult = await queuedDeleteMessageWithAck(sock, chat, deleteKey, 180, 6500);
+        console.info('[del3-message-format-matched]', { sessionId, group: chat, messageId, format, deleteRequestSent: true, serverAcknowledgementTracked: true, serverAcknowledged: true, acknowledgementStatus: deleteResult.acknowledgementStatus, scope: 'same_group_same_whatsapp_format' });
         return true;
     } catch (error) {
         if (claimed && db) await db.collection('processed_messages').deleteOne({ _id: dedupId }).catch(() => {});
@@ -4553,7 +4572,7 @@ async function createCodeSession(sId, format = 'pair', expectExisting = false, a
 
 function normalizePairingCode(value) {
     const code = String(value || '').trim().toUpperCase().replace(/[\s-]/g, '');
-    if (!/^[0-9A-HJKMNP-TV-Z]{8}$/.test(code)) throw new Error('pairing_code_format_invalid');
+    if (!/^[1-9A-HJKMNP-TV-Z]{8}$/.test(code)) throw new Error('pairing_code_format_invalid');
     return code;
 }
 
@@ -4572,7 +4591,6 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
         let retryTimer = null;
         let pollTimer = null;
         let timeoutTimer = null;
-        let requestPromise = null;
         const detachSocket = () => {
             if (currentSocket && currentHandler) {
                 try {
@@ -4607,7 +4625,8 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
             currentSocket = socket;
             currentHandler = update => {
                 if (settled || currentSocket !== socket) return;
-                if (activeSessions.get(sessionId)?.sock && activeSessions.get(sessionId).sock !== socket) {
+                const latest = activeSessions.get(sessionId);
+                if (latest?.sock && latest.sock !== socket) {
                     if (!requestStarted) {
                         detachSocket();
                         schedule(250, 'replacement_socket_detected');
@@ -4625,7 +4644,7 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
                         return;
                     }
                     detachSocket();
-                    if ([401, 403].includes(statusCode)) {
+                    if ([401, 403, 419].includes(statusCode)) {
                         finish(new Error(`pairing_socket_closed_before_code:${statusCode}`));
                         return;
                     }
@@ -4641,7 +4660,7 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
                 schedule(500, 'socket_listener_retry');
                 return;
             }
-            console.info('[pairing-code-socket-attached]', { sessionId, qrAvailable: !!activeSessions.get(sessionId)?.qrString, socketReplaced: trigger === 'replacement_socket_detected' || trigger === 'socket_reconnected' });
+            console.info('[pairing-code-socket-attached]', { sessionId, qrAvailable: !!(activeSessions.get(sessionId) || sessionData)?.qrString, socketReplaced: trigger === 'replacement_socket_detected' || trigger === 'socket_reconnected' });
             schedule(250, trigger || 'socket_attached');
         };
         const attempt = async trigger => {
@@ -4674,16 +4693,15 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
             if (sessionData && sessionData !== active) sessionData.pairingCodeRequestStarted = true;
             const requestSocket = socket;
             console.info('[pairing-code-request-started]', { sessionId, attempt: 1, numberLength: normalizedNumber.length, qrAvailable: !!active.qrString });
-            requestPromise = Promise.resolve().then(() => requestSocket.requestPairingCode(normalizedNumber));
             try {
-                const result = await requestPromise;
+                const result = await requestSocket.requestPairingCode(normalizedNumber);
                 if (activeSessions.get(sessionId)?.sock && activeSessions.get(sessionId).sock !== requestSocket) throw new Error('pairing_socket_replaced_during_code_request');
                 const code = normalizePairingCode(result);
                 if (typeof active?.flushAuthWrites === 'function') await active.flushAuthWrites();
                 console.info('[pairing-code-request-completed]', { sessionId, attempt: 1, codeLength: code.length, codeCharacterSet: /^[0-9]{8}$/.test(code) ? 'numeric' : 'crockford_base32' });
                 finish(null, code);
             } catch (error) {
-                console.warn('[pairing-code-request-failed]', { sessionId, attempt: 1, error: error?.message || String(error), retryable: false, action: 'start_a_fresh_pairing_session_without_overwriting_pairing_state' });
+                console.warn('[pairing-code-request-failed]', { sessionId, attempt: 1, error: error?.message || String(error), retryable: false, action: 'start_a_fresh_pairing_session_without_reusing_a_rejected_code' });
                 finish(error);
             }
         };
@@ -6818,8 +6836,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             printQRInTerminal: false,
             auth: { creds: state.creds, keys: cachedSignalKeyStore },
             cachedGroupMetadata: async groupJid => getGroupMetadataCached(sessionId, sock, groupJid),
-            browser: Browsers.ubuntu('Chrome'), 
-            markOnlineOnConnect: false,
+            browser: connectionFormat === 'pair' ? Browsers.macOS('Chrome') : Browsers.ubuntu('Chrome'),
+            markOnlineOnConnect: connectionFormat === 'pair',
             generateHighQualityLinkPreview: true,
             msgRetryCounterCache: createSessionRetryCache(sessionId),
             retryRequestDelayMs: 250,
@@ -7963,13 +7981,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     timestamp: receivedDiagnostic.timestamp
                 });
                 if (!String(receivedBody || '').trim() && !receivedParsedCommand) {
-                    if (receivedIsGroup && !m?.key?.fromMe && receivedType !== 'unknown' && receivedType !== 'protocolMessage' && receivedType !== 'senderKeyDistributionMessage') {
+                    if (receivedIsGroup && !m?.key?.fromMe && receivedType !== 'protocolMessage' && receivedType !== 'senderKeyDistributionMessage') {
                         let ownerRecordForDel3 = sessionOwnersCache.get(sessionId) || null;
                         if (!ownerRecordForDel3 && db) {
                             ownerRecordForDel3 = await db.collection('session_owners').findOne({ sessionId }).catch(() => null);
                             if (ownerRecordForDel3) sessionOwnersCache.set(sessionId, ownerRecordForDel3);
                         }
-                        await applyDel3ToIncomingMessage(sock, sessionId, m, receivedChat, receivedSenderJid, receivedSenderAliases, ownerRecordForDel3, canBotModerateGroup);
+                        await applyDel3ToIncomingMessage(sock, sessionId, m, receivedChat, receivedSenderJid, receivedSenderAliases, ownerRecordForDel3);
                     }
                     cacheRecentMessage(sessionId, m);
                     console.info('[message-awaiting-readable-content]', {
@@ -8444,7 +8462,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         });
 
                         if (isGroup && sender && !isFromMe && !isOwnerReal) {
-                            const del3Deleted = await applyDel3ToIncomingMessage(sock, sessionId, m, from, sender, senderJids, sOwnerTop, canBotModerateGroup);
+                            const del3Deleted = await applyDel3ToIncomingMessage(sock, sessionId, m, from, sender, senderJids, sOwnerTop);
                             if (del3Deleted) return;
                         }
 
@@ -9293,7 +9311,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 break;
                                             }
                                             try {
-                                                await queuedDeleteMessageWithAck(sock, from, quotedDel3Key, 180, 9000);
+                                                await queuedSendMessage(sock, from, { delete: quotedDel3Key }, {}, 180);
                                             } catch (del3SelectedDeleteError) {
                                                 console.warn('[del3-selected-message-delete-failed]', { sessionId, group: from, messageId: quotedDel3Id, format: del3Format || 'unknown', error: del3SelectedDeleteError?.message || String(del3SelectedDeleteError) });
                                                 await safeSendFormatted(sock, from, t.cmd_del3, t.del3_delete_failed || t.command_error, pushName, true, activeHostName);
@@ -9463,30 +9481,42 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 break;
                                             }
                                             try {
-                                                if (!TF_BOT_BASE_URL) throw new Error('tf_bot_not_configured');
-                                                const internalApiToken = String(process.env.TOKEN || process.env.ADMIN_API_TOKEN || '').trim();
-                                                if (!internalApiToken) throw new Error('internal_api_token_not_configured');
                                                 const pairingApiBase = TFBOT_INTERNAL_API_BASE_URL || TFBOT_CLUSTER_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || TF_BOT_BASE_URL;
+                                                if (!pairingApiBase) throw new Error('pairing_api_not_configured');
+                                                const internalApiToken = String(process.env.ADMIN_API_TOKEN || process.env.TOKEN || '').trim();
+                                                if (!internalApiToken) throw new Error('internal_api_token_not_configured');
                                                 const pairingApiUrl = new URL('/get-code', `${pairingApiBase}/`).toString();
-                                                const response = await fetch(pairingApiUrl, {
-                                                    method: 'POST',
-                                                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'Authorization': `Bearer ${internalApiToken}` },
-                                                    body: JSON.stringify({ number: args.replace(/[^0-9]/g, ''), method: 'code', autoExpire: true }),
-                                                    redirect: 'error',
-                                                    cache: 'no-store'
-                                                });
-                                                const responseContentType = String(response.headers.get('content-type') || '').toLowerCase();
-                                                const responseText = await response.text();
-                                                let data = null;
-                                                try { data = JSON.parse(responseText); } catch (parseError) {
-                                                    console.error('[pairing-code-api-invalid-response]', { status: response.status, contentType: responseContentType || 'unknown', targetHost: new URL(pairingApiUrl).host, responseKind: /^\s*</.test(responseText) ? 'html' : 'non_json' });
-                                                    throw new Error(`pairing_api_non_json_response:${response.status}:${responseContentType.includes('html') ? 'html' : 'non_json'}`);
+                                                const pairingController = new AbortController();
+                                                const pairingTimeout = setTimeout(() => pairingController.abort(), 80000);
+                                                let response;
+                                                let responseText;
+                                                try {
+                                                    response = await fetch(pairingApiUrl, {
+                                                        method: 'POST',
+                                                        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'Authorization': `Bearer ${internalApiToken}` },
+                                                        body: JSON.stringify({ number: args.replace(/[^0-9]/g, ''), method: 'code', autoExpire: true }),
+                                                        redirect: 'error',
+                                                        cache: 'no-store',
+                                                        signal: pairingController.signal
+                                                    });
+                                                    responseText = await response.text();
+                                                } finally {
+                                                    clearTimeout(pairingTimeout);
                                                 }
+                                                let data = null;
+                                                try { data = JSON.parse(responseText || ''); }
+                                                catch (parseError) {
+                                                    const contentType = String(response?.headers?.get('content-type') || '').toLowerCase();
+                                                    console.error('[pairing-code-api-invalid-response]', { status: response?.status || 0, contentType: contentType || 'unknown', targetHost: new URL(pairingApiUrl).host, responseKind: /^\s*</.test(String(responseText || '')) ? 'html' : 'non_json' });
+                                                    throw new Error(`pairing_api_non_json_response:${response?.status || 0}:${contentType.includes('html') ? 'html' : 'non_json'}`);
+                                                }
+                                                if (!response?.ok) throw new Error(String(data?.error || `pairing_api_http_${response?.status || 0}`));
+                                                if (data?.ok !== true || !data?.code) throw new Error(String(data?.error || 'pair_code_not_returned'));
+                                                data.code = normalizePairingCode(data.code);
                                                 if (isCancelled) return;
-                                                if (!response.ok) throw new Error(String(data?.error || `pairing_api_http_${response.status}`));
                                                 if (data && data.code) {
                                                     const tfid_code = crypto.randomInt(100000000000, 999999999999);
-                                                    const confirmLink_code = `${TF_BOT_BASE_URL}/TF-${tfid_code}`;
+                                                    const confirmLink_code = `${pairingApiBase.replace(/\/+$/, '')}/TF-${tfid_code}`;
                                                     const confirmText = t.code_confirm.replace('{link}', confirmLink_code);
                                                     const msgConfirmation = await trackedSendImageCaptioned(sock, from, adamLogoBuffer, t.cmd_code, confirmText, pushName);
                                                     responseSentForLog = !!msgConfirmation;
