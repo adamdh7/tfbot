@@ -31,10 +31,10 @@ const runtimeLogRenderServiceId = String(process.env.RENDER_SERVICE_ID || 'local
 const runtimeLogRenderServiceName = String(process.env.RENDER_SERVICE_NAME || process.env.RENDER_SERVICE_TYPE || 'local').trim().slice(0, 120);
 const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
 const runtimeLogRenderCommit = String(process.env.RENDER_GIT_COMMIT || '').trim().slice(0, 80);
-const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}`).slice(0, 240);
-const TFBOT_CLUSTER_CODE_REVISION = 'r39-signal-retry-current-deploy-logs';
+const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}:${shortLogHash(runtimeLogInstanceId)}`).slice(0, 240);
+const TFBOT_CLUSTER_CODE_REVISION = 'r40-suspension-aware-signal-preservation';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-30')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
-const runtimeLogClusterId = TFBOT_CODE_RELEASE_ID;
+const runtimeLogClusterId = `${runtimeLogDeploymentId}:${shortLogHash(runtimeLogInstanceId)}`.slice(0, 240);
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
 const runtimeLogSecrets = Object.entries(process.env)
     .filter(([key, value]) => /TOKEN|SECRET|PASSWORD|PASSWD|API.?KEY|MONGO_URI|URI$|CF_ACCOUNTS|TAVILY/i.test(key) && String(value || '').length >= 8)
@@ -405,7 +405,23 @@ function getSignalRecoveryPeerDetails(parsed) {
 function scheduleSignalRecoveryFromLog(sessionId, parsed) {
     if (!sessionId || !parsed || typeof parsed !== 'object' || serverShuttingDown) return;
     const details = getSignalRecoveryPeerDetails(parsed);
-    if (!details.remoteJid || !details.peerJid) return;
+    if (!details.remoteJid || !details.peerJid) {
+        const flushKey = `${sessionId}:unattributed-signal-auth-flush`;
+        const now = Date.now();
+        if (Number(signalRecoveryCooldowns.get(flushKey) || 0) <= now) {
+            signalRecoveryCooldowns.set(flushKey, now + 15000);
+            const flushTimer = setTimeout(async () => {
+                try {
+                    await flushAuthWritesForSession(sessionId);
+                    console.info('[signal-auth-flush-after-unattributed-failure]', { sessionId, action: 'flush_pending_auth_writes_without_deleting_signal_keys' });
+                } catch (error) {
+                    console.warn('[signal-auth-flush-after-unattributed-failure-failed]', { sessionId, error: error?.message || String(error) });
+                }
+            }, 100);
+            if (typeof flushTimer.unref === 'function') flushTimer.unref();
+        }
+        return;
+    }
     const currentSession = activeSessions.get(sessionId);
     const currentSocket = currentSession?.sock;
     const ownPhone = getAuthenticatedPhoneNumber(currentSocket?.user || null, currentSession?.authState?.creds || null);
@@ -514,7 +530,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-30-r39';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-30-r40';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -675,6 +691,7 @@ const reconnectTimers = new Map();
 const sessionStartPromises = new Map();
 const SESSION_HEALTH_CHECK_INTERVAL_MS = Math.max(15000, Number(process.env.SESSION_HEALTH_CHECK_INTERVAL_MS) || 30000);
 const SESSION_WS_PONG_TIMEOUT_MS = Math.max(60000, Number(process.env.SESSION_WS_PONG_TIMEOUT_MS) || 120000);
+const SESSION_UNCONNECTED_TTL_MS = Math.max(120000, Math.min(3600000, Number(process.env.SESSION_UNCONNECTED_TTL_MS) || 300000));
 const GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS = Math.max(60000, Number(process.env.GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS) || 6 * 60 * 60 * 1000);
 const GROUP_SENDER_KEY_RESET_EVERY_SEND = String(process.env.GROUP_SENDER_KEY_RESET_EVERY_SEND || 'false').trim().toLowerCase() === 'true';
 const groupSenderKeyResetAt = new Map();
@@ -736,6 +753,7 @@ const groupMetadataCache = new Map();
 const sessionOwnersCache = new Map();
 const processedLocalCache = new Set();
 let isPurging = false;
+let expiredSessionCleanupPromise = null;
 
 const messageQueues = new WeakMap();
 const outgoingMessageCache = new Set();
@@ -1237,18 +1255,20 @@ function queueMessage(executeFn, delayMs = 150, queueKey = null) {
 async function claimMessageForProcessing(sessionId, messageId, remoteJid = '', accountIdentity = '') {
     if (!db || !sessionId || !messageId) return true;
     const normalizedChat = String(remoteJid || 'unknown-chat').trim();
+    const normalizedMessageId = String(messageId || '').trim();
     const accountScope = String(accountIdentity || sessionId).trim();
-    const documentId = `${shortLogHash(accountScope)}:${normalizedChat}:${messageId}`;
+    const accountScopeHash = shortLogHash(accountScope);
+    const documentId = `${accountScopeHash}:${normalizedMessageId}`;
     try {
         const result = await db.collection('processed_messages').updateOne(
             { _id: documentId },
-            { $setOnInsert: { sessionId, accountScopeHash: shortLogHash(accountScope), messageId, remoteJid: normalizedChat, ts: Date.now(), expireAt: new Date(Date.now() + PROCESSED_MESSAGE_RETENTION_MS) } },
+            { $setOnInsert: { sessionId, accountScopeHash, messageId: normalizedMessageId, remoteJid: normalizedChat, ts: Date.now(), expireAt: new Date(Date.now() + PROCESSED_MESSAGE_RETENTION_MS) } },
             { upsert: true }
         );
         return result.upsertedCount === 1;
     } catch (error) {
         if (error && error.code === 11000) return false;
-        console.error('[message-dedupe]', { sessionId, remoteJid: normalizedChat, messageId, error: error?.message || String(error) });
+        console.error('[message-dedupe]', { sessionId, remoteJid: normalizedChat, messageId: normalizedMessageId, error: error?.message || String(error) });
         return true;
     }
 }
@@ -1714,9 +1734,6 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             destinationType: destinationJid.endsWith('@g.us') ? 'group' : destinationJid.endsWith('@newsletter') ? 'channel' : destinationJid.endsWith('@s.whatsapp.net') ? 'private_pn' : destinationJid.endsWith('@lid') ? 'private_lid' : 'other'
         });
         const sendTo = async targetJid => {
-            if (sessionId && /@g\.us$/i.test(String(targetJid || '').trim())) {
-                await resetGroupSenderKeyMemoryBeforeSend(sessionId, targetJid);
-            }
             const echoToken = rememberOutgoingTextEcho(sessionId, targetJid, outgoingContent);
             try {
                 return await sock.sendMessage(targetJid, outgoingContent, options);
@@ -2280,8 +2297,8 @@ async function connectMongo(options = {}) {
             await runtimeLogsCollection.createIndex({ serviceId: 1, createdAt: -1, _id: -1 }, { name: 'server_runtime_logs_service_created_desc' });
             await runtimeLogsCollection.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'server_runtime_logs_expire_at_ttl' });
         }
-        const removedPreviousServiceDeployLogs = await runtimeLogsCollection.deleteMany({ serviceId: runtimeLogRenderServiceId, deploymentId: { $ne: runtimeLogDeploymentId } });
-        const removedPreviousCodeLogs = coordinatorOnly ? await runtimeLogsCollection.deleteMany({ clusterId: { $ne: runtimeLogClusterId } }) : { deletedCount: 0 };
+        const removedPreviousServiceDeployLogs = await runtimeLogsCollection.deleteMany({ serviceId: runtimeLogRenderServiceId, clusterId: { $ne: runtimeLogClusterId } });
+        const removedPreviousCodeLogs = { deletedCount: 0 };
         const removedPreviousDeployLogs = { deletedCount: Number(removedPreviousServiceDeployLogs?.deletedCount || 0) + Number(removedPreviousCodeLogs?.deletedCount || 0) };
         if (skipStorageInitialization) {
             pendingRuntimeLogPersistenceCollection = runtimeLogsCollection;
@@ -3377,7 +3394,7 @@ async function removeDel3Rule(sessionId, gjid, messageFormat) {
     setBoundedMapEntry(activeDel3RulesCache, `${sessionId}_${gjid}`, next, ACTIVE_DEL2_CACHE_MAX_ENTRIES);
 }
 
-async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, senderJid, senderAliases, ownerRecord) {
+async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, senderJid, senderAliases, ownerRecord, canBotModerateGroupFn, isProtectedWhatsAppTargetFn) {
     const chat = String(groupJid || message?.key?.remoteJid || '').trim();
     const messageId = String(message?.key?.id || '').trim();
     if (!/@g\.us$/i.test(chat) || !messageId || message?.key?.fromMe === true) return false;
@@ -3385,8 +3402,13 @@ async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, se
     if (!format) return false;
     const rules = await getDel3Rules(sessionId, chat);
     if (!rules.some(rule => rule.format === format)) return false;
+    const ownerIdentityAvailable = !!(ownerRecord && typeof ownerRecord === 'object' && [ownerRecord.Number, ownerRecord.number, ownerRecord.OwnerNumber, ownerRecord.ownerNumber, ownerRecord.PairingNumber, ownerRecord.AccountJid, ownerRecord.accountJid, ownerRecord.OwnerLid, ownerRecord.ownerLid, ownerRecord.Name, ownerRecord.name, ownerRecord.ownerName].some(value => String(value || '').trim()));
+    if (!ownerIdentityAvailable) {
+        console.warn('[del3-message-protected]', { sessionId, group: chat, messageId, format, reason: 'owner_identity_record_unavailable_fail_closed' });
+        return false;
+    }
     const aliasText = (Array.isArray(senderAliases) ? senderAliases : []).map(String).join(' ');
-    if (isProtectedWhatsAppTarget(senderJid, ownerRecord, sock?.user?.id || '', aliasText)) {
+    if (typeof isProtectedWhatsAppTargetFn === 'function' && isProtectedWhatsAppTargetFn(senderJid, ownerRecord, sock?.user?.id || '', aliasText)) {
         console.info('[del3-message-protected]', { sessionId, group: chat, messageId, format, reason: 'host_or_bot' });
         return false;
     }
@@ -3397,7 +3419,7 @@ async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, se
         console.info('[del3-message-skipped-stale]', { sessionId, group: chat, messageId, format, ageSeconds });
         return false;
     }
-    if (!(await canBotModerateGroup(chat))) {
+    if (typeof canBotModerateGroupFn !== 'function' || !(await canBotModerateGroupFn(chat))) {
         console.warn('[del3-message-delete-skipped]', { sessionId, group: chat, messageId, format, reason: 'bot_not_group_admin_or_group_metadata_unavailable' });
         return false;
     }
@@ -3723,45 +3745,68 @@ function normalizeTfbotActiveDomainRecord(record, source = 'mongodb') {
 }
 
 async function probeTfbotServingDomain(domain) {
-    if (!TFBOT_CLUSTER_TOKEN || !domain?.host || !domain?.url) return null;
+    if (!domain?.host || !domain?.url) return null;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TFBOT_ROUTER_PROBE_TIMEOUT_MS);
     try {
-        const response = await fetch(`${domain.url}${TFBOT_ROUTER_OK_PATH}`, {
+        const response = await fetch(domain.url, {
             method: 'GET',
-            headers: {
-                'X-TFBOT-Cluster-Token': TFBOT_CLUSTER_TOKEN,
-                'X-TFBOT-Expected-Host': domain.host,
-                'Accept': 'application/json'
-            },
+            headers: { 'Accept': 'text/html,application/json;q=0.9,*/*;q=0.8' },
             cache: 'no-store',
             redirect: 'manual',
             signal: controller.signal
         });
-        if (response.status !== 200) {
-            await response.body?.cancel().catch(() => {});
-            return null;
+        const responseText = await response.text().catch(() => '');
+        if (/This service has been suspended by its owner/i.test(String(responseText || '').slice(0, 160000))) {
+            console.warn('[tfbot-router-domain-suspended]', { host: domain.host, status: response.status, reason: 'render_owner_suspension_message', action: 'try_next_domain_in_priority_order' });
+            return { ok: false, suspended: true, host: domain.host, url: domain.url, workerActive: false, workerState: 'suspended', checkedAt: new Date(), rootStatus: response.status };
         }
-        const payload = await response.json().catch(() => null);
-        if (!payload || payload.ok !== true || payload.service !== 'tfbot-router-node' || normalizeTfbotHost(payload.host) !== domain.host || payload.database !== TFBOT_DATABASE_NAME) return null;
-        const detectedReleaseId = String(payload.releaseId || '');
-        if (detectedReleaseId !== TFBOT_CODE_RELEASE_ID) {
-            console.warn('[tfbot-router-code-release-rejected]', { host: domain.host, expectedReleaseId: TFBOT_CODE_RELEASE_ID, detectedReleaseId: detectedReleaseId || 'missing', action: 'skip_incompatible_worker' });
-            return null;
+        let payload = null;
+        const healthController = new AbortController();
+        const healthTimer = setTimeout(() => healthController.abort(), Math.min(2200, TFBOT_ROUTER_COORDINATOR_TIMEOUT_MS));
+        try {
+            const healthResponse = await fetch(`${domain.url}${TFBOT_ROUTER_OK_PATH}`, {
+                method: 'GET',
+                headers: {
+                    'X-TFBOT-Cluster-Token': TFBOT_CLUSTER_TOKEN,
+                    'X-TFBOT-Expected-Host': domain.host,
+                    'Accept': 'application/json'
+                },
+                cache: 'no-store',
+                redirect: 'manual',
+                signal: healthController.signal
+            });
+            const healthText = await healthResponse.text().catch(() => '');
+            if (/This service has been suspended by its owner/i.test(String(healthText || '').slice(0, 160000))) {
+                return { ok: false, suspended: true, host: domain.host, url: domain.url, workerActive: false, workerState: 'suspended', checkedAt: new Date(), rootStatus: response.status };
+            }
+            if (healthResponse.status === 200) {
+                try { payload = JSON.parse(healthText); } catch (error) { payload = null; }
+            }
+        } catch (healthError) {
+            payload = null;
+        } finally {
+            clearTimeout(healthTimer);
         }
-        if (String(payload.workerState || '') === 'error' || String(payload.workerState || '') === 'stopping') return null;
+        const validHealthPayload = !!(payload && payload.ok === true && payload.service === 'tfbot-router-node' && normalizeTfbotHost(payload.host) === domain.host && payload.database === TFBOT_DATABASE_NAME);
+        if (validHealthPayload && String(payload.workerState || '') === 'error') {
+            console.warn('[tfbot-router-worker-reported-error]', { host: domain.host, action: 'keep_url_valid_but_attempt_activation' });
+        }
         return {
             ok: true,
             host: domain.host,
             url: domain.url,
-            workerActive: payload.workerActive === true,
-            workerState: String(payload.workerState || 'standby'),
-            activeHost: normalizeTfbotHost(payload.activeHost || ''),
-            generation: String(payload.generation || ''),
-            activeSessionCount: Number(payload.activeSessionCount || 0),
+            workerActive: validHealthPayload && payload.workerActive === true,
+            workerState: validHealthPayload ? String(payload.workerState || 'standby') : 'unverified',
+            activeHost: validHealthPayload ? normalizeTfbotHost(payload.activeHost || '') : '',
+            generation: validHealthPayload ? String(payload.generation || '') : '',
+            activeSessionCount: validHealthPayload ? Number(payload.activeSessionCount || 0) : 0,
+            healthVerified: validHealthPayload,
+            rootStatus: response.status,
             checkedAt: new Date()
         };
     } catch (error) {
+        console.warn('[tfbot-router-domain-no-response]', { host: domain.host, error: error?.name === 'AbortError' ? 'timeout' : String(error?.message || error).slice(0, 160) });
         return null;
     } finally {
         clearTimeout(timer);
@@ -3830,43 +3875,36 @@ async function refreshTfbotActiveDomain(force = false) {
         const previousHost = normalizeTfbotHost(tfbotCoordinatorSelectionCache?.host || '');
         const previousIndex = TFBOT_ROUTER_SERVING_DOMAINS.findIndex(item => item.host === previousHost);
         let selectedItem = null;
-        if (previousIndex >= 0) {
-            const currentDomain = TFBOT_ROUTER_SERVING_DOMAINS[previousIndex];
-            selectionPhase = 'probe-previous-domain';
-            const currentHealth = await probeTfbotServingDomain(currentDomain);
-            checked.push({ domain: currentDomain, health: currentHealth });
-            if (currentHealth?.ok) selectedItem = { domain: currentDomain, health: currentHealth };
+        for (const domain of TFBOT_ROUTER_SERVING_DOMAINS) {
+            selectionPhase = `probe-priority-domain:${domain.host}`;
+            const domainProbeResult = await probeTfbotServingDomain(domain);
+            checked.push({ domain, health: domainProbeResult });
+            if (domainProbeResult?.ok) {
+                selectedItem = { domain, health: domainProbeResult };
+                break;
+            }
         }
         if (!selectedItem) {
-            const startIndex = previousIndex >= 0 ? (previousIndex + 1) % TFBOT_ROUTER_SERVING_DOMAINS.length : 0;
-            for (let offset = 0; offset < TFBOT_ROUTER_SERVING_DOMAINS.length; offset++) {
-                const index = (startIndex + offset) % TFBOT_ROUTER_SERVING_DOMAINS.length;
-                const domain = TFBOT_ROUTER_SERVING_DOMAINS[index];
-                if (domain.host === previousHost) continue;
-                selectionPhase = `probe-candidate:${domain.host}`;
-                const domainProbeResult = await probeTfbotServingDomain(domain);
-                checked.push({ domain, health: domainProbeResult });
-                if (domainProbeResult?.ok) {
-                    selectedItem = { domain, health: domainProbeResult };
-                    break;
+            const primaryDomain = TFBOT_ROUTER_SERVING_DOMAINS[0];
+            const primaryProbe = checked.find(item => item.domain.host === primaryDomain.host)?.health || null;
+            selectedItem = {
+                domain: primaryDomain,
+                health: primaryProbe?.ok ? primaryProbe : {
+                    ok: true,
+                    host: primaryDomain.host,
+                    url: primaryDomain.url,
+                    workerActive: false,
+                    workerState: 'unconfirmed-last-resort',
+                    activeHost: '',
+                    generation: '',
+                    activeSessionCount: 0,
+                    checkedAt: new Date(),
+                    lastResort: true
                 }
-            }
+            };
+            console.warn('[tfbot-router-returned-to-primary-last-resort]', { coordinator: TFBOT_COORDINATOR_HOST, checkedHosts: checked.map(item => item.domain.host), primaryHost: primaryDomain.host, reason: 'tfbot6_or_all_alternates_did_not_respond', action: 'select_primary_domain_as_last_resort' });
         }
         const checkedAt = new Date();
-        if (!selectedItem) {
-            tfbotCoordinatorSelectionCache = null;
-            tfbotActiveDomainCache = null;
-            tfbotCoordinatorSelectionAt = Date.now();
-            tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
-            selectionPhase = 'persist-unavailable';
-            await persistTfbotCoordinatorSelection(null, 'unavailable');
-            if (previousIndex >= 0) {
-                const previousDomain = TFBOT_ROUTER_SERVING_DOMAINS[previousIndex];
-                await sendTfbotWorkerControl(previousDomain, { host: '', generation: crypto.randomUUID() });
-            }
-            console.warn('[tfbot-router-no-serving-domain]', { coordinator: TFBOT_COORDINATOR_HOST, checkedHosts: checked.map(item => item.domain.host), action: 'keep_all_workers_in_standby' });
-            return null;
-        }
         const selected = selectedItem.domain;
         const sameSelection = previousHost === selected.host && !!tfbotCoordinatorSelectionCache?.generation;
         const generation = sameSelection ? String(tfbotCoordinatorSelectionCache.generation) : crypto.randomUUID();
@@ -3878,7 +3916,7 @@ async function refreshTfbotActiveDomain(force = false) {
             healthy: true,
             workerActive: selectedProbeResult.workerActive === true,
             workerState: String(selectedProbeResult.workerState || 'starting'),
-            source: 'tfbot7-sequential-health-poll',
+            source: 'tfbot7-suspension-aware-priority-poll',
             selectedBy: TFBOT_COORDINATOR_HOST,
             healthyHosts: [selected.host],
             probeResults: checked.map(item => ({ host: item.domain.host, ok: !!item.health?.ok, workerState: item.health?.workerState || 'unreachable', checkedAt }))
@@ -3918,7 +3956,7 @@ async function refreshTfbotActiveDomain(force = false) {
             coordinator: TFBOT_COORDINATOR_HOST,
             generation,
             pollingIntervalMs: 77000,
-            selectionMode: 'sequential-first-healthy-only',
+            selectionMode: 'primary-then-2-to-6-suspension-aware-then-primary-last-resort',
             controls: [previousControl, control].filter(Boolean)
         });
         selectionPhase = 'complete';
@@ -4973,8 +5011,8 @@ const translations = {
     disconnect_sys_msg: "Vous avez été déconnecté. Une suppression totale des données et sessions a été initiée via le système.",
     del2_activated: "La modération stricte a été activée pour @{user}. Tous les messages de cet utilisateur seront supprimés de manière instantanée.",
     del2_deactivated: "La modération stricte a été désactivée pour @{user}.",
-    del3_activated: "La suppression automatique est activée pour ce type de message. Le message sélectionné a été supprimé.",
-    del3_deactivated: "La suppression automatique est désactivée pour ce type de message. Le message sélectionné a été supprimé.",
+    del3_activated: "La suppression automatique est activée pour ce type de message. Les messages de l’hôte, du propriétaire et du bot restent protégés.",
+    del3_deactivated: "La suppression automatique est désactivée pour ce type de message.",
     del3_delete_failed: "Impossible de supprimer ce message. Vérifie les droits du bot et réessaie.",
     del3_deleted_unclassified: "Le message a été supprimé. Son type n’a pas pu être identifié, donc la suppression automatique n’a pas été modifiée.",
     del3_usage: "Réponds à un message du groupe avec del3 pour le supprimer et activer ou désactiver la suppression automatique des prochains messages du même type.",
@@ -5025,8 +5063,8 @@ const translations = {
     disconnect_sys_msg: "You have been disconnected. A total deletion of data and sessions has been initiated via the system.",
     del2_activated: "Strict moderation has been activated for @{user}. All incoming messages from this user will be deleted immediately.",
     del2_deactivated: "Strict moderation has been deactivated for @{user}.",
-    del3_activated: "Automatic deletion is enabled for this message type. The selected message was deleted.",
-    del3_deactivated: "Automatic deletion is disabled for this message type. The selected message was deleted.",
+    del3_activated: "Automatic deletion is enabled for this message type. The host, owner and bot messages remain protected.",
+    del3_deactivated: "Automatic deletion is disabled for this message type.",
     del3_delete_failed: "This message could not be deleted. Check the bot permissions and try again.",
     del3_deleted_unclassified: "The message was deleted. Its type could not be identified, so automatic deletion was not changed.",
     del3_usage: "Reply to a group message with del3 to delete it and toggle automatic deletion of future messages of the same type.",
@@ -5077,8 +5115,8 @@ const translations = {
     disconnect_sys_msg: "Ha sido desconectado. Se ha iniciado una eliminación total de datos y sesiones a través del sistema.",
     del2_activated: "Se ha activado la moderación estricta para @{user}. Todos los mensajes entrantes de este usuario serán eliminados de inmediato.",
     del2_deactivated: "Se ha desactivado la moderación estricta para @{user}.",
-    del3_activated: "La eliminación automática está activada para este tipo de mensaje. El mensaje seleccionado se eliminó.",
-    del3_deactivated: "La eliminación automática está desactivada para este tipo de mensaje. El mensaje seleccionado se eliminó.",
+    del3_activated: "La eliminación automática está activada para este tipo de mensaje. Los mensajes del anfitrión, del propietario y del bot permanecen protegidos.",
+    del3_deactivated: "La eliminación automática está desactivada para este tipo de mensaje.",
     del3_delete_failed: "No se pudo eliminar este mensaje. Comprueba los permisos del bot e inténtalo de nuevo.",
     del3_deleted_unclassified: "El mensaje se eliminó. No se pudo identificar su tipo, por lo que no se modificó la eliminación automática.",
     del3_usage: "Responde a un mensaje del grupo con del3 para eliminarlo y activar o desactivar la eliminación automática de los próximos mensajes del mismo tipo.",
@@ -5129,8 +5167,8 @@ const translations = {
     disconnect_sys_msg: "Ou dekonekte. Yon efasman total done ak sesyon yo te inisye atravè sistèm nan.",
     del2_activated: "Modération estrik aktive pou @{user}. Tout mesaj moun sa a voye ap siprime touswit.",
     del2_deactivated: "Modération estrik dezaktive pou @{user}.",
-    del3_activated: "Sipresyon otomatik aktive pou kalite mesaj sa a. Mesaj ou te chwazi a efase.",
-    del3_deactivated: "Sipresyon otomatik dezaktive pou kalite mesaj sa a. Mesaj ou te chwazi a efase.",
+    del3_activated: "Sipresyon otomatik aktive pou kalite mesaj sa a. Mesaj lame, pwopriyetè a ak bot la rete pwoteje.",
+    del3_deactivated: "Sipresyon otomatik dezaktive pou kalite mesaj sa a.",
     del3_delete_failed: "Mesaj sa a pa t kapab efase. Verifye pèmisyon bot la epi eseye ankò.",
     del3_deleted_unclassified: "Mesaj la efase. Nou pa t kapab idantifye kalite li, kidonk efasman otomatik la pa chanje.",
     del3_usage: "Reponn sou yon mesaj nan gwoup la ak del3 pou efase li epi aktive oswa dezaktive efasman otomatik pwochen mesaj ki gen menm kalite a.",
@@ -5232,42 +5270,15 @@ async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, 
 
 const logoPath = path.join(__dirname, 'adamdh7.png');
 let adamLogoBuffer = fs.existsSync(logoPath) ? fs.readFileSync(logoPath) : null;
-const TFBOT_LOGO_MAX_BYTES = Math.max(50000, Math.min(500000, Number(process.env.TFBOT_LOGO_MAX_BYTES || 220000)));
-const TFBOT_LOGO_MAX_DIMENSION = Math.max(256, Math.min(900, Number(process.env.TFBOT_LOGO_MAX_DIMENSION || 512)));
-const TFBOT_LOGO_JPEG_QUALITY = Math.max(45, Math.min(85, Number(process.env.TFBOT_LOGO_JPEG_QUALITY || 66)));
 let logoOptimizationResult = 'not_checked';
 
 async function optimizeAdamLogoForBandwidth() {
-    if (!adamLogoBuffer) {
+    if (!Buffer.isBuffer(adamLogoBuffer) || !adamLogoBuffer.length) {
         logoOptimizationResult = 'logo_missing';
         return false;
     }
-    const originalBytes = adamLogoBuffer.length;
-    try {
-        const sharp = require('sharp');
-        const input = sharp(adamLogoBuffer, { failOn: 'error', limitInputPixels: 40000000 });
-        const metadata = await input.metadata();
-        if (!metadata || !Number(metadata.width) || !Number(metadata.height)) throw new Error('logo_image_metadata_invalid');
-        const optimized = await sharp(adamLogoBuffer, { failOn: 'error', limitInputPixels: 40000000 })
-            .rotate()
-            .resize(TFBOT_LOGO_MAX_DIMENSION, TFBOT_LOGO_MAX_DIMENSION, { fit: 'inside', withoutEnlargement: true })
-            .jpeg({ quality: TFBOT_LOGO_JPEG_QUALITY, mozjpeg: true, progressive: true })
-            .toBuffer();
-        if (!Buffer.isBuffer(optimized) || !optimized.length || detectImageMimeType(optimized) !== 'image/jpeg') throw new Error('logo_optimization_output_invalid');
-        adamLogoBuffer = optimized;
-        logoOptimizationResult = 'optimized_image';
-    } catch (error) {
-        adamLogoBuffer = null;
-        logoOptimizationResult = 'invalid_image_text_fallback';
-        console.warn('[logo-image-invalid-text-fallback]', { originalBytes, error: String(error?.message || error).slice(0, 180), action: 'disable_image_attachment_and_send_text_only' });
-        return false;
-    }
-    if (adamLogoBuffer.length > TFBOT_LOGO_MAX_BYTES) {
-        adamLogoBuffer = null;
-        console.warn('[logo-bandwidth-fallback-text]', { originalBytes, maxBytes: TFBOT_LOGO_MAX_BYTES, optimization: logoOptimizationResult, action: 'send_text_without_repeated_large_logo' });
-        return false;
-    }
-    console.info('[logo-bandwidth-optimized]', { originalBytes, finalBytes: adamLogoBuffer.length, maxBytes: TFBOT_LOGO_MAX_BYTES, maxDimension: TFBOT_LOGO_MAX_DIMENSION, quality: TFBOT_LOGO_JPEG_QUALITY, optimization: logoOptimizationResult });
+    logoOptimizationResult = 'original_image_preserved';
+    console.info('[logo-original-preserved]', { originalBytes: adamLogoBuffer.length, transformed: false, action: 'send_existing_image_buffer_without_resize_or_compression' });
     return true;
 }
 
@@ -6613,17 +6624,14 @@ function fitErrorExplanation(value) {
 }
 
 function errorFallbackText(actionName, language) {
-    const action = String(actionName || 'Action').replace(/\s+/g, ' ').slice(0, 20);
+    const action = String(actionName || 'Action').replace(/\s+/g, ' ').slice(0, 40);
     const fallbacks = {
-        fr: `L’action « ${action} » a échoué.`,
-        en: `The “${action}” action failed.`,
-        es: `La acción «${action}» falló.`,
-        ht: `Aksyon «${action}» la echwe.`
+        fr: `L’action « ${action} » n’a pas abouti. Vérifie les droits nécessaires et réessaie.`,
+        en: `The “${action}” action did not complete. Check the required permissions and try again.`,
+        es: `La acción «${action}» no se completó. Comprueba los permisos necesarios e inténtalo de nuevo.`,
+        ht: `Aksyon «${action}» la pa fini. Verifye otorizasyon ki nesesè yo epi eseye ankò.`
     };
-    const result = String(fallbacks[language] || fallbacks.ht).replace(/\s+/g, ' ').trim();
-    if (result.length >= 300 && result.length <= 400) return result;
-    const generic = `L’action « ${action} » a échoué.`.replace(/\s+/g, ' ').trim();
-    return generic.length >= 300 && generic.length <= 400 ? generic : `L’action « ${action} » a échoué.`;
+    return String(fallbacks[['fr', 'en', 'es', 'ht'].includes(language) ? language : 'ht'] || fallbacks.ht).replace(/\s+/g, ' ').trim();
 }
 
 async function explainActionError(error, language, actionName, userName, messageTimestamp) {
@@ -7255,8 +7263,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             const changedJid = String(change?.jid || change?.id || change?.from || change?.participant || '').trim();
             const isSelfIdentity = change?.me === true;
             if (isSelfIdentity) {
-                void resetSessionGroupSenderKeyMemory(sessionId, 'own_signal_identity_changed').catch(error => console.warn('[identity-change-group-reset-failed]', { sessionId, error: error?.message || String(error) }));
-                console.warn('[whatsapp-identity-change]', { sessionId, participant: 'self', action: 'reset_group_sender_key_memory' });
+                console.info('[identity-change-group-sender-keys-preserved]', { sessionId, action: 'preserve_existing_group_sender_keys_until_baileys_refreshes_them' });
+                console.info('[whatsapp-identity-change]', { sessionId, participant: 'self', action: 'preserve_group_sender_key_memory' });
                 return;
             }
             if (!changedJid) {
@@ -7271,7 +7279,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             const groupJid = String(update?.id || update?.jid || update?.groupJid || '').trim();
             if (!/@g\.us$/i.test(groupJid)) return;
             invalidateCachedGroupMetadata(sessionId, groupJid);
-            void resetSessionGroupSenderKeyMemory(sessionId, 'group_participants_updated', groupJid).catch(error => console.warn('[group-participant-sender-key-reset-failed]', { sessionId, groupJid, error: error?.message || String(error) }));
+            console.info('[group-participant-update-preserved-sender-key-memory]', { sessionId, groupJid, action: 'refresh_group_metadata_without_deleting_signal_sender_keys' });
         });
 
         sock.ev.on('connection.update', async (update) => {
@@ -7588,11 +7596,22 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
         const isBotGroupParticipant = participant => participantMatchesIdentities(participant, getBotIdentityAliases());
 
-        const canBotModerateGroup = async groupJid => {
+        const canBotModerateGroup = async (groupJid, forceRefresh = false) => {
             try {
-                const metadata = await getGroupMetadataCached(sessionId, sock, groupJid);
-                const botParticipant = Array.isArray(metadata?.participants) ? metadata.participants.find(isBotGroupParticipant) : null;
-                return !!botParticipant && isAdminParticipantForPolicy(botParticipant);
+                let metadata = await getGroupMetadataCached(sessionId, sock, groupJid, forceRefresh);
+                let botParticipant = Array.isArray(metadata?.participants) ? metadata.participants.find(isBotGroupParticipant) : null;
+                if (!botParticipant || !isAdminParticipantForPolicy(botParticipant)) {
+                    try {
+                        metadata = await promiseWithTimeout(sock.groupMetadata(groupJid), GROUP_METADATA_FETCH_TIMEOUT_MS, 'Fresh WhatsApp group administrator lookup');
+                        if (metadata) setCachedGroupMetadata(sessionId, groupJid, metadata);
+                        botParticipant = Array.isArray(metadata?.participants) ? metadata.participants.find(isBotGroupParticipant) : null;
+                    } catch (refreshError) {
+                        console.warn('[del3-bot-admin-refresh-failed]', { sessionId, group: groupJid, error: refreshError?.message || String(refreshError) });
+                    }
+                }
+                const allowed = !!botParticipant && isAdminParticipantForPolicy(botParticipant);
+                console.info('[del3-bot-admin-check]', { sessionId, group: groupJid, foundBotParticipant: !!botParticipant, isAdmin: allowed, metadataParticipants: Array.isArray(metadata?.participants) ? metadata.participants.length : 0, refreshed: forceRefresh || !allowed });
+                return allowed;
             } catch (error) {
                 console.warn('[del3-bot-admin-check-failed]', { sessionId, group: groupJid, error: error?.message || String(error) });
                 return false;
@@ -7731,16 +7750,19 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             const target = String(targetJid || '').trim();
             if (!target) return false;
             const identityValues = [target, ...String(alternatePhone || '').trim().split(/\s+/)].filter(Boolean);
-            const botIdentities = [currentBotJid, sock.user?.id, sock.user?.lid, sock.user?.phoneNumber].map(value => String(value || '').trim()).filter(Boolean);
+            const botIdentities = [currentBotJid, sock.user?.id, sock.user?.lid, sock.user?.phoneNumber, state.creds?.me?.id, state.creds?.me?.lid].map(value => String(value || '').trim()).filter(Boolean);
+            const ownerIdentities = [ownerDocument?.Number, ownerDocument?.number, ownerDocument?.OwnerNumber, ownerDocument?.ownerNumber, ownerDocument?.PairingNumber, ownerDocument?.AccountJid, ownerDocument?.accountJid, ownerDocument?.OwnerLid, ownerDocument?.ownerLid].map(value => String(value || '').trim()).filter(Boolean);
             const normalizeIdentifier = value => normalizeActionJid(value);
-            if (identityValues.some(value => botIdentities.some(botValue => normalizeIdentifier(value) === normalizeIdentifier(botValue)))) return true;
-            const ownerNumber = normalizePhoneNumber(ownerDocument?.Number || '');
+            const targetIdentifiers = identityValues.map(normalizeIdentifier).filter(Boolean);
+            if (targetIdentifiers.some(value => botIdentities.some(botValue => normalizeIdentifier(botValue) === value))) return true;
+            if (targetIdentifiers.some(value => ownerIdentities.some(ownerValue => normalizeIdentifier(ownerValue) === value))) return true;
+            const ownerNumbers = ownerIdentities.map(normalizedJidNumber).filter(Boolean);
             const botNumbers = botIdentities.filter(value => !/@lid(?:$|:)/i.test(value)).map(normalizedJidNumber).filter(Boolean);
             const targetNumbers = identityValues.filter(value => !/@lid(?:$|:)/i.test(value)).map(normalizedJidNumber).filter(Boolean);
-            if (targetNumbers.some(number => (ownerNumber && number === ownerNumber) || botNumbers.includes(number))) return true;
-            const ownerName = normalizePersonName(ownerDocument?.Name || '');
+            if (targetNumbers.some(number => ownerNumbers.includes(number) || botNumbers.includes(number))) return true;
+            const ownerNames = [ownerDocument?.Name, ownerDocument?.name, ownerDocument?.ownerName].map(normalizePersonName).filter(Boolean);
             const targetNames = identityValues.map(value => normalizePersonName(userInfo.get(value)?.pseudo || '')).filter(Boolean);
-            return !!ownerName && targetNames.some(name => name === ownerName);
+            return ownerNames.some(ownerName => targetNames.includes(ownerName));
         };
 
         const resolveTargets = async (arg, m, metadata = null, ownerDocument = null, currentBotJid = null) => {
@@ -8059,7 +8081,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             ownerRecordForDel3 = await db.collection('session_owners').findOne({ sessionId }).catch(() => null);
                             if (ownerRecordForDel3) sessionOwnersCache.set(sessionId, ownerRecordForDel3);
                         }
-                        await applyDel3ToIncomingMessage(sock, sessionId, m, receivedChat, receivedSenderJid, receivedSenderAliases, ownerRecordForDel3);
+                        await applyDel3ToIncomingMessage(sock, sessionId, m, receivedChat, receivedSenderJid, receivedSenderAliases, ownerRecordForDel3, canBotModerateGroup, isProtectedWhatsAppTarget);
                     }
                     cacheRecentMessage(sessionId, m);
                     console.info('[message-awaiting-readable-content]', {
@@ -8157,13 +8179,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: receivedChat, messageAgeSeconds: messageAgeForDedupe, reason: 'stale_history_append_not_claimed' });
                     continue;
                 }
-                const msgCacheKey = `${sessionId}:${receivedChat}:${msgId}`;
+                const msgCacheKey = `${sessionId}:id:${msgId}`;
+                const msgChatCacheKey = `${sessionId}:${receivedChat}:${msgId}`;
                 if (m.key.fromMe && consumeOutgoingTextEcho(sessionId, m.key.remoteJid || '', extractBody(m))) {
                     console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'outgoing_text_echo' });
                     continue;
                 }
-                if (outgoingMessageCache.has(msgCacheKey)) {
+                if (outgoingMessageCache.has(msgCacheKey) || outgoingMessageCache.has(msgChatCacheKey)) {
                     outgoingMessageCache.delete(msgCacheKey);
+                    outgoingMessageCache.delete(msgChatCacheKey);
                     console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'outgoing_message_echo' });
                     continue;
                 }
@@ -8534,7 +8558,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         });
 
                         if (isGroup && sender && !isFromMe && !isOwnerReal) {
-                            const del3Deleted = await applyDel3ToIncomingMessage(sock, sessionId, m, from, sender, senderJids, sOwnerTop);
+                            const del3Deleted = await applyDel3ToIncomingMessage(sock, sessionId, m, from, sender, senderJids, sOwnerTop, canBotModerateGroup, isProtectedWhatsAppTarget);
                             if (del3Deleted) return;
                         }
 
@@ -8877,12 +8901,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 ? Math.max(120000, Number(process.env.KICKALL2_MAX_TIMEOUT_MS || 1200000))
                                                 : internalCommand === 'kickall'
                                                     ? Math.max(180000, Number(process.env.KICKALL_MAX_TIMEOUT_MS || 1200000)): 120000;
-                                const timeoutExecute = new Promise((_, reject) => {
-                                    timeoutId = setTimeout(() => {
-                                        isCancelled = true;
-                                        reject(new Error('TimeoutExceeded'));
-                                    }, commandTimeoutMs);
-                                });
+                                timeoutId = setTimeout(() => {
+                                    console.warn('[command-execution-running-long]', { sessionId, messageId: msgId, command: internalCommand, elapsedThresholdMs: commandTimeoutMs, action: 'keep_command_running_until_real_result_to_avoid_false_failure' });
+                                }, commandTimeoutMs);
+                                if (typeof timeoutId.unref === 'function') timeoutId.unref();
 
                                 const safeSendFormatted = async (...sendArgs) => {
                                     if (isCancelled || terminalResponseSent) return null;
@@ -9378,16 +9400,21 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             if (quoted.participantAlt) quotedDel3Key.participantAlt = quoted.participantAlt;
                                             if (quoted.participantPn) quotedDel3Key.participantPn = quoted.participantPn;
                                             if (quoted.senderPn) quotedDel3Key.senderPn = quoted.senderPn;
-                                            if (!quotedDel3FromMe && !(await canBotModerateGroup(from))) {
+                                            if (!(await canBotModerateGroup(from, true))) {
                                                 await safeSendFormatted(sock, from, t.cmd_del3, t.del3_bot_admin_required, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            try {
-                                                await queuedSendMessage(sock, from, { delete: quotedDel3Key }, {}, 180);
-                                            } catch (del3SelectedDeleteError) {
-                                                console.warn('[del3-selected-message-delete-failed]', { sessionId, group: from, messageId: quotedDel3Id, format: del3Format || 'unknown', error: del3SelectedDeleteError?.message || String(del3SelectedDeleteError) });
-                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_delete_failed || t.command_error, pushName, true, activeHostName);
-                                                break;
+                                            const quotedDel3Protected = quotedDel3FromMe || !sOwnerTop || isProtectedWhatsAppTarget(quotedDel3Participant, sOwnerTop, sock.user?.id || '', [quotedDel3Key.remoteJid, quotedDel3Key.remoteJidAlt, quotedDel3Key.participant, quotedDel3Key.participantAlt, quotedDel3Key.participantPn].filter(Boolean).join(' '));
+                                            if (!quotedDel3Protected) {
+                                                try {
+                                                    await queuedDeleteMessageWithAck(sock, from, quotedDel3Key, 180, 6500);
+                                                } catch (del3SelectedDeleteError) {
+                                                    console.warn('[del3-selected-message-delete-failed]', { sessionId, group: from, messageId: quotedDel3Id, format: del3Format || 'unknown', error: del3SelectedDeleteError?.message || String(del3SelectedDeleteError) });
+                                                    await safeSendFormatted(sock, from, t.cmd_del3, t.del3_delete_failed || t.command_error, pushName, true, activeHostName);
+                                                    break;
+                                                }
+                                            } else {
+                                                console.info('[del3-selected-message-protected]', { sessionId, group: from, messageId: quotedDel3Id, reason: quotedDel3FromMe ? 'bot_own_message' : 'session_owner_or_deployer' });
                                             }
                                             if (!del3Format) {
                                                 console.info('[del3-selected-message-deleted-format-unknown]', { sessionId, group: from, messageId: quotedDel3Id, messageContentAvailable: !!quotedDel3Message, automaticRuleChanged: false });
@@ -9835,7 +9862,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
                                 const commandStartedAt = Date.now();
                                 try {
-                                    await Promise.race([commandExecute(), timeoutExecute]);
+                                    await commandExecute();
                                     console.info('[command-completed]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, senderName: sName, senderJid: sender, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid', command: internalCommand, durationMs: Date.now() - commandStartedAt, action: terminalResponseSent || responseSentForLog ? 'command_completed_response_sent' : 'command_completed_without_confirmed_response', responseSent: !!(terminalResponseSent || responseSentForLog) });
                                 } catch (e) {
                                     console.error('[command-failed]', { sessionId, messageId: msgId, senderName: sName, senderJid: sender, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: from, command: internalCommand, durationMs: Date.now() - commandStartedAt, action: 'command_handler_failed', error: e?.message || String(e) });
@@ -9937,40 +9964,99 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
     }
 }
 
-async function loadExistingSessions() {
-    if (!db) return;
+async function cleanupExpiredUnconnectedSessions() {
+    if (!db || serverShuttingDown || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive) || tfbotWorkerStopping) return 0;
+    if (expiredSessionCleanupPromise) return expiredSessionCleanupPromise;
+    const cleanupPromise = cleanupExpiredUnconnectedSessionsInternal();
+    expiredSessionCleanupPromise = cleanupPromise;
+    try { return await cleanupPromise; } finally { if (expiredSessionCleanupPromise === cleanupPromise) expiredSessionCleanupPromise = null; }
+}
+
+async function cleanupExpiredUnconnectedSessionsInternal() {
+    if (!db || serverShuttingDown || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive) || tfbotWorkerStopping) return 0;
     const collection = db.collection('baileys_auth');
-    const pairingCutoff = new Date(Date.now() - Math.max(120000, Number(process.env.PAIRING_SESSION_TTL_MS || 900000)));
-    const stalePairingOwners = await db.collection('session_owners').find({
+    const cleanupStatuses = ['pairing_expired', 'pairing_error', 'reauth_required', 'qr_disponible', 'synchronisation', 'initialisation', 'deconnecte', 'disconnected', 'pairing_starting', 'pairing', 'duplicate_account'];
+    const staleCandidates = await db.collection('session_owners').find({
         $or: [
-            { connectionStatus: { $in: ['pairing_expired', 'pairing_error'] } },
-            { pairingPending: true, pairingStartedAt: { $lt: pairingCutoff }, connectionStatus: { $in: ['pairing_starting', 'pairing'] } }
+            { connectionStatus: { $in: cleanupStatuses } },
+            { reauthRequired: true },
+            { duplicateAccountOf: { $exists: true, $nin: ['', null] } }
         ]
-    }).limit(500).toArray().catch(error => {
-        console.warn('[session-expired-pairing-scan-failed]', { error: error?.message || String(error) });
+    }).limit(1500).toArray().catch(error => {
+        console.warn('[session-expired-scan-failed]', { error: error?.message || String(error) });
         return [];
     });
-    for (const owner of stalePairingOwners) {
+    const cleanupNow = Date.now();
+    let staleRemoved = 0;
+    for (const owner of staleCandidates) {
         const staleSessionId = String(owner.sessionId || '').trim();
         if (!staleSessionId) continue;
         const runtime = activeSessions.get(staleSessionId);
         const runtimeStatus = String(runtime?.status || '').toLowerCase();
-        if (['connecte', 'connected'].includes(runtimeStatus) || runtime?.authState?.creds?.registered === true) continue;
-        const leaseUntil = new Date(owner.ownerLeaseUntil || 0).getTime();
-        if (TFBOT_CLUSTER_ENABLED && owner.ownerInstanceId && owner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && leaseUntil > Date.now()) continue;
-        const liveSessionLock = await db.collection('session_runtime_locks').findOne({ _id: staleSessionId, leaseUntil: { $gt: new Date() } }, { projection: { _id: 1, owner: 1 } }).catch(() => null);
+        if (['connecte', 'connected', 'active', 'online'].includes(runtimeStatus)) continue;
+        const ownerStatus = String(owner.connectionStatus || owner.status || (owner.reauthRequired ? 'reauth_required' : '')).toLowerCase();
+        const status = runtimeStatus && runtimeStatus !== 'deconnecte' ? runtimeStatus : ownerStatus;
+        if (['connecte', 'connected', 'active', 'online'].includes(status)) continue;
+        if (!cleanupStatuses.includes(status) && owner.reauthRequired !== true && !owner.duplicateAccountOf) continue;
+        const idTimestamp = Number(staleSessionId.match(/^session_(\d+)/)?.[1] || 0);
+        const timestampCandidates = status === 'reauth_required' || owner.reauthRequired === true
+            ? [owner.lastAuthFailureAt, owner.disconnectTime, owner.statusUpdatedAt, owner.updatedAt, owner.createdAt]
+            : status === 'duplicate_account' || owner.duplicateAccountOf
+                ? [owner.duplicateAccountDetectedAt, owner.statusUpdatedAt, owner.updatedAt, owner.createdAt]
+                : ['deconnecte', 'disconnected'].includes(status)
+                    ? [owner.disconnectTime, owner.statusUpdatedAt, owner.updatedAt, owner.createdAt]
+                    : [owner.pairingStartedAt, owner.statusUpdatedAt, owner.disconnectTime, owner.updatedAt, owner.createdAt];
+        const sessionTimestamp = timestampCandidates.map(value => value instanceof Date ? value.getTime() : Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : new Date(value || 0).getTime()).find(value => Number.isFinite(value) && value > 0) || idTimestamp || 0;
+        if (!sessionTimestamp || cleanupNow - sessionTimestamp < SESSION_UNCONNECTED_TTL_MS) continue;
+        const ownerLeaseUntil = new Date(owner.ownerLeaseUntil || 0).getTime();
+        if (TFBOT_CLUSTER_ENABLED && owner.ownerInstanceId && owner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && ownerLeaseUntil > cleanupNow && owner.connectionStatus !== 'duplicate_account' && !owner.duplicateAccountOf && owner.reauthRequired !== true) continue;
+        const liveSessionLock = await db.collection('session_runtime_locks').findOne({ _id: staleSessionId, leaseUntil: { $gt: new Date(cleanupNow) } }, { projection: { _id: 1, owner: 1 } }).catch(() => null);
         if (liveSessionLock && liveSessionLock.owner !== processInstanceId) continue;
-        const liveAccountLock = await db.collection('session_account_runtime_locks').findOne({ sessionId: staleSessionId, leaseUntil: { $gt: new Date() } }, { projection: { _id: 1, owner: 1 } }).catch(() => null);
+        const liveAccountLock = await db.collection('session_account_runtime_locks').findOne({ sessionId: staleSessionId, leaseUntil: { $gt: new Date(cleanupNow) } }, { projection: { _id: 1, owner: 1 } }).catch(() => null);
         if (liveAccountLock && liveAccountLock.owner !== processInstanceId) continue;
-        const credsDoc = await collection.findOne({ _id: `auth-${staleSessionId}-creds` }, { projection: { 'creds.registered': 1 } }).catch(() => null);
-        if (credsDoc?.creds?.registered === true) continue;
         try {
+            if (runtime?.sock) {
+                await cleanupSocket(staleSessionId);
+                runtime.status = 'deconnecte';
+                runtime.disconnectTime = cleanupNow;
+                await releaseSessionRuntimeLock(staleSessionId);
+            } else if (liveSessionLock?.owner === processInstanceId || liveAccountLock?.owner === processInstanceId) {
+                await releaseSessionRuntimeLock(staleSessionId);
+            }
+            const credsDoc = await collection.findOne({ _id: `auth-${staleSessionId}-creds` }, { projection: { 'creds.registered': 1 } }).catch(() => null);
+            const credentialsRegistered = credsDoc?.creds?.registered === true;
+            const isReauthExpired = status === 'reauth_required' || owner.reauthRequired === true;
+            const isPendingPairingExpired = ['pairing_expired', 'pairing_error', 'qr_disponible', 'synchronisation', 'initialisation', 'deconnecte', 'disconnected', 'pairing_starting', 'pairing'].includes(status);
+            const duplicateTarget = String(owner.duplicateAccountOf || owner.duplicateOfSessionId || owner.mergedIntoSessionId || '').trim();
+            if (duplicateTarget && duplicateTarget !== staleSessionId) {
+                const targetExists = await db.collection('session_owners').findOne({ sessionId: duplicateTarget }, { projection: { sessionId: 1 } }).catch(() => null);
+                if (!targetExists) {
+                    console.warn('[session-duplicate-target-missing-preserved]', { sourceSessionId: staleSessionId, targetSessionId: duplicateTarget, action: 'preserve_source_and_all_linked_data_until_target_is_available' });
+                    continue;
+                }
+                await mergeSessionScopedData(staleSessionId, duplicateTarget);
+            }
+            if (credentialsRegistered && !isReauthExpired && !duplicateTarget && !isPendingPairingExpired) continue;
+            const pendingReconnect = reconnectTimers.get(staleSessionId);
+            if (pendingReconnect) {
+                clearTimeout(pendingReconnect);
+                reconnectTimers.delete(staleSessionId);
+            }
             await deleteMongoSession(staleSessionId);
-            console.info('[session-expired-pairing-removed]', { sessionId: staleSessionId, status: String(owner.connectionStatus || 'pairing_expired'), credentialsRegistered: false, associatedDataRemoved: true });
+            staleRemoved++;
+            console.info('[session-expired-unconnected-removed]', { sessionId: staleSessionId, status, ageMs: cleanupNow - sessionTimestamp, credentialsRegistered, associatedDataRemoved: true, mergedIntoSession: duplicateTarget || null });
         } catch (error) {
-            console.warn('[session-expired-pairing-removal-failed]', { sessionId: staleSessionId, error: error?.message || String(error) });
+            console.warn('[session-expired-unconnected-removal-failed]', { sessionId: staleSessionId, status, error: error?.message || String(error) });
         }
     }
+    if (staleRemoved) console.info('[session-expired-cleanup-completed]', { removed: staleRemoved, maxAgeMs: SESSION_UNCONNECTED_TTL_MS });
+    return staleRemoved;
+}
+
+async function loadExistingSessions() {
+    if (!db) return;
+    const collection = db.collection('baileys_auth');
+    await cleanupExpiredUnconnectedSessions();
     const credsDocs = await collection.find({ _id: { $regex: /^auth-.*-creds$/ } }).toArray();
     const candidates = [];
     for (const doc of credsDocs) {
@@ -10091,6 +10177,7 @@ setInterval(async () => {
         const now = Date.now();
         const threshold = now - PROCESSED_MESSAGE_RETENTION_MS;
         const preferenceThreshold = now - SESSION_PROFILE_RETENTION_MS;
+        await cleanupExpiredUnconnectedSessions();
         await db.collection('processed_messages').deleteMany({ ts: { $lt: threshold } });
         await db.collection('user_preferences').deleteMany({ updatedAt: { $type: 'number', $lt: preferenceThreshold }, expireAt: { $exists: false } });
         await db.collection('lid_phone_mappings').deleteMany({ updatedAt: { $lt: new Date(now - LID_PHONE_MAPPING_RETENTION_MS) } });
@@ -10266,17 +10353,15 @@ async function main() {
         clusterServingDomains: TFBOT_ROUTER_SERVING_DOMAINS.map(item => item.host),
         clusterDomainRouter: true,
         clusterDomainDetectionUsesRenderDefaults: true,
-        clusterDomainSelectionPriority: 'keep-current-if-healthy-otherwise-next-priority-first',
-        clusterDomainSelectionMode: 'sequential-first-compatible-only',
+        clusterDomainSelectionPriority: 'tf-bot-then-tfbot2-through-tfbot6',
+        clusterDomainSelectionMode: 'switch-only-on-render-owner-suspension; any-other-http-response-is-valid',
         clusterWorkerCoordinatorPollMs: 77000,
         clusterNonActiveDomainsRedirectStatus: 307,
         clusterPollingIntervalMs: 77000,
         clusterInactiveWorkersConnectMongo: false,
         clusterCoordinatorConnectMongo: TFBOT_CLUSTER_COORDINATOR_ONLY,
         clusterInactiveWorkersRestoreSessions: false,
-        logoMaxBytes: TFBOT_LOGO_MAX_BYTES,
-        logoMaxDimension: TFBOT_LOGO_MAX_DIMENSION,
-        logoJpegQuality: TFBOT_LOGO_JPEG_QUALITY,
+        logoTransformation: 'disabled-original-buffer-preserved',
         clusterInstanceId: TFBOT_CLUSTER_INSTANCE_ID,
         clusterHealthCacheMs: TFBOT_CLUSTER_HEALTH_CACHE_MS,
         clusterHealthProbeLimit: TFBOT_CLUSTER_HEALTH_PROBE_LIMIT,
@@ -10290,6 +10375,7 @@ async function main() {
         authWritesAllowSessionScopedBootstrapUntilIdentity: true,
         pairingAuthPreservedOnTransientFailure: true,
         pairingTimeoutMs: Math.max(120000, Number(process.env.PAIRING_SESSION_TTL_MS || 900000)),
+        unconnectedSessionTtlMs: SESSION_UNCONNECTED_TTL_MS,
         imageUploadBasename: 'tfbot',
         groupSenderKeyResetBeforeSendEnabled: false,
         groupSenderKeyResetEveryMessage: false,
