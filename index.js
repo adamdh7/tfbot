@@ -32,7 +32,7 @@ const runtimeLogRenderServiceName = String(process.env.RENDER_SERVICE_NAME || pr
 const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
 const runtimeLogRenderCommit = String(process.env.RENDER_GIT_COMMIT || '').trim().slice(0, 80);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}:${shortLogHash(runtimeLogInstanceId)}`).slice(0, 240);
-const TFBOT_CLUSTER_CODE_REVISION = 'r40-suspension-aware-signal-preservation';
+const TFBOT_CLUSTER_CODE_REVISION = 'r41-del3-identity-signal-binary-log-boundary';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-30')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
 const runtimeLogClusterId = `${runtimeLogDeploymentId}:${shortLogHash(runtimeLogInstanceId)}`.slice(0, 240);
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
@@ -111,6 +111,20 @@ function scheduleRuntimeLogPersistence(delayMs = 40) {
 function attachRuntimeLogPersistence(collection) {
     runtimeLogPersistenceCollection = collection || null;
     scheduleRuntimeLogPersistence(0);
+}
+
+async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
+    if (!collection || typeof collection.deleteMany !== 'function') return 0;
+    const result = await collection.deleteMany({
+        serviceId: runtimeLogRenderServiceId,
+        $or: [
+            { createdAt: { $lt: runtimeLogStartedAt } },
+            { deploymentId: { $ne: runtimeLogDeploymentId } },
+            { clusterId: { $ne: runtimeLogClusterId } },
+            { instance: { $ne: runtimeLogInstanceId } }
+        ]
+    });
+    return Number(result?.deletedCount || 0);
 }
 
 async function flushRuntimeLogPersistence() {
@@ -530,7 +544,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-30-r40';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r41';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1636,8 +1650,10 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         }
         const outgoingContent = content;
         const originalDestinationJid = String(jid || '').trim();
-        const ownPhoneJid = normalizePhoneCacheJid(sock.user?.id || sock.user?.phoneNumber || '');
-        let ownLidJid = normalizeLidCacheKey(sock.user?.lid || '');
+        const ownAuthCreds = activeSession?.authState?.creds || sock.authState?.creds || null;
+        const ownPhoneNumber = getAuthenticatedPhoneNumber(sock.user || null, ownAuthCreds);
+        const ownPhoneJid = normalizePhoneCacheJid(ownPhoneNumber ? `${ownPhoneNumber}@s.whatsapp.net` : (sock.user?.id || sock.user?.phoneNumber || ''));
+        let ownLidJid = getAuthenticatedLid(sock.user || null, ownAuthCreds);
         if (!/@lid$/i.test(ownLidJid) && sessionId && ownPhoneJid) {
             const ownLidResolution = await resolveLidForPhone(sessionId, sock, ownPhoneJid);
             ownLidJid = normalizeLidCacheKey(ownLidResolution?.lid || '');
@@ -1661,10 +1677,10 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         const originalDestinationIsLid = /@lid$/i.test(originalDestinationJid);
         const originalDestinationIsPhone = /@s\.whatsapp\.net$/i.test(originalDestinationJid);
         const selfPrimaryJid = isSelfChatDestination
-            ? (originalDestinationIsLid || originalDestinationIsPhone ? originalDestinationJid : (ownLidJid || ownPhoneJid))
+            ? (ownPhoneJid || (originalDestinationIsLid || originalDestinationIsPhone ? originalDestinationJid : ownLidJid))
             : '';
         const selfFallbackJid = isSelfChatDestination
-            ? (originalDestinationIsLid && ownPhoneJid ? ownPhoneJid : originalDestinationIsPhone && /@lid$/i.test(ownLidJid) ? ownLidJid : '')
+            ? (originalDestinationIsLid ? originalDestinationJid : originalDestinationIsPhone && /@lid$/i.test(ownLidJid) ? ownLidJid : '')
             : '';
         if (isSelfChatDestination) {
             console.info('[self-chat-original-address-preserved]', {
@@ -1672,12 +1688,12 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 originalDestinationType: originalDestinationIsLid ? 'lid' : originalDestinationIsPhone ? 'phone' : 'unknown',
                 primaryDestinationType: /@lid$/i.test(selfPrimaryJid) ? 'lid' : /@s\.whatsapp\.net$/i.test(selfPrimaryJid) ? 'phone' : 'unknown',
                 fallbackDestinationType: /@lid$/i.test(selfFallbackJid) ? 'lid' : /@s\.whatsapp\.net$/i.test(selfFallbackJid) ? 'phone' : null,
-                action: 'preserve_the_addressing_mode_of_the_self_chat_message'
+                action: 'send_self_chat_to_authenticated_phone_first_and_keep_original_lid_as_fallback'
             });
         }
         let destinationJid = isSelfChatDestination ? selfPrimaryJid : originalDestinationJid;
         let destinationResolution = isSelfChatDestination
-            ? (originalDestinationIsLid ? 'self_chat_original_lid_preserved' : originalDestinationIsPhone ? 'self_chat_original_phone_preserved' : 'self_chat_original_address_preserved')
+            ? (ownPhoneJid ? 'self_chat_authenticated_phone_primary' : originalDestinationIsLid ? 'self_chat_original_lid_preserved' : originalDestinationIsPhone ? 'self_chat_original_phone_preserved' : 'self_chat_original_address_preserved')
             : /@lid$/i.test(originalDestinationJid) ? 'original_lid_pending_phone_resolution' : 'original_phone_preserved';
         let alternateDestinationJid = isSelfChatDestination ? selfFallbackJid : '';
         let alternateDestinationResolution = isSelfChatDestination && selfFallbackJid ? (/\@lid$/i.test(selfFallbackJid) ? 'self_chat_lid_fallback' : 'self_chat_phone_fallback') : '';
@@ -2297,16 +2313,14 @@ async function connectMongo(options = {}) {
             await runtimeLogsCollection.createIndex({ serviceId: 1, createdAt: -1, _id: -1 }, { name: 'server_runtime_logs_service_created_desc' });
             await runtimeLogsCollection.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'server_runtime_logs_expire_at_ttl' });
         }
-        const removedPreviousServiceDeployLogs = await runtimeLogsCollection.deleteMany({ serviceId: runtimeLogRenderServiceId, clusterId: { $ne: runtimeLogClusterId } });
-        const removedPreviousCodeLogs = { deletedCount: 0 };
-        const removedPreviousDeployLogs = { deletedCount: Number(removedPreviousServiceDeployLogs?.deletedCount || 0) + Number(removedPreviousCodeLogs?.deletedCount || 0) };
         if (skipStorageInitialization) {
             pendingRuntimeLogPersistenceCollection = runtimeLogsCollection;
             console.info('[tfbot-worker-storage-prepared]', { host: TFBOT_CLUSTER_INSTANCE_HOST, role: 'selected-worker-awaiting-selection-confirmation', migration: false, indexInitialization: false, persistenceAttached: false });
             return true;
         }
+        const removedPreviousServiceDeployLogs = await clearPreviousRuntimeLogsForCurrentDeployment(runtimeLogsCollection);
         attachRuntimeLogPersistence(runtimeLogsCollection);
-        console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', source: 'render-environment', serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, clusterId: runtimeLogClusterId, deploymentStartedAt: runtimeLogStartedAt.toISOString(), removedPreviousDeployLogCount: Number(removedPreviousDeployLogs?.deletedCount || 0), removedPreviousServiceDeployLogCount: Number(removedPreviousServiceDeployLogs?.deletedCount || 0), removedPreviousCodeLogCount: Number(removedPreviousCodeLogs?.deletedCount || 0), retentionDays: LOG_DASHBOARD_RETENTION_DAYS, maxEntries: LOG_DASHBOARD_PERSIST_MAX_ENTRIES, dashboardHistoryLimit: LOG_DASHBOARD_MAX_ENTRIES, role: coordinatorOnly ? 'coordinator' : 'active-serving' });
+        console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', source: 'render-environment', serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, clusterId: runtimeLogClusterId, deploymentStartedAt: runtimeLogStartedAt.toISOString(), removedPreviousDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousServiceDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousCodeLogCount: 0, retentionDays: LOG_DASHBOARD_RETENTION_DAYS, maxEntries: LOG_DASHBOARD_PERSIST_MAX_ENTRIES, dashboardHistoryLimit: LOG_DASHBOARD_MAX_ENTRIES, role: coordinatorOnly ? 'coordinator' : 'active-serving' });
         await db.collection('cluster_router').createIndex({ updatedAt: -1 }, { name: 'cluster_router_updated_desc' });
         await db.collection('processed_messages').createIndex({ ts: 1 });
         await db.collection('processed_messages').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'processed_messages_expire_at_ttl' });
@@ -2412,6 +2426,48 @@ function fixBuffers(obj) {
     }
     return obj;
 }
+
+function restoreSignalSessionBuffer(value, depth = 0, seen = new WeakSet()) {
+    if (value === null || value === undefined || depth > 7) return null;
+    if (Buffer.isBuffer(value)) return value.length ? Buffer.from(value) : null;
+    if (value instanceof Uint8Array) return value.byteLength ? Buffer.from(value) : null;
+    if (value instanceof ArrayBuffer) return value.byteLength ? Buffer.from(new Uint8Array(value)) : null;
+    if (Array.isArray(value)) {
+        if (value.length && value.every(item => Number.isInteger(item) && item >= 0 && item <= 255)) return Buffer.from(value);
+        return null;
+    }
+    if (typeof value === 'string') {
+        const encoded = value.trim().replace(/-/g, '+').replace(/_/g, '/');
+        if (!encoded || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) || encoded.length % 4 === 1) return null;
+        const normalized = encoded + '='.repeat((4 - encoded.length % 4) % 4);
+        const decoded = Buffer.from(normalized, 'base64');
+        return decoded.length && decoded.toString('base64').replace(/=+$/, '') === normalized.replace(/=+$/, '') ? decoded : null;
+    }
+    if (typeof value !== 'object' || seen.has(value)) return null;
+    seen.add(value);
+    if (typeof value.serialize === 'function') {
+        try {
+            const serialized = value.serialize();
+            const output = restoreSignalSessionBuffer(serialized, depth + 1, seen);
+            if (output) return output;
+        } catch (error) {}
+    }
+    const fixed = fixBuffers(value);
+    if (Buffer.isBuffer(fixed)) return fixed.length ? Buffer.from(fixed) : null;
+    if (fixed instanceof Uint8Array) return fixed.byteLength ? Buffer.from(fixed) : null;
+    if (value.$binary && typeof value.$binary.base64 === 'string') {
+        const output = restoreSignalSessionBuffer(value.$binary.base64, depth + 1, seen);
+        if (output) return output;
+    }
+    const candidates = [value.buffer, value.bytes, value.byteArray, value.data, value.value, value.binary, value.base64, value.serialized, value.record];
+    for (const candidate of candidates) {
+        if (candidate === value || candidate === undefined || candidate === null) continue;
+        const output = restoreSignalSessionBuffer(candidate, depth + 1, seen);
+        if (output) return output;
+    }
+    return null;
+}
+
 async function assertSessionRuntimeOwnership(sessionId, options = {}) {
     if (TFBOT_CLUSTER_COORDINATOR_ONLY || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping))) throw new Error('tfbot_worker_not_active');
     if (sessionFenceClosureInFlight.has(sessionId)) throw new Error('session_runtime_lock_fenced');
@@ -3002,18 +3058,10 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
             const docs = await collection.find({ _id: { $in: dbIds } }).toArray();
             for (const doc of docs) {
                 const keyId = doc._id.substring(prefix.length);
-                let restored = fixBuffers(doc.data);
-                if (type === 'session' && Array.isArray(restored) && restored.every(value => Number.isInteger(value) && value >= 0 && value <= 255)) restored = Buffer.from(restored);
-                if (type === 'session' && typeof restored === 'string') {
-                    const encoded = restored.trim().replace(/-/g, '+').replace(/_/g, '/');
-                    if (/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) && encoded.length > 0 && encoded.length % 4 !== 1) {
-                        const normalized = encoded + '='.repeat((4 - encoded.length % 4) % 4);
-                        const decoded = Buffer.from(normalized, 'base64');
-                        if (decoded.length && decoded.toString('base64').replace(/=+$/, '') === normalized.replace(/=+$/, '')) restored = decoded;
-                    }
-                }
-                if (type === 'session' && (!restored || (!Buffer.isBuffer(restored) && !(restored instanceof Uint8Array)) || restored.length === 0)) {
-                    console.warn('[signal-auth-session-record-invalid-preserved]', { sessionId, keyHash: shortLogHash(keyId), storedType: doc.data?._bsontype || (Array.isArray(doc.data) ? 'array' : typeof doc.data), reason: 'session_record_cannot_be_restored_as_nonempty_binary', action: 'skip_without_deleting_persisted_record' });
+                let restored = type === 'session' ? restoreSignalSessionBuffer(doc.data) : fixBuffers(doc.data);
+                if (type === 'session' && (!Buffer.isBuffer(restored) || restored.length === 0)) {
+                    const storedShape = doc.data && typeof doc.data === 'object' ? Object.keys(doc.data).slice(0, 12) : [];
+                    console.warn('[signal-auth-session-record-invalid-preserved]', { sessionId, keyHash: shortLogHash(keyId), storedType: doc.data?._bsontype || (Array.isArray(doc.data) ? 'array' : typeof doc.data), storedShape, reason: 'session_record_cannot_be_restored_as_nonempty_binary', action: 'preserve_record_and_skip_until_valid_binary_representation_is_available' });
                     continue;
                 }
                 if (Buffer.isBuffer(restored) && !Buffer.isBuffer(doc.data) && doc.data?._bsontype !== 'Binary') {
@@ -3033,7 +3081,14 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
                 for (const [id, value] of Object.entries(entries)) {
                     const dbId = `${sessionKey}_key_${type}-${id}`;
                     if (value === null || value === undefined) operations.push({ deleteOne: { filter: { _id: dbId } } });
-                    else operations.push({ updateOne: { filter: { _id: dbId }, update: { $set: { data: fixBuffers(value), updatedAt: new Date() } }, upsert: true } });
+                    else {
+                        const storedValue = type === 'session' ? restoreSignalSessionBuffer(value) : fixBuffers(value);
+                        if (type === 'session' && (!Buffer.isBuffer(storedValue) || storedValue.length === 0)) {
+                            console.error('[signal-auth-session-write-rejected]', { sessionId, keyHash: shortLogHash(id), reason: 'session_record_must_be_nonempty_binary', action: 'do_not_overwrite_existing_signal_record_with_invalid_object' });
+                            throw new Error('signal_auth_session_write_not_binary');
+                        }
+                        operations.push({ updateOne: { filter: { _id: dbId }, update: { $set: { data: storedValue, updatedAt: new Date() } }, upsert: true } });
+                    }
                 }
             }
             await runBulkWriteWithFallback(operations, 'signal-keys');
@@ -4437,9 +4492,11 @@ async function activateTfbotWorker() {
                 tfbotWorkerState = 'standby';
                 return false;
             }
-            attachRuntimeLogPersistence(pendingRuntimeLogPersistenceCollection || db.collection('server_runtime_logs'));
+            const activeRuntimeLogCollection = pendingRuntimeLogPersistenceCollection || db.collection('server_runtime_logs');
+            const removedPreviousRuntimeLogs = await clearPreviousRuntimeLogsForCurrentDeployment(activeRuntimeLogCollection);
+            attachRuntimeLogPersistence(activeRuntimeLogCollection);
             pendingRuntimeLogPersistenceCollection = null;
-            console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', role: 'active-serving-only', host: TFBOT_CLUSTER_INSTANCE_HOST });
+            console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', role: 'active-serving-only', host: TFBOT_CLUSTER_INSTANCE_HOST, serviceId: runtimeLogRenderServiceId, deploymentId: runtimeLogDeploymentId, instanceId: runtimeLogInstanceId, deploymentStartedAt: runtimeLogStartedAt.toISOString(), removedPreviousDeployLogCount: removedPreviousRuntimeLogs });
             tfbotWorkerActive = true;
             tfbotWorkerStarting = false;
             tfbotWorkerState = 'active';
@@ -5296,10 +5353,16 @@ async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIM
     let databaseReadError = null;
     try {
         if (db) {
-            const filter = { clusterId: runtimeLogClusterId };
-            if (incremental) filter.createdAt = { $gte: new Date(Math.max(0, since - 2000)) };
+            const filter = {
+                serviceId: runtimeLogRenderServiceId,
+                deploymentId: runtimeLogDeploymentId,
+                clusterId: runtimeLogClusterId,
+                instance: runtimeLogInstanceId,
+                createdAt: { $gte: runtimeLogStartedAt }
+            };
+            if (incremental) filter.createdAt.$gte = new Date(Math.max(runtimeLogStartedAt.getTime(), since - 2000));
             const cursor = db.collection('server_runtime_logs')
-                .find(filter, { projection: { at: 1, level: 1, text: 1, createdAt: 1, clusterId: 1 } })
+                .find(filter, { projection: { at: 1, level: 1, text: 1, createdAt: 1, clusterId: 1, deploymentId: 1, serviceId: 1, instance: 1 } })
                 .sort(incremental ? { createdAt: 1, _id: 1 } : { createdAt: -1, _id: -1 })
                 .limit(limit);
             if (typeof cursor.maxTimeMS === 'function') cursor.maxTimeMS(1800);
@@ -5321,7 +5384,7 @@ async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIM
     }
     for (const item of runtimeLogBuffer) {
         const atMs = Date.parse(String(item.at || '')) || 0;
-        if (!incremental || atMs >= since - 2000) byId.set(String(item.id), item);
+        if (atMs >= runtimeLogStartedAt.getTime() && (!incremental || atMs >= Math.max(runtimeLogStartedAt.getTime(), since - 2000))) byId.set(String(item.id), item);
     }
     let logs = Array.from(byId.values())
         .sort((a, b) => String(a.at).localeCompare(String(b.at)) || String(a.id).localeCompare(String(b.id)));
@@ -5377,7 +5440,7 @@ app.get(LOG_DASHBOARD_PATH, async (req, res) => {
         const requestedLimit = Math.max(20, Math.min(250, Number(req.query?.limit) || LOG_DASHBOARD_PAGE_LIMIT));
         const since = Math.max(0, Number(req.query?.since) || 0);
         const snapshot = await collectRuntimeLogSnapshot(requestedLimit, since);
-        return res.status(200).json({ ok: true, count: snapshot.logs.length, logs: snapshot.logs, nextSince: snapshot.nextSince, serverTime: new Date().toISOString() });
+        return res.status(200).json({ ok: true, count: snapshot.logs.length, logs: snapshot.logs, nextSince: snapshot.nextSince, deploymentStartedAt: runtimeLogStartedAt.toISOString(), deploymentId: runtimeLogDeploymentId, instanceId: runtimeLogInstanceId, serverTime: new Date().toISOString() });
     }
 
     const initialLogs = runtimeLogBuffer.slice(-Math.min(30, LOG_DASHBOARD_PAGE_LIMIT));
@@ -5434,6 +5497,7 @@ body{min-height:100vh;min-height:100svh;overflow-x:hidden;touch-action:pan-y}
 window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
 (() => {
  const endpoint = location.pathname;
+ const deploymentStartedAtMs = ${runtimeLogStartedAt.getTime()};
  const logsNode = document.getElementById('logs');
  const jumpButton = document.getElementById('jump');
  const copyAllButton = document.getElementById('copy-all');
@@ -5493,7 +5557,7 @@ window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
  }
  function render(nextLogs){
    const oldIds=new Set(allLogs.map(item=>textOf(item.id)));
-   const incoming=(Array.isArray(nextLogs)?nextLogs:[]).filter(item=>!textOf(item.id).startsWith('dashboard-loading:'));
+   const incoming=(Array.isArray(nextLogs)?nextLogs:[]).filter(item=>!textOf(item.id).startsWith('dashboard-loading:')&&(Date.parse(textOf(item.at))||0)>=deploymentStartedAtMs);
    const merged=new Map(allLogs.map(item=>[textOf(item.id),item]));
    for(const item of incoming)merged.set(textOf(item.id),item);
    const next=Array.from(merged.values()).sort((a,b)=>textOf(a.at).localeCompare(textOf(b.at))||textOf(a.id).localeCompare(textOf(b.id))).slice(-clientBufferLimit);
@@ -7526,9 +7590,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         const normalizeActionJid = value => {
             const raw = String(value || '').trim();
             if (!raw) return '';
-            if (/@s\.whatsapp\.net$/i.test(raw)) return `${raw.split(':')[0].split('@')[0]}@s.whatsapp.net`;
-            if (/@lid$/i.test(raw) || /@g\.us$/i.test(raw)) return raw;
-            if (raw.includes('@')) return raw;
+            if (/@lid$/i.test(raw)) return normalizeLidCacheKey(raw);
+            if (/@(?:s\.whatsapp\.net|c\.us)$/i.test(raw)) {
+                const phone = normalizedJidNumber(raw);
+                return phone ? `${phone}@s.whatsapp.net` : '';
+            }
+            if (/@g\.us$/i.test(raw)) return raw.toLowerCase().replace(/:\d+(?=@)/, '');
+            if (raw.includes('@')) return raw.toLowerCase().replace(/:\d+(?=@)/, '');
             const number = normalizePhoneNumber(raw);
             return number ? `${number}@s.whatsapp.net` : '';
         };
@@ -7542,12 +7610,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             participant?.participantAlt,
             participant?.participantPn,
             participant?.jid,
-            participant?.pn
+            participant?.pn,
+            participant?.participantId,
+            participant?.userJid,
+            participant?.participant
         ].map(value => String(value || '').trim()).filter(Boolean);
 
         const isAdminParticipantForPolicy = participant => {
-            const role = String(participant?.admin || '').trim().toLowerCase();
-            return participant?.isAdmin === true || participant?.isSuperAdmin === true || role === 'admin' || role === 'superadmin';
+            const role = String(participant?.admin ?? participant?.role ?? participant?.type ?? '').trim().toLowerCase();
+            return participant?.admin === true || participant?.isAdmin === true || participant?.isSuperAdmin === true || role === 'admin' || role === 'superadmin' || role === 'group_admin';
         };
 
         const findActionParticipant = (target, metadata) => {
@@ -7585,32 +7656,72 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             return candidatePhoneNumbers.some(number => wantedPhoneNumbers.includes(number));
         };
 
-        const getBotIdentityAliases = () => [
-            sock.user?.id,
-            sock.user?.lid,
-            sock.user?.phoneNumber,
-            state.creds?.me?.id,
-            state.creds?.me?.lid,
-            activeSessions.get(sessionId)?.number ? `${normalizePhoneNumber(activeSessions.get(sessionId).number)}@s.whatsapp.net` : ''
-        ].filter(Boolean).map(String);
+        const getBotIdentityAliases = () => {
+            const authenticatedPhone = getAuthenticatedPhoneNumber(sock.user || null, state.creds);
+            const authenticatedLid = getAuthenticatedLid(sock.user || null, state.creds);
+            const storedNumber = normalizePhoneNumber(activeSessions.get(sessionId)?.number || '');
+            return [...new Set([
+                sock.user?.id,
+                sock.user?.lid,
+                sock.user?.phoneNumber,
+                state.creds?.me?.id,
+                state.creds?.me?.lid,
+                authenticatedPhone ? `${authenticatedPhone}@s.whatsapp.net` : '',
+                authenticatedLid,
+                storedNumber ? `${storedNumber}@s.whatsapp.net` : ''
+            ].filter(Boolean).map(normalizeActionJid).filter(Boolean))];
+        };
 
         const isBotGroupParticipant = participant => participantMatchesIdentities(participant, getBotIdentityAliases());
 
         const canBotModerateGroup = async (groupJid, forceRefresh = false) => {
             try {
-                let metadata = await getGroupMetadataCached(sessionId, sock, groupJid, forceRefresh);
-                let botParticipant = Array.isArray(metadata?.participants) ? metadata.participants.find(isBotGroupParticipant) : null;
+                const normalizedGroup = String(groupJid || '').trim();
+                if (!/@g\.us$/i.test(normalizedGroup)) return false;
+                let metadata = forceRefresh
+                    ? await promiseWithTimeout(sock.groupMetadata(normalizedGroup), GROUP_METADATA_FETCH_TIMEOUT_MS, 'Fresh WhatsApp group administrator lookup')
+                    : await getGroupMetadataCached(sessionId, sock, normalizedGroup, false);
+                if (metadata) setCachedGroupMetadata(sessionId, normalizedGroup, metadata);
+                let botIdentities = getBotIdentityAliases();
+                const ownLid = getAuthenticatedLid(sock.user || null, state.creds);
+                if (ownLid) {
+                    try {
+                        const mappedPhone = normalizePhoneCacheJid(await sock.signalRepository?.lidMapping?.getPNForLID?.(ownLid));
+                        if (mappedPhone && !botIdentities.includes(mappedPhone)) botIdentities = [...botIdentities, mappedPhone];
+                    } catch (mappingError) {
+                        console.warn('[del3-own-lid-phone-resolution-failed]', { sessionId, group: normalizedGroup, error: mappingError?.message || String(mappingError) });
+                    }
+                    const rememberedPhone = normalizePhoneCacheJid(getRememberedPhoneForLid(sessionId, ownLid));
+                    if (rememberedPhone && !botIdentities.includes(rememberedPhone)) botIdentities = [...botIdentities, rememberedPhone];
+                }
+                const findBotParticipant = currentMetadata => Array.isArray(currentMetadata?.participants)
+                    ? currentMetadata.participants.find(participant => participantMatchesIdentities(participant, botIdentities)) || null
+                    : null;
+                let botParticipant = findBotParticipant(metadata);
                 if (!botParticipant || !isAdminParticipantForPolicy(botParticipant)) {
                     try {
-                        metadata = await promiseWithTimeout(sock.groupMetadata(groupJid), GROUP_METADATA_FETCH_TIMEOUT_MS, 'Fresh WhatsApp group administrator lookup');
-                        if (metadata) setCachedGroupMetadata(sessionId, groupJid, metadata);
-                        botParticipant = Array.isArray(metadata?.participants) ? metadata.participants.find(isBotGroupParticipant) : null;
+                        metadata = await promiseWithTimeout(sock.groupMetadata(normalizedGroup), GROUP_METADATA_FETCH_TIMEOUT_MS, 'Fresh WhatsApp group administrator lookup');
+                        if (metadata) setCachedGroupMetadata(sessionId, normalizedGroup, metadata);
+                        botParticipant = findBotParticipant(metadata);
                     } catch (refreshError) {
-                        console.warn('[del3-bot-admin-refresh-failed]', { sessionId, group: groupJid, error: refreshError?.message || String(refreshError) });
+                        console.warn('[del3-bot-admin-refresh-failed]', { sessionId, group: normalizedGroup, error: refreshError?.message || String(refreshError) });
                     }
                 }
-                const allowed = !!botParticipant && isAdminParticipantForPolicy(botParticipant);
-                console.info('[del3-bot-admin-check]', { sessionId, group: groupJid, foundBotParticipant: !!botParticipant, isAdmin: allowed, metadataParticipants: Array.isArray(metadata?.participants) ? metadata.participants.length : 0, refreshed: forceRefresh || !allowed });
+                const ownerAliases = [metadata?.owner, metadata?.ownerPn].filter(Boolean).map(normalizeActionJid).filter(Boolean);
+                const botIsGroupOwner = ownerAliases.some(alias => botIdentities.includes(alias));
+                const allowed = botIsGroupOwner || (!!botParticipant && isAdminParticipantForPolicy(botParticipant));
+                console.info('[del3-bot-admin-check]', {
+                    sessionId,
+                    group: normalizedGroup,
+                    foundBotParticipant: !!botParticipant,
+                    botIsGroupOwner,
+                    isAdmin: allowed,
+                    participantRole: botParticipant?.admin ?? botParticipant?.role ?? null,
+                    metadataParticipants: Array.isArray(metadata?.participants) ? metadata.participants.length : 0,
+                    botIdentityCount: botIdentities.length,
+                    botIdentityHashes: botIdentities.map(shortLogHash),
+                    refreshed: forceRefresh || !allowed
+                });
                 return allowed;
             } catch (error) {
                 console.warn('[del3-bot-admin-check-failed]', { sessionId, group: groupJid, error: error?.message || String(error) });
