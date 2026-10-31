@@ -40,7 +40,7 @@ const runtimeLogRenderExternalHost = String(process.env.RENDER_EXTERNAL_HOSTNAME
 const runtimeLogServiceScope = [runtimeLogRenderExternalHost ? `host:${runtimeLogRenderExternalHost}` : '', runtimeLogRenderServiceNameExplicit ? `name:${runtimeLogRenderServiceNameExplicit}` : ''].filter(Boolean).join('|') || `local:${runtimeLogPort}`;
 const runtimeLogServiceScopeHash = shortLogHash(runtimeLogServiceScope);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}:${shortLogHash(runtimeLogInstanceId)}`).slice(0, 240);
-const TFBOT_CLUSTER_CODE_REVISION = 'r57-owner-fromme-service-port-log-isolation-live-session-and-del3-identity';
+const TFBOT_CLUSTER_CODE_REVISION = 'r58-router-health-first-owner-self-chat-command-dispatch';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
 const runtimeLogClusterId = `${runtimeLogDeploymentId}:${shortLogHash(runtimeLogInstanceId)}`.slice(0, 240);
 const runtimeLogDeploymentGroupId = `${String(TFBOT_CLUSTER_CODE_REVISION).normalize('NFKC').replace(/[\p{Cc}\p{Cf}]/gu, '').trim().slice(0, 160)}:service-${runtimeLogServiceScopeHash}:port-${runtimeLogPort}`;
@@ -775,7 +775,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r57';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r58';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -4394,56 +4394,35 @@ async function probeTfbotServingDomain(domain) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TFBOT_ROUTER_PROBE_TIMEOUT_MS);
     try {
-        const response = await fetch(domain.url, {
+        const healthResponse = await fetch(`${domain.url}${TFBOT_ROUTER_OK_PATH}`, {
             method: 'GET',
-            headers: { 'Accept': 'text/html,application/json;q=0.9,*/*;q=0.8' },
+            headers: {
+                'X-TFBOT-Cluster-Token': TFBOT_CLUSTER_TOKEN,
+                'X-TFBOT-Expected-Host': domain.host,
+                'Accept': 'application/json'
+            },
             cache: 'no-store',
             redirect: 'manual',
             signal: controller.signal
         });
-        const responseText = await response.text().catch(() => '');
-        if (/This service has been suspended by its owner/i.test(String(responseText || '').slice(0, 160000))) {
-            console.warn('[tfbot-router-domain-suspended]', { host: domain.host, status: response.status, reason: 'render_owner_suspension_message', action: 'try_next_domain_in_priority_order' });
-            return { ok: false, suspended: true, host: domain.host, url: domain.url, workerActive: false, workerState: 'suspended', checkedAt: new Date(), rootStatus: response.status };
+        const healthText = await healthResponse.text().catch(() => '');
+        if (/This service has been suspended by its owner/i.test(String(healthText || '').slice(0, 160000))) {
+            console.warn('[tfbot-router-domain-suspended]', { host: domain.host, status: healthResponse.status, reason: 'render_owner_suspension_message', probe: 'authenticated_internal_health', action: 'try_next_domain_in_priority_order' });
+            return { ok: false, suspended: true, host: domain.host, url: domain.url, workerActive: false, workerState: 'suspended', checkedAt: new Date(), healthStatus: healthResponse.status, rootStatus: healthResponse.status };
         }
-        if (!response.ok) {
-            console.warn('[tfbot-router-domain-http-unavailable]', { host: domain.host, status: response.status, action: 'try_next_domain_in_priority_order' });
+        if (healthResponse.status !== 200) {
+            console.warn('[tfbot-router-health-http-unavailable]', { host: domain.host, status: healthResponse.status, probe: 'authenticated_internal_health', action: 'try_next_domain_in_priority_order' });
             return null;
         }
         let payload = null;
-        const healthController = new AbortController();
-        const healthTimer = setTimeout(() => healthController.abort(), Math.min(2200, TFBOT_ROUTER_COORDINATOR_TIMEOUT_MS));
-        try {
-            const healthResponse = await fetch(`${domain.url}${TFBOT_ROUTER_OK_PATH}`, {
-                method: 'GET',
-                headers: {
-                    'X-TFBOT-Cluster-Token': TFBOT_CLUSTER_TOKEN,
-                    'X-TFBOT-Expected-Host': domain.host,
-                    'Accept': 'application/json'
-                },
-                cache: 'no-store',
-                redirect: 'manual',
-                signal: healthController.signal
-            });
-            const healthText = await healthResponse.text().catch(() => '');
-            if (/This service has been suspended by its owner/i.test(String(healthText || '').slice(0, 160000))) {
-                return { ok: false, suspended: true, host: domain.host, url: domain.url, workerActive: false, workerState: 'suspended', checkedAt: new Date(), rootStatus: response.status };
-            }
-            if (healthResponse.status === 200) {
-                try { payload = JSON.parse(healthText); } catch (error) { payload = null; }
-            }
-        } catch (healthError) {
-            payload = null;
-        } finally {
-            clearTimeout(healthTimer);
-        }
+        try { payload = JSON.parse(healthText); } catch (error) { payload = null; }
         const validHealthPayload = !!(payload && payload.ok === true && payload.service === 'tfbot-router-node' && normalizeTfbotHost(payload.host) === domain.host && payload.database === TFBOT_DATABASE_NAME);
         if (!validHealthPayload) {
-            console.warn('[tfbot-router-health-unverified]', { host: domain.host, rootStatus: response.status, healthStatus: payload ? 'invalid-payload' : 'no-valid-health-response', action: 'try_next_domain_in_priority_order' });
+            console.warn('[tfbot-router-health-unverified]', { host: domain.host, healthStatus: healthResponse.status, healthPayload: payload ? 'invalid-payload' : 'invalid-json', action: 'try_next_domain_in_priority_order' });
             return null;
         }
         const reportedWorkerState = String(payload.workerState || 'standby').toLowerCase();
-        if (reportedWorkerState === 'error' || reportedWorkerState === 'drain_failed' || payload.draining === true) {
+        if (reportedWorkerState === 'error' || reportedWorkerState === 'drain_failed' || reportedWorkerState === 'stopping' || payload.draining === true) {
             console.warn('[tfbot-router-worker-unavailable]', { host: domain.host, workerState: reportedWorkerState, draining: payload.draining === true, action: 'try_next_domain_in_priority_order' });
             return null;
         }
@@ -4457,17 +4436,18 @@ async function probeTfbotServingDomain(domain) {
             generation: String(payload.generation || ''),
             activeSessionCount: Number(payload.activeSessionCount || 0),
             healthVerified: true,
-            rootStatus: response.status,
+            healthStatus: healthResponse.status,
+            rootStatus: healthResponse.status,
+            probe: 'authenticated_internal_health',
             checkedAt: new Date()
         };
     } catch (error) {
-        console.warn('[tfbot-router-domain-no-response]', { host: domain.host, error: error?.name === 'AbortError' ? 'timeout' : String(error?.message || error).slice(0, 160) });
+        console.warn('[tfbot-router-domain-no-response]', { host: domain.host, probe: 'authenticated_internal_health', error: error?.name === 'AbortError' ? 'timeout' : String(error?.message || error).slice(0, 160) });
         return null;
     } finally {
         clearTimeout(timer);
     }
 }
-
 async function sendTfbotWorkerControl(domain, selection) {
     if (!TFBOT_CLUSTER_TOKEN || !domain?.host || !domain?.url) return null;
     const controller = new AbortController();
@@ -4550,9 +4530,9 @@ async function refreshTfbotActiveDomain(force = false) {
                 console.error('[tfbot-router-no-serving-domain]', {
                     coordinator: TFBOT_COORDINATOR_HOST,
                     checkedHosts: checked.map(item => item.domain.host),
-                    probeResults: checked.map(item => ({ host: item.domain.host, ok: item.health?.ok === true, status: item.health?.rootStatus || null, suspended: item.health?.suspended === true })),
+                    probeResults: checked.map(item => ({ host: item.domain.host, ok: item.health?.ok === true, status: item.health?.healthStatus || item.health?.rootStatus || null, healthStatus: item.health?.healthStatus || null, workerState: item.health?.workerState || (item.health?.suspended ? 'suspended' : 'no-response'), suspended: item.health?.suspended === true })),
                     checkedAt,
-                    action: 'no_redirect_target_is_selected_until_a_priority_domain_responds'
+                    action: 'no_redirect_target_is_selected_until_an_authenticated_worker_health_endpoint_responds'
                 });
                 return null;
             }
@@ -4571,7 +4551,7 @@ async function refreshTfbotActiveDomain(force = false) {
                 source: 'tfbot7-strict-priority-health-probe',
                 selectedBy: TFBOT_COORDINATOR_HOST,
                 healthyHosts: [selected.host],
-                probeResults: checked.map(item => ({ host: item.domain.host, ok: item.health?.ok === true, suspended: item.health?.suspended === true, workerState: item.health?.workerState || (item.health?.suspended ? 'suspended' : 'no-response'), checkedAt }))
+                probeResults: checked.map(item => ({ host: item.domain.host, ok: item.health?.ok === true, healthStatus: item.health?.healthStatus || null, suspended: item.health?.suspended === true, workerState: item.health?.workerState || (item.health?.suspended ? 'suspended' : 'no-response'), checkedAt }))
             };
             let previousControl = null;
             if (previousIndex >= 0 && previousHost !== selected.host) {
@@ -4608,7 +4588,7 @@ async function refreshTfbotActiveDomain(force = false) {
                 coordinator: TFBOT_COORDINATOR_HOST,
                 generation,
                 pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS,
-                selectionMode: 'strict-priority-tf-bot-then-tfbot2-then-tfbot3-and-later-only-after-no-response',
+                selectionMode: 'strict-priority-authenticated-health-probe-tf-bot-then-tfbot2-then-tfbot3-and-later',
                 controls: [previousControl, control].filter(Boolean)
             });
             selectionPhase = 'complete';
@@ -7756,6 +7736,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             browser: connectionFormat === 'pair' ? Browsers.macOS('Chrome') : Browsers.ubuntu('Chrome'),
             defaultQueryTimeoutMs: Math.max(30000, Math.min(120000, Number(process.env.BAILEYS_QUERY_TIMEOUT_MS || 120000))),
             markOnlineOnConnect: false,
+            emitOwnEvents: true,
             fireInitQueries: false,
             generateHighQualityLinkPreview: false,
             msgRetryCounterCache: createSessionRetryCache(sessionId),
@@ -8902,6 +8883,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         addressingMode: entry?.key?.addressingMode || null,
                         chatType: mainChat.endsWith('@g.us') ? 'group' : mainChat.endsWith('@newsletter') ? 'channel' : mainChat === 'status@broadcast' ? 'status' : mainChat === 'unknown-chat' ? 'unknown' : 'private',
                         fromMe: !!entry?.key?.fromMe,
+                        selfChatCandidate: !!entry?.key?.fromMe && !mainChat.endsWith('@g.us') && !mainChat.endsWith('@newsletter'),
                         pushName: String(entry?.pushName || '').slice(0, 80),
                         messageType: Object.keys(unwrapMessageContent(entry?.message) || {})[0] || 'unknown',
                         messageKeys: Object.keys(entry?.message || {}),
@@ -8969,13 +8951,23 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const receivedType = Object.keys(receivedContent || {})[0] || 'unknown';
                 const receivedChat = String(m?.key?.remoteJid || m?.key?.remoteJidAlt || 'unknown-chat');
                 const receivedId = String(m?.key?.id || 'missing-id');
-                const receivedParsedCommand = String(receivedBody || '').trim()
+                const receivedIsGroup = receivedChat.endsWith('@g.us');
+                const receivedIsChannel = receivedChat.endsWith('@newsletter');
+                const receivedExplicitParsedCommand = String(receivedBody || '').trim()
                     ? parseIncomingCommand(receivedBody, globalLang, getCommandParsingContext(m?.message))
                     : null;
-                const receivedIsGroup = receivedChat.endsWith('@g.us');
+                const receivedOwnPhoneNumber = getAuthenticatedPhoneNumber(sock.user, activeMessageCredentials);
+                const receivedOwnLid = getAuthenticatedLid(sock.user, activeMessageCredentials);
+                const receivedOwnAccountJids = [...new Set([sock.user?.id, receivedOwnPhoneNumber ? `${receivedOwnPhoneNumber}@s.whatsapp.net` : '', receivedOwnLid].filter(Boolean).map(String))];
+                const receivedChatAliases = [...new Set([receivedChat, m?.key?.remoteJidAlt].filter(Boolean).map(String))];
+                const receivedIsOwnerSelfChat = m?.key?.fromMe === true && !receivedIsGroup && !receivedIsChannel
+                    && receivedChatAliases.some(chatJid => receivedOwnAccountJids.some(accountJid => areEquivalentWhatsAppChatJids(sessionId, chatJid, accountJid)));
+                const receivedParsedCommand = receivedExplicitParsedCommand || (receivedIsOwnerSelfChat && String(receivedBody || '').trim()
+                    ? { command: 'ai', internalCommand: 'ai', args: clipLongText(String(receivedBody || '').trim(), AI_MAX_INPUT_CHARS), implicitOwnerSelfChat: true }
+                    : null);
                 if (receivedIsGroup && m?.key?.fromMe && m?.message) cacheRecentMessage(sessionId, m);
                 const recentOutgoingIdEcho = !!m?.key?.fromMe && isRecentOutgoingMessageId(sessionId, receivedId);
-                const outgoingTextEcho = !!m?.key?.fromMe && !receivedParsedCommand
+                const outgoingTextEcho = !!m?.key?.fromMe && !receivedExplicitParsedCommand
                     && consumeOutgoingTextEcho(sessionId, m?.key?.remoteJid || receivedChat, receivedBody);
                 if (recentOutgoingIdEcho || outgoingTextEcho) {
                     console.info('[message-ignored]', {
@@ -9099,6 +9091,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         internalCommand: receivedParsedCommand.internalCommand,
                         argumentPreview: String(receivedParsedCommand.args || '').slice(0, 1000),
                         stage: 'before_deduplication_policy_and_execution',
+                        implicitOwnerSelfChatAI: receivedParsedCommand.implicitOwnerSelfChat === true,
                         action: 'recognized_not_yet_authorized_or_executed'
                     });
                 }
@@ -9160,14 +9153,14 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 });
                 const messageTimestampForDedupe = Number(m.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m.messageTimestamp);
                 const messageAgeForDedupe = Number.isFinite(messageTimestampForDedupe) && messageTimestampForDedupe > 0 ? Math.floor(Date.now() / 1000) - messageTimestampForDedupe : null;
-                if (upsertType === 'append' && messageAgeForDedupe !== null && messageAgeForDedupe > 120 && !receivedParsedCommand) {
+                if (upsertType === 'append' && messageAgeForDedupe !== null && messageAgeForDedupe > 120 && !receivedExplicitParsedCommand) {
                     cacheRecentMessage(sessionId, m);
                     console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: receivedChat, messageAgeSeconds: messageAgeForDedupe, reason: 'stale_history_append_not_claimed' });
                     continue;
                 }
                 const msgCacheKey = `${sessionId}:id:${msgId}`;
                 const msgChatCacheKey = `${sessionId}:${receivedChat}:${msgId}`;
-                if (m.key.fromMe && !receivedParsedCommand && consumeOutgoingTextEcho(sessionId, m.key.remoteJid || '', extractBody(m))) {
+                if (m.key.fromMe && !receivedExplicitParsedCommand && consumeOutgoingTextEcho(sessionId, m.key.remoteJid || '', extractBody(m))) {
                     console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'outgoing_text_echo' });
                     continue;
                 }
@@ -9274,13 +9267,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         let from = rawFrom;
                         let privateReplyTargetResolution = /@lid$/i.test(rawFrom) ? 'original_chat_jid_lid_preferred' : 'original_chat_jid_pn_preferred';
                         const earlyBody = extractBody(m);
-                        const isBotFormattedResponseEcho = /(?:^|\n)\s*>\s*\*Adam D'H7\*/i.test(String(earlyBody || ''))
-                            || (/(?:^|\n)\s*\*Adam D'H7\*\s*\n\s*Utilisateur\s*:/i.test(String(earlyBody || '')) && /(?:^|\n)\s*Propriétaire\s*:\s*Adam D'H7/i.test(String(earlyBody || '')));
-                        if (isFromMe && isBotFormattedResponseEcho) {
-                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: from, fromMe: true, bodyPreview: String(earlyBody || '').replace(/[\r\n\t]+/g, ' ').slice(0, 180), reason: 'own_bot_formatted_response_echo' });
-                            return;
-                        }
-                        
                         const isGroup = rawChatIsGroup;
                         const isChannel = rawChatIsChannel;
                         const messageType = Object.keys(unwrapMessageContent(m.message) || {})[0];
