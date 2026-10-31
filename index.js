@@ -19,6 +19,7 @@ const LOG_DASHBOARD_RETENTION_DAYS = Math.max(1, Math.min(30, Number(process.env
 const LOG_DASHBOARD_PERSIST_MAX_ENTRIES = Math.max(5000, Math.min(200000, Number(process.env.LOG_DASHBOARD_PERSIST_MAX_ENTRIES || 50000)));
 const runtimeLogBuffer = [];
 const runtimeLogPendingWrites = [];
+let runtimeLogInitialCleanupCompleted = false;
 let runtimeLogPersistenceCollection = null;
 let pendingRuntimeLogPersistenceCollection = null;
 let runtimeLogPersistenceTimer = null;
@@ -32,8 +33,8 @@ const runtimeLogRenderServiceName = String(process.env.RENDER_SERVICE_NAME || pr
 const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
 const runtimeLogRenderCommit = String(process.env.RENDER_GIT_COMMIT || '').trim().slice(0, 80);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}:${shortLogHash(runtimeLogInstanceId)}`).slice(0, 240);
-const TFBOT_CLUSTER_CODE_REVISION = 'r41-del3-identity-signal-binary-log-boundary';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-30')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
+const TFBOT_CLUSTER_CODE_REVISION = 'r45-preserve-router-selection-auth-write-failure-logs-purge';
+const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
 const runtimeLogClusterId = `${runtimeLogDeploymentId}:${shortLogHash(runtimeLogInstanceId)}`.slice(0, 240);
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
 const runtimeLogSecrets = Object.entries(process.env)
@@ -110,21 +111,117 @@ function scheduleRuntimeLogPersistence(delayMs = 40) {
 
 function attachRuntimeLogPersistence(collection) {
     runtimeLogPersistenceCollection = collection || null;
+    if (!runtimeLogPersistenceCollection) return;
+    const pendingIds = new Set(runtimeLogPendingWrites.map(item => String(item?._id || '')));
+    for (const entry of runtimeLogBuffer) {
+        if (!entry?.id || pendingIds.has(String(entry.id))) continue;
+        pendingIds.add(String(entry.id));
+        runtimeLogPendingWrites.push({
+            _id: entry.id,
+            instance: runtimeLogInstanceId,
+            deploymentId: runtimeLogDeploymentId,
+            serviceId: runtimeLogRenderServiceId,
+            serviceName: runtimeLogRenderServiceName,
+            renderInstanceId: runtimeLogRenderInstanceId,
+            renderCommit: runtimeLogRenderCommit || null,
+            deploymentStartedAt: runtimeLogStartedAt,
+            clusterId: runtimeLogClusterId,
+            instanceUrl: runtimeLogInstanceUrl || null,
+            sequence: Number(String(entry.id).split(':').pop()) || 0,
+            at: entry.at,
+            createdAt: new Date(entry.at),
+            expireAt: new Date(Date.now() + LOG_DASHBOARD_RETENTION_DAYS * 24 * 60 * 60 * 1000),
+            level: entry.level,
+            text: entry.text
+        });
+    }
     scheduleRuntimeLogPersistence(0);
 }
 
 async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
-    if (!collection || typeof collection.deleteMany !== 'function') return 0;
-    const result = await collection.deleteMany({
-        serviceId: runtimeLogRenderServiceId,
-        $or: [
-            { createdAt: { $lt: runtimeLogStartedAt } },
-            { deploymentId: { $ne: runtimeLogDeploymentId } },
-            { clusterId: { $ne: runtimeLogClusterId } },
-            { instance: { $ne: runtimeLogInstanceId } }
-        ]
-    });
-    return Number(result?.deletedCount || 0);
+    if (!collection || typeof collection.deleteMany !== 'function' || !db) return 0;
+    if (runtimeLogInitialCleanupCompleted) return 0;
+    const markerCollection = db.collection('cluster_router');
+    const markerId = `runtime-logs-cleanup:${runtimeLogDeploymentId}`;
+    const claimOwner = processInstanceId;
+    for (let attempt = 0; attempt < 140; attempt++) {
+        const now = new Date();
+        const existing = await markerCollection.findOne({ _id: markerId }).catch(() => null);
+        if (existing?.completed === true) {
+            runtimeLogInitialCleanupCompleted = true;
+            return 0;
+        }
+        const leaseUntil = new Date(now.getTime() + 30000);
+        try {
+            await markerCollection.updateOne(
+                {
+                    _id: markerId,
+                    completed: { $ne: true },
+                    $or: [
+                        { leaseUntil: { $lte: now } },
+                        { leaseUntil: { $exists: false } },
+                        { owner: claimOwner }
+                    ]
+                },
+                {
+                    $set: { owner: claimOwner, leaseUntil, deploymentId: runtimeLogDeploymentId, releaseId: TFBOT_CODE_RELEASE_ID, updatedAt: now, status: 'running' },
+                    $setOnInsert: { completed: false, createdAt: now }
+                },
+                { upsert: true }
+            );
+        } catch (claimError) {
+            if (Number(claimError?.code) === 11000 || String(claimError?.codeName || '') === 'DuplicateKey') {
+                await new Promise(resolve => setTimeout(resolve, 250));
+                continue;
+            }
+            throw claimError;
+        }
+        const claim = await markerCollection.findOne({ _id: markerId }).catch(() => null);
+        if (claim?.completed === true) {
+            runtimeLogInitialCleanupCompleted = true;
+            return 0;
+        }
+        if (String(claim?.owner || '') !== claimOwner) {
+            await new Promise(resolve => setTimeout(resolve, 250));
+            continue;
+        }
+        const rawAppCollection = mongoClient?.db(TFBOT_DATABASE_NAME)?.collection(TFBOT_APP_DATA_COLLECTION);
+        if (!rawAppCollection) throw new Error('runtime_log_physical_collection_unavailable');
+        const logicalBefore = await collection.countDocuments({}).catch(() => 0);
+        const logicalPurge = await collection.deleteMany({});
+        const legacyLogFilter = {
+            $or: [
+                { __tfbotBucket: 'server_runtime_logs' },
+                { _id: { $regex: '^server_runtime_logs::' } },
+                { _id: { $regex: '^server_runtime_logs:' }, level: { $exists: true }, text: { $exists: true } },
+                { _id: { $regex: '^(?:runtime[-_]?logs?|logs)[:::_-]' }, level: { $exists: true }, text: { $exists: true } },
+                { deploymentId: { $exists: true }, level: { $exists: true }, text: { $exists: true }, createdAt: { $exists: true } }
+            ]
+        };
+        const legacyBefore = await rawAppCollection.countDocuments(legacyLogFilter).catch(() => 0);
+        const legacyPurge = await rawAppCollection.deleteMany(legacyLogFilter);
+        const logicalAfter = await collection.countDocuments({}).catch(() => -1);
+        const legacyAfter = await rawAppCollection.countDocuments(legacyLogFilter).catch(() => -1);
+        const removed = Number(logicalPurge?.deletedCount || 0) + Number(legacyPurge?.deletedCount || 0);
+        if (logicalAfter > 0 || legacyAfter > 0) throw new Error(`runtime_log_cleanup_incomplete:logical=${logicalAfter}:legacy=${legacyAfter}`);
+        console.info('[runtime-log-physical-cleanup-verified]', { logicalBefore, logicalRemoved: Number(logicalPurge?.deletedCount || 0), legacyBefore, legacyRemoved: Number(legacyPurge?.deletedCount || 0), logicalAfter, legacyAfter, action: 'remove_all_prior_server_runtime_log_documents_before_current_deploy_log_attach' });
+        await markerCollection.updateOne(
+            { _id: markerId, owner: claimOwner, completed: { $ne: true } },
+            {
+                $set: { completed: true, status: 'completed', removedCount: removed, completedAt: new Date(), updatedAt: new Date() },
+                $unset: { leaseUntil: 1 }
+            }
+        );
+        runtimeLogInitialCleanupCompleted = true;
+        return removed;
+    }
+    const finalMarker = await markerCollection.findOne({ _id: markerId }).catch(() => null);
+    if (finalMarker?.completed === true) {
+        runtimeLogInitialCleanupCompleted = true;
+        return 0;
+    }
+    console.warn('[runtime-log-deploy-cleanup-not-acquired]', { deploymentId: runtimeLogDeploymentId, owner: finalMarker?.owner || null, status: finalMarker?.status || 'unknown', action: 'preserve_active_deploy_logs_and_continue' });
+    return 0;
 }
 
 async function flushRuntimeLogPersistence() {
@@ -249,7 +346,8 @@ const signalDiagnosticTimes = new Map();
 const signalRecoveryCounters = new Map();
 const signalRecoveryCooldowns = new Map();
 const signalRecoveryTimers = new Map();
-const SIGNAL_RECOVERY_THRESHOLD = Math.max(2, Math.min(5, Number(process.env.SIGNAL_RECOVERY_THRESHOLD || 2)));
+const expectedSocketCloseLogTimes = new Map();
+const SIGNAL_RECOVERY_THRESHOLD = Math.max(3, Math.min(10, Number(process.env.SIGNAL_RECOVERY_THRESHOLD || 5)));
 const SIGNAL_RECOVERY_WINDOW_MS = Math.max(10000, Math.min(180000, Number(process.env.SIGNAL_RECOVERY_WINDOW_MS || 60000)));
 const SIGNAL_RECOVERY_COOLDOWN_MS = Math.max(60000, Math.min(3600000, Number(process.env.SIGNAL_RECOVERY_COOLDOWN_MS || 120000)));
 function isSignalDecryptionFailure(args) {
@@ -524,6 +622,18 @@ function createDashboardPinoLogger(options = {}) {
                     let parsed;
                     try { parsed = JSON.parse(line); } catch (error) { parsed = { msg: line }; }
                     const diagnosticArgs = [parsed?.msg || parsed?.message || '', parsed];
+                    const parsedSessionId = String(parsed?.sessionId || options?.base?.sessionId || '').trim();
+                    const closedSocketText = getSignalLogText(diagnosticArgs);
+                    const expectedSocketClose = /Connection Closed|WebSocket is not open|socket.*closed/i.test(closedSocketText) && (tfbotWorkerStopping || serverShuttingDown || workerDrainingSessionIds.has(parsedSessionId) || Date.now() < workerDrainExpectedClosedUntil);
+                    if (expectedSocketClose) {
+                        const closeKey = `${parsedSessionId || 'unknown'}:${component}`;
+                        const previousAt = Number(expectedSocketCloseLogTimes.get(closeKey) || 0);
+                        if (Date.now() - previousAt >= 10000) {
+                            expectedSocketCloseLogTimes.set(closeKey, Date.now());
+                            recordRuntimeLog('warn', ['[baileys-socket-close-during-handoff]', { sessionId: parsedSessionId || null, component, action: 'expected_socket_close_while_worker_handoff_and_auth_drain_continue' }]);
+                        }
+                        continue;
+                    }
                     if (isSignalDecryptionFailure(diagnosticArgs)) {
                         const recoverySessionId = String(parsed?.sessionId || options?.base?.sessionId || '').trim();
                         if (recoverySessionId) scheduleSignalRecoveryFromLog(recoverySessionId, parsed);
@@ -544,7 +654,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r41';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r45';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -724,11 +834,15 @@ const CHAT_HISTORY_MAX_ENTRIES = Math.max(50, Math.min(2000, Number(process.env.
 const REGISTERED_BOT_ACCOUNT_CACHE_TTL_MS = Math.max(5000, Math.min(60000, Number(process.env.REGISTERED_BOT_ACCOUNT_CACHE_TTL_MS) || 15000));
 const GROUP_METADATA_FETCH_TIMEOUT_MS = Math.max(3000, Number(process.env.GROUP_METADATA_FETCH_TIMEOUT_MS) || 12000);
 const authWriteQueues = new Map();
+const authWriteActivityAt = new Map();
+const authWriteFailures = new Map();
 const groupMetadataFetchPromises = new Map();
 const sessionRuntimeLockTimers = new Map();
 const sessionRuntimeLockTokens = new Map();
 const sessionRuntimeLockLeaseUntil = new Map();
 const sessionFenceClosureInFlight = new Set();
+const workerDrainingSessionIds = new Set();
+let workerDrainExpectedClosedUntil = 0;
 const sessionLockRetryTimers = new Map();
 const accountRuntimeLockTimers = new Map();
 const sessionAccountRuntimeLocks = new Map();
@@ -895,6 +1009,8 @@ function cleanupSessionVolatileCaches(sessionId) {
     for (const key of [...chatHistoryAccessTimes.keys()]) if (key.startsWith(sessionPrefix)) chatHistoryAccessTimes.delete(key);
     for (const key of [...msgRetryCounterCache.keys()]) if (key.startsWith(`${id}:`)) msgRetryCounterCache.delete(key);
     for (const key of [...msgRetryCounterExpiryCache.keys()]) if (key.startsWith(`${id}:`)) msgRetryCounterExpiryCache.delete(key);
+    authWriteActivityAt.delete(id);
+    authWriteFailures.delete(id);
     for (const key of [...outgoingMessageCache]) if (key.startsWith(`${id}:`)) outgoingMessageCache.delete(key);
     for (const key of [...outgoingMessageIdCache.keys()]) if (key.startsWith(`${id}:`)) outgoingMessageIdCache.delete(key);
     for (const key of [...outgoingTextEchoCache.keys()]) if (key.startsWith(`${id}:`)) outgoingTextEchoCache.delete(key);
@@ -1117,19 +1233,46 @@ async function flushAuthWritesForSession(sessionId) {
     const key = String(sessionId || '');
     for (let attempt = 0; attempt < 10; attempt++) {
         const pending = authWriteQueues.get(key);
-        if (!pending) return;
+        if (!pending) {
+            const previousFailure = authWriteFailures.get(key);
+            if (previousFailure) throw new Error(`signal_auth_store_previous_write_failed:${previousFailure.message || 'unknown'}`);
+            return;
+        }
         try {
             await promiseWithTimeout(pending, 20000, 'Signal auth-store flush');
         } catch (error) {
+            const failure = { at: Date.now(), message: String(error?.message || error).slice(0, 240) };
+            authWriteFailures.set(key, failure);
             if (authWriteQueues.get(key) === pending) authWriteQueues.delete(key);
             throw error;
         }
-        if (authWriteQueues.get(key) === pending) {
-            authWriteQueues.delete(key);
-            return;
-        }
+        if (authWriteQueues.get(key) === pending) authWriteQueues.delete(key);
+        const previousFailure = authWriteFailures.get(key);
+        if (previousFailure) throw new Error(`signal_auth_store_previous_write_failed:${previousFailure.message || 'unknown'}`);
     }
     throw new Error('signal_auth_store_queue_did_not_quiesce');
+}
+
+async function waitForAuthStoreQuiescence(sessionId, timeoutMs = 45000, quietMs = 4500) {
+    const key = String(sessionId || '');
+    const startedAt = Date.now();
+    let lastError = null;
+    while (Date.now() - startedAt < timeoutMs) {
+        try {
+            await flushAuthWritesForSession(key);
+            lastError = null;
+        } catch (error) {
+            lastError = error;
+        }
+        const activityAt = Number(authWriteActivityAt.get(key) || startedAt);
+        if (!authWriteQueues.has(key) && !lastError && Date.now() - activityAt >= quietMs) {
+            await new Promise(resolve => setTimeout(resolve, 300));
+            if (!authWriteQueues.has(key) && Number(authWriteActivityAt.get(key) || startedAt) === activityAt) return true;
+        }
+        await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    if (lastError) throw lastError;
+    throw new Error('signal_auth_store_drain_timeout');
 }
 
 async function resolvePhoneForLid(sessionId, sock, lidValue) {
@@ -2318,9 +2461,14 @@ async function connectMongo(options = {}) {
             console.info('[tfbot-worker-storage-prepared]', { host: TFBOT_CLUSTER_INSTANCE_HOST, role: 'selected-worker-awaiting-selection-confirmation', migration: false, indexInitialization: false, persistenceAttached: false });
             return true;
         }
-        const removedPreviousServiceDeployLogs = await clearPreviousRuntimeLogsForCurrentDeployment(runtimeLogsCollection);
-        attachRuntimeLogPersistence(runtimeLogsCollection);
-        console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', source: 'render-environment', serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, clusterId: runtimeLogClusterId, deploymentStartedAt: runtimeLogStartedAt.toISOString(), removedPreviousDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousServiceDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousCodeLogCount: 0, retentionDays: LOG_DASHBOARD_RETENTION_DAYS, maxEntries: LOG_DASHBOARD_PERSIST_MAX_ENTRIES, dashboardHistoryLimit: LOG_DASHBOARD_MAX_ENTRIES, role: coordinatorOnly ? 'coordinator' : 'active-serving' });
+        const removedPreviousServiceDeployLogs = coordinatorOnly ? 0 : await clearPreviousRuntimeLogsForCurrentDeployment(runtimeLogsCollection);
+        if (coordinatorOnly) {
+            runtimeLogPersistenceCollection = null;
+            pendingRuntimeLogPersistenceCollection = null;
+        } else {
+            attachRuntimeLogPersistence(runtimeLogsCollection);
+        }
+        console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', source: 'release-scoped-cleanup', serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, clusterId: runtimeLogClusterId, releaseId: TFBOT_CODE_RELEASE_ID, deploymentStartedAt: runtimeLogStartedAt.toISOString(), removedPreviousDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousServiceDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousCodeLogCount: removedPreviousServiceDeployLogs, retentionDays: LOG_DASHBOARD_RETENTION_DAYS, maxEntries: LOG_DASHBOARD_PERSIST_MAX_ENTRIES, dashboardHistoryLimit: LOG_DASHBOARD_MAX_ENTRIES, role: coordinatorOnly ? 'coordinator-cleanup-only' : 'active-serving', persistenceAttached: !coordinatorOnly });
         await db.collection('cluster_router').createIndex({ updatedAt: -1 }, { name: 'cluster_router_updated_desc' });
         await db.collection('processed_messages').createIndex({ ts: 1 });
         await db.collection('processed_messages').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'processed_messages_expire_at_ttl' });
@@ -2452,6 +2600,14 @@ function restoreSignalSessionBuffer(value, depth = 0, seen = new WeakSet()) {
             if (output) return output;
         } catch (error) {}
     }
+    const directKeys = Object.keys(value).filter(key => /^\d+$/.test(key)).sort((a, b) => Number(a) - Number(b));
+    const extraKeys = Object.keys(value).filter(key => !/^\d+$/.test(key));
+    if (directKeys.length && directKeys.every((key, index) => key === String(index)) && directKeys.every(key => Number.isInteger(Number(value[key])) && Number(value[key]) >= 0 && Number(value[key]) <= 255) && extraKeys.every(key => ['length', 'position', 'byteLength', 'byteOffset', 'type', 'sub_type', 'subType', '_bsontype'].includes(key))) {
+        const bytes = Buffer.from(directKeys.map(key => Number(value[key])));
+        const declaredLength = Number(value.position ?? value.byteLength ?? value.length);
+        const restored = Number.isInteger(declaredLength) && declaredLength > 0 && declaredLength < bytes.length ? bytes.subarray(0, declaredLength) : bytes;
+        if (restored.length) return Buffer.from(restored);
+    }
     const fixed = fixBuffers(value);
     if (Buffer.isBuffer(fixed)) return fixed.length ? Buffer.from(fixed) : null;
     if (fixed instanceof Uint8Array) return fixed.byteLength ? Buffer.from(fixed) : null;
@@ -2469,7 +2625,8 @@ function restoreSignalSessionBuffer(value, depth = 0, seen = new WeakSet()) {
 }
 
 async function assertSessionRuntimeOwnership(sessionId, options = {}) {
-    if (TFBOT_CLUSTER_COORDINATOR_ONLY || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping))) throw new Error('tfbot_worker_not_active');
+    const allowWorkerDrain = options?.allowWorkerDrain === true && workerDrainingSessionIds.has(sessionId);
+    if (TFBOT_CLUSTER_COORDINATOR_ONLY || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping) && !allowWorkerDrain)) throw new Error('tfbot_worker_not_active');
     if (sessionFenceClosureInFlight.has(sessionId)) throw new Error('session_runtime_lock_fenced');
     const allowAccountBootstrap = options?.allowAccountBootstrap === true;
     const skipLiveAccountIdentityCheck = options?.skipLiveAccountIdentityCheck === true;
@@ -2494,7 +2651,7 @@ async function assertSessionRuntimeOwnership(sessionId, options = {}) {
         const liveLid = getAuthenticatedLid(activeForOwnership.sock.user, activeForOwnership.authState?.creds);
         const credentialsRegistered = activeForOwnership?.authState?.creds?.registered === true;
         if (credentialsRegistered && (livePhone || liveLid) && !sessionHasAccountRuntimeLocks(sessionId, [livePhone, liveLid])) {
-            const repaired = await ensureAccountRuntimeLockForIdentity(sessionId, activeForOwnership.sock.user, activeForOwnership.authState?.creds);
+            const repaired = await ensureAccountRuntimeLockForIdentity(sessionId, activeForOwnership.sock.user, activeForOwnership.authState?.creds, { allowWorkerDrain });
             if (!repaired?.acquired || !sessionHasAccountRuntimeLocks(sessionId, [livePhone, liveLid])) throw new Error('account_runtime_lock_missing_or_incomplete');
             console.warn('[account-lock-auto-repaired-before-session-operation]', { sessionId, phoneIdentityKnown: !!livePhone, lidIdentityKnown: !!liveLid, lockCount: (sessionAccountRuntimeLockEntries.get(sessionId) || []).length });
         }
@@ -2512,19 +2669,20 @@ async function assertSessionRuntimeOwnership(sessionId, options = {}) {
     return true;
 }
 
-async function ensureAccountRuntimeLockForIdentity(sessionId, user = null, creds = null) {
-    await assertSessionRuntimeOwnership(sessionId, { allowAccountBootstrap: true });
+async function ensureAccountRuntimeLockForIdentity(sessionId, user = null, creds = null, options = {}) {
+    const ownershipOptions = { allowAccountBootstrap: true, allowWorkerDrain: options?.allowWorkerDrain === true };
+    await assertSessionRuntimeOwnership(sessionId, ownershipOptions);
     const phone = getAuthenticatedPhoneNumber(user, creds);
     const lid = getAuthenticatedLid(user, creds);
     if (!phone && !lid) return { acquired: true, bootstrap: true, identityKnown: false };
     if (sessionHasAccountRuntimeLocks(sessionId, [phone, lid])) {
-        await assertSessionRuntimeOwnership(sessionId, { skipLiveAccountIdentityCheck: true });
+        await assertSessionRuntimeOwnership(sessionId, { skipLiveAccountIdentityCheck: true, allowWorkerDrain: options?.allowWorkerDrain === true });
         return { acquired: true, alreadyHeld: true, identityKnown: true };
     }
     const pending = accountRuntimeLockAcquisitionPromises.get(sessionId);
     if (pending) {
         await pending;
-        return ensureAccountRuntimeLockForIdentity(sessionId, user, creds);
+        return ensureAccountRuntimeLockForIdentity(sessionId, user, creds, options);
     }
     const acquisition = (async () => {
         const identity = phone || lid;
@@ -2543,7 +2701,7 @@ async function ensureAccountRuntimeLockForIdentity(sessionId, user = null, creds
             });
             throw new Error('account_runtime_lock_conflict_during_auth_bootstrap');
         }
-        await assertSessionRuntimeOwnership(sessionId, { skipLiveAccountIdentityCheck: true });
+        await assertSessionRuntimeOwnership(sessionId, { skipLiveAccountIdentityCheck: true, allowWorkerDrain: options?.allowWorkerDrain === true });
         console.info('[auth-bootstrap-account-lock-ready]', {
             sessionId,
             phoneIdentityKnown: !!phone,
@@ -2562,6 +2720,10 @@ async function ensureAccountRuntimeLockForIdentity(sessionId, user = null, creds
 
 async function closeSessionSocketWithoutAuthFlush(sessionId, reason, options = {}) {
     if (!sessionId || sessionFenceClosureInFlight.has(sessionId)) return false;
+    if (workerDrainingSessionIds.has(sessionId)) {
+        console.info('[session-socket-close-owned-by-worker-drain]', { sessionId, reason: String(reason || 'worker_handoff') });
+        return false;
+    }
     sessionFenceClosureInFlight.add(sessionId);
     const active = activeSessions.get(sessionId) || null;
     const oldSocket = active?.sock || null;
@@ -2661,7 +2823,7 @@ async function acquireSessionRuntimeLock(sessionId) {
         let heartbeatRunning = false;
         let timer;
         timer = setInterval(async () => {
-            if (heartbeatRunning || serverShuttingDown) return;
+            if (heartbeatRunning || serverShuttingDown || tfbotWorkerStopping || workerDrainingSessionIds.has(sessionId)) return;
             heartbeatRunning = true;
             try {
                 const nextLease = new Date(Date.now() + SESSION_RUNTIME_LOCK_LEASE_MS);
@@ -2903,7 +3065,7 @@ async function acquireAccountRuntimeLock(sessionId, identityValue, identityAlias
     let heartbeatRunning = false;
     const heartbeatEntries = acquiredEntries.map(entry => ({ key: entry.key, token: entry.token }));
     const timer = setInterval(async () => {
-        if (heartbeatRunning || serverShuttingDown || sessionFenceClosureInFlight.has(sessionId)) return;
+        if (heartbeatRunning || serverShuttingDown || tfbotWorkerStopping || workerDrainingSessionIds.has(sessionId) || sessionFenceClosureInFlight.has(sessionId)) return;
         heartbeatRunning = true;
         try {
             const nextLease = new Date(Date.now() + SESSION_RUNTIME_LOCK_LEASE_MS);
@@ -2986,16 +3148,25 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
     const setAuthSocket = socket => { authSocket = socket || null; };
     const queueAuthWrite = operation => {
         const previous = authWriteQueues.get(sessionId) || Promise.resolve();
+        authWriteActivityAt.set(sessionId, Date.now());
         const run = previous.catch(() => {}).then(async () => {
-            await assertSessionRuntimeOwnership(sessionId, { allowAccountBootstrap: true });
+            const allowWorkerDrain = workerDrainingSessionIds.has(sessionId);
+            await assertSessionRuntimeOwnership(sessionId, { allowAccountBootstrap: true, allowWorkerDrain });
             const liveSocket = authSocket || activeSessions.get(sessionId)?.sock || null;
-            await ensureAccountRuntimeLockForIdentity(sessionId, liveSocket?.user || null, creds);
+            await ensureAccountRuntimeLockForIdentity(sessionId, liveSocket?.user || null, creds, { allowWorkerDrain });
             const phone = getAuthenticatedPhoneNumber(liveSocket?.user || null, creds);
             const lid = getAuthenticatedLid(liveSocket?.user || null, creds);
-            await assertSessionRuntimeOwnership(sessionId, { allowAccountBootstrap: !phone && !lid, skipLiveAccountIdentityCheck: true });
+            await assertSessionRuntimeOwnership(sessionId, { allowAccountBootstrap: !phone && !lid, skipLiveAccountIdentityCheck: true, allowWorkerDrain });
             return operation();
         });
         authWriteQueues.set(sessionId, run);
+        run.then(() => {
+            authWriteActivityAt.set(sessionId, Date.now());
+            authWriteFailures.delete(sessionId);
+        }, error => {
+            authWriteActivityAt.set(sessionId, Date.now());
+            authWriteFailures.set(sessionId, { at: Date.now(), message: String(error?.message || error).slice(0, 240) });
+        });
         return run;
     };
     const flushAuthWrites = () => flushAuthWritesForSession(sessionId);
@@ -3474,10 +3645,7 @@ async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, se
         console.info('[del3-message-skipped-stale]', { sessionId, group: chat, messageId, format, ageSeconds });
         return false;
     }
-    if (typeof canBotModerateGroupFn !== 'function' || !(await canBotModerateGroupFn(chat))) {
-        console.warn('[del3-message-delete-skipped]', { sessionId, group: chat, messageId, format, reason: 'bot_not_group_admin_or_group_metadata_unavailable' });
-        return false;
-    }
+    console.info('[del3-live-delete-validation]', { sessionId, group: chat, messageId, format, action: 'attempt_delete_and_use_whatsapp_server_ack_as_authority' });
     const account = getAuthenticatedPhoneNumber(sock?.user, activeSessions.get(sessionId)?.authState?.creds) || getAuthenticatedLid(sock?.user, activeSessions.get(sessionId)?.authState?.creds) || sessionId;
     const dedupId = `del3:${shortLogHash(account)}:${chat}:${messageId}`;
     if (del3DeleteDedupCache.has(dedupId)) return false;
@@ -3509,7 +3677,19 @@ async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, se
     }
 }
 
-process.on('unhandledRejection', (error) => { console.error('[unhandledRejection]', error?.message || error); });
+process.on('unhandledRejection', (error) => {
+    const message = String(error?.message || error || '');
+    const expectedClosedSocket = /^(?:Connection Closed|1006)$|WebSocket is not open|socket.*closed/i.test(message);
+    if (expectedClosedSocket && (tfbotWorkerStopping || serverShuttingDown || workerDrainingSessionIds.size > 0 || Date.now() < workerDrainExpectedClosedUntil)) {
+        console.warn('[baileys-closed-socket-rejection-during-handoff]', { error: message.slice(0, 120), workerStopping: tfbotWorkerStopping, drainingSessionCount: workerDrainingSessionIds.size, action: 'expected_transport_close_while_worker_handoff' });
+        return;
+    }
+    if (expectedClosedSocket) {
+        console.warn('[baileys-closed-socket-rejection]', { error: message.slice(0, 120), action: 'socket_closed_without_process_crash' });
+        return;
+    }
+    console.error('[unhandledRejection]', error?.message || error);
+});
 process.on('uncaughtException', (error) => {
     const exceptionText = String(error?.message || error?.stack || error || 'unknown');
     if (/Failed to decrypt message with any known session|Bad MAC/i.test(exceptionText)) {
@@ -3764,8 +3944,8 @@ function renewTfbotWorkerLease() {
     tfbotWorkerLeaseUntil = Date.now() + TFBOT_CLUSTER_LEASE_MS;
     tfbotWorkerLeaseTimer = setTimeout(() => {
         tfbotWorkerLeaseTimer = null;
-        if (tfbotWorkerSelectedHost === TFBOT_CLUSTER_INSTANCE_HOST && tfbotWorkerLeaseUntil <= Date.now()) {
-            void deactivateTfbotWorker('coordinator_lease_expired').catch(error => console.error('[tfbot-worker-lease-expiry-failed]', { host: TFBOT_CLUSTER_INSTANCE_HOST, error: error?.message || String(error) }));
+        if (tfbotWorkerSelectedHost === TFBOT_CLUSTER_INSTANCE_HOST && tfbotWorkerLeaseUntil <= Date.now() && tfbotWorkerActive && !tfbotWorkerStopping) {
+            console.warn('[tfbot-worker-coordinator-lease-expired-serving-preserved]', { host: TFBOT_CLUSTER_INSTANCE_HOST, leaseMs: TFBOT_CLUSTER_LEASE_MS, action: 'keep_current_worker_active_until_explicit_deselection' });
         }
     }, TFBOT_CLUSTER_LEASE_MS + 1000);
     if (typeof tfbotWorkerLeaseTimer.unref === 'function') tfbotWorkerLeaseTimer.unref();
@@ -3871,7 +4051,7 @@ async function probeTfbotServingDomain(domain) {
 async function sendTfbotWorkerControl(domain, selection) {
     if (!TFBOT_CLUSTER_TOKEN || !domain?.host || !domain?.url) return null;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TFBOT_ROUTER_COORDINATOR_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), Math.max(15000, TFBOT_ROUTER_COORDINATOR_TIMEOUT_MS));
     try {
         const response = await fetch(`${domain.url}${TFBOT_WORKER_CONTROL_PATH}`, {
             method: 'GET',
@@ -3926,96 +4106,133 @@ async function refreshTfbotActiveDomain(force = false) {
     tfbotCoordinatorSelectionPromise = (async () => {
         let selectionPhase = 'initialize';
         try {
-        const checked = [];
-        const previousHost = normalizeTfbotHost(tfbotCoordinatorSelectionCache?.host || '');
-        const previousIndex = TFBOT_ROUTER_SERVING_DOMAINS.findIndex(item => item.host === previousHost);
-        let selectedItem = null;
-        for (const domain of TFBOT_ROUTER_SERVING_DOMAINS) {
-            selectionPhase = `probe-priority-domain:${domain.host}`;
-            const domainProbeResult = await probeTfbotServingDomain(domain);
-            checked.push({ domain, health: domainProbeResult });
-            if (domainProbeResult?.ok) {
-                selectedItem = { domain, health: domainProbeResult };
-                break;
-            }
-        }
-        if (!selectedItem) {
-            const primaryDomain = TFBOT_ROUTER_SERVING_DOMAINS[0];
-            const primaryProbe = checked.find(item => item.domain.host === primaryDomain.host)?.health || null;
-            selectedItem = {
-                domain: primaryDomain,
-                health: primaryProbe?.ok ? primaryProbe : {
-                    ok: true,
-                    host: primaryDomain.host,
-                    url: primaryDomain.url,
-                    workerActive: false,
-                    workerState: 'unconfirmed-last-resort',
-                    activeHost: '',
-                    generation: '',
-                    activeSessionCount: 0,
-                    checkedAt: new Date(),
-                    lastResort: true
+            const checked = [];
+            const previousSelection = tfbotCoordinatorSelectionCache || tfbotActiveDomainCache || null;
+            const previousHost = normalizeTfbotHost(previousSelection?.host || '');
+            const previousIndex = TFBOT_ROUTER_SERVING_DOMAINS.findIndex(item => item.host === previousHost);
+            let selectedItem = null;
+            if (previousIndex >= 0) {
+                const previousDomain = TFBOT_ROUTER_SERVING_DOMAINS[previousIndex];
+                selectionPhase = `probe-current-domain:${previousDomain.host}`;
+                const currentProbe = await probeTfbotServingDomain(previousDomain);
+                checked.push({ domain: previousDomain, health: currentProbe });
+                if (!currentProbe?.suspended) {
+                    const retainedHealth = currentProbe || {
+                        ok: true,
+                        host: previousDomain.host,
+                        url: previousDomain.url,
+                        workerActive: previousSelection?.workerActive === true,
+                        workerState: String(previousSelection?.workerState || 'unverified-keep-current'),
+                        activeHost: previousDomain.host,
+                        generation: String(previousSelection?.generation || ''),
+                        activeSessionCount: Number(previousSelection?.activeSessionCount || 0),
+                        checkedAt: new Date(),
+                        retainedWithoutSuspensionResponse: true
+                    };
+                    selectedItem = { domain: previousDomain, health: retainedHealth };
+                    if (!currentProbe) {
+                        console.warn('[tfbot-router-current-domain-no-response-retained]', {
+                            host: previousDomain.host,
+                            action: 'keep_current_domain_unless_render_returns_explicit_owner_suspension'
+                        });
+                    }
                 }
-            };
-            console.warn('[tfbot-router-returned-to-primary-last-resort]', { coordinator: TFBOT_COORDINATOR_HOST, checkedHosts: checked.map(item => item.domain.host), primaryHost: primaryDomain.host, reason: 'tfbot6_or_all_alternates_did_not_respond', action: 'select_primary_domain_as_last_resort' });
-        }
-        const checkedAt = new Date();
-        const selected = selectedItem.domain;
-        const sameSelection = previousHost === selected.host && !!tfbotCoordinatorSelectionCache?.generation;
-        const generation = sameSelection ? String(tfbotCoordinatorSelectionCache.generation) : crypto.randomUUID();
-        const selectedProbeResult = selectedItem.health;
-        const result = {
-            ...selected,
-            checkedAt,
-            generation,
-            healthy: true,
-            workerActive: selectedProbeResult.workerActive === true,
-            workerState: String(selectedProbeResult.workerState || 'starting'),
-            source: 'tfbot7-suspension-aware-priority-poll',
-            selectedBy: TFBOT_COORDINATOR_HOST,
-            healthyHosts: [selected.host],
-            probeResults: checked.map(item => ({ host: item.domain.host, ok: !!item.health?.ok, workerState: item.health?.workerState || 'unreachable', checkedAt }))
-        };
-        let previousControl = null;
-        if (previousIndex >= 0 && previousHost !== selected.host) {
-            const previousDomain = TFBOT_ROUTER_SERVING_DOMAINS[previousIndex];
-            tfbotCoordinatorSelectionCache = null;
-            tfbotActiveDomainCache = null;
-            tfbotCoordinatorSelectionAt = Date.now();
-            tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
-            await persistTfbotCoordinatorSelection(null, 'switching');
-            const stopped = await sendTfbotWorkerControl(previousDomain, { host: '', generation });
-            previousControl = { host: previousDomain.host, deactivated: !!stopped, state: stopped?.state || 'unconfirmed' };
-        }
-        tfbotCoordinatorSelectionCache = result;
-        tfbotActiveDomainCache = result;
-        tfbotCoordinatorSelectionAt = Date.now();
-        tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
-        tfbotCoordinatorActiveProbeAt = tfbotCoordinatorSelectionAt;
-        selectionPhase = 'persist-selected';
-        await persistTfbotCoordinatorSelection(result, 'selected');
-        const alreadyActive = sameSelection && selectedProbeResult.workerActive === true && selectedProbeResult.activeHost === selected.host && selectedProbeResult.generation === generation;
-        let control = { host: selected.host, unchanged: true, state: selectedProbeResult.workerState || 'unknown' };
-        if (!alreadyActive && selectedProbeResult.workerState !== 'starting') {
-            selectionPhase = `activate-worker:${selected.host}`;
-            const applied = await sendTfbotWorkerControl(selected, result);
-            control = { host: selected.host, applied: !!applied, state: applied?.state || 'unconfirmed' };
-            if (applied?.state) {
-                result.workerState = String(applied.state);
-                result.workerActive = applied.state === 'active';
             }
-        }
-        console.info('[tfbot-router-selection-updated]', {
-            activeHost: selected.host,
-            checkedHosts: checked.map(item => item.domain.host),
-            coordinator: TFBOT_COORDINATOR_HOST,
-            generation,
-            pollingIntervalMs: 77000,
-            selectionMode: 'primary-then-2-to-6-suspension-aware-then-primary-last-resort',
-            controls: [previousControl, control].filter(Boolean)
-        });
-        selectionPhase = 'complete';
-        return result;
+            if (!selectedItem) {
+                for (const domain of TFBOT_ROUTER_SERVING_DOMAINS) {
+                    if (domain.host === previousHost) continue;
+                    selectionPhase = `probe-failover-domain:${domain.host}`;
+                    const domainProbeResult = await probeTfbotServingDomain(domain);
+                    checked.push({ domain, health: domainProbeResult });
+                    if (domainProbeResult && !domainProbeResult.suspended) {
+                        selectedItem = { domain, health: domainProbeResult };
+                        break;
+                    }
+                }
+            }
+            if (!selectedItem) {
+                const primaryDomain = TFBOT_ROUTER_SERVING_DOMAINS[0];
+                const primaryProbe = checked.find(item => item.domain.host === primaryDomain.host)?.health || null;
+                selectedItem = {
+                    domain: primaryDomain,
+                    health: primaryProbe && !primaryProbe.suspended ? primaryProbe : {
+                        ok: true,
+                        host: primaryDomain.host,
+                        url: primaryDomain.url,
+                        workerActive: false,
+                        workerState: 'unconfirmed-last-resort',
+                        activeHost: '',
+                        generation: '',
+                        activeSessionCount: 0,
+                        checkedAt: new Date(),
+                        lastResort: true
+                    }
+                };
+                console.warn('[tfbot-router-returned-to-primary-last-resort]', {
+                    coordinator: TFBOT_COORDINATOR_HOST,
+                    checkedHosts: checked.map(item => item.domain.host),
+                    primaryHost: primaryDomain.host,
+                    reason: 'all_failover_domains_returned_suspension_or_no_response',
+                    action: 'select_primary_domain_as_last_resort'
+                });
+            }
+            const checkedAt = new Date();
+            const selected = selectedItem.domain;
+            const sameSelection = previousHost === selected.host && !!previousSelection?.generation;
+            const generation = sameSelection ? String(previousSelection.generation) : crypto.randomUUID();
+            const selectedProbeResult = selectedItem.health;
+            const result = {
+                ...selected,
+                checkedAt,
+                generation,
+                healthy: true,
+                workerActive: selectedProbeResult.workerActive === true,
+                workerState: String(selectedProbeResult.workerState || 'starting'),
+                source: sameSelection ? 'tfbot7-sticky-current-domain-unless-explicit-suspension' : 'tfbot7-explicit-suspension-failover',
+                selectedBy: TFBOT_COORDINATOR_HOST,
+                healthyHosts: [selected.host],
+                probeResults: checked.map(item => ({ host: item.domain.host, ok: !!item.health?.ok, suspended: item.health?.suspended === true, workerState: item.health?.workerState || (item.health?.suspended ? 'suspended' : 'no-response'), checkedAt }))
+            };
+            let previousControl = null;
+            if (previousIndex >= 0 && previousHost !== selected.host) {
+                const previousDomain = TFBOT_ROUTER_SERVING_DOMAINS[previousIndex];
+                tfbotCoordinatorSelectionCache = null;
+                tfbotActiveDomainCache = null;
+                tfbotCoordinatorSelectionAt = Date.now();
+                tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
+                await persistTfbotCoordinatorSelection(null, 'switching_after_explicit_suspension');
+                const stopped = await sendTfbotWorkerControl(previousDomain, { host: '', generation });
+                previousControl = { host: previousDomain.host, deactivated: !!stopped, state: stopped?.state || 'unavailable_after_suspension' };
+            }
+            tfbotCoordinatorSelectionCache = result;
+            tfbotActiveDomainCache = result;
+            tfbotCoordinatorSelectionAt = Date.now();
+            tfbotActiveDomainCacheAt = Date.now();
+            tfbotCoordinatorActiveProbeAt = tfbotCoordinatorSelectionAt;
+            selectionPhase = 'persist-selected';
+            await persistTfbotCoordinatorSelection(result, 'selected');
+            const alreadyActive = sameSelection && selectedProbeResult.workerActive === true && selectedProbeResult.activeHost === selected.host && selectedProbeResult.generation === generation;
+            let control = { host: selected.host, unchanged: true, state: selectedProbeResult.workerState || 'unknown' };
+            if (!alreadyActive && selectedProbeResult.workerState !== 'starting') {
+                selectionPhase = `activate-worker:${selected.host}`;
+                const applied = await sendTfbotWorkerControl(selected, result);
+                control = { host: selected.host, applied: !!applied, state: applied?.state || 'unconfirmed' };
+                if (applied?.state) {
+                    result.workerState = String(applied.state);
+                    result.workerActive = applied.state === 'active';
+                }
+            }
+            console.info('[tfbot-router-selection-updated]', {
+                activeHost: selected.host,
+                checkedHosts: checked.map(item => item.domain.host),
+                coordinator: TFBOT_COORDINATOR_HOST,
+                generation,
+                pollingIntervalMs: 77000,
+                selectionMode: 'sticky-current-url-unless-exact-render-owner-suspension',
+                controls: [previousControl, control].filter(Boolean)
+            });
+            selectionPhase = 'complete';
+            return result;
         } catch (error) {
             console.error('[tfbot-router-selection-failed]', {
                 phase: selectionPhase,
@@ -4417,7 +4634,7 @@ app.get(TFBOT_WORKER_POLL_PATH, async (req, res) => {
     }
 });
 
-app.get(TFBOT_WORKER_CONTROL_PATH, (req, res) => {
+app.get(TFBOT_WORKER_CONTROL_PATH, async (req, res) => {
     if (!TFBOT_CLUSTER_ENABLED || TFBOT_CLUSTER_COORDINATOR_ONLY || !isValidClusterToken(req)) return res.status(404).type('text/plain').send('Not found');
     const expectedHost = normalizeTfbotHost(req.get('X-TFBOT-Expected-Host') || '');
     const requestHost = normalizeTfbotHost(req.get('host') || req.hostname || '');
@@ -4447,11 +4664,14 @@ app.get(TFBOT_WORKER_CONTROL_PATH, (req, res) => {
     if (tfbotWorkerLeaseTimer) clearTimeout(tfbotWorkerLeaseTimer);
     tfbotWorkerLeaseTimer = null;
     tfbotWorkerLeaseUntil = 0;
-    if (tfbotWorkerActive || db || mongoClient || tfbotWorkerActivationPromise) {
-        if (!tfbotWorkerDeactivationPromise) {
-            void deactivateTfbotWorker('not_selected').catch(error => console.error('[tfbot-worker-deactivation-failed]', { host: TFBOT_CLUSTER_INSTANCE_HOST, error: error?.message || String(error) }));
+    if (tfbotWorkerActive || db || mongoClient || tfbotWorkerActivationPromise || tfbotWorkerDeactivationPromise) {
+        try {
+            await deactivateTfbotWorker('not_selected');
+        } catch (error) {
+            console.error('[tfbot-worker-deactivation-failed]', { host: TFBOT_CLUSTER_INSTANCE_HOST, error: error?.message || String(error) });
+            return res.status(503).json({ ok: false, host: TFBOT_CLUSTER_INSTANCE_HOST, state: 'drain_failed', generation });
         }
-        return res.status(202).json({ ok: true, host: TFBOT_CLUSTER_INSTANCE_HOST, state: 'stopping', generation });
+        return res.status(200).json({ ok: true, host: TFBOT_CLUSTER_INSTANCE_HOST, state: 'standby', generation, drained: true });
     }
     tfbotWorkerState = 'standby';
     tfbotWorkerStarting = false;
@@ -4546,6 +4766,9 @@ async function deactivateTfbotWorker(reason = 'not_selected') {
         return true;
     }
     tfbotWorkerDeactivationPromise = (async () => {
+        const sessionsToDrain = [...activeSessions.entries()];
+        for (const [sessionId] of sessionsToDrain) workerDrainingSessionIds.add(sessionId);
+        workerDrainExpectedClosedUntil = Date.now() + 180000;
         tfbotWorkerStopping = true;
         tfbotWorkerActive = false;
         if (tfbotWorkerActivationPromise) await tfbotWorkerActivationPromise.catch(() => {});
@@ -4557,24 +4780,64 @@ async function deactivateTfbotWorker(reason = 'not_selected') {
         reconnectTimers.clear();
         for (const timer of sessionLockRetryTimers.values()) clearTimeout(timer);
         sessionLockRetryTimers.clear();
-        for (const [sessionId, session] of [...activeSessions.entries()]) {
-            try { await cleanupSocket(sessionId); }
-            catch (error) { console.warn('[tfbot-worker-socket-close-failed]', { sessionId, error: error?.message || String(error) }); }
-            if (session) {
-                session.status = 'deconnecte';
-                session.disconnectTime = Date.now();
-                session.sock = null;
+        const drainFailures = [];
+        for (const [sessionId, session] of sessionsToDrain) {
+            try {
+                await cleanupSocket(sessionId);
+                if (session) {
+                    session.status = 'deconnecte';
+                    session.disconnectTime = Date.now();
+                    session.sock = null;
+                }
+            } catch (error) {
+                drainFailures.push({ sessionId, error });
+                console.error('[tfbot-worker-auth-drain-incomplete]', { sessionId, error: error?.message || String(error), action: 'keep_mongodb_open_and_retry_session_restore' });
             }
-            await flushAuthWritesForSession(sessionId).catch(error => console.warn('[tfbot-worker-auth-flush-failed]', { sessionId, error: error?.message || String(error) }));
+        }
+        const settled = await Promise.all(sessionsToDrain.map(async ([sessionId]) => {
+            try {
+                await waitForAuthStoreQuiescence(sessionId, 45000, 4500);
+                console.info('[signal-auth-store-drain-completed]', { sessionId, quietWindowMs: 4500, action: 'safe_to_release_session_runtime_lock' });
+                return { sessionId, ok: true };
+            } catch (error) {
+                return { sessionId, ok: false, error };
+            }
+        }));
+        for (const result of settled) {
+            if (!result.ok && !drainFailures.some(item => item.sessionId === result.sessionId)) drainFailures.push({ sessionId: result.sessionId, error: result.error });
+        }
+        if (drainFailures.length) {
+            tfbotWorkerStopping = false;
+            tfbotWorkerActive = true;
+            tfbotWorkerStarting = true;
+            tfbotWorkerState = 'starting';
+            tfbotWorkerSelectedHost = TFBOT_CLUSTER_INSTANCE_HOST;
+            for (const [sessionId] of sessionsToDrain) workerDrainingSessionIds.delete(sessionId);
+            renewTfbotWorkerLease();
+            try {
+                await loadExistingSessions();
+                await startClusterHeartbeat();
+                tfbotWorkerState = 'active';
+                tfbotWorkerStarting = false;
+            } catch (restoreError) {
+                tfbotWorkerState = 'error';
+                tfbotWorkerStarting = false;
+                console.error('[tfbot-worker-drain-rollback-restore-failed]', { host: TFBOT_CLUSTER_INSTANCE_HOST, error: restoreError?.message || String(restoreError), action: 'keep_mongodb_connected_and_preserve_all_auth_documents' });
+            }
+            const firstFailure = drainFailures[0];
+            throw new Error(`worker_auth_store_drain_incomplete:${firstFailure.sessionId}:${firstFailure.error?.message || 'unknown'}`);
+        }
+        for (const [sessionId] of sessionsToDrain) {
             await releaseSessionRuntimeLock(sessionId);
             cleanupSessionVolatileCaches(sessionId);
             activeSessions.delete(sessionId);
         }
         if (db) {
             const expiredAt = new Date(Date.now() - 1000);
+            const handoffAt = new Date();
             await db.collection('session_owners').updateMany(
                 { ownerInstanceId: TFBOT_CLUSTER_INSTANCE_ID },
-                { $set: { connectionStatus: 'deconnecte', ownerLeaseUntil: expiredAt, ownerUpdatedAt: new Date() } }
+                { $set: { connectionStatus: 'deconnecte', disconnectTime: handoffAt, ownerLeaseUntil: expiredAt, ownerUpdatedAt: handoffAt, workerHandoffAt: handoffAt } }
             ).catch(error => console.warn('[tfbot-worker-owner-release-failed]', { error: error?.message || String(error) }));
             await db.collection('cluster_instances').updateOne(
                 { _id: TFBOT_CLUSTER_INSTANCE_ID },
@@ -4594,10 +4857,11 @@ async function deactivateTfbotWorker(reason = 'not_selected') {
             try { await client.close(); }
             catch (error) { console.warn('[tfbot-worker-mongo-close-failed]', error?.message || String(error)); }
         }
+        for (const [sessionId] of sessionsToDrain) workerDrainingSessionIds.delete(sessionId);
         tfbotWorkerState = 'standby';
         tfbotWorkerStopping = false;
         tfbotWorkerLeaseUntil = 0;
-        console.info('[tfbot-worker-deactivated]', { host: TFBOT_CLUSTER_INSTANCE_HOST, reason, mongoDisconnected: true, activeSessionCount: activeSessions.size });
+        console.info('[tfbot-worker-deactivated]', { host: TFBOT_CLUSTER_INSTANCE_HOST, reason, mongoDisconnected: true, activeSessionCount: activeSessions.size, drainedSessionCount: sessionsToDrain.length });
         return true;
     })();
     try {
@@ -4622,11 +4886,11 @@ async function pollTfbotCoordinatorSelection() {
                 signal: controller.signal
             });
             const payload = await response.json().catch(() => null);
-            if (payload?.releaseId && String(payload.releaseId) !== TFBOT_CODE_RELEASE_ID) {
-                if (tfbotWorkerActive || db || mongoClient || tfbotWorkerActivationPromise) await deactivateTfbotWorker('coordinator_release_mismatch');
-                return false;
+            if (!response.ok || !payload || payload.ok !== true) return false;
+            const coordinatorReleaseId = String(payload.releaseId || '');
+            if (coordinatorReleaseId && coordinatorReleaseId !== TFBOT_CODE_RELEASE_ID) {
+                console.warn('[tfbot-worker-coordinator-release-mismatch]', { host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorReleaseId, workerReleaseId: TFBOT_CODE_RELEASE_ID, action: 'honor_explicit_active_host_and_generation_without_forcing_shutdown' });
             }
-            if (!response.ok || !payload || payload.ok !== true || String(payload.releaseId || '') !== TFBOT_CODE_RELEASE_ID) return false;
             const selectedHost = normalizeTfbotHost(payload.activeHost || payload.host || '');
             const selectedDomain = TFBOT_ROUTER_DOMAIN_BY_HOST.get(selectedHost);
             const generation = String(payload.generation || '').slice(0, 180);
@@ -6894,11 +7158,18 @@ async function cleanupSocket(sessionId) {
         try {
             await promiseWithTimeout(flush(), 20000, 'Flush Signal keys before socket replacement');
             console.info('[signal-auth-store-flushed-before-reconnect]', { sessionId });
+            return true;
         } catch (error) {
-            console.error('[signal-auth-store-flush-before-reconnect-failed]', { sessionId, error: error?.message || String(error), action: 'continue_reconnect_but_preserve_shared_write_queue' });
+            console.error('[signal-auth-store-flush-before-reconnect-failed]', { sessionId, error: error?.message || String(error), action: 'preserve_runtime_lock_until_auth_flush_can_be_verified' });
+            return false;
         }
-    } else {
-        await flushAuthWritesForSession(sessionId).catch(error => console.warn('[signal-auth-store-flush-failed]', { sessionId, error: error?.message || String(error) }));
+    }
+    try {
+        await flushAuthWritesForSession(sessionId);
+        return true;
+    } catch (error) {
+        console.warn('[signal-auth-store-flush-failed]', { sessionId, error: error?.message || String(error) });
+        return false;
     }
 }
 
@@ -7993,6 +8264,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         });
 
         sock.ev.on('messages.upsert', async (up) => {
+            if (workerDrainingSessionIds.has(sessionId) || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping))) {
+                console.info('[message-upsert-ignored-during-worker-handoff]', { sessionId, upsertType: String(up?.type || ''), messageCount: Array.isArray(up?.messages) ? up.messages.length : 0, action: 'leave_whatsapp_offline_sync_for_selected_worker' });
+                return;
+            }
             let liveAccountPhone = '';
             let liveAccountLid = '';
             try {
@@ -8013,6 +8288,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             }
             const upsertType = String(up?.type || '');
             const rawBatch = Array.isArray(up?.messages) ? up.messages : [];
+            if (workerDrainingSessionIds.has(sessionId) || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping))) {
+                console.info('[message-upsert-ignored-during-worker-handoff]', { sessionId, upsertType, messageCount: rawBatch.length, action: 'leave_whatsapp_offline_sync_for_selected_worker' });
+                return;
+            }
             console.info('[messages-upsert-batch]', {
                 sessionId,
                 connectedAccountJid: sock.user?.id || null,
@@ -9511,10 +9790,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             if (quoted.participantAlt) quotedDel3Key.participantAlt = quoted.participantAlt;
                                             if (quoted.participantPn) quotedDel3Key.participantPn = quoted.participantPn;
                                             if (quoted.senderPn) quotedDel3Key.senderPn = quoted.senderPn;
-                                            if (!(await canBotModerateGroup(from, true))) {
-                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_bot_admin_required, pushName, true, activeHostName);
-                                                break;
-                                            }
                                             const quotedDel3Protected = quotedDel3FromMe || !sOwnerTop || isProtectedWhatsAppTarget(quotedDel3Participant, sOwnerTop, sock.user?.id || '', [quotedDel3Key.remoteJid, quotedDel3Key.remoteJidAlt, quotedDel3Key.participant, quotedDel3Key.participantAlt, quotedDel3Key.participantPn].filter(Boolean).join(' '));
                                             if (!quotedDel3Protected) {
                                                 try {
@@ -10134,10 +10409,14 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
             } else if (liveSessionLock?.owner === processInstanceId || liveAccountLock?.owner === processInstanceId) {
                 await releaseSessionRuntimeLock(staleSessionId);
             }
-            const credsDoc = await collection.findOne({ _id: `auth-${staleSessionId}-creds` }, { projection: { 'creds.registered': 1 } }).catch(() => null);
+            const credsDoc = await collection.findOne({ _id: `auth-${staleSessionId}-creds` }, { projection: { 'creds.registered': 1, 'creds.me.id': 1, 'creds.me.lid': 1 } }).catch(() => null);
             const credentialsRegistered = credsDoc?.creds?.registered === true;
+            const credentialsHaveIdentity = !!(credsDoc?.creds?.me?.id || credsDoc?.creds?.me?.lid);
+            const ownerHasAccountIdentity = !!(owner.Number || owner.AccountJid || owner.OwnerLid || owner.accountJid || owner.phoneNumber);
+            const hasRecoverableAccountCredentials = credentialsRegistered || credentialsHaveIdentity || ownerHasAccountIdentity;
             const isReauthExpired = status === 'reauth_required' || owner.reauthRequired === true;
-            const isPendingPairingExpired = ['pairing_expired', 'pairing_error', 'qr_disponible', 'synchronisation', 'initialisation', 'deconnecte', 'disconnected', 'pairing_starting', 'pairing'].includes(status);
+            const isPendingPairingExpired = ['pairing_expired', 'pairing_error', 'qr_disponible', 'synchronisation', 'initialisation', 'pairing_starting', 'pairing'].includes(status);
+            const isUnregisteredDisconnectedExpired = !credentialsRegistered && ['deconnecte', 'disconnected'].includes(status);
             const duplicateTarget = String(owner.duplicateAccountOf || owner.duplicateOfSessionId || owner.mergedIntoSessionId || '').trim();
             if (duplicateTarget && duplicateTarget !== staleSessionId) {
                 const targetExists = await db.collection('session_owners').findOne({ sessionId: duplicateTarget }, { projection: { sessionId: 1 } }).catch(() => null);
@@ -10147,7 +10426,11 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
                 }
                 await mergeSessionScopedData(staleSessionId, duplicateTarget);
             }
-            if (credentialsRegistered && !isReauthExpired && !duplicateTarget && !isPendingPairingExpired) continue;
+            if (hasRecoverableAccountCredentials && !isReauthExpired && !duplicateTarget) {
+                console.info('[session-expiry-preserved-account-credentials]', { sessionId: staleSessionId, status, ageMs: cleanupNow - sessionTimestamp, credentialsRegistered, credentialsHaveIdentity, ownerHasAccountIdentity, action: 'keep_auth_and_all_linked_session_data_for_reconnect' });
+                continue;
+            }
+            if (!isReauthExpired && !duplicateTarget && !isPendingPairingExpired && !isUnregisteredDisconnectedExpired) continue;
             const pendingReconnect = reconnectTimers.get(staleSessionId);
             if (pendingReconnect) {
                 clearTimeout(pendingReconnect);
@@ -10155,7 +10438,7 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
             }
             await deleteMongoSession(staleSessionId);
             staleRemoved++;
-            console.info('[session-expired-unconnected-removed]', { sessionId: staleSessionId, status, ageMs: cleanupNow - sessionTimestamp, credentialsRegistered, associatedDataRemoved: true, mergedIntoSession: duplicateTarget || null });
+            console.info('[session-expired-unconnected-removed]', { sessionId: staleSessionId, status, ageMs: cleanupNow - sessionTimestamp, credentialsRegistered, credentialsHaveIdentity, ownerHasAccountIdentity, associatedDataRemoved: true, mergedIntoSession: duplicateTarget || null });
         } catch (error) {
             console.warn('[session-expired-unconnected-removal-failed]', { sessionId: staleSessionId, status, error: error?.message || String(error) });
         }
@@ -10526,12 +10809,28 @@ async function main() {
             await connectMongo({ coordinatorOnly: true });
             const savedSelection = await db.collection('cluster_router').findOne({ _id: TFBOT_ROUTER_STATE_ID }).catch(() => null);
             const savedDomain = TFBOT_ROUTER_DOMAIN_BY_HOST.get(normalizeTfbotHost(savedSelection?.activeHost || ''));
-            if (savedDomain && String(savedSelection?.releaseId || '') === TFBOT_CODE_RELEASE_ID && savedSelection?.generation) {
-                tfbotCoordinatorSelectionCache = { ...savedDomain, generation: String(savedSelection.generation), healthy: true, workerActive: false, workerState: 'starting', source: 'tfbot7-persisted-selection', selectedBy: TFBOT_COORDINATOR_HOST, healthyHosts: [savedDomain.host] };
+            if (savedDomain && savedSelection?.activeHost) {
+                const persistedGeneration = String(savedSelection.generation || crypto.randomUUID()).slice(0, 180);
+                tfbotCoordinatorSelectionCache = {
+                    ...savedDomain,
+                    generation: persistedGeneration,
+                    healthy: true,
+                    workerActive: false,
+                    workerState: 'persisted-selection-awaiting-live-probe',
+                    source: 'tfbot7-persisted-selection-across-deployments',
+                    selectedBy: TFBOT_COORDINATOR_HOST,
+                    healthyHosts: [savedDomain.host]
+                };
+                tfbotActiveDomainCache = tfbotCoordinatorSelectionCache;
                 tfbotCoordinatorSelectionAt = Date.now() - TFBOT_ROUTER_COORDINATOR_CACHE_MS;
-            } else if (savedDomain && savedSelection?.activeHost) {
-                await sendTfbotWorkerControl(savedDomain, { host: '', generation: crypto.randomUUID() });
-                console.warn('[tfbot-router-previous-release-stopped]', { host: savedDomain.host, previousReleaseId: String(savedSelection.releaseId || 'missing'), currentReleaseId: TFBOT_CODE_RELEASE_ID });
+                tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
+                console.info('[tfbot-router-persisted-host-retained-across-deploy]', {
+                    host: savedDomain.host,
+                    previousReleaseId: String(savedSelection.releaseId || 'missing'),
+                    currentReleaseId: TFBOT_CODE_RELEASE_ID,
+                    generation: persistedGeneration,
+                    action: 'keep_saved_host_and_sessions_unless_exact_render_owner_suspension_is_detected'
+                });
             }
             tfbotCoordinatorStorageReady = true;
             console.info('[tfbot-coordinator-mode]', { host: TFBOT_CLUSTER_INSTANCE_HOST, role: 'coordinator-only-storage-and-router', mongoConnected: !!db, whatsappRuntime: false, sessionRestore: false, pollingIntervalMs: 77000 });
