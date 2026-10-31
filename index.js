@@ -42,8 +42,8 @@ const runtimeLogServiceScope = [runtimeLogRenderExternalHost ? `host:${runtimeLo
 const runtimeLogServiceScopeHash = shortLogHash(runtimeLogServiceScope);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}:${shortLogHash(runtimeLogInstanceId)}`).slice(0, 240);
 let runtimeLogDeploymentGroupId = 'cluster-pending';
-const TFBOT_CLUSTER_CODE_REVISION = 'r60-explicit-ai-only-signal-cache-isolation-global-log-boundary-active-worker-only-probe';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
+const TFBOT_CLUSTER_CODE_REVISION = 'r61-compatible-global-log-boundary-targeted-group-signal-recovery';
+const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 runtimeLogDeploymentGroupId = `${TFBOT_CLUSTER_CODE_REVISION}:cluster-pending`;
 const runtimeLogClusterId = `${runtimeLogDeploymentId}:${shortLogHash(runtimeLogInstanceId)}`.slice(0, 240);
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
@@ -70,6 +70,13 @@ function areTfbotReleasesCompatible(first, second) {
     const firstKey = getTfbotReleaseCompatibilityKey(first);
     const secondKey = getTfbotReleaseCompatibilityKey(second);
     return !!firstKey && firstKey === secondKey;
+}
+
+function isRuntimeLogBoundaryCompatible(marker) {
+    if (!marker || marker.completed !== true || !marker.deploymentStartedAt) return false;
+    const recordedRevision = normalizeTfbotReleaseId(marker.codeRevision || marker.revision || '').toLowerCase();
+    if (recordedRevision) return recordedRevision === TFBOT_CLUSTER_CODE_REVISION.toLowerCase();
+    return areTfbotReleasesCompatible(marker.releaseId, TFBOT_CODE_RELEASE_ID);
 }
 
 function sanitizeRuntimeLogString(value) {
@@ -180,6 +187,7 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
     const markerCollection = db.collection('cluster_router');
     const markerId = 'runtime-logs-active-cluster-deployment';
     const isCoordinator = TFBOT_CLUSTER_COORDINATOR_ONLY || !TFBOT_CLUSTER_ENABLED;
+    const coordinatorInstanceId = String(runtimeLogRenderInstanceId || runtimeLogInstanceId);
     const adoptMarker = marker => {
         const startedAt = new Date(marker?.deploymentStartedAt || marker?.startedAt || marker?.completedAt || runtimeLogStartedAt);
         runtimeLogDeploymentStartedAt = Number.isFinite(startedAt.getTime()) ? startedAt : runtimeLogStartedAt;
@@ -197,9 +205,11 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
         }
     };
     if (!isCoordinator) {
+        let lastObservedMarker = null;
         for (let attempt = 0; attempt < 20; attempt++) {
             const marker = await markerCollection.findOne({ _id: markerId }).catch(() => null);
-            if (marker?.completed === true && String(marker.releaseId || '') === TFBOT_CODE_RELEASE_ID && marker?.deploymentStartedAt) {
+            if (marker) lastObservedMarker = marker;
+            if (isRuntimeLogBoundaryCompatible(marker)) {
                 adoptMarker(marker);
                 applyBoundaryToPendingLogs();
                 console.info('[runtime-log-deployment-boundary-loaded]', {
@@ -208,7 +218,8 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
                     deploymentGroupId: runtimeLogDeploymentGroupId,
                     coordinatorInstanceId: marker.coordinatorInstanceId || null,
                     releaseId: TFBOT_CODE_RELEASE_ID,
-                    action: 'adopt_only_the_current_release_global_deployment_timestamp_before_log_persistence'
+                    coordinatorCodeRevision: marker.codeRevision || getTfbotReleaseCompatibilityKey(marker.releaseId || ''),
+                    action: 'adopt_the_shared_coordinator_deployment_timestamp_for_the_matching_code_revision_before_log_persistence'
                 });
                 return 0;
             }
@@ -217,16 +228,22 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
         console.warn('[runtime-log-deployment-boundary-unavailable]', {
             host: TFBOT_CLUSTER_INSTANCE_HOST,
             expectedReleaseId: TFBOT_CODE_RELEASE_ID,
+            expectedCodeRevision: TFBOT_CLUSTER_CODE_REVISION,
+            markerFound: !!lastObservedMarker,
+            markerCompleted: lastObservedMarker?.completed === true,
+            markerCodeRevision: String(lastObservedMarker?.codeRevision || lastObservedMarker?.revision || ''),
+            markerReleaseCompatibilityKey: getTfbotReleaseCompatibilityKey(lastObservedMarker?.releaseId || ''),
+            markerDeploymentStartedAt: lastObservedMarker?.deploymentStartedAt || null,
+            markerCoordinatorInstanceKnown: !!lastObservedMarker?.coordinatorInstanceId,
             action: 'do_not_attach_persistence_or_relabel_buffer_until_matching_coordinator_boundary_is_available'
         });
         return null;
     }
     const claimOwner = processInstanceId;
-    const coordinatorInstanceId = String(runtimeLogRenderInstanceId || runtimeLogInstanceId);
     for (let attempt = 0; attempt < 140; attempt++) {
         const now = new Date();
         const existing = await markerCollection.findOne({ _id: markerId }).catch(() => null);
-        if (existing?.completed === true && String(existing.releaseId || '') === TFBOT_CODE_RELEASE_ID) {
+        if (isRuntimeLogBoundaryCompatible(existing) && String(existing.coordinatorInstanceId || '') === coordinatorInstanceId) {
             adoptMarker(existing);
             applyBoundaryToPendingLogs();
             return 0;
@@ -249,6 +266,7 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
                         coordinatorInstanceId,
                         deploymentId: runtimeLogDeploymentId,
                         releaseId: TFBOT_CODE_RELEASE_ID,
+                        codeRevision: TFBOT_CLUSTER_CODE_REVISION,
                         deploymentStartedAt: runtimeLogStartedAt,
                         startedAt: runtimeLogStartedAt,
                         updatedAt: now,
@@ -267,7 +285,7 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
             throw claimError;
         }
         const claim = await markerCollection.findOne({ _id: markerId }).catch(() => null);
-        if (claim?.completed === true && String(claim.releaseId || '') === TFBOT_CODE_RELEASE_ID) {
+        if (isRuntimeLogBoundaryCompatible(claim) && String(claim.coordinatorInstanceId || '') === coordinatorInstanceId) {
             adoptMarker(claim);
             applyBoundaryToPendingLogs();
             return 0;
@@ -329,6 +347,7 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
                     status: 'completed',
                     coordinatorInstanceId,
                     releaseId: TFBOT_CODE_RELEASE_ID,
+                    codeRevision: TFBOT_CLUSTER_CODE_REVISION,
                     deploymentGroupId: runtimeLogDeploymentGroupId,
                     deploymentStartedAt: cutoff,
                     removedCount: removed,
@@ -343,7 +362,7 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
         return removed;
     }
     const finalMarker = await markerCollection.findOne({ _id: markerId }).catch(() => null);
-    if (finalMarker?.completed === true && String(finalMarker.releaseId || '') === TFBOT_CODE_RELEASE_ID) {
+    if (isRuntimeLogBoundaryCompatible(finalMarker) && String(finalMarker.coordinatorInstanceId || '') === coordinatorInstanceId) {
         adoptMarker(finalMarker);
         applyBoundaryToPendingLogs();
         return 0;
@@ -512,6 +531,7 @@ const expectedSocketCloseLogTimes = new Map();
 const SIGNAL_RECOVERY_THRESHOLD = Math.max(3, Math.min(10, Number(process.env.SIGNAL_RECOVERY_THRESHOLD || 5)));
 const SIGNAL_RECOVERY_WINDOW_MS = Math.max(10000, Math.min(180000, Number(process.env.SIGNAL_RECOVERY_WINDOW_MS || 60000)));
 const SIGNAL_RECOVERY_COOLDOWN_MS = Math.max(60000, Math.min(3600000, Number(process.env.SIGNAL_RECOVERY_COOLDOWN_MS || 120000)));
+const SIGNAL_GROUP_SENDER_KEY_RECOVERY_COOLDOWN_MS = Math.max(30000, Math.min(1800000, Number(process.env.SIGNAL_GROUP_SENDER_KEY_RECOVERY_COOLDOWN_MS || 120000)));
 function isSignalDecryptionFailure(args) {
     return /Failed to decrypt message|failed to decrypt message|Session error:.*Bad MAC|Bad MAC|MessageCounterError|Key used already or never filled|SessionError:\s*No sessions|No session found to decrypt message|No sessions|Chain closed|Decrypted message with closed session|calculateMAC|Cannot read properties of null \(reading ['\"]constructor['\"]\)/i.test(getSignalLogText(args));
 }
@@ -772,6 +792,33 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
     while (signalRecoveryCounters.size > 2000) signalRecoveryCounters.delete(signalRecoveryCounters.keys().next().value);
     const selfPeer = !details.isGroup && areEquivalentWhatsAppChatJids(sessionId, details.peerJid, getAuthenticatedLid(activeSessions.get(sessionId)?.sock?.user || null, activeSessions.get(sessionId)?.authState?.creds || null))
         || !details.isGroup && areEquivalentWhatsAppChatJids(sessionId, details.peerJid, activeSessions.get(sessionId)?.sock?.user?.id || '');
+    if (details.isGroup && ['signal_session_missing', 'bad_mac', 'signal_decryption_error', 'message_counter_error'].includes(kind)) {
+        const groupRecoveryKey = `${sessionId}:${details.remoteJid}:sender-key-recovery`;
+        const recoveryUntil = Number(signalRecoveryCooldowns.get(groupRecoveryKey) || 0);
+        if (recoveryUntil <= now && !signalRecoveryTimers.has(groupRecoveryKey)) {
+            signalRecoveryCooldowns.set(groupRecoveryKey, now + SIGNAL_GROUP_SENDER_KEY_RECOVERY_COOLDOWN_MS);
+            const recoveryTimer = setTimeout(async () => {
+                signalRecoveryTimers.delete(groupRecoveryKey);
+                try {
+                    const resetCount = await resetSessionGroupSenderKeyMemory(sessionId, `signal_${kind}`, details.remoteJid);
+                    console.warn('[signal-group-sender-key-recovery]', {
+                        sessionId,
+                        groupJid: details.remoteJid,
+                        participant: details.peerJid,
+                        messageId: details.messageId || null,
+                        failureKind: kind,
+                        resetCount,
+                        action: 'redistribute_sender_key_to_current_group_devices_on_next_outgoing_group_message',
+                        signalSessionsDeleted: false
+                    });
+                } catch (error) {
+                    console.warn('[signal-group-sender-key-recovery-failed]', { sessionId, groupJid: details.remoteJid, failureKind: kind, error: error?.message || String(error) });
+                }
+            }, 250);
+            signalRecoveryTimers.set(groupRecoveryKey, recoveryTimer);
+            if (typeof recoveryTimer.unref === 'function') recoveryTimer.unref();
+        }
+    }
     console.warn(details.isGroup ? '[signal-group-session-preserved]' : selfPeer ? '[signal-private-self-chat-session-preserved]' : '[signal-peer-session-preserved]', {
         sessionId,
         peer: details.peerJid,
@@ -848,7 +895,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r60';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r61';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -2096,6 +2143,9 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             destinationType: destinationJid.endsWith('@g.us') ? 'group' : destinationJid.endsWith('@newsletter') ? 'channel' : destinationJid.endsWith('@s.whatsapp.net') ? 'private_pn' : destinationJid.endsWith('@lid') ? 'private_lid' : 'other'
         });
         const sendTo = async targetJid => {
+            if (sessionId && /@g\.us$/i.test(String(targetJid || ''))) {
+                await resetGroupSenderKeyMemoryBeforeSend(sessionId, String(targetJid));
+            }
             const echoToken = rememberOutgoingTextEcho(sessionId, targetJid, outgoingContent);
             try {
                 return await sock.sendMessage(targetJid, outgoingContent, options);
@@ -6162,8 +6212,12 @@ async function optimizeAdamLogoForBandwidth() {
         console.warn('[logo-image-source-unavailable]', { action: 'keep_image_send_disabled_without_text_fallback' });
         return false;
     }
-    logoOptimizationResult = 'original_image_bytes_preserved';
-    console.info('[logo-image-source-preserved]', { originalBytes: adamLogoBuffer.length, action: 'send_original_image_buffer_without_resize_reencode_or_text_fallback' });
+    const isPng = adamLogoBuffer.length >= 8 && adamLogoBuffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    const isJpeg = adamLogoBuffer.length >= 3 && adamLogoBuffer[0] === 255 && adamLogoBuffer[1] === 216 && adamLogoBuffer[2] === 255;
+    const detectedFormat = isPng ? 'png' : isJpeg ? 'jpeg' : 'unsupported';
+    logoOptimizationResult = detectedFormat === 'unsupported' ? 'original_image_bytes_preserved_format_unverified' : 'original_image_bytes_preserved';
+    console.info('[logo-image-source-preserved]', { originalBytes: adamLogoBuffer.length, detectedFormat, fileExtension: path.extname(logoPath).toLowerCase(), action: 'send_original_image_buffer_without_resize_reencode_or_text_fallback' });
+    if (detectedFormat === 'unsupported') console.warn('[logo-image-source-format-warning]', { originalBytes: adamLogoBuffer.length, action: 'do_not_claim_image_thumbnail_or_client_decryption_is_valid_without_a_supported_png_or_jpeg_signature' });
     return true;
 }
 
@@ -7888,7 +7942,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     if (now - lastLoggedAt < 30000) return;
                     retryMessageMissLogTimes.set(retryMissKey, now);
                     while (retryMessageMissLogTimes.size > 4000) retryMessageMissLogTimes.delete(retryMessageMissLogTimes.keys().next().value);
-                    console.info('[message-retry-cache-miss]', { sessionId, messageId: key?.id || null, requestedChatJid: requestedChatJid || null, databaseAvailable, repeatedRetryLogSuppressedForMs: 30000 });
+                    console.info('[message-retry-cache-miss]', { sessionId, messageId: key?.id || null, requestedChatJid: requestedChatJid || null, requestedFromMe: typeof key?.fromMe === 'boolean' ? key.fromMe : null, fromMeFieldMissing: key?.fromMe === undefined || key?.fromMe === null, databaseAvailable, repeatedRetryLogSuppressedForMs: 30000 });
                 };
                 let exactRecentMessage = null;
                 for (let i = recentMsgsCache.length - 1; i >= 0; i--) {
@@ -7919,7 +7973,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     const lookupScope = 'same_session';
                     const storedChatAliases = [...new Set([stored?.remoteJid, stored?.remoteJidAlt, ...(Array.isArray(stored?.remoteJidAliases) ? stored.remoteJidAliases : [])].map(value => String(value || '').trim()).filter(Boolean))];
                     const storedChatMatches = !requestedChatJid || storedChatAliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, requestedChatJid));
-                    if (stored?.message && stored.sessionId === sessionId && stored.fromMe === true && key?.fromMe === true) {
+                    const retryMayReferToOwnMessage = key?.fromMe === true || key?.fromMe === undefined || key?.fromMe === null;
+                    if (stored?.message && stored.sessionId === sessionId && stored.fromMe === true && retryMayReferToOwnMessage) {
                         const restoredMessage = fixBuffers(stored.message);
                         cacheRecentMessage(sessionId, { key: { id: key.id, remoteJid: stored.remoteJid || requestedChatJid || '', remoteJidAlt: stored.remoteJidAlt || '', fromMe: true }, message: restoredMessage, messageTimestamp: stored.messageTimestamp || Math.floor(Date.now() / 1000) });
                         if (storedChatMatches) {
@@ -8232,8 +8287,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             const changedJid = String(change?.jid || change?.id || change?.from || change?.participant || '').trim();
             const isSelfIdentity = change?.me === true;
             if (isSelfIdentity) {
-                console.info('[identity-change-group-sender-keys-preserved]', { sessionId, action: 'preserve_existing_group_sender_keys_until_baileys_refreshes_them' });
-                console.info('[whatsapp-identity-change]', { sessionId, participant: 'self', action: 'preserve_group_sender_key_memory' });
+                console.warn('[whatsapp-identity-change]', { sessionId, participant: 'self', action: 'reset_group_sender_key_memory_once_to_redistribute_after_own_identity_change' });
+                void resetSessionGroupSenderKeyMemory(sessionId, 'self_identity_change').catch(error => console.warn('[self-identity-group-sender-key-reset-failed]', { sessionId, error: error?.message || String(error) }));
                 return;
             }
             if (!changedJid) {
@@ -8248,7 +8303,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             const groupJid = String(update?.id || update?.jid || update?.groupJid || '').trim();
             if (!/@g\.us$/i.test(groupJid)) return;
             invalidateCachedGroupMetadata(sessionId, groupJid);
-            console.info('[group-participant-update-preserved-sender-key-memory]', { sessionId, groupJid, action: 'refresh_group_metadata_without_deleting_signal_sender_keys' });
+            const action = String(update?.action || '').trim().toLowerCase();
+            if (['add', 'remove', 'modify'].includes(action)) {
+                console.info('[group-participant-update-sender-key-refresh-scheduled]', { sessionId, groupJid, action, participantCount: Array.isArray(update?.participants) ? update.participants.length : 0 });
+                void resetSessionGroupSenderKeyMemory(sessionId, `group_participants_${action}`, groupJid).catch(error => console.warn('[group-participant-sender-key-reset-failed]', { sessionId, groupJid, action, error: error?.message || String(error) }));
+            } else {
+                console.info('[group-participant-update-metadata-refreshed]', { sessionId, groupJid, action: action || 'unknown', senderKeyMemoryPreserved: true });
+            }
         });
 
         sock.ev.on('connection.update', async (update) => {
