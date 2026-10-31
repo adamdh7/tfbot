@@ -7,478 +7,15 @@ const originalConsoleDebug = console.debug.bind(console);
 const originalConsoleTrace = console.trace.bind(console);
 const originalConsoleDir = console.dir.bind(console);
 const originalConsoleTable = console.table.bind(console);
-const LOG_DASHBOARD_PATH = (() => {
-    const configured = String(process.env.LOG_DASHBOARD_PATH || '/adamdh7=modpas/adamdh7').trim();
-    const normalized = (configured.startsWith('/') ? configured : `/${configured}`).replace(/\/+$/, '');
-    return /^\/[A-Za-z0-9_./=-]{12,180}$/.test(normalized) ? normalized : '/adamdh7=modpas/adamdh7';
-})();
-const LOG_DASHBOARD_MAX_ENTRIES = Math.max(1000, Math.min(10000, Number(process.env.LOG_DASHBOARD_MAX_ENTRIES || 5000)));
-const LOG_DASHBOARD_PAGE_LIMIT = Math.max(80, Math.min(250, Number(process.env.LOG_DASHBOARD_PAGE_LIMIT || 120)));
 const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(process.env.MESSAGE_QUEUE_TASK_TIMEOUT_MS || 45000)));
-const runtimeLogBuffer = [];
-const runtimeLogPendingWrites = [];
-let runtimeLogInitialCleanupCompleted = false;
-let runtimeLogPersistenceCollection = null;
-let pendingRuntimeLogPersistenceCollection = null;
-let runtimeLogBoundaryRetryTimer = null;
-let runtimeLogBoundaryRetryCollection = null;
-let runtimeLogPersistenceTimer = null;
-let runtimeLogPersistenceRunning = false;
-let runtimeLogPruneCounter = 0;
-let runtimeLogSequence = 0;
-const runtimeLogInstanceId = `${Date.now()}-${process.pid}`;
-const runtimeLogStartedAt = new Date();
-const runtimeLogPort = String(process.env.PORT || '7000').trim().slice(0, 20);
-let runtimeLogDeploymentStartedAt = runtimeLogStartedAt;
-let runtimeLogDeploymentReadyAt = null;
-const runtimeLogRenderServiceId = String(process.env.RENDER_SERVICE_ID || 'local').trim().slice(0, 120);
-const runtimeLogRenderServiceNameExplicit = String(process.env.RENDER_SERVICE_NAME || '').trim().slice(0, 120);
-const runtimeLogRenderServiceName = String(runtimeLogRenderServiceNameExplicit || process.env.RENDER_SERVICE_TYPE || 'local').trim().slice(0, 120);
-const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
-const runtimeLogRenderCommit = String(process.env.RENDER_GIT_COMMIT || '').trim().slice(0, 80);
-const runtimeLogRenderExternalHost = String(process.env.RENDER_EXTERNAL_HOSTNAME || (() => { try { return new URL(process.env.RENDER_EXTERNAL_URL || '').hostname; } catch (error) { return ''; } })()).trim().toLowerCase().slice(0, 180);
-const runtimeLogServiceScope = [runtimeLogRenderExternalHost ? `host:${runtimeLogRenderExternalHost}` : '', runtimeLogRenderServiceNameExplicit ? `name:${runtimeLogRenderServiceNameExplicit}` : ''].filter(Boolean).join('|') || `local:${runtimeLogPort}`;
-const runtimeLogServiceScopeHash = shortLogHash(runtimeLogServiceScope);
-const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}:${shortLogHash(runtimeLogInstanceId)}`).slice(0, 240);
-let runtimeLogDeploymentGroupId = 'cluster-pending';
-const TFBOT_CLUSTER_CODE_REVISION = 'r66-baileys-outgoing-retry-preflight-before-relay';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
-runtimeLogDeploymentGroupId = `${TFBOT_CLUSTER_CODE_REVISION}:cluster-pending`;
-const runtimeLogClusterId = `${runtimeLogDeploymentId}:${shortLogHash(runtimeLogInstanceId)}`.slice(0, 240);
-const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
-const runtimeLogSecrets = Object.entries(process.env)
-    .filter(([key, value]) => /TOKEN|SECRET|PASSWORD|PASSWD|API.?KEY|MONGO_URI|URI$|CF_ACCOUNTS|TAVILY|OWNER_?NUMBER|TFBOT_OWNER/i.test(key) && String(value || '').length >= 6)
-    .map(([, value]) => String(value));
+const MESSAGE_QUEUE_TIMEOUT_SETTLE_MS = Math.max(500, Math.min(15000, Number(process.env.MESSAGE_QUEUE_TIMEOUT_SETTLE_MS || 3000)));
+const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(500, Math.min(5000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 1800)));
+const TFBOT_CLUSTER_CODE_REVISION = 'r67-render-local-logs-message-retry-and-session-queue';
+const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31-r67')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
     catch (error) { return 'hidden'; }
-}
-
-function normalizeTfbotReleaseId(value) {
-    return String(value || '').normalize('NFKC').replace(/[\p{Cc}\p{Cf}]/gu, '').replace(/\s+/gu, ' ').trim();
-}
-
-function getTfbotReleaseCompatibilityKey(value) {
-    const normalized = normalizeTfbotReleaseId(value);
-    const match = normalized.match(/:(r\d+[-a-z0-9_]+)$/i);
-    return match ? match[1].toLowerCase() : normalized;
-}
-
-function areTfbotReleasesCompatible(first, second) {
-    const firstKey = getTfbotReleaseCompatibilityKey(first);
-    const secondKey = getTfbotReleaseCompatibilityKey(second);
-    return !!firstKey && firstKey === secondKey;
-}
-
-function getTfbotReleaseCommit(value) {
-    const normalized = normalizeTfbotReleaseId(value);
-    const match = normalized.match(/:([a-f0-9]{7,40}):r\d+[-a-z0-9_]+$/i);
-    return match ? match[1].toLowerCase() : '';
-}
-
-function isRuntimeLogBoundaryCompatible(marker) {
-    if (!marker || marker.completed !== true || !marker.deploymentStartedAt) return false;
-    const recordedRevision = normalizeTfbotReleaseId(marker.codeRevision || marker.revision || '').toLowerCase();
-    const markerCommit = String(marker.renderCommit || getTfbotReleaseCommit(marker.releaseId || '')).trim().toLowerCase();
-    if (runtimeLogRenderCommit && markerCommit && runtimeLogRenderCommit.toLowerCase() === markerCommit) return true;
-    if (recordedRevision) return recordedRevision === TFBOT_CLUSTER_CODE_REVISION.toLowerCase();
-    return areTfbotReleasesCompatible(marker.releaseId, TFBOT_CODE_RELEASE_ID);
-}
-
-function sanitizeRuntimeLogString(value) {
-    let output = String(value ?? '').slice(0, 3000);
-    for (const secret of runtimeLogSecrets) output = output.split(secret).join('[REDACTED]');
-    output = output
-        .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [REDACTED]')
-        .replace(/([?&](?:token|key|secret|password|api_key)=)[^&\s]+/gi, '$1[REDACTED]')
-        .replace(/\b\d{5,25}(?::\d+)?@(?:s\.whatsapp\.net|lid|g\.us|newsletter)\b/gi, '[WHATSAPP_ID]')
-        .replace(/\b\+?\d[\d ().-]{7,}\d\b/g, '[PHONE]');
-    return output;
-}
-
-function sanitizeRuntimeLogValue(value, key = '', depth = 0, seen = new WeakSet()) {
-    const field = String(key || '').toLowerCase();
-    if (/(?:token|secret|password|passwd|authorization|cookie|api.?key|private.?key|authstate|credentials|signal.?key.?store)/i.test(field)) return '[REDACTED]';
-    if (/(?:messagetext|bodypreview|textpreview|argumentpreview|quotedmessage|messagebody|messagecontent|caption|rawbody|bodyraw|^message$|^conversation$|^text$|^raw$|extendedtextmessage)/i.test(field)) {
-        const length = typeof value === 'string' ? value.length : value && typeof value === 'object' ? 'object' : 0;
-        return `[message content redacted; ${length}]`;
-    }
-    if (/(?:sessionid|messageid|responsemessageid|stanzaid)$/i.test(field) && value !== null && value !== undefined) {
-        const prefix = /session/i.test(field) ? 'session' : 'message';
-        return `${prefix}#${shortLogHash(value)}`;
-    }
-    if (/(?:jid|phone|number|sendername|pushname|ownername|accountname|displayname|hostname|contactname|contact|filename|address|latitude|longitude|location|aliases|identitycandidates|participantids)/i.test(field) && value !== null && value !== undefined) {
-        if (Array.isArray(value)) return value.slice(0, 20).map(item => `[id#${shortLogHash(item)}]`);
-        const raw = String(value);
-        const domain = raw.endsWith('@g.us') ? 'group' : raw.endsWith('@lid') ? 'lid' : raw.endsWith('@s.whatsapp.net') ? 'private' : 'id';
-        return `${domain}#${shortLogHash(raw)}`;
-    }
-    if (depth > 5) return '[DEPTH_LIMIT]';
-    if (value === null || value === undefined || typeof value === 'boolean' || typeof value === 'number') return value;
-    if (typeof value === 'string') return sanitizeRuntimeLogString(value);
-    if (typeof value === 'bigint') return String(value);
-    if (typeof value === 'function') return '[Function]';
-    if (Buffer.isBuffer(value) || value instanceof Uint8Array) return `[binary ${value.length} bytes]`;
-    if (value instanceof Error) {
-        return {
-            name: sanitizeRuntimeLogString(value.name || 'Error'),
-            message: sanitizeRuntimeLogString(value.message || ''),
-            stack: sanitizeRuntimeLogString(String(value.stack || '').slice(0, 1800))
-        };
-    }
-    if (typeof value === 'object') {
-        if (seen.has(value)) return '[Circular]';
-        seen.add(value);
-        if (Array.isArray(value)) return value.slice(0, 40).map(item => sanitizeRuntimeLogValue(item, key, depth + 1, seen));
-        const output = {};
-        for (const [childKey, childValue] of Object.entries(value).slice(0, 80)) {
-            output[childKey] = sanitizeRuntimeLogValue(childValue, childKey, depth + 1, seen);
-        }
-        return output;
-    }
-    return sanitizeRuntimeLogString(value);
-}
-
-function scheduleRuntimeLogPersistence(delayMs = 40) {
-    if (!runtimeLogPersistenceCollection || runtimeLogPersistenceTimer || runtimeLogPersistenceRunning || !runtimeLogPendingWrites.length) return;
-    runtimeLogPersistenceTimer = setTimeout(() => {
-        runtimeLogPersistenceTimer = null;
-        void flushRuntimeLogPersistence();
-    }, Math.max(0, delayMs));
-    if (typeof runtimeLogPersistenceTimer.unref === 'function') runtimeLogPersistenceTimer.unref();
-}
-
-function attachRuntimeLogPersistence(collection) {
-    runtimeLogPersistenceCollection = collection || null;
-    if (!runtimeLogPersistenceCollection) return;
-    runtimeLogPendingWrites.splice(0, runtimeLogPendingWrites.length, ...runtimeLogPendingWrites.filter(item => new Date(item?.createdAt || item?.at || 0).getTime() >= runtimeLogDeploymentStartedAt.getTime()).map(item => ({ ...item, deploymentGroupId: runtimeLogDeploymentGroupId, deploymentStartedAt: runtimeLogDeploymentStartedAt })));
-    for (const entry of runtimeLogBuffer) {
-        if ((Date.parse(String(entry?.at || '')) || 0) >= runtimeLogDeploymentStartedAt.getTime()) {
-            entry.deploymentGroupId = runtimeLogDeploymentGroupId;
-            entry.deploymentStartedAt = runtimeLogDeploymentStartedAt;
-        }
-    }
-    const pendingIds = new Set(runtimeLogPendingWrites.map(item => String(item?._id || '')));
-    for (const entry of runtimeLogBuffer) {
-        if (!entry?.id || (Date.parse(String(entry.at || '')) || 0) < runtimeLogDeploymentStartedAt.getTime() || pendingIds.has(String(entry.id))) continue;
-        pendingIds.add(String(entry.id));
-        runtimeLogPendingWrites.push({
-            _id: entry.id,
-            instance: runtimeLogInstanceId,
-            deploymentId: runtimeLogDeploymentId,
-            deploymentGroupId: runtimeLogDeploymentGroupId,
-            serviceId: runtimeLogRenderServiceId,
-            serviceName: runtimeLogRenderServiceName,
-            serviceScope: runtimeLogServiceScope,
-            renderInstanceId: runtimeLogRenderInstanceId,
-            renderCommit: runtimeLogRenderCommit || null,
-            deploymentStartedAt: runtimeLogDeploymentStartedAt,
-            port: runtimeLogPort,
-            clusterId: runtimeLogClusterId,
-            instanceUrl: runtimeLogInstanceUrl || null,
-            sequence: Number(String(entry.id).split(':').pop()) || 0,
-            at: entry.at,
-            createdAt: new Date(entry.at),
-            level: entry.level,
-            text: entry.text
-        });
-    }
-    scheduleRuntimeLogPersistence(0);
-}
-
-async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
-    if (!collection || typeof collection.deleteMany !== 'function' || !db) return 0;
-    if (runtimeLogInitialCleanupCompleted) return 0;
-    const markerCollection = db.collection('cluster_router');
-    const markerId = 'runtime-logs-active-cluster-deployment';
-    const isCoordinator = TFBOT_CLUSTER_COORDINATOR_ONLY || !TFBOT_CLUSTER_ENABLED;
-    const coordinatorInstanceId = String(runtimeLogRenderInstanceId || runtimeLogInstanceId);
-    const adoptMarker = marker => {
-        const startedAt = new Date(marker?.deploymentStartedAt || marker?.startedAt || marker?.completedAt || runtimeLogStartedAt);
-        runtimeLogDeploymentStartedAt = Number.isFinite(startedAt.getTime()) ? startedAt : runtimeLogStartedAt;
-        runtimeLogDeploymentGroupId = String(marker?.deploymentGroupId || `${TFBOT_CLUSTER_CODE_REVISION}:cluster-${shortLogHash(`${marker?.coordinatorInstanceId || runtimeLogRenderInstanceId}:${marker?.releaseId || TFBOT_CODE_RELEASE_ID}`)}`);
-        runtimeLogInitialCleanupCompleted = true;
-        return runtimeLogDeploymentStartedAt;
-    };
-    const applyBoundaryToPendingLogs = () => {
-        const cutoffMs = runtimeLogDeploymentStartedAt.getTime();
-        runtimeLogPendingWrites.splice(0, runtimeLogPendingWrites.length, ...runtimeLogPendingWrites.filter(item => new Date(item?.createdAt || item?.at || 0).getTime() >= cutoffMs).map(item => ({ ...item, deploymentGroupId: runtimeLogDeploymentGroupId, deploymentStartedAt: runtimeLogDeploymentStartedAt })));
-        runtimeLogBuffer.splice(0, runtimeLogBuffer.length, ...runtimeLogBuffer.filter(entry => (Date.parse(String(entry?.at || '')) || 0) >= cutoffMs));
-        for (const entry of runtimeLogBuffer) {
-            entry.deploymentGroupId = runtimeLogDeploymentGroupId;
-            entry.deploymentStartedAt = runtimeLogDeploymentStartedAt;
-        }
-    };
-    if (!isCoordinator) {
-        let lastObservedMarker = null;
-        for (let attempt = 0; attempt < 20; attempt++) {
-            const marker = await markerCollection.findOne({ _id: markerId }).catch(() => null);
-            if (marker) lastObservedMarker = marker;
-            if (isRuntimeLogBoundaryCompatible(marker)) {
-                adoptMarker(marker);
-                applyBoundaryToPendingLogs();
-                console.info('[runtime-log-deployment-boundary-loaded]', {
-                    host: TFBOT_CLUSTER_INSTANCE_HOST,
-                    deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(),
-                    deploymentGroupId: runtimeLogDeploymentGroupId,
-                    coordinatorInstanceId: marker.coordinatorInstanceId || null,
-                    releaseId: TFBOT_CODE_RELEASE_ID,
-                    coordinatorCodeRevision: marker.codeRevision || getTfbotReleaseCompatibilityKey(marker.releaseId || ''),
-                    action: 'adopt_the_shared_coordinator_deployment_timestamp_for_the_matching_code_revision_before_log_persistence'
-                });
-                return 0;
-            }
-            await new Promise(resolve => setTimeout(resolve, 250));
-        }
-        console.warn('[runtime-log-deployment-boundary-unavailable]', {
-            host: TFBOT_CLUSTER_INSTANCE_HOST,
-            expectedReleaseId: TFBOT_CODE_RELEASE_ID,
-            expectedCodeRevision: TFBOT_CLUSTER_CODE_REVISION,
-            markerFound: !!lastObservedMarker,
-            markerCompleted: lastObservedMarker?.completed === true,
-            markerCodeRevision: String(lastObservedMarker?.codeRevision || lastObservedMarker?.revision || ''),
-            markerReleaseCompatibilityKey: getTfbotReleaseCompatibilityKey(lastObservedMarker?.releaseId || ''),
-            markerDeploymentStartedAt: lastObservedMarker?.deploymentStartedAt || null,
-            markerCoordinatorInstanceKnown: !!lastObservedMarker?.coordinatorInstanceId,
-            action: 'do_not_attach_persistence_or_relabel_buffer_until_matching_coordinator_boundary_is_available'
-        });
-        return null;
-    }
-    const claimOwner = processInstanceId;
-    for (let attempt = 0; attempt < 140; attempt++) {
-        const now = new Date();
-        const existing = await markerCollection.findOne({ _id: markerId }).catch(() => null);
-        if (isRuntimeLogBoundaryCompatible(existing) && existing.completed === true && String(existing.coordinatorInstanceId || '') === coordinatorInstanceId && String(existing.deploymentId || '') === runtimeLogDeploymentId) {
-            adoptMarker(existing);
-            applyBoundaryToPendingLogs();
-            return 0;
-        }
-        const leaseUntil = new Date(now.getTime() + 30000);
-        try {
-            await markerCollection.updateOne(
-                {
-                    _id: markerId,
-                    $or: [
-                        { leaseUntil: { $lte: now } },
-                        { leaseUntil: { $exists: false } },
-                        { owner: claimOwner }
-                    ]
-                },
-                {
-                    $set: {
-                        owner: claimOwner,
-                        leaseUntil,
-                        coordinatorInstanceId,
-                        deploymentId: runtimeLogDeploymentId,
-                        releaseId: TFBOT_CODE_RELEASE_ID,
-                        codeRevision: TFBOT_CLUSTER_CODE_REVISION,
-                        renderCommit: runtimeLogRenderCommit || null,
-                        deploymentStartedAt: runtimeLogDeploymentReadyAt instanceof Date && Number.isFinite(runtimeLogDeploymentReadyAt.getTime()) ? runtimeLogDeploymentReadyAt : runtimeLogStartedAt,
-                        startedAt: runtimeLogDeploymentReadyAt instanceof Date && Number.isFinite(runtimeLogDeploymentReadyAt.getTime()) ? runtimeLogDeploymentReadyAt : runtimeLogStartedAt,
-                        updatedAt: now,
-                        status: 'running',
-                        completed: false
-                    },
-                    $setOnInsert: { createdAt: now }
-                },
-                { upsert: true }
-            );
-        } catch (claimError) {
-            if (Number(claimError?.code) === 11000 || String(claimError?.codeName || '') === 'DuplicateKey') {
-                await new Promise(resolve => setTimeout(resolve, 250));
-                continue;
-            }
-            throw claimError;
-        }
-        const claim = await markerCollection.findOne({ _id: markerId }).catch(() => null);
-        if (claim?.completed === true && isRuntimeLogBoundaryCompatible(claim) && String(claim.coordinatorInstanceId || '') === coordinatorInstanceId && String(claim.deploymentId || '') === runtimeLogDeploymentId) {
-            adoptMarker(claim);
-            applyBoundaryToPendingLogs();
-            return 0;
-        }
-        if (String(claim?.owner || '') !== claimOwner) {
-            await new Promise(resolve => setTimeout(resolve, 250));
-            continue;
-        }
-        runtimeLogDeploymentStartedAt = runtimeLogDeploymentReadyAt instanceof Date && Number.isFinite(runtimeLogDeploymentReadyAt.getTime()) ? runtimeLogDeploymentReadyAt : runtimeLogStartedAt;
-        runtimeLogDeploymentGroupId = `${TFBOT_CLUSTER_CODE_REVISION}:cluster-${shortLogHash(`${coordinatorInstanceId}:${TFBOT_CODE_RELEASE_ID}:${runtimeLogDeploymentStartedAt.getTime()}`)}`;
-        const rawAppCollection = mongoClient?.db(TFBOT_DATABASE_NAME)?.collection(TFBOT_APP_DATA_COLLECTION);
-        if (!rawAppCollection) throw new Error('runtime_log_physical_collection_unavailable');
-        const cutoff = runtimeLogDeploymentStartedAt;
-        const logicalOldLogs = {
-            $or: [
-                { createdAt: { $lt: cutoff } },
-                { createdAt: { $exists: false }, at: { $lt: cutoff.toISOString() } }
-            ]
-        };
-        const logicalBefore = await collection.countDocuments(logicalOldLogs).catch(() => 0);
-        const logicalPurge = await collection.deleteMany(logicalOldLogs);
-        const legacyLogFilter = {
-            $and: [
-                { $or: [
-                    { __tfbotBucket: 'server_runtime_logs' },
-                    { _id: { $regex: '^server_runtime_logs::' } },
-                    { _id: { $regex: '^server_runtime_logs:' }, level: { $exists: true }, text: { $exists: true } },
-                    { _id: { $regex: '^(?:runtime[-_]?logs?|logs)[:::_-]' }, level: { $exists: true }, text: { $exists: true }, createdAt: { $exists: true } }
-                ] },
-                { $or: [
-                    { createdAt: { $lt: cutoff } },
-                    { createdAt: { $exists: false }, at: { $lt: cutoff.toISOString() } }
-                ] }
-            ]
-        };
-        const legacyBefore = await rawAppCollection.countDocuments(legacyLogFilter).catch(() => 0);
-        const legacyPurge = await rawAppCollection.deleteMany(legacyLogFilter);
-        const logicalAfter = await collection.countDocuments(logicalOldLogs).catch(() => -1);
-        const legacyAfter = await rawAppCollection.countDocuments(legacyLogFilter).catch(() => -1);
-        const removed = Number(logicalPurge?.deletedCount || 0) + Number(legacyPurge?.deletedCount || 0);
-        if (logicalAfter > 0 || legacyAfter > 0) console.error('[runtime-log-old-documents-cleanup-incomplete]', { logicalAfter, legacyAfter, deploymentStartedAt: cutoff.toISOString(), action: 'dashboard_filters_all_old_entries_by_global_deployment_timestamp' });
-        console.info('[runtime-log-deployment-cleanup-verified]', {
-            logicalBefore,
-            logicalRemoved: Number(logicalPurge?.deletedCount || 0),
-            legacyBefore,
-            legacyRemoved: Number(legacyPurge?.deletedCount || 0),
-            logicalAfter,
-            legacyAfter,
-            deploymentGroupId: runtimeLogDeploymentGroupId,
-            coordinatorInstanceId,
-            deploymentStartedAt: cutoff.toISOString(),
-            action: 'delete_every_persisted_runtime_log_older_than_the_current_coordinator_deployment_across_all_instances'
-        });
-        await markerCollection.updateOne(
-            { _id: markerId, owner: claimOwner, completed: { $ne: true } },
-            {
-                $set: {
-                    completed: true,
-                    status: 'completed',
-                    coordinatorInstanceId,
-                    releaseId: TFBOT_CODE_RELEASE_ID,
-                    codeRevision: TFBOT_CLUSTER_CODE_REVISION,
-                    renderCommit: runtimeLogRenderCommit || null,
-                    deploymentGroupId: runtimeLogDeploymentGroupId,
-                    deploymentStartedAt: cutoff,
-                    removedCount: removed,
-                    completedAt: new Date(),
-                    updatedAt: new Date()
-                },
-                $unset: { leaseUntil: 1 }
-            }
-        );
-        runtimeLogInitialCleanupCompleted = true;
-        applyBoundaryToPendingLogs();
-        return removed;
-    }
-    const finalMarker = await markerCollection.findOne({ _id: markerId }).catch(() => null);
-    if (isRuntimeLogBoundaryCompatible(finalMarker) && String(finalMarker.coordinatorInstanceId || '') === coordinatorInstanceId) {
-        adoptMarker(finalMarker);
-        applyBoundaryToPendingLogs();
-        return 0;
-    }
-    console.error('[runtime-log-deployment-cleanup-not-acquired]', { deploymentId: runtimeLogDeploymentId, coordinatorInstanceId, owner: finalMarker?.owner || null, status: finalMarker?.status || 'unknown', action: 'do_not_attach_old_logs_as_current_deployment' });
-    return 0;
-}
-function scheduleRuntimeLogBoundaryRetry(collection, delayMs = 5000) {
-    if (!collection || runtimeLogInitialCleanupCompleted || serverShuttingDown) return;
-    runtimeLogBoundaryRetryCollection = collection;
-    if (runtimeLogBoundaryRetryTimer) return;
-    runtimeLogBoundaryRetryTimer = setTimeout(async () => {
-        runtimeLogBoundaryRetryTimer = null;
-        const target = runtimeLogBoundaryRetryCollection;
-        if (!target || runtimeLogInitialCleanupCompleted || serverShuttingDown || tfbotWorkerStopping || !tfbotWorkerActive) return;
-        try {
-            await clearPreviousRuntimeLogsForCurrentDeployment(target);
-            if (runtimeLogInitialCleanupCompleted) {
-                await target.updateMany({ expireAt: { $exists: true } }, { $unset: { expireAt: 1 } }).catch(error => console.warn('[runtime-log-expiry-field-removal-failed]', { host: TFBOT_CLUSTER_INSTANCE_HOST, error: error?.message || String(error) }));
-                attachRuntimeLogPersistence(target);
-                if (pendingRuntimeLogPersistenceCollection === target) pendingRuntimeLogPersistenceCollection = null;
-                runtimeLogBoundaryRetryCollection = null;
-                console.info('[runtime-log-persistence-attached-after-boundary]', {
-                    host: TFBOT_CLUSTER_INSTANCE_HOST,
-                    releaseId: TFBOT_CODE_RELEASE_ID,
-                    deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(),
-                    deploymentGroupId: runtimeLogDeploymentGroupId,
-                    action: 'attach_only_after_global_old_log_purge_and_matching_release_marker'
-                });
-                return;
-            }
-        } catch (error) {
-            console.warn('[runtime-log-boundary-retry-failed]', { host: TFBOT_CLUSTER_INSTANCE_HOST, error: error?.message || String(error) });
-        }
-        scheduleRuntimeLogBoundaryRetry(target, delayMs);
-    }, Math.max(1000, Number(delayMs) || 5000));
-    if (typeof runtimeLogBoundaryRetryTimer.unref === 'function') runtimeLogBoundaryRetryTimer.unref();
-}
-async function flushRuntimeLogPersistence() {
-    if (runtimeLogPersistenceRunning || !runtimeLogPersistenceCollection || !runtimeLogPendingWrites.length) return;
-    runtimeLogPersistenceRunning = true;
-    let nextRetryDelay = 25;
-    try {
-        while (runtimeLogPersistenceCollection && runtimeLogPendingWrites.length) {
-            const batch = runtimeLogPendingWrites.slice(0, 250);
-            try {
-                await runtimeLogPersistenceCollection.insertMany(batch, { ordered: false });
-            } catch (error) {
-                const writeErrors = Array.isArray(error?.writeErrors) ? error.writeErrors : [];
-                const duplicateOnly = writeErrors.length
-                    ? writeErrors.every(item => Number(item?.code || item?.err?.code) === 11000)
-                    : Number(error?.code) === 11000;
-                if (!duplicateOnly) throw error;
-            }
-            runtimeLogPendingWrites.splice(0, batch.length);
-        }
-    } catch (error) {
-        nextRetryDelay = 5000;
-        originalConsoleError('[runtime-log-persistence-failed]', {
-            error: error?.message || String(error),
-            pendingEntries: runtimeLogPendingWrites.length,
-            retryInMs: nextRetryDelay
-        });
-    } finally {
-        runtimeLogPersistenceRunning = false;
-        if (runtimeLogPendingWrites.length && !runtimeLogPersistenceTimer) scheduleRuntimeLogPersistence(nextRetryDelay);
-    }
-}
-
-function recordRuntimeLog(level, args) {
-    try {
-        const safeArgs = Array.from(args || []).slice(0, 8).map(value => sanitizeRuntimeLogValue(value));
-        let text = safeArgs.map(value => {
-            if (typeof value === 'string') return value;
-            try { return JSON.stringify(value); } catch (error) { return '[unserializable log value]'; }
-        }).join(' ').slice(0, 6500);
-        const sequence = ++runtimeLogSequence;
-        const at = new Date().toISOString();
-        const normalizedLevel = String(level || 'log').toLowerCase();
-        const id = `${runtimeLogInstanceId}:${sequence}`;
-        const entry = { id, at, level: normalizedLevel, text, serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, serviceScope: runtimeLogServiceScope, deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, deploymentStartedAt: runtimeLogDeploymentStartedAt, port: runtimeLogPort };
-        runtimeLogBuffer.push(entry);
-        if (runtimeLogBuffer.length > LOG_DASHBOARD_MAX_ENTRIES) runtimeLogBuffer.splice(0, runtimeLogBuffer.length - LOG_DASHBOARD_MAX_ENTRIES);
-
-        if (runtimeLogPersistenceCollection) {
-            runtimeLogPendingWrites.push({
-                _id: id,
-                instance: runtimeLogInstanceId,
-                deploymentId: runtimeLogDeploymentId,
-                deploymentGroupId: runtimeLogDeploymentGroupId,
-                serviceId: runtimeLogRenderServiceId,
-                serviceName: runtimeLogRenderServiceName,
-                serviceScope: runtimeLogServiceScope,
-                renderInstanceId: runtimeLogRenderInstanceId,
-                renderCommit: runtimeLogRenderCommit || null,
-                deploymentStartedAt: runtimeLogDeploymentStartedAt,
-                port: runtimeLogPort,
-                clusterId: runtimeLogClusterId,
-                instanceUrl: runtimeLogInstanceUrl || null,
-                sequence,
-                at,
-                createdAt: new Date(at),
-                    level: normalizedLevel,
-                text
-            });
-            scheduleRuntimeLogPersistence();
-        }
-    } catch (error) {}
 }
 
 let lastSignalDiagnosticAt = 0;
@@ -549,55 +86,46 @@ function logSignalDecryptionFailure(args, context = null) {
         : kind === 'bad_mac' ? 'Signal authentication check failed'
         : 'Baileys could not decrypt an incoming message';
     const diagnostic = { kind, peerJid, messageId, fromMe, detail: safeDetail, messageBodyAvailable: false, explanation: 'The message could not be decrypted, so WhatsApp did not provide readable text to the message handler.', retryExpected: !!messageId, credentialsDeleted: false, accountCredentialsPreserved: true };
-    recordRuntimeLog('warn', ['[whatsapp-signal-diagnostic]', diagnostic]);
     originalConsoleWarn('[whatsapp-signal-diagnostic]', diagnostic);
 }
 console.log = (...args) => {
     if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
-    recordRuntimeLog('log', args);
     originalConsoleLog(...args);
 };
 console.error = (...args) => {
     if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
-    recordRuntimeLog('error', args);
     originalConsoleError(...args);
 };
 console.warn = (...args) => {
     if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
-    recordRuntimeLog('warn', args);
     originalConsoleWarn(...args);
 };
 console.info = (...args) => {
     if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
-    recordRuntimeLog('info', args);
     originalConsoleInfo(...args);
 };
 console.debug = (...args) => {
     if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
-    recordRuntimeLog('debug', args);
     originalConsoleDebug(...args);
 };
 console.trace = (...args) => {
     if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
-    recordRuntimeLog('trace', args);
     originalConsoleTrace(...args);
 };
 console.dir = (...args) => {
     if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
-    recordRuntimeLog('dir', args);
     originalConsoleDir(...args);
 };
 console.table = (...args) => {
     if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
     if (isSensitiveSignalLog(args)) return;
-    recordRuntimeLog('table', args);
     originalConsoleTable(...args);
 };
 const crypto = require('crypto');
@@ -756,46 +284,45 @@ function applyBaileysSignalTransactionPatch() {
 }
 
 function applyBaileysOutgoingRetryPreflightPatch() {
-    const marker = "await config.persistOutgoingMessage(jid, fullMsg);";
+    const marker = 'await config.persistOutgoingMessage(jid, fullMsg);';
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
         const searchDirectories = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
-        const candidates = [...new Set(searchDirectories.flatMap(directory => [
-            path.join(directory, 'Socket', 'messages-send.js'),
-            path.join(directory, 'socket', 'messages-send.js'),
-            path.join(directory, 'Socket', 'messages-send.cjs'),
-            path.join(directory, 'socket', 'messages-send.cjs'),
-            path.join(directory, 'Socket', 'messages-send.ts'),
-            path.join(directory, 'socket', 'messages-send.ts')
-        ]))];
+        const candidates = [...new Set(searchDirectories.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs', 'ts'].map(extension => path.join(directory, folder, `messages-send.${extension}`)))) )];
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
         if (!filePath) return { applied: false, reason: 'messages_send_module_not_found' };
         const source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), sourceFormat: 'sendMessage-before-relay' };
-
         const sendMessageMatch = /\bsendMessage\s*:\s*async\s*\(/.exec(source) || /\basync\s+sendMessage\s*\(/.exec(source);
         if (!sendMessageMatch) return { applied: false, reason: 'send_message_method_anchor_not_found', file: path.basename(filePath) };
         const searchStart = sendMessageMatch.index;
-        const fullMessageMatch = /\bconst\s+fullMsg\s*=\s*await\b/.exec(source.slice(searchStart));
-        if (!fullMessageMatch) return { applied: false, reason: 'generated_full_message_declaration_not_found', file: path.basename(filePath) };
+        const fullMessageMatch = /\bconst\s+fullMsg(?:\s*:\s*[^=;\n]+)?\s*=\s*await\s+generateWAMessage\s*\(/.exec(source.slice(searchStart));
+        if (!fullMessageMatch) return { applied: false, reason: 'generated_full_message_call_not_found', file: path.basename(filePath) };
         const fullMessageStart = searchStart + fullMessageMatch.index;
-        const generatorStart = source.indexOf('generateWAMessage', fullMessageStart);
-        if (generatorStart < 0 || generatorStart - fullMessageStart > 1800) return { applied: false, reason: 'message_generator_anchor_not_found', file: path.basename(filePath) };
-
-        const relayPattern = /await\s+relayMessage\s*\(\s*jid\s*,\s*fullMsg\.message\s*,/g;
-        relayPattern.lastIndex = generatorStart;
+        const relayPattern = /\bawait\s+relayMessage\s*\(\s*jid\s*,\s*fullMsg\.message\s*!?\s*,/g;
+        relayPattern.lastIndex = fullMessageStart + fullMessageMatch[0].length;
         const relayMatch = relayPattern.exec(source);
-        if (!relayMatch || relayMatch.index - fullMessageStart > 16000) return { applied: false, reason: 'relay_after_generated_full_message_not_found', file: path.basename(filePath) };
-
-        const insertion = `\n\t\t\tif (typeof config.persistOutgoingMessage === 'function') {\n\t\t\t\tawait config.persistOutgoingMessage(jid, fullMsg);\n\t\t\t}\n`;
+        if (!relayMatch || relayMatch.index - fullMessageStart > 20000) {
+            return { applied: false, reason: 'relay_after_generated_full_message_not_found', file: path.basename(filePath) };
+        }
+        if (source.includes(marker)) {
+            const existingIndex = source.indexOf(marker, fullMessageStart);
+            if (existingIndex >= fullMessageStart && existingIndex < relayMatch.index) {
+                return { applied: true, alreadyApplied: true, file: path.basename(filePath), sourceFormat: 'generated-message-before-relay', persistedBeforeRelay: true };
+            }
+            return { applied: false, reason: 'existing_preflight_marker_not_before_relay', file: path.basename(filePath) };
+        }
+        const insertion = `if (typeof config.persistOutgoingMessage === 'function') {\n\t\t\t\tawait config.persistOutgoingMessage(jid, fullMsg);\n\t\t\t}\n\t\t\t`;
         const patchedSource = source.slice(0, relayMatch.index) + insertion + source.slice(relayMatch.index);
         const persistedIndex = patchedSource.indexOf(marker, fullMessageStart);
-        const relayIndex = patchedSource.indexOf(relayMatch[0], relayMatch.index + insertion.length);
-        if (persistedIndex < fullMessageStart || relayIndex < 0 || persistedIndex >= relayIndex) return { applied: false, reason: 'preflight_patch_verification_failed', file: path.basename(filePath) };
-
+        const patchedRelayPattern = /\bawait\s+relayMessage\s*\(\s*jid\s*,\s*fullMsg\.message\s*!?\s*,/g;
+        patchedRelayPattern.lastIndex = relayMatch.index + insertion.length;
+        const patchedRelayMatch = patchedRelayPattern.exec(patchedSource);
+        if (persistedIndex < fullMessageStart || !patchedRelayMatch || persistedIndex >= patchedRelayMatch.index) {
+            return { applied: false, reason: 'preflight_patch_order_verification_failed', file: path.basename(filePath) };
+        }
         fs.writeFileSync(filePath, patchedSource, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), sourceFormat: 'sendMessage-before-relay', persistedBeforeRelay: true };
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), sourceFormat: 'generated-message-before-relay', persistedBeforeRelay: true, supportsTypeScriptNonNullAssertion: true };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
@@ -978,7 +505,7 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
     }
 }
 
-function createDashboardPinoLogger(options = {}) {
+function createRenderPinoLogger(options = {}) {
     const component = String(options?.base?.component || 'baileys').slice(0, 60);
     const sink = new Writable({
         write(chunk, encoding, callback) {
@@ -996,7 +523,7 @@ function createDashboardPinoLogger(options = {}) {
                         const previousAt = Number(expectedSocketCloseLogTimes.get(closeKey) || 0);
                         if (Date.now() - previousAt >= 10000) {
                             expectedSocketCloseLogTimes.set(closeKey, Date.now());
-                            recordRuntimeLog('warn', ['[baileys-socket-close-during-handoff]', { sessionId: parsedSessionId || null, component, action: 'expected_socket_close_while_worker_handoff_and_auth_drain_continue' }]);
+                            originalConsoleWarn('[baileys-socket-close-during-handoff]', { sessionId: parsedSessionId || null, component, action: 'expected_socket_close_while_worker_handoff_and_auth_drain_continue' });
                         }
                         continue;
                     }
@@ -1008,7 +535,6 @@ function createDashboardPinoLogger(options = {}) {
                     }
                     if (isSensitiveSignalLog(diagnosticArgs)) continue;
                     const level = ({ 10: 'trace', 20: 'debug', 30: 'info', 40: 'warn', 50: 'error', 60: 'fatal' })[Number(parsed?.level)] || 'log';
-                    recordRuntimeLog(level, [`[${component}]`, parsed]);
                     process.stdout.write(`${line}\n`);
                 }
                 callback();
@@ -1020,7 +546,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r66';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r67';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1713,7 +1239,24 @@ async function processMessageQueue(queue) {
                     if (typeof task.onTimeout === 'function') {
                         await Promise.resolve().then(() => task.onTimeout(error)).catch(timeoutError => console.error('[message-queue-timeout-handler-failed]', { taskId: task.id, error: timeoutError?.message || String(timeoutError) }));
                     }
-                    await operation.catch(() => {});
+                    let settleTimer = null;
+                    const operationSettled = await Promise.race([
+                        operation.then(() => true, () => true),
+                        new Promise(resolve => {
+                            settleTimer = setTimeout(() => resolve(false), MESSAGE_QUEUE_TIMEOUT_SETTLE_MS);
+                            if (typeof settleTimer.unref === 'function') settleTimer.unref();
+                        })
+                    ]);
+                    if (settleTimer) clearTimeout(settleTimer);
+                    if (!operationSettled) {
+                        console.error('[message-queue-task-abandoned-after-session-fence]', {
+                            taskId: task.id,
+                            partition: queue.partitionKey || '__session__',
+                            settleWaitMs: MESSAGE_QUEUE_TIMEOUT_SETTLE_MS,
+                            action: 'release_queue_after_timeout_handler_fenced_session_socket_and_ignore_late_result'
+                        });
+                        operation.catch(() => {});
+                    }
                 } else {
                     console.warn('[message-queue-task-failed]', {
                         taskId: task.id,
@@ -1874,7 +1417,7 @@ async function persistOutgoingRetryMessage(sessionId, jid, message, jidAliases =
             { _id: record._id },
             { $set: record },
             { upsert: true }
-        ), 5000, 'Baileys outgoing retry message persistence');
+        ), BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS, 'Baileys outgoing retry message persistence');
         console.info('[message-retry-store-write-completed]', { sessionId, messageId, remoteJid, aliasCount: remoteJidAliases.length });
         return true;
     } catch (error) {
@@ -2171,6 +1714,28 @@ function consumeOutgoingTextEcho(sessionId, jid, text) {
     return false;
 }
 
+function getMessageQueuePartitionKey(sessionId, jid, session) {
+    const destination = String(jid || '').trim();
+    if (!destination) return '__unknown_chat__';
+    const lower = destination.toLowerCase();
+    if (/@g\.us$/i.test(destination)) return `group:${lower}`;
+    if (/@newsletter$/i.test(destination)) return `channel:${lower}`;
+    if (/^status@broadcast$/i.test(destination)) return 'broadcast:status';
+    const credentials = session?.authState?.creds || session?.sock?.authState?.creds || null;
+    const ownPhone = normalizePhoneCacheJid(`${getAuthenticatedPhoneNumber(session?.sock?.user, credentials) || ''}@s.whatsapp.net`);
+    const ownLid = normalizeLidCacheKey(getAuthenticatedLid(session?.sock?.user, credentials));
+    const destinationPhone = normalizePhoneCacheJid(destination) || getRememberedPhoneForLid(sessionId, destination);
+    if (ownPhone && destinationPhone === ownPhone) return `private:${ownPhone}`;
+    if (/@lid$/i.test(destination)) {
+        const destinationLid = normalizeLidCacheKey(destination);
+        if (ownPhone && ownLid && destinationLid === ownLid) return `private:${ownPhone}`;
+        if (destinationPhone) return `private:${destinationPhone}`;
+        return `private:${destinationLid}`;
+    }
+    if (destinationPhone) return `private:${destinationPhone}`;
+    return `chat:${normalizeOutgoingEchoJid(destination)}`;
+}
+
 async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180) {
     let sessionId = null;
     let activeSession = null;
@@ -2185,6 +1750,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
     const expectedSessionId = sessionId;
     const expectedSession = activeSession;
     const originalDestinationJid = String(jid || '').trim();
+    const queuePartitionKey = getMessageQueuePartitionKey(expectedSessionId, originalDestinationJid, expectedSession);
     return queueMessage(async () => {
         const currentSession = activeSessions.get(expectedSessionId);
         if (currentSession !== expectedSession || currentSession?.sock !== sock || !['connecte', 'connected', 'active', 'online'].includes(String(currentSession?.status || '').toLowerCase())) {
@@ -2406,13 +1972,18 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                     const outgoingAccountPhone = getAuthenticatedPhoneNumber(sock.user, activeSessions.get(sessionId)?.authState?.creds) || normalizedJidNumber(sock.user?.id || sock.user?.phoneNumber || '');
                     const outgoingAccountJid = String(sock.user?.id || sock.user?.phoneNumber || '');
                     const outgoingAliases = [originalDestinationJid, destinationJid, alternateDestinationJid, isSelfChatDestination ? ownLidJid : '', result.key?.remoteJidAlt, result.key?.participant, result.key?.participantAlt, result.key?.participantPn].filter(Boolean);
-                    await persistOutgoingRetryMessage(sessionId, sentDestinationJid, result, outgoingAliases, outgoingAccountPhone, outgoingAccountJid, getAuthenticatedLid(sock.user, activeSessions.get(sessionId)?.authState?.creds));
-                    console.warn('[message-retry-post-send-fallback-used]', { sessionId, messageId: result.key.id, action: 'Baileys_preflight_patch_unavailable_or_not_invoked' });
+                    void persistOutgoingRetryMessage(sessionId, sentDestinationJid, result, outgoingAliases, outgoingAccountPhone, outgoingAccountJid, getAuthenticatedLid(sock.user, activeSessions.get(sessionId)?.authState?.creds))
+                        .then(saved => {
+                            if (saved) console.info('[message-retry-post-send-fallback-saved]', { sessionId, messageId: result.key.id, action: 'durable_retry_copy_saved_after_relay_without_blocking_chat_queue' });
+                            else console.warn('[message-retry-post-send-fallback-memory-only]', { sessionId, messageId: result.key.id, action: 'session_memory_copy_retained_for_retry' });
+                        })
+                        .catch(error => console.warn('[message-retry-post-send-fallback-failed]', { sessionId, messageId: result.key.id, error: error?.message || String(error) }));
+                    console.warn('[message-retry-post-send-fallback-used]', { sessionId, messageId: result.key.id, action: 'preflight_patch_unavailable_or_store_write_failed_fallback_is_non_blocking' });
                 }
             }
         }
         return result;
-    }, delayMs, sock, originalDestinationJid, async timeoutError => {
+    }, delayMs, sock, queuePartitionKey, async timeoutError => {
         const latestSession = activeSessions.get(expectedSessionId);
         if (latestSession === expectedSession && latestSession.sock === sock) {
             console.error('[outbound-chat-queue-session-fenced]', { sessionId: expectedSessionId, destinationType: originalDestinationJid.endsWith('@g.us') ? 'group' : originalDestinationJid.endsWith('@lid') ? 'private_lid' : 'private_or_other', reason: timeoutError?.message || String(timeoutError), action: 'close_only_the_timed_out_session_socket_and_stop_late_messages_from_this_session' });
@@ -2560,7 +2131,6 @@ const TFBOT_LOGICAL_COLLECTIONS = new Set([
     'group_settings',
     'lid_phone_mappings',
     'processed_messages',
-    'server_runtime_logs',
     'session_account_runtime_locks',
     'session_owners',
     'session_runtime_locks',
@@ -2802,7 +2372,9 @@ async function migrateTfbotStorage(targetDb) {
     for (const sourceDb of sourceDbs) {
         let names = [];
         try {
-            names = (await sourceDb.listCollections({}, { nameOnly: true }).toArray()).map(item => String(item.name || '')).filter(name => name && !name.startsWith('system.') && name !== TFBOT_APP_DATA_COLLECTION && name !== TFBOT_WHATSAPP_COLLECTION);
+            names = (await sourceDb.listCollections({}, { nameOnly: true }).toArray())
+                .map(item => String(item.name || ''))
+                .filter(name => name && !name.startsWith('system.') && name !== TFBOT_APP_DATA_COLLECTION && name !== TFBOT_WHATSAPP_COLLECTION && name !== 'server_runtime_logs');
         } catch (error) {
             console.warn('[tfbot-legacy-collection-list-failed]', { database: sourceDb.databaseName, error: error?.message || String(error) });
             continue;
@@ -2810,45 +2382,59 @@ async function migrateTfbotStorage(targetDb) {
         for (const name of names) {
             const sourceCollection = sourceDb.collection(name);
             let copied = 0;
-            let skippedLogs = 0;
             try {
-                if (name === 'server_runtime_logs') {
-                    skippedLogs = await sourceCollection.countDocuments({}).catch(() => 0);
-                } else {
-                    const cursor = sourceCollection.find({}).batchSize(250);
-                    let batch = [];
-                    const flush = async () => {
-                        if (!batch.length) return;
-                        if (name === 'baileys_auth') {
-                            for (const document of batch) {
-                                const copy = cloneMongoValue(document);
-                                await authTarget.updateOne({ _id: copy._id }, { $setOnInsert: copy }, { upsert: true, writeConcern: { w: 'majority', wtimeout: 15000 } });
-                            }
-                        } else {
-                            for (const document of batch) {
-                                const copy = cloneMongoValue(document);
-                                if (typeof copy._id === 'string') copy._id = tfbotNamespacedId(name, copy._id);
-                                copy.__tfbotBucket = name;
-                                if (name === 'baileys_outgoing_messages' && copy.createdAt) {
-                                    const createdAt = new Date(copy.createdAt).getTime();
-                                    if (Number.isFinite(createdAt)) copy.__tfbotExpiresAt = new Date(createdAt + BAILEYS_RETRY_MESSAGE_TTL_SECONDS * 1000);
-                                }
-                                await appTarget.updateOne({ _id: copy._id }, { $setOnInsert: copy }, { upsert: true, writeConcern: { w: 'majority', wtimeout: 15000 } });
-                            }
+                const cursor = sourceCollection.find({}).batchSize(250);
+                let batch = [];
+                const flush = async () => {
+                    if (!batch.length) return;
+                    if (name === 'baileys_auth') {
+                        for (const document of batch) {
+                            const copy = cloneMongoValue(document);
+                            await authTarget.updateOne(
+                                { _id: copy._id },
+                                { $setOnInsert: copy },
+                                { upsert: true, writeConcern: { w: 'majority', wtimeout: 15000 } }
+                            );
                         }
-                        copied += batch.length;
-                        batch = [];
-                    };
-                    while (await cursor.hasNext()) {
-                        batch.push(await cursor.next());
-                        if (batch.length >= 250) await flush();
+                    } else {
+                        for (const document of batch) {
+                            const copy = cloneMongoValue(document);
+                            if (typeof copy._id === 'string') copy._id = tfbotNamespacedId(name, copy._id);
+                            copy.__tfbotBucket = name;
+                            if (name === 'baileys_outgoing_messages' && copy.createdAt) {
+                                const createdAt = new Date(copy.createdAt).getTime();
+                                if (Number.isFinite(createdAt)) copy.__tfbotExpiresAt = new Date(createdAt + BAILEYS_RETRY_MESSAGE_TTL_SECONDS * 1000);
+                            }
+                            await appTarget.updateOne(
+                                { _id: copy._id },
+                                { $setOnInsert: copy },
+                                { upsert: true, writeConcern: { w: 'majority', wtimeout: 15000 } }
+                            );
+                        }
                     }
-                    await flush();
+                    copied += batch.length;
+                    batch = [];
+                };
+                while (await cursor.hasNext()) {
+                    batch.push(await cursor.next());
+                    if (batch.length >= 250) await flush();
                 }
+                await flush();
                 await sourceCollection.drop();
-                console.info('[tfbot-legacy-collection-migrated]', { sourceDatabase: sourceDb.databaseName, sourceCollection: name, destinationCollection: name === 'baileys_auth' ? TFBOT_WHATSAPP_COLLECTION : TFBOT_APP_DATA_COLLECTION, copiedDocuments: copied, discardedOldLogDocuments: skippedLogs });
+                console.info('[tfbot-legacy-collection-migrated]', {
+                    sourceDatabase: sourceDb.databaseName,
+                    sourceCollection: name,
+                    destinationCollection: name === 'baileys_auth' ? TFBOT_WHATSAPP_COLLECTION : TFBOT_APP_DATA_COLLECTION,
+                    copiedDocuments: copied
+                });
             } catch (error) {
-                console.error('[tfbot-legacy-collection-migration-failed]', { sourceDatabase: sourceDb.databaseName, sourceCollection: name, copiedDocuments: copied, error: error?.message || String(error), action: 'source_collection_preserved' });
+                console.error('[tfbot-legacy-collection-migration-failed]', {
+                    sourceDatabase: sourceDb.databaseName,
+                    sourceCollection: name,
+                    copiedDocuments: copied,
+                    error: error?.message || String(error),
+                    action: 'source_collection_preserved'
+                });
                 throw new Error(`tfbot_storage_migration_failed:${sourceDb.databaseName}:${name}`);
             }
         }
@@ -2869,33 +2455,18 @@ async function connectMongo(options = {}) {
             }
         }
         if (!skipStorageInitialization) await migrateTfbotStorage(targetDb);
-        const actualPhysicalCollections = (await targetDb.listCollections({}, { nameOnly: true }).toArray()).map(item => item.name).filter(name => !String(name).startsWith('system.')).sort();
+        const listedPhysicalCollections = (await targetDb.listCollections({}, { nameOnly: true }).toArray()).map(item => String(item.name || '')).filter(name => !name.startsWith('system.'));
+        const retiredPhysicalLogCollectionPresent = listedPhysicalCollections.includes('server_runtime_logs');
+        const actualPhysicalCollections = listedPhysicalCollections.filter(name => name !== 'server_runtime_logs').sort();
         const expectedPhysicalCollections = [TFBOT_APP_DATA_COLLECTION, TFBOT_WHATSAPP_COLLECTION].sort();
         const unexpectedPhysicalCollections = actualPhysicalCollections.filter(name => !expectedPhysicalCollections.includes(name));
-        console.info('[tfbot-storage-layout-verified]', { database: TFBOT_DATABASE_NAME, expectedPhysicalCollections, actualPhysicalCollections, physicalCollectionCount: actualPhysicalCollections.length, unexpectedPhysicalCollections, role: coordinatorOnly ? 'coordinator' : 'serving' });
+        console.info('[tfbot-storage-layout-verified]', { database: TFBOT_DATABASE_NAME, expectedPhysicalCollections, actualPhysicalCollections, physicalCollectionCount: actualPhysicalCollections.length, unexpectedPhysicalCollections, retiredPhysicalLogCollectionPresent, role: coordinatorOnly ? 'coordinator' : 'serving' });
         if (unexpectedPhysicalCollections.length || actualPhysicalCollections.length !== 2) throw new Error(`tfbot_storage_layout_must_have_exactly_two_collections:${actualPhysicalCollections.join(',')}`);
         db = createTfbotDatabase(targetDb);
-        const runtimeLogsCollection = db.collection('server_runtime_logs');
-        if (!skipStorageInitialization) {
-            await runtimeLogsCollection.createIndex({ deploymentGroupId: 1, createdAt: -1, _id: -1 }, { name: 'server_runtime_logs_deployment_group_created_desc' });
-            await runtimeLogsCollection.createIndex({ serviceId: 1, createdAt: -1, _id: -1 }, { name: 'server_runtime_logs_service_created_desc' });
-            await runtimeLogsCollection.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'server_runtime_logs_expire_at_ttl' });
-        }
         if (skipStorageInitialization) {
-            pendingRuntimeLogPersistenceCollection = runtimeLogsCollection;
-            console.info('[tfbot-worker-storage-prepared]', { host: TFBOT_CLUSTER_INSTANCE_HOST, role: 'selected-worker-awaiting-selection-confirmation', migration: false, indexInitialization: false, persistenceAttached: false });
+            console.info('[tfbot-worker-storage-prepared]', { host: TFBOT_CLUSTER_INSTANCE_HOST, role: 'selected-worker-awaiting-selection-confirmation', migration: false, indexInitialization: false });
             return true;
         }
-        const removedPreviousServiceDeployLogs = await clearPreviousRuntimeLogsForCurrentDeployment(runtimeLogsCollection);
-        if (runtimeLogInitialCleanupCompleted) {
-            await runtimeLogsCollection.updateMany({ expireAt: { $exists: true } }, { $unset: { expireAt: 1 } }).catch(error => console.warn('[runtime-log-expiry-field-removal-failed]', { error: error?.message || String(error) }));
-            attachRuntimeLogPersistence(runtimeLogsCollection);
-        } else {
-            runtimeLogPersistenceCollection = null;
-            pendingRuntimeLogPersistenceCollection = runtimeLogsCollection;
-            if (!coordinatorOnly) scheduleRuntimeLogBoundaryRetry(runtimeLogsCollection, 5000);
-        }
-        console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', source: 'deployment-group-cleanup', serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, clusterId: runtimeLogClusterId, releaseId: TFBOT_CODE_RELEASE_ID, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), removedPreviousDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousServiceDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousCodeLogCount: removedPreviousServiceDeployLogs, role: coordinatorOnly ? 'coordinator-log-writer-and-router' : 'active-serving', persistenceAttached: !!runtimeLogPersistenceCollection });
         await db.collection('cluster_router').createIndex({ updatedAt: -1 }, { name: 'cluster_router_updated_desc' });
         await db.collection('processed_messages').createIndex({ ts: 1 });
         await db.collection('processed_messages').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'processed_messages_expire_at_ttl' });
@@ -4574,7 +4145,7 @@ function isSameOriginFrontendApiRequest(req) {
 app.use((req, res, next) => {
     const originalSend = res.send.bind(res);
     const originalSendFile = res.sendFile.bind(res);
-    const skipEmbeddedBotPage = () => isBotIframeDocumentRequest(req) || String(req.path || '') === LOG_DASHBOARD_PATH;
+    const skipEmbeddedBotPage = () => isBotIframeDocumentRequest(req);
     res.send = function(body) {
         let outgoing = body;
         let contentType = String(res.getHeader('Content-Type') || '');
@@ -4696,7 +4267,6 @@ app.use((req, res, next) => {
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     const requestPath = String(req.path || '/').replace(/\/+$/, '') || '/';
     if (requestPath === '/ok' || requestPath === TFBOT_CLUSTER_HEALTH_PATH || requestPath === TFBOT_ROUTER_OK_PATH || requestPath === TFBOT_ROUTER_RESOLVE_PATH || requestPath === TFBOT_WORKER_CONTROL_PATH || requestPath === TFBOT_WORKER_POLL_PATH || isValidClusterHop(req)) return next();
-    if (requestPath === LOG_DASHBOARD_PATH) return next();
     if (requestPath === '/list') return next();
     if (requestPath === '/') {
         if (isAllowedEmbeddedHomeRequest(req)) return next();
@@ -5533,24 +5103,9 @@ async function activateTfbotWorker() {
                 const unusedClient = mongoClient;
                 mongoClient = null;
                 db = null;
-                pendingRuntimeLogPersistenceCollection = null;
-                runtimeLogPersistenceCollection = null;
                 if (unusedClient) await unusedClient.close().catch(() => {});
                 tfbotWorkerState = 'standby';
                 return false;
-            }
-            const activeRuntimeLogCollection = pendingRuntimeLogPersistenceCollection || db.collection('server_runtime_logs');
-            const removedPreviousRuntimeLogs = await clearPreviousRuntimeLogsForCurrentDeployment(activeRuntimeLogCollection);
-            if (runtimeLogInitialCleanupCompleted) {
-                await activeRuntimeLogCollection.updateMany({ expireAt: { $exists: true } }, { $unset: { expireAt: 1 } }).catch(error => console.warn('[runtime-log-expiry-field-removal-failed]', { host: TFBOT_CLUSTER_INSTANCE_HOST, error: error?.message || String(error) }));
-                attachRuntimeLogPersistence(activeRuntimeLogCollection);
-                pendingRuntimeLogPersistenceCollection = null;
-                console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', role: 'active-serving-only', host: TFBOT_CLUSTER_INSTANCE_HOST, serviceId: runtimeLogRenderServiceId, deploymentId: runtimeLogDeploymentId, releaseId: TFBOT_CODE_RELEASE_ID, deploymentGroupId: runtimeLogDeploymentGroupId, instanceId: runtimeLogInstanceId, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), removedPreviousDeployLogCount: removedPreviousRuntimeLogs });
-            } else {
-                runtimeLogPersistenceCollection = null;
-                pendingRuntimeLogPersistenceCollection = activeRuntimeLogCollection;
-                scheduleRuntimeLogBoundaryRetry(activeRuntimeLogCollection, 5000);
-                console.warn('[runtime-log-persistence-held]', { host: TFBOT_CLUSTER_INSTANCE_HOST, releaseId: TFBOT_CODE_RELEASE_ID, action: 'worker_can_serve_but_logs_remain_in_memory_until_global_deployment_boundary_is_confirmed' });
             }
             tfbotWorkerActive = true;
             tfbotWorkerStarting = false;
@@ -5573,14 +5128,6 @@ async function activateTfbotWorker() {
             tfbotWorkerLeaseUntil = 0;
             if (clusterHeartbeatTimer) clearInterval(clusterHeartbeatTimer);
             clusterHeartbeatTimer = null;
-            try { await flushRuntimeLogPersistence(); } catch (flushError) {}
-            if (runtimeLogPersistenceTimer) clearTimeout(runtimeLogPersistenceTimer);
-            runtimeLogPersistenceTimer = null;
-            runtimeLogPersistenceCollection = null;
-            pendingRuntimeLogPersistenceCollection = null;
-            runtimeLogBoundaryRetryCollection = null;
-            if (runtimeLogBoundaryRetryTimer) clearTimeout(runtimeLogBoundaryRetryTimer);
-            runtimeLogBoundaryRetryTimer = null;
             const client = mongoClient;
             mongoClient = null;
             db = null;
@@ -5682,15 +5229,6 @@ async function deactivateTfbotWorker(reason = 'not_selected') {
                 { $set: { status: 'standby', draining: true, leaseUntil: expiredAt, activeSessionCount: 0, inFlightCount: 0, lastSeenAt: new Date(), updatedAt: new Date() } }
             ).catch(error => console.warn('[tfbot-worker-standby-state-failed]', { error: error?.message || String(error) }));
         }
-        try { await flushRuntimeLogPersistence(); }
-        catch (error) { console.warn('[tfbot-worker-log-flush-failed]', error?.message || String(error)); }
-        if (runtimeLogPersistenceTimer) clearTimeout(runtimeLogPersistenceTimer);
-        runtimeLogPersistenceTimer = null;
-        runtimeLogPersistenceCollection = null;
-        pendingRuntimeLogPersistenceCollection = null;
-        runtimeLogBoundaryRetryCollection = null;
-        if (runtimeLogBoundaryRetryTimer) clearTimeout(runtimeLogBoundaryRetryTimer);
-        runtimeLogBoundaryRetryTimer = null;
         const client = mongoClient;
         mongoClient = null;
         db = null;
@@ -6484,363 +6022,6 @@ app.get('/sw.js', (req, res) => res.sendFile(path.join(__dirname, 'sw.js')));
 app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s Us Adam D’H7"));
 app.get('/ok', (req, res) => res.send('ok'));
 
-async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIMIT, sinceValue = 0, olderCursorValue = null) {
-    const limit = Math.max(20, Math.min(250, Number(requestedLimit) || LOG_DASHBOARD_PAGE_LIMIT));
-    const since = Math.max(0, Number(sinceValue) || 0);
-    const beforeAt = olderCursorValue && typeof olderCursorValue === 'object' ? new Date(olderCursorValue.beforeAt || 0) : null;
-    const beforeId = String(olderCursorValue?.beforeId || '').trim();
-    const older = !!(beforeAt && Number.isFinite(beforeAt.getTime()) && beforeAt.getTime() >= runtimeLogDeploymentStartedAt.getTime() && beforeId);
-    const incremental = !older && since > 0;
-    const byId = new Map();
-    let databaseReadError = null;
-    let hasOlder = false;
-    let nextOlderCursor = null;
-    try {
-        if (db && runtimeLogInitialCleanupCompleted) {
-            const filter = { createdAt: { $gte: runtimeLogDeploymentStartedAt }, deploymentGroupId: runtimeLogDeploymentGroupId };
-            if (older) {
-                filter.$and = [
-                    { createdAt: { $gte: runtimeLogDeploymentStartedAt } },
-                    { $or: [
-                        { createdAt: { $lt: beforeAt } },
-                        { createdAt: beforeAt, _id: { $lt: beforeId } }
-                    ] }
-                ];
-            } else if (incremental) {
-                filter.createdAt = { $gte: new Date(Math.max(runtimeLogDeploymentStartedAt.getTime(), since - 2000)) };
-            }
-            const cursor = db.collection('server_runtime_logs')
-                .find(filter, { projection: { at: 1, level: 1, text: 1, createdAt: 1, clusterId: 1, deploymentId: 1, deploymentGroupId: 1, deploymentStartedAt: 1, serviceId: 1, serviceName: 1, serviceScope: 1, port: 1, instance: 1, renderInstanceId: 1 } })
-                .sort(incremental ? { createdAt: 1, _id: 1 } : { createdAt: -1, _id: -1 })
-                .limit(older || !incremental ? limit + 1 : limit);
-            if (typeof cursor.maxTimeMS === 'function') cursor.maxTimeMS(2500);
-            const persisted = await cursor.toArray();
-            const page = older || !incremental ? persisted.slice(0, limit) : persisted;
-            hasOlder = !incremental && persisted.length > limit;
-            if (!incremental && page.length) {
-                const oldest = page[page.length - 1];
-                nextOlderCursor = {
-                    beforeAt: new Date(oldest.createdAt || oldest.at || 0).toISOString(),
-                    beforeId: String(oldest._id || '')
-                };
-            }
-            for (const item of page) {
-                const id = String(item._id);
-                byId.set(id, {
-                    id,
-                    at: String(item.at || item.createdAt?.toISOString?.() || ''),
-                    level: String(item.level || 'log'),
-                    text: String(item.text || ''),
-                    deploymentGroupId: String(item.deploymentGroupId || ''),
-                    serviceId: String(item.serviceId || ''),
-                    serviceName: String(item.serviceName || ''),
-                    serviceScope: String(item.serviceScope || ''),
-                    port: String(item.port || '')
-                });
-            }
-        } else {
-            databaseReadError = db ? 'Purge globale et repère de déploiement en attente' : 'MongoDB non connecté';
-        }
-    } catch (error) {
-        databaseReadError = String(error?.message || error || 'lecture MongoDB impossible').slice(0, 180);
-    }
-    if (!older) {
-        for (const item of runtimeLogBuffer) {
-            const atMs = Date.parse(String(item.at || '')) || 0;
-            if (atMs >= runtimeLogDeploymentStartedAt.getTime() && (!incremental || atMs >= Math.max(runtimeLogDeploymentStartedAt.getTime(), since - 2000))) byId.set(String(item.id), item);
-        }
-    }
-    let logs = Array.from(byId.values())
-        .sort((a, b) => String(a.at).localeCompare(String(b.at)) || String(a.id).localeCompare(String(b.id)));
-    if (!older && !incremental) logs = logs.slice(-limit);
-    else if (older) logs = logs.slice(0, limit);
-    else logs = logs.slice(0, limit);
-    if (databaseReadError) {
-        logs.push({
-            id: `dashboard-read-error:${runtimeLogInstanceId}:${Date.now()}`,
-            at: new Date().toISOString(),
-            level: 'error',
-            text: `[runtime-log-dashboard] lecture historique impossible: ${databaseReadError}`
-        });
-    }
-    if (!logs.length && !incremental && !older) {
-        logs.push({
-            id: `dashboard-empty:${runtimeLogInstanceId}`,
-            at: new Date().toISOString(),
-            level: 'warn',
-            text: '[runtime-log-dashboard] aucun log enregistré pour ce déploiement'
-        });
-    }
-    const nextSince = logs.reduce((latest, item) => Math.max(latest, Date.parse(String(item.at || '')) || 0), since);
-    return { logs, nextSince, hasOlder: older || !incremental ? hasOlder : null, olderCursor: older || !incremental ? nextOlderCursor : null };
-}
-
-app.get(LOG_DASHBOARD_PATH, async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
-    res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'");
-    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
-    res.removeHeader('Access-Control-Allow-Origin');
-
-    const now = Date.now();
-    const clientKey = String(req.ip || req.socket?.remoteAddress || 'unknown').slice(0, 100);
-    const rate = logDashboardRateLimits.get(clientKey) || { startedAt: now, count: 0 };
-    if (now - rate.startedAt > 60000) { rate.startedAt = now; rate.count = 0; }
-    rate.count++;
-    logDashboardRateLimits.set(clientKey, rate);
-    if (logDashboardRateLimits.size > 2000) {
-        for (const [key, value] of logDashboardRateLimits.entries()) {
-            if (now - value.startedAt > 120000 || logDashboardRateLimits.size > 1800) logDashboardRateLimits.delete(key);
-            if (logDashboardRateLimits.size <= 1800) break;
-        }
-    }
-    if (rate.count > 600) return res.status(429).type('text/plain').send('Trop de requêtes.');
-
-    if (String(req.query?.format || '').toLowerCase() === 'json') {
-        const requestedLimit = Math.max(20, Math.min(250, Number(req.query?.limit) || LOG_DASHBOARD_PAGE_LIMIT));
-        const since = Math.max(0, Number(req.query?.since) || 0);
-        const olderRequested = String(req.query?.older || '') === '1';
-        const olderCursor = olderRequested ? { beforeAt: String(req.query?.beforeAt || ''), beforeId: String(req.query?.beforeId || '') } : null;
-        if (olderRequested && (!Number.isFinite(new Date(olderCursor.beforeAt).getTime()) || !olderCursor.beforeId)) return res.status(400).json({ ok: false, error: 'invalid_older_log_cursor' });
-        const snapshot = await collectRuntimeLogSnapshot(requestedLimit, since, olderCursor);
-        return res.status(200).json({ ok: true, count: snapshot.logs.length, logs: snapshot.logs, nextSince: snapshot.nextSince, hasOlder: snapshot.hasOlder, olderCursor: snapshot.olderCursor, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, serviceScope: runtimeLogServiceScope, port: runtimeLogPort, instanceId: runtimeLogInstanceId, serverTime: new Date().toISOString() });
-    }
-
-    const initialLogs = runtimeLogBuffer.filter(item => (Date.parse(String(item.at || '')) || 0) >= runtimeLogDeploymentStartedAt.getTime()).slice(-Math.min(30, LOG_DASHBOARD_PAGE_LIMIT));
-    const firstPaintLogs = initialLogs.length ? initialLogs : [{
-        id: `dashboard-loading:${runtimeLogInstanceId}`,
-        at: new Date().toISOString(),
-        level: 'info',
-        text: '[runtime-log-dashboard] chargement des logs persistants du serveur…'
-    }];
-    const escapeLogHtml = value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    const initialRowsHtml = firstPaintLogs.map(item => {
-        const id = escapeLogHtml(item.id || '');
-        const date = escapeLogHtml(String(item.at || '').replace('T', ' ').replace('Z', ''));
-        const level = escapeLogHtml(String(item.level || 'log').toUpperCase());
-        const text = escapeLogHtml(item.text || '');
-        return `<article class="log" data-id="${id}"><header class="meta"><em class="level ${escapeLogHtml(item.level || 'log')}">${level}</em><span class="separator">;</span><time class="date">${date}</time><button class="copy-log" type="button" aria-label="Copier ce log"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg></button></header><pre class="message">${text}</pre></article>`;
-    }).join('');
-    const initialLogsJson = JSON.stringify(firstPaintLogs).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
-    const html = `<!doctype html>
-<html lang="fr">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<meta name="color-scheme" content="dark">
-<title></title>
-<style>
-:root{color-scheme:dark;background:#000;color:#fff;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{margin:0;padding:0;width:100%;min-height:100%;background:#000;color:#fff;overscroll-behavior:none;overscroll-behavior-x:none}
-body{min-height:100vh;min-height:100svh;overflow-x:hidden;touch-action:pan-y}
-#load-older{position:sticky;top:0;z-index:9;display:none;margin:8px auto 0;padding:9px 14px;border:1px solid #555;border-radius:8px;background:#111;color:#fff;font:600 12px/1.35 system-ui,-apple-system,sans-serif;cursor:pointer}
-#load-older.visible{display:block}#load-older:disabled{opacity:.6;cursor:wait}
-#logs{width:100%;padding:14px 8px max(22px,env(safe-area-inset-bottom));overscroll-behavior:none}
-.log{position:relative;width:100%;padding:8px 2px 10px;color:#fff;white-space:normal;overflow-wrap:anywhere}
-.meta{display:flex;align-items:center;gap:6px;min-height:19px;padding-right:34px;font-size:11px;line-height:1.45}
-.level{font-weight:800;font-style:italic;white-space:nowrap;color:#fff}
-.level.error,.level.fatal,.level.warn,.level.info,.level.debug,.level.trace{color:#fff}
-.separator{font-style:normal;color:#fff}
-.date{font-style:italic;color:#fff;white-space:nowrap}
-.message{display:block;margin:4px 32px 0 0;padding:0;color:#fff;font-size:11px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-family:inherit;user-select:text}
-.copy-log,#copy-all{position:absolute;top:5px;right:0;width:27px;height:27px;display:grid;place-items:center;border:0;padding:0;margin:0;background:transparent;color:#fff;opacity:.9;cursor:pointer}
-.copy-log:active,#copy-all:active{opacity:1}.copy-log svg,#copy-all svg{display:block;width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
-#copy-all{position:fixed;z-index:10;top:max(10px,env(safe-area-inset-top));right:max(12px,env(safe-area-inset-right));width:34px;height:34px;opacity:1}
-#jump{position:fixed;z-index:8;right:max(12px,env(safe-area-inset-right));bottom:max(14px,env(safe-area-inset-bottom));width:42px;height:42px;display:none;place-items:center;padding:0;border:0;border-radius:0;background:transparent;color:#fff;cursor:pointer;opacity:1}
-#jump.visible{display:grid}#jump svg{width:27px;height:27px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-#unseen-count{position:absolute;right:0;top:-15px;min-width:16px;max-width:80px;overflow:hidden;color:#fff;background:#000;font:800 12px/1 system-ui,-apple-system,sans-serif;text-align:right;white-space:nowrap}
-@media(max-width:560px){#logs{padding-left:6px;padding-right:6px}.meta{font-size:10px}.message{font-size:10px}.log{padding-top:7px;padding-bottom:9px}}
-</style>
-</head></style>
-</head>
-<body>
-<button id="copy-all" type="button" aria-label="Copier tous les logs"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg></button>
-<button id="load-older" type="button">Charger les anciens logs</button>
-<main id="logs" aria-live="off">${initialRowsHtml}</main>
-<button id="jump" type="button" aria-label="Aller aux nouveaux logs ou en bas"><span id="unseen-count" aria-live="off"></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v15M6 13l6 6 6-6"/></svg></button>
-<script>
-window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
-(() => {
- const endpoint = location.pathname;
-     const deploymentStartedAtMs = ${runtimeLogDeploymentStartedAt.getTime()};
- const logsNode = document.getElementById('logs');
- const jumpButton = document.getElementById('jump');
- const copyAllButton = document.getElementById('copy-all');
- const loadOlderButton = document.getElementById('load-older');
- const unseenCountNode = document.getElementById('unseen-count');
- let allLogs = Array.isArray(window.__SERVER_LOG_SNAPSHOT__) ? window.__SERVER_LOG_SNAPSHOT__ : [];
- let lastFetchError = '';
- let requestRunning = false;
- let pollTimer = null;
- let firstUnseenId = '';
- let unseenCount = 0;
- let jumpAction = 'unseen';
- let hasRendered = false;
- let logCursor = 0;
- let initialLoadDone = false;
- let olderCursor = null;
- let hasOlder = false;
- let olderRequestRunning = false;
- const maxRows = ${LOG_DASHBOARD_PAGE_LIMIT};
- const textOf = value => String(value == null ? '' : value);
- const levelClass = value => textOf(value).toLowerCase().replace(/[^a-z0-9_-]/g,'');
- function atBottom(){return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 8;}
- function rowFor(id){return [...logsNode.querySelectorAll('.log')].find(row => row.dataset.id === id) || null;}
- function visibleAnchor(){
-   const rows = logsNode.querySelectorAll('.log');
-   for(const row of rows){const box=row.getBoundingClientRect();if(box.bottom>0)return {id:row.dataset.id,top:box.top};}
-   return null;
- }
- function updateJump(){
-   jumpButton.classList.toggle('visible',!atBottom() || unseenCount>0);
-   unseenCountNode.textContent=unseenCount>0?(unseenCount>99?'99+':String(unseenCount)):'';
- }
- function copyText(item){
-   return textOf(item.level).toUpperCase() + ' ; ' + textOf(item.at).replace('T',' ').replace('Z','') + '\\n' + textOf(item.text);
- }
- async function writeClipboard(value){
-   if(navigator.clipboard&&navigator.clipboard.writeText){await navigator.clipboard.writeText(value);return true;}
-   const area=document.createElement('textarea');area.value=value;area.setAttribute('readonly','');area.style.position='fixed';area.style.left='-9999px';area.style.top='0';document.body.appendChild(area);area.select();const copied=document.execCommand('copy');area.remove();if(!copied)throw new Error('clipboard_unavailable');return true;
- }
- async function copyAll(){
-   try{
-     while(hasOlder&&olderCursor){const loaded=await loadOlder(true);if(!loaded)throw new Error('older_log_page_unavailable');}
-     await writeClipboard(allLogs.map(copyText).join('\\n\\n'));
-     copyAllButton.style.opacity='.5';window.setTimeout(()=>{copyAllButton.style.opacity='1';},500);
-   }catch(error){copyAllButton.style.opacity='1';}
- }
- copyAllButton.addEventListener('click',copyAll);
- loadOlderButton.addEventListener('click',()=>{void loadOlder(false);});
- function updateOlderButton(){loadOlderButton.classList.toggle('visible',hasOlder&&!!olderCursor);loadOlderButton.disabled=olderRequestRunning;loadOlderButton.textContent=olderRequestRunning?'Chargement des anciens logs…':hasOlder?'Charger les anciens logs':'Tous les logs sont chargés';}
- function makeRow(item){
-   const row=document.createElement('article');row.className='log';row.dataset.id=textOf(item.id);
-   const meta=document.createElement('header');meta.className='meta';
-   const level=document.createElement('em');level.className='level '+levelClass(item.level);level.textContent=textOf(item.level).toUpperCase();
-   const separator=document.createElement('span');separator.className='separator';separator.textContent=';';
-   const date=document.createElement('time');date.className='date';date.textContent=textOf(item.at).replace('T',' ').replace('Z','');
-   const copy=document.createElement('button');copy.className='copy-log';copy.type='button';copy.setAttribute('aria-label','Copier ce log');
-   copy.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg>';
-   copy.addEventListener('click',()=>copyOne(item,copy));
-   meta.append(level,separator,date,copy);
-   const content=document.createElement('pre');content.className='message';content.textContent=textOf(item.text);
-   row.append(meta,content);
-   return row;
- }
- async function copyOne(item,button){
-   try{await writeClipboard(copyText(item));button.style.opacity='.45';window.setTimeout(()=>{button.style.opacity='.9';},550);}catch(error){}
- }
- function render(nextLogs, options={}){
-   const oldIds=new Set(allLogs.map(item=>textOf(item.id)));
-   const incoming=(Array.isArray(nextLogs)?nextLogs:[]).filter(item=>!textOf(item.id).startsWith('dashboard-loading:')&&(Date.parse(textOf(item.at))||0)>=deploymentStartedAtMs);
-   const merged=new Map(allLogs.map(item=>[textOf(item.id),item]));
-   for(const item of incoming)merged.set(textOf(item.id),item);
-   const next=Array.from(merged.values()).sort((a,b)=>textOf(a.at).localeCompare(textOf(b.at))||textOf(a.id).localeCompare(textOf(b.id)));
-   const added=next.filter(item=>!oldIds.has(textOf(item.id))&&!textOf(item.id).startsWith('dashboard-loading:'));
-   const wasAtBottom=options.older?false:(!hasRendered||atBottom());
-   const anchor=wasAtBottom?null:visibleAnchor();
-   if(!options.older&&!wasAtBottom&&added.length){if(!firstUnseenId)firstUnseenId=textOf(added[0].id);unseenCount+=added.length;}
-   allLogs=next;
-   const fragment=document.createDocumentFragment();
-   for(const item of allLogs)fragment.appendChild(makeRow(item));
-   logsNode.replaceChildren(fragment);
-   hasRendered=true;
-   if(wasAtBottom){
-     firstUnseenId='';unseenCount=0;jumpAction='unseen';
-     window.scrollTo(0,document.documentElement.scrollHeight);
-   }else if(anchor){
-     const restored=rowFor(anchor.id);
-     if(restored){const nextTop=restored.getBoundingClientRect().top;window.scrollBy(0,nextTop-anchor.top);}
-   }
-   updateJump();
-   updateOlderButton();
- }
- async function loadOlder(fromCopy=false){
-   if(!hasOlder||!olderCursor||olderRequestRunning)return false;
-   olderRequestRunning=true;updateOlderButton();
-   try{
-     const query='?format=json&limit='+maxRows+'&older=1&beforeAt='+encodeURIComponent(olderCursor.beforeAt)+'&beforeId='+encodeURIComponent(olderCursor.beforeId);
-     const response=await fetch(endpoint+query,{cache:'no-store',credentials:'same-origin',headers:{'Accept':'application/json'}});
-     if(!response.ok)throw new Error('HTTP '+response.status);
-     const payload=await response.json();
-     if(!payload||payload.ok!==true||!Array.isArray(payload.logs))throw new Error('invalid_older_log_response');
-     if((Date.parse(textOf(payload.deploymentStartedAt))||0)!==deploymentStartedAtMs)throw new Error('deployment_timestamp_mismatch');
-     render(payload.logs,{older:true});
-     olderCursor=payload.olderCursor||null;
-     hasOlder=payload.hasOlder===true;
-     updateOlderButton();
-     return true;
-   }catch(error){
-     loadOlderButton.textContent='Erreur : réessayer';
-     if(fromCopy)throw error;
-     return false;
-   }finally{olderRequestRunning=false;updateOlderButton();}
- }
- async function load(){
-   if(requestRunning)return;
-   requestRunning=true;
-   try{
-     const query=initialLoadDone?('?format=json&limit=160&since='+Math.max(0,logCursor-2000)):('?format=json&limit='+maxRows);
-     const response=await fetch(endpoint+query,{cache:'no-store',credentials:'same-origin',headers:{'Accept':'application/json'}});
-     if(!response.ok)throw new Error('HTTP '+response.status);
-     const payload=await response.json();
-     if(!payload||payload.ok!==true||!Array.isArray(payload.logs))throw new Error('invalid_log_response');
-     if((Date.parse(textOf(payload.deploymentStartedAt))||0)!==deploymentStartedAtMs)throw new Error('deployment_timestamp_mismatch');
-     lastFetchError='';
-     if(Number.isFinite(Number(payload.nextSince)))logCursor=Math.max(logCursor,Number(payload.nextSince));
-     if(!initialLoadDone){hasOlder=payload.hasOlder===true;olderCursor=payload.olderCursor||null;}
-     initialLoadDone=true;
-     if(payload.logs.length)render(payload.logs);
-     updateOlderButton();
-   }catch(error){
-     const detail='dashboard_fetch_failed: '+textOf(error&&error.message?error.message:error).slice(0,180);
-     if(detail!==lastFetchError){
-       lastFetchError=detail;
-       const existing=allLogs.filter(item=>!textOf(item.id).startsWith('dashboard-client-error:'));
-       existing.push({id:'dashboard-client-error:'+Date.now(),at:new Date().toISOString(),level:'error',text:'[runtime-log-dashboard] '+detail});
-       render(existing,false);
-     }
-   }finally{requestRunning=false;}
- }
- jumpButton.addEventListener('click',()=>{
-   if(jumpAction==='unseen'&&firstUnseenId){
-     const target=rowFor(firstUnseenId);
-     if(target){target.scrollIntoView({block:'start',behavior:'smooth'});jumpAction='bottom';updateJump();return;}
-   }
-   window.scrollTo({top:document.documentElement.scrollHeight,behavior:'smooth'});
-   jumpAction='unseen';firstUnseenId='';
-   window.setTimeout(updateJump,450);
- });
- let scrollFrame=0;
- window.addEventListener('scroll',()=>{
-   if(scrollFrame)return;
-   scrollFrame=window.requestAnimationFrame(()=>{
-     scrollFrame=0;
-     if(atBottom()){firstUnseenId='';unseenCount=0;jumpAction='unseen';}
-     updateJump();
-   });
- },{passive:true});
- document.addEventListener('gesturestart',event=>event.preventDefault(),{passive:false});
- document.addEventListener('touchmove',event=>{if(event.touches&&event.touches.length>1)event.preventDefault();},{passive:false});
- document.addEventListener('wheel',event=>{if(event.ctrlKey||event.metaKey)event.preventDefault();},{passive:false});
- document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&['+','=','-','0'].includes(String(event.key).toLowerCase()))event.preventDefault();});
- document.addEventListener('visibilitychange',()=>{if(!document.hidden)void load();});
- void load();
- updateOlderButton();
- pollTimer=window.setInterval(load,30000);
- window.addEventListener('pagehide',()=>{if(pollTimer)window.clearInterval(pollTimer);});
-})();
-</script>
-</body>
-</html>`;
-    return res.status(200).type('html').send(html);
-});
-const logDashboardRateLimits = new Map();
 const handleTFSlugRequest = (req, res) => {
     const match = String(req.path || '').match(/(?:^|\/)TF-([A-Za-z0-9_-]{1,80})(?:\/.*)?$/i);
     const id = String(req.params?.id || match?.[1] || '');
@@ -8278,8 +7459,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             retryCounterTtlMs: MSG_RETRY_COUNTER_TTL_MS,
             retryCounterLimit: MSG_RETRY_COUNTER_MAX_ENTRIES
         });
-        const baileysLogger = createDashboardPinoLogger({ level: baileysLogLevel, base: { sessionId, component: 'baileys' } });
-        const signalKeyStoreLogger = createDashboardPinoLogger({ level: signalStoreLogLevel, base: { sessionId, component: 'signal-key-store' } });
+        const baileysLogger = createRenderPinoLogger({ level: baileysLogLevel, base: { sessionId, component: 'baileys' } });
+        const signalKeyStoreLogger = createRenderPinoLogger({ level: signalStoreLogLevel, base: { sessionId, component: 'signal-key-store' } });
         const cachedSignalKeyStore = createDurableSignalKeyStore(state.keys, signalKeyStoreLogger);
         let sock;
         sock = makeWASocket({
@@ -8323,8 +7504,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const saved = await persistOutgoingRetryMessage(sessionId, remoteJid, messageToPersist, aliases, accountPhone, accountJid, accountLid);
                 if (!saved) {
                     outgoingRetryPreflightIds.delete(`${sessionId}:${messageId}`);
-                    console.error('[message-retry-preflight-blocked-send]', { sessionId, messageId, remoteJid, action: 'do_not_relay_message_without_durable_getMessage_copy' });
-                    throw new Error('outgoing_retry_store_preflight_failed');
+                    console.error('[message-retry-preflight-memory-fallback]', {
+                        sessionId,
+                        messageId,
+                        remoteJid,
+                        timeoutMs: BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS,
+                        memoryCopyAvailable: true,
+                        action: 'allow_delivery_using_session_scoped_memory_copy_and_retry_durable_save_after_relay'
+                    });
+                    return;
                 }
                 outgoingRetryPreflightIds.set(`${sessionId}:${messageId}`, Date.now());
                 while (outgoingRetryPreflightIds.size > 5000) outgoingRetryPreflightIds.delete(outgoingRetryPreflightIds.keys().next().value);
@@ -9521,8 +8709,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         || outgoingMessageCache.has(`${sessionId}:${earlyReceivedChat}:${earlyReceivedId}`)
                         || isRecentOutgoingMessageId(sessionId, earlyReceivedId);
                     if (!alreadyPersistedOutgoing) {
-                        const savedOwnerMessage = await persistOutgoingRetryMessage(sessionId, earlyReceivedChat, m, [earlyReceivedChat, m?.key?.remoteJidAlt].filter(Boolean), earlyReceivedOwnPhone, sock.user?.id || '', earlyReceivedOwnLid);
-                        if (savedOwnerMessage) console.info('[owner-outgoing-message-retry-copy-saved]', { sessionId, messageId: earlyReceivedId, chatJid: earlyReceivedChat, sessionStatus: activeMessageSession?.status || null });
+                        void persistOutgoingRetryMessage(sessionId, earlyReceivedChat, m, [earlyReceivedChat, m?.key?.remoteJidAlt].filter(Boolean), earlyReceivedOwnPhone, sock.user?.id || '', earlyReceivedOwnLid)
+                            .then(savedOwnerMessage => {
+                                if (savedOwnerMessage) console.info('[owner-outgoing-message-retry-copy-saved]', { sessionId, messageId: earlyReceivedId, chatJid: earlyReceivedChat, sessionStatus: activeMessageSession?.status || null, persistenceMode: 'background_without_blocking_message_dispatch' });
+                            })
+                            .catch(ownerMessageSaveError => console.warn('[owner-outgoing-message-retry-copy-save-failed]', { sessionId, messageId: earlyReceivedId, error: ownerMessageSaveError?.message || String(ownerMessageSaveError) }));
                     }
                 }
                 const activeMessageAuthenticated = activeMessageSession?.sock === sock && activeMessageSession.status === 'connecte' && activeMessageCredentials?.registered === true && !!activeMessageIdentity && activeMessageSocketReady;
@@ -9553,6 +8744,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const receivedOwnAccountJids = [...new Set([sock.user?.id, receivedOwnPhoneNumber ? `${receivedOwnPhoneNumber}@s.whatsapp.net` : '', receivedOwnLid].filter(Boolean).map(String))];
                 const receivedChatAliases = [...new Set([receivedChat, m?.key?.remoteJidAlt].filter(Boolean).map(String))];
                 const receivedParsedCommand = receivedExplicitParsedCommand;
+                if (m?.key?.fromMe === true && receivedParsedCommand) {
+                    console.info('[companion-device-command-dispatch]', {
+                        sessionId,
+                        messageId: receivedId,
+                        chatJid: receivedChat,
+                        command: receivedParsedCommand.command || null,
+                        action: 'dispatch_readable_command_from_linked_device_unless_the_id_is_a_known_bot_echo'
+                    });
+                }
                 const recentOutgoingIdEcho = !!m?.key?.fromMe && isRecentOutgoingMessageId(sessionId, receivedId);
                 const outgoingTextEcho = !!m?.key?.fromMe && !receivedExplicitParsedCommand
                     && consumeOutgoingTextEcho(sessionId, m?.key?.remoteJid || receivedChat, receivedBody);
@@ -11957,7 +11157,6 @@ async function shutdownServer(signal) {
             { $set: { status: 'draining', draining: true, leaseUntil: new Date(Date.now() - 1000), lastSeenAt: new Date(), updatedAt: new Date(), activeSessionCount: activeSessions.size, inFlightCount: clusterInFlightRequests } }
         ).catch(error => console.warn('[cluster-instance-drain-mark-failed]', { error: error?.message || String(error) }));
     }
-    try { await flushRuntimeLogPersistence(); } catch (logFlushError) { originalConsoleError('[runtime-log-final-flush-failed]', logFlushError?.message || String(logFlushError)); }
     for (const timer of reconnectTimers.values()) clearTimeout(timer);
     reconnectTimers.clear();
     for (const timer of sessionLockRetryTimers.values()) clearTimeout(timer);
@@ -11996,7 +11195,6 @@ async function shutdownServer(signal) {
         try { httpServer.close(() => resolve()); } catch (e) { resolve(); }
     });
     console.info('[server-shutdown-completed]', { signal, processInstanceId });
-    try { await flushRuntimeLogPersistence(); } catch (error) { originalConsoleError('[runtime-log-shutdown-flush-failed]', error?.message || String(error)); }
     try { if (mongoClient) await mongoClient.close(); } catch (error) { console.warn('[server-shutdown-mongo-close-failed]', error?.message || String(error)); }
 }
 
@@ -12049,9 +11247,8 @@ async function main() {
         aiDispatchPolicy: 'ai-ia-asistan-iu-tfasistan-prefix-required-at-parser-and-handler',
         actionErrorExplanation: 'localized-static-fallback-no-ai-request',
         signalKeyCacheIsolation: 'deep-copy-on-cache-read-and-write-no-shared-mutable-session-object',
-        runtimeLogBoundaryRequiresCurrentReleaseMarker: true,
         routerProbePolicy: 'current-active-only-fallback-after-active-failure',
-        companionDeviceMessages: 'ignored-before-command-dispatch-without-read-receipt',
+        companionDeviceMessages: 'dispatch-readable-own-device-commands-and-ignore-only-known-bot-echoes',
         pairingPendingSessionTtlMs: PAIRING_SESSION_TTL_MS,
         pairingConnectedSocketStates: [1, 'OPEN'],
         pairingProxyTimeoutMs: TFBOT_PAIRING_PROXY_TIMEOUT_MS,
@@ -12068,14 +11265,10 @@ async function main() {
         imageUploadBasename: 'tfbot',
         groupSenderKeyResetBeforeSendEnabled: false,
         groupSenderKeyResetEveryMessage: false,
-        selfChatAddressingMode: 'preserve_original_jid',
+        selfChatAddressingMode: 'authenticated_own_phone_primary_original_lid_fallback',
         privateLidMappedPhonePrimary: true,
         passiveSocketHealth: true,
         activeGroupFetchHealthProbe: false,
-        runtimeLogDeploymentId: runtimeLogDeploymentId,
-        previousDeploymentLogsPruned: true,
-        runtimeLogDeploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(),
-        runtimeLogPort: runtimeLogPort,
         publicModeAcceptsOtherBotOwnersAsOrdinaryUsers: true,
         exclusiveAccountRuntimeLocks: true,
         accountLockIncludesPnAndLidAliases: true,
@@ -12096,12 +11289,12 @@ async function main() {
         authWritesFencedByRuntimeLock: true,
         retryStoreExactSessionIdFallback: true,
         retryStoreSameAuthenticatedAccountFallback: true,
-        runtimeLogHistoryPagination: true,
-        runtimeLogRetentionAfterCoordinatorHttpListening: false,
-        runtimeLogMongoPurgeBeforeCoordinatorHttpListen: true,
+        outgoingRetryMessagePersistedBeforeRelay: true,
+        privateQueueAliasesCanonicalizedWithinSession: true,
+        timedOutQueueAbandonAfterSessionFenceMs: MESSAGE_QUEUE_TIMEOUT_SETTLE_MS,
         authenticatedSessionAuthDeletionOnOfflineTimeout: false,
         targetedSignalPeerRecovery: true,
-        selfChatPhonePreferred: false,
+        selfChatPhonePreferred: true,
         lidPhoneMappingFreshMs: LID_PHONE_MAPPING_FRESH_MS,
         sessionScopedLidMappings: true,
         senderKeyIdentityInvalidation: true,
@@ -12112,12 +11305,8 @@ async function main() {
         if (TFBOT_CLUSTER_COORDINATOR_ONLY) {
             tfbotWorkerActive = false;
             tfbotWorkerState = 'coordinator';
-            runtimeLogDeploymentReadyAt = new Date();
-            runtimeLogDeploymentStartedAt = runtimeLogDeploymentReadyAt;
-            console.info('[runtime-log-deployment-cleanup-starting-before-http]', { host: TFBOT_CLUSTER_INSTANCE_HOST, deploymentStartedAt: runtimeLogDeploymentReadyAt.toISOString(), action: 'purge_all_older_mongodb_runtime_logs_before_http_listener_and_router_start' });
             await connectMongo({ coordinatorOnly: true });
-            if (!runtimeLogInitialCleanupCompleted || !runtimeLogPersistenceCollection) throw new Error('tfbot7_initial_runtime_log_cleanup_not_completed_before_http');
-            console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, baileysSignalTransactionPatch: baileysSignalTransactionPatchStatus, baileysOutgoingRetryPreflightPatch: baileysOutgoingRetryPreflightPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, renderServiceId: runtimeLogRenderServiceId, renderServiceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), port: runtimeLogPort });
+            console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, baileysSignalTransactionPatch: baileysSignalTransactionPatchStatus, baileysOutgoingRetryPreflightPatch: baileysOutgoingRetryPreflightPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, port: PORT });
             httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
             const savedSelection = await db.collection('cluster_router').findOne({ _id: TFBOT_ROUTER_STATE_ID }).catch(() => null);
             const savedDomain = TFBOT_ROUTER_DOMAIN_BY_HOST.get(normalizeTfbotHost(savedSelection?.activeHost || ''));
@@ -12156,10 +11345,7 @@ async function main() {
         await startTfbotWorkerCoordinatorPoller();
         return;
     }
-    runtimeLogDeploymentReadyAt = new Date();
-    runtimeLogDeploymentStartedAt = runtimeLogDeploymentReadyAt;
     await connectMongo();
-    if (!runtimeLogInitialCleanupCompleted || !runtimeLogPersistenceCollection) throw new Error('initial_runtime_log_cleanup_not_completed_before_http');
     await optimizeAdamLogoForBandwidth();
     tfbotWorkerActive = true;
     tfbotWorkerState = 'active';
