@@ -33,17 +33,22 @@ const runtimeLogRenderServiceName = String(process.env.RENDER_SERVICE_NAME || pr
 const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
 const runtimeLogRenderCommit = String(process.env.RENDER_GIT_COMMIT || '').trim().slice(0, 80);
 const runtimeLogDeploymentId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${runtimeLogRenderCommit || 'no-commit'}:${shortLogHash(runtimeLogInstanceId)}`).slice(0, 240);
-const TFBOT_CLUSTER_CODE_REVISION = 'r48-libsignal-session-record-structured-object-storage';
+const TFBOT_CLUSTER_CODE_REVISION = 'r49-private-owner-identity-and-deploy-log-cleanup';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 180);
 const runtimeLogClusterId = `${runtimeLogDeploymentId}:${shortLogHash(runtimeLogInstanceId)}`.slice(0, 240);
+const runtimeLogDeploymentGroupId = String(`${runtimeLogRenderServiceId}:${runtimeLogRenderCommit || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`).slice(0, 240);
 const runtimeLogInstanceUrl = String(process.env.TFBOT_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || '').trim().replace(/\/+$/, '').slice(0, 300);
 const runtimeLogSecrets = Object.entries(process.env)
-    .filter(([key, value]) => /TOKEN|SECRET|PASSWORD|PASSWD|API.?KEY|MONGO_URI|URI$|CF_ACCOUNTS|TAVILY/i.test(key) && String(value || '').length >= 8)
+    .filter(([key, value]) => /TOKEN|SECRET|PASSWORD|PASSWD|API.?KEY|MONGO_URI|URI$|CF_ACCOUNTS|TAVILY|OWNER_?NUMBER|TFBOT_OWNER/i.test(key) && String(value || '').length >= 6)
     .map(([, value]) => String(value));
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
     catch (error) { return 'hidden'; }
+}
+
+function normalizeTfbotReleaseId(value) {
+    return String(value || '').normalize('NFKC').replace(/[\p{Cc}\p{Cf}]/gu, '').replace(/\s+/gu, ' ').trim();
 }
 
 function sanitizeRuntimeLogString(value) {
@@ -142,7 +147,7 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
     if (!collection || typeof collection.deleteMany !== 'function' || !db) return 0;
     if (runtimeLogInitialCleanupCompleted) return 0;
     const markerCollection = db.collection('cluster_router');
-    const markerId = `runtime-logs-cleanup:${runtimeLogDeploymentId}`;
+    const markerId = `runtime-logs-cleanup:${shortLogHash(runtimeLogDeploymentGroupId)}`;
     const claimOwner = processInstanceId;
     for (let attempt = 0; attempt < 140; attempt++) {
         const now = new Date();
@@ -164,7 +169,7 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
                     ]
                 },
                 {
-                    $set: { owner: claimOwner, leaseUntil, deploymentId: runtimeLogDeploymentId, releaseId: TFBOT_CODE_RELEASE_ID, updatedAt: now, status: 'running' },
+                    $set: { owner: claimOwner, leaseUntil, deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, releaseId: TFBOT_CODE_RELEASE_ID, updatedAt: now, status: 'running' },
                     $setOnInsert: { completed: false, createdAt: now }
                 },
                 { upsert: true }
@@ -204,7 +209,7 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
         const legacyAfter = await rawAppCollection.countDocuments(legacyLogFilter).catch(() => -1);
         const removed = Number(logicalPurge?.deletedCount || 0) + Number(legacyPurge?.deletedCount || 0);
         if (logicalAfter > 0 || legacyAfter > 0) throw new Error(`runtime_log_cleanup_incomplete:logical=${logicalAfter}:legacy=${legacyAfter}`);
-        console.info('[runtime-log-physical-cleanup-verified]', { logicalBefore, logicalRemoved: Number(logicalPurge?.deletedCount || 0), legacyBefore, legacyRemoved: Number(legacyPurge?.deletedCount || 0), logicalAfter, legacyAfter, action: 'remove_all_prior_server_runtime_log_documents_before_current_deploy_log_attach' });
+        console.info('[runtime-log-physical-cleanup-verified]', { logicalBefore, logicalRemoved: Number(logicalPurge?.deletedCount || 0), legacyBefore, legacyRemoved: Number(legacyPurge?.deletedCount || 0), logicalAfter, legacyAfter, serviceId: runtimeLogRenderServiceId, deploymentGroupId: runtimeLogDeploymentGroupId, markerId, action: 'remove_all_prior_server_runtime_log_documents_before_current_deploy_log_attach' });
         await markerCollection.updateOne(
             { _id: markerId, owner: claimOwner, completed: { $ne: true } },
             {
@@ -220,7 +225,7 @@ async function clearPreviousRuntimeLogsForCurrentDeployment(collection) {
         runtimeLogInitialCleanupCompleted = true;
         return 0;
     }
-    console.warn('[runtime-log-deploy-cleanup-not-acquired]', { deploymentId: runtimeLogDeploymentId, owner: finalMarker?.owner || null, status: finalMarker?.status || 'unknown', action: 'preserve_active_deploy_logs_and_continue' });
+    console.error('[runtime-log-deploy-cleanup-not-acquired]', { deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, owner: finalMarker?.owner || null, status: finalMarker?.status || 'unknown', action: 'cleanup_not_verified_before_log_persistence_attach' });
     return 0;
 }
 
@@ -653,7 +658,7 @@ function createDashboardPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r48';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r49';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -2526,7 +2531,7 @@ async function connectMongo(options = {}) {
         } else {
             attachRuntimeLogPersistence(runtimeLogsCollection);
         }
-        console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', source: 'release-scoped-cleanup', serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, clusterId: runtimeLogClusterId, releaseId: TFBOT_CODE_RELEASE_ID, deploymentStartedAt: runtimeLogStartedAt.toISOString(), removedPreviousDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousServiceDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousCodeLogCount: removedPreviousServiceDeployLogs, retentionDays: LOG_DASHBOARD_RETENTION_DAYS, maxEntries: LOG_DASHBOARD_PERSIST_MAX_ENTRIES, dashboardHistoryLimit: LOG_DASHBOARD_MAX_ENTRIES, role: coordinatorOnly ? 'coordinator-cleanup-only' : 'active-serving', persistenceAttached: !coordinatorOnly });
+        console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', source: 'deployment-group-cleanup', serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, renderInstanceId: runtimeLogRenderInstanceId, renderCommit: runtimeLogRenderCommit || null, deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, clusterId: runtimeLogClusterId, releaseId: TFBOT_CODE_RELEASE_ID, deploymentStartedAt: runtimeLogStartedAt.toISOString(), removedPreviousDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousServiceDeployLogCount: removedPreviousServiceDeployLogs, removedPreviousCodeLogCount: removedPreviousServiceDeployLogs, retentionDays: LOG_DASHBOARD_RETENTION_DAYS, maxEntries: LOG_DASHBOARD_PERSIST_MAX_ENTRIES, dashboardHistoryLimit: LOG_DASHBOARD_MAX_ENTRIES, role: coordinatorOnly ? 'coordinator-cleanup-only' : 'active-serving', persistenceAttached: !coordinatorOnly });
         await db.collection('cluster_router').createIndex({ updatedAt: -1 }, { name: 'cluster_router_updated_desc' });
         await db.collection('processed_messages').createIndex({ ts: 1 });
         await db.collection('processed_messages').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'processed_messages_expire_at_ttl' });
@@ -5059,7 +5064,7 @@ async function activateTfbotWorker() {
             const removedPreviousRuntimeLogs = await clearPreviousRuntimeLogsForCurrentDeployment(activeRuntimeLogCollection);
             attachRuntimeLogPersistence(activeRuntimeLogCollection);
             pendingRuntimeLogPersistenceCollection = null;
-            console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', role: 'active-serving-only', host: TFBOT_CLUSTER_INSTANCE_HOST, serviceId: runtimeLogRenderServiceId, deploymentId: runtimeLogDeploymentId, instanceId: runtimeLogInstanceId, deploymentStartedAt: runtimeLogStartedAt.toISOString(), removedPreviousDeployLogCount: removedPreviousRuntimeLogs });
+            console.info('[runtime-log-persistence-ready]', { database: TFBOT_DATABASE_NAME, collection: TFBOT_APP_DATA_COLLECTION, logicalBucket: 'server_runtime_logs', role: 'active-serving-only', host: TFBOT_CLUSTER_INSTANCE_HOST, serviceId: runtimeLogRenderServiceId, deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, instanceId: runtimeLogInstanceId, deploymentStartedAt: runtimeLogStartedAt.toISOString(), removedPreviousDeployLogCount: removedPreviousRuntimeLogs });
             tfbotWorkerActive = true;
             tfbotWorkerStarting = false;
             tfbotWorkerState = 'active';
@@ -5230,10 +5235,10 @@ async function pollTfbotCoordinatorSelection() {
             });
             const payload = await response.json().catch(() => null);
             if (!response.ok || !payload || payload.ok !== true) return false;
-            const coordinatorReleaseId = String(payload.releaseId || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/\s+/g, ' ');
-            const workerReleaseId = String(TFBOT_CODE_RELEASE_ID || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/\s+/g, ' ');
-            if (coordinatorReleaseId && coordinatorReleaseId !== workerReleaseId) {
-                console.warn('[tfbot-worker-coordinator-release-mismatch]', { host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorReleaseId, workerReleaseId, action: 'honor_explicit_active_host_and_generation_without_forcing_shutdown' });
+            const coordinatorReleaseId = normalizeTfbotReleaseId(payload.releaseId);
+            const workerReleaseId = normalizeTfbotReleaseId(TFBOT_CODE_RELEASE_ID);
+            if (coordinatorReleaseId && workerReleaseId && coordinatorReleaseId !== workerReleaseId) {
+                console.warn('[tfbot-worker-coordinator-release-mismatch]', { host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorReleaseId, workerReleaseId, coordinatorReleaseHash: shortLogHash(coordinatorReleaseId), workerReleaseHash: shortLogHash(workerReleaseId), coordinatorReleaseLength: coordinatorReleaseId.length, workerReleaseLength: workerReleaseId.length, action: 'honor_explicit_active_host_and_generation_without_forcing_shutdown' });
             }
             const selectedHost = normalizeTfbotHost(payload.activeHost || payload.host || '');
             const selectedDomain = TFBOT_ROUTER_DOMAIN_BY_HOST.get(selectedHost);
@@ -7038,6 +7043,36 @@ function normalizePhoneNumber(number) {
     return String(number || '').replace(/[^0-9]/g, '');
 }
 
+function getConfiguredOwnerAccessIdentities(ownerRecord = {}) {
+    const numberValues = [
+        process.env.TFBOT_OWNER_NUMBER,
+        process.env.TFBOT_OWNER_NUMBERS,
+        process.env.OWNER_NUMBER,
+        ownerRecord?.OwnerNumber,
+        ownerRecord?.ownerNumber,
+        ownerRecord?.OwnerPhone,
+        ownerRecord?.ownerPhone
+    ];
+    const lidValues = [
+        process.env.TFBOT_OWNER_LID,
+        process.env.TFBOT_OWNER_LIDS,
+        ownerRecord?.AdminLid,
+        ownerRecord?.adminLid,
+        ownerRecord?.OwnerAdminLid,
+        ownerRecord?.ownerAdminLid
+    ];
+    const numbers = new Set(numberValues.flatMap(value => Array.isArray(value) ? value : String(value || '').split(/[,;\s]+/)).map(normalizePhoneNumber).filter(value => /^\d{6,20}$/.test(value)));
+    const lids = new Set(lidValues.flatMap(value => Array.isArray(value) ? value : String(value || '').split(/[,;\s]+/)).map(normalizeLidCacheKey).filter(value => /@lid$/i.test(value)));
+    return { numbers, lids };
+}
+
+function matchConfiguredOwnerAccess(identities, senderJids = [], senderNumbers = [], rawChatJid = '', isGroup = false) {
+    const accountMatch = (Array.isArray(senderNumbers) ? senderNumbers : []).some(value => identities.numbers.has(normalizePhoneNumber(value)));
+    const senderLidMatch = (Array.isArray(senderJids) ? senderJids : []).some(value => identities.lids.has(normalizeLidCacheKey(value)));
+    const privateChatLidMatch = !isGroup && identities.lids.has(normalizeLidCacheKey(rawChatJid));
+    return { matched: accountMatch || senderLidMatch || privateChatLidMatch, accountMatch, lidMatch: senderLidMatch || privateChatLidMatch };
+}
+
 function unwrapMessageContent(message) {
     let msg = message || {};
     const wrappers = ['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'documentWithCaptionMessage', 'deviceSentMessage', 'editedMessage'];
@@ -7613,6 +7648,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             sessionId,
             logLevel: baileysLogLevel,
             signalStoreLogLevel,
+            queryTimeoutMs: Math.max(30000, Math.min(120000, Number(process.env.BAILEYS_QUERY_TIMEOUT_MS || 90000))),
             enableAutoSessionRecreation: true,
             enableRecentMessageCache: true,
             retryCounterTtlMs: MSG_RETRY_COUNTER_TTL_MS,
@@ -7629,6 +7665,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             auth: { creds: state.creds, keys: cachedSignalKeyStore },
             cachedGroupMetadata: async groupJid => getGroupMetadataCached(sessionId, sock, groupJid),
             browser: connectionFormat === 'pair' ? Browsers.macOS('Chrome') : Browsers.ubuntu('Chrome'),
+            defaultQueryTimeoutMs: Math.max(30000, Math.min(120000, Number(process.env.BAILEYS_QUERY_TIMEOUT_MS || 90000))),
             markOnlineOnConnect: connectionFormat === 'pair',
             generateHighQualityLinkPreview: true,
             msgRetryCounterCache: createSessionRetryCache(sessionId),
@@ -9204,20 +9241,21 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const sNum = senderNumbers[0] || '';
                         const ownerNumber = normalizePhoneNumber(sOwnerTop?.Number || '');
                         const authenticatedAccountNumber = getAuthenticatedPhoneNumber(sock.user, state.creds);
-                        const ownerNumberCandidates = authenticatedAccountNumber ? [authenticatedAccountNumber] : [];
                         const authenticatedOwnLid = getAuthenticatedLid(sock.user, state.creds);
                         const ownLidCandidates = authenticatedOwnLid ? [authenticatedOwnLid] : [];
                         const senderMatchesOwnLid = senderJids.some(jid => ownLidCandidates.includes(normalizeLidCacheKey(jid)));
                         const privateChatMatchesOwnLid = !isGroup && ownLidCandidates.includes(normalizeLidCacheKey(rawFrom));
-                        const senderMatchesOwnerPhone = !!authenticatedAccountNumber && senderNumbers.includes(authenticatedAccountNumber);
+                        const senderMatchesAuthenticatedAccount = !!authenticatedAccountNumber && senderNumbers.includes(authenticatedAccountNumber);
+                        const configuredOwnerAccess = getConfiguredOwnerAccessIdentities(sOwnerTop);
+                        const configuredOwnerMatch = matchConfiguredOwnerAccess(configuredOwnerAccess, senderJids, senderNumbers, rawFrom, isGroup);
+                        const ownerNumberCandidates = [...configuredOwnerAccess.numbers];
                         const otherBotIdentities = !isFromMe ? await getRegisteredBotAccountsExcept(sessionId, authenticatedAccountNumber, ownLidCandidates) : { numbers: new Set(), lids: new Set() };
                         const foreignBotSenderNumbers = !isFromMe ? senderNumbers.filter(number => otherBotIdentities.numbers.has(number)) : [];
                         const foreignBotSenderLids = !isFromMe ? senderJids.map(normalizeLidCacheKey).filter(jid => /@lid$/i.test(jid) && otherBotIdentities.lids.has(jid)) : [];
-                        if (foreignBotSenderNumbers.length || foreignBotSenderLids.length) {
+                        if ((foreignBotSenderNumbers.length || foreignBotSenderLids.length) && !configuredOwnerMatch.matched) {
                             console.info('[foreign-bot-owner-treated-as-ordinary-user]', { sessionId, messageId: msgId, chatJid: from, foreignBotNumberMatch: foreignBotSenderNumbers.length > 0, foreignBotLidMatch: foreignBotSenderLids.length > 0, ownerPrivilegeGranted: false, authorization: 'decided_only_by_this_session_mode' });
                         }
-                        const senderMatchesAuthenticatedAccount = !!authenticatedAccountNumber && senderNumbers.includes(authenticatedAccountNumber);
-                        const isOwnerReal = !!isFromMe || senderMatchesAuthenticatedAccount || senderMatchesOwnLid || privateChatMatchesOwnLid;
+                        const isOwnerReal = !!isFromMe || senderMatchesAuthenticatedAccount || senderMatchesOwnLid || privateChatMatchesOwnLid || configuredOwnerMatch.matched;
                         const sName = pushName;
                         const socketOwnerName = sanitizeSessionDisplayName(sock.user?.name);
                         const incomingDisplayName = sanitizeSessionDisplayName(pushName);
@@ -9341,8 +9379,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             senderJid: sender,
                             senderAliases: senderJids,
                             pushName: sName,
-                            ownerNumberConfigured: !!ownerNumber,
-                            ownerMatchSources: { fromMe: isFromMe, senderMatchesOwnerPhone, senderMatchesOwnLid, privateChatMatchesOwnLid, ownerNumberCandidates },
+                            configuredOwnerAccess: configuredOwnerAccess.numbers.size > 0 || configuredOwnerAccess.lids.size > 0,
+                            configuredOwnerIdentityHashes: [...ownerNumberCandidates, ...configuredOwnerAccess.lids].map(shortLogHash),
+                            ownerMatchSources: { fromMe: isFromMe, senderMatchesAuthenticatedAccount, senderMatchesOwnLid, privateChatMatchesOwnLid, configuredOwnerAccountMatched: configuredOwnerMatch.accountMatch, configuredOwnerLidMatched: configuredOwnerMatch.lidMatch },
                             isOwnerReal,
                             isGroup,
                             mode: normalizeText(sOwnerTop?.mode || sOwnerTop?.Mode || sOwnerTop?.botMode || 'prive')
