@@ -10,12 +10,34 @@ const originalConsoleTable = console.table.bind(console);
 const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(process.env.MESSAGE_QUEUE_TASK_TIMEOUT_MS || 45000)));
 const MESSAGE_QUEUE_TIMEOUT_SETTLE_MS = Math.max(500, Math.min(15000, Number(process.env.MESSAGE_QUEUE_TIMEOUT_SETTLE_MS || 3000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(500, Math.min(5000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 1800)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r67-render-local-logs-message-retry-and-session-queue';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31-r67')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+const TFBOT_CLUSTER_CODE_REVISION = 'r68-local-render-log-ui-poller-hysteresis-retry-store';
+const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31-r68')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
     catch (error) { return 'hidden'; }
+}
+
+function normalizeTfbotReleaseId(value) {
+    return String(value || '').normalize('NFKC').replace(/[\p{Cc}\p{Cf}]/gu, '').replace(/\s+/gu, ' ').trim();
+}
+
+function getTfbotReleaseCompatibilityKey(value) {
+    const normalized = normalizeTfbotReleaseId(value);
+    const match = normalized.match(/:(r\d+[-a-z0-9_]+)$/i);
+    return match ? match[1].toLowerCase() : normalized;
+}
+
+function areTfbotReleasesCompatible(first, second) {
+    const firstKey = getTfbotReleaseCompatibilityKey(first);
+    const secondKey = getTfbotReleaseCompatibilityKey(second);
+    return !!firstKey && firstKey === secondKey;
+}
+
+function getTfbotReleaseCommit(value) {
+    const normalized = normalizeTfbotReleaseId(value);
+    const match = normalized.match(/:([a-f0-9]{7,40}):r\d+[-a-z0-9_]+$/i);
+    return match ? match[1].toLowerCase() : '';
 }
 
 let lastSignalDiagnosticAt = 0;
@@ -135,6 +157,277 @@ const pino = require('pino');
 const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
+const LOG_DASHBOARD_PATH = (() => {
+    const configured = String(process.env.LOG_DASHBOARD_PATH || '/adamdh7=modpas/adamdh7').trim();
+    const normalized = (configured.startsWith('/') ? configured : `/${configured}`).replace(/\/+$/, '');
+    return /^\/[A-Za-z0-9_./=-]{12,180}$/.test(normalized) ? normalized : '/adamdh7=modpas/adamdh7';
+})();
+const LOG_DASHBOARD_MAX_ENTRIES = Math.max(1000, Math.min(20000, Number(process.env.LOG_DASHBOARD_MAX_ENTRIES || 5000)));
+const LOG_DASHBOARD_PAGE_LIMIT = Math.max(80, Math.min(250, Number(process.env.LOG_DASHBOARD_PAGE_LIMIT || 120)));
+const LOG_DASHBOARD_FILE_MAX_BYTES = Math.max(1048576, Math.min(52428800, Number(process.env.TFBOT_LOG_FILE_MAX_BYTES || 10485760)));
+const TFBOT_LOG_INGEST_PATH = '/__tfbot/logs/ingest';
+const runtimeLogInstanceId = `${String(process.env.RENDER_INSTANCE_ID || process.env.HOSTNAME || 'render').slice(0, 120)}-${Date.now()}-${process.pid}`;
+const runtimeLogStartedAt = new Date();
+const runtimeLogDeploymentStartedAt = new Date(0);
+const runtimeLogSequence = { value: 0 };
+const runtimeLogBuffer = [];
+const runtimeLogSeenIds = new Set();
+const runtimeLogPendingDiskWrites = [];
+const runtimeLogPendingForwardWrites = [];
+let runtimeLogDiskReady = false;
+let runtimeLogDiskWriteRunning = false;
+let runtimeLogDiskTimer = null;
+let runtimeLogForwardTimer = null;
+let runtimeLogForwardRunning = false;
+let runtimeLogForwardTarget = '';
+let runtimeLogForwardToken = '';
+let runtimeLogStdoutRemainder = '';
+let runtimeLogStderrRemainder = '';
+const runtimeLogRenderServiceId = String(process.env.RENDER_SERVICE_ID || 'local').trim().slice(0, 120);
+const runtimeLogRenderServiceName = String(process.env.RENDER_SERVICE_NAME || process.env.RENDER_SERVICE_TYPE || 'local').trim().slice(0, 120);
+const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
+const runtimeLogRenderExternalHost = String(process.env.RENDER_EXTERNAL_HOSTNAME || (() => { try { return new URL(process.env.RENDER_EXTERNAL_URL || '').hostname; } catch (error) { return ''; } })()).trim().toLowerCase().slice(0, 180);
+const runtimeLogPort = String(process.env.PORT || '7000').trim().slice(0, 20);
+const runtimeLogServiceScope = [runtimeLogRenderExternalHost ? `host:${runtimeLogRenderExternalHost}` : '', runtimeLogRenderServiceName ? `name:${runtimeLogRenderServiceName}` : ''].filter(Boolean).join('|') || `local:${runtimeLogPort}`;
+const runtimeLogDeploymentId = `${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${String(process.env.RENDER_GIT_COMMIT || 'no-commit').slice(0, 80)}`.slice(0, 240);
+const runtimeLogDeploymentGroupId = `r68-local-render-log-ui-poller-hysteresis-retry-store:${runtimeLogDeploymentId}`.slice(0, 240);
+const runtimeLogDirectory = path.resolve(String(process.env.TFBOT_LOG_DIR || (process.env.RENDER_DISK_PATH ? path.join(process.env.RENDER_DISK_PATH, 'tfbot-logs') : String(process.env.RENDER || '').toLowerCase() === 'true' ? '/var/data/tfbot-logs' : path.join(__dirname, '.tfbot-logs'))));
+const runtimeLogFilePath = path.join(runtimeLogDirectory, 'runtime.jsonl');
+const runtimeLogSecrets = Object.entries(process.env)
+    .filter(([key, value]) => /TOKEN|SECRET|PASSWORD|PASSWD|API.?KEY|MONGO_URI|URI$|CF_ACCOUNTS|TAVILY/i.test(key) && String(value || '').length >= 6)
+    .map(([, value]) => String(value));
+const originalStdoutWrite = process.stdout.write.bind(process.stdout);
+const originalStderrWrite = process.stderr.write.bind(process.stderr);
+const logDashboardRateLimits = new Map();
+
+function sanitizeRuntimeLogText(value) {
+    let output = String(value ?? '').slice(0, 6500);
+    for (const secret of runtimeLogSecrets) output = output.split(secret).join('[REDACTED]');
+    return output
+        .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [REDACTED]')
+        .replace(/([?&](?:token|key|secret|password|api_key)=)[^&\s]+/gi, '$1[REDACTED]')
+        .replace(/((?:mongo(?:db)?(?:\+srv)?:\/\/)[^\s"']+)/gi, '[MONGODB_URI_REDACTED]')
+        .replace(/((?:authorization|cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret)\s*[:=]\s*)['"]?[^\s,'"}]+/gi, '$1[REDACTED]')
+        .replace(/("(?:messageText|bodyPreview|textPreview|argumentPreview|messageBody|caption|rawBody)"\s*:\s*")[^"]*(")/gi, '$1[message content redacted]$2')
+        .replace(/((?:messageText|bodyPreview|textPreview|argumentPreview|messageBody|caption|rawBody)\s*:\s*)'[^']*'/gi, "$1'[message content redacted]'");
+}
+
+function normalizeCapturedLogLevel(line, fallback) {
+    try {
+        const parsed = JSON.parse(line);
+        const numeric = Number(parsed?.level);
+        return ({ 10: 'trace', 20: 'debug', 30: 'info', 40: 'warn', 50: 'error', 60: 'fatal' })[numeric] || fallback;
+    } catch (error) {
+        return fallback;
+    }
+}
+
+function addRuntimeLogEntry(entry, options = {}) {
+    const id = String(entry?.id || '').slice(0, 260);
+    const at = String(entry?.at || new Date().toISOString());
+    const parsedAt = Date.parse(at);
+    if (!id || !Number.isFinite(parsedAt) || runtimeLogSeenIds.has(id)) return false;
+    const host = String(entry?.host || runtimeLogRenderExternalHost || runtimeLogRenderServiceName).slice(0, 180);
+    const text = sanitizeRuntimeLogText(entry?.text || '');
+    const normalized = {
+        id,
+        at: new Date(parsedAt).toISOString(),
+        level: String(entry?.level || 'log').toLowerCase().slice(0, 16),
+        text: host && host !== runtimeLogRenderExternalHost && entry?.remote === true ? `[${host}] ${text}` : text,
+        host,
+        serviceName: String(entry?.serviceName || runtimeLogRenderServiceName).slice(0, 120),
+        instance: String(entry?.instance || runtimeLogRenderInstanceId).slice(0, 160)
+    };
+    runtimeLogSeenIds.add(id);
+    runtimeLogBuffer.push(normalized);
+    while (runtimeLogBuffer.length > LOG_DASHBOARD_MAX_ENTRIES) {
+        const removed = runtimeLogBuffer.shift();
+        if (removed?.id) runtimeLogSeenIds.delete(String(removed.id));
+    }
+    while (runtimeLogSeenIds.size > LOG_DASHBOARD_MAX_ENTRIES * 2) runtimeLogSeenIds.delete(runtimeLogSeenIds.values().next().value);
+    if (options.disk !== false) {
+        runtimeLogPendingDiskWrites.push(normalized);
+        if (runtimeLogPendingDiskWrites.length > LOG_DASHBOARD_MAX_ENTRIES * 2) runtimeLogPendingDiskWrites.splice(0, runtimeLogPendingDiskWrites.length - LOG_DASHBOARD_MAX_ENTRIES * 2);
+    }
+    if (options.forward !== false && runtimeLogForwardTarget) {
+        runtimeLogPendingForwardWrites.push({ ...normalized, text: text, remote: false });
+        if (runtimeLogPendingForwardWrites.length > 3000) runtimeLogPendingForwardWrites.shift();
+    }
+    return true;
+}
+
+function recordRuntimeLogChunk(level, chunk) {
+    const raw = Buffer.isBuffer(chunk) || chunk instanceof Uint8Array ? Buffer.from(chunk).toString('utf8') : String(chunk ?? '');
+    if (!raw) return;
+    const streamKey = level === 'error' ? 'stderr' : 'stdout';
+    const combined = (streamKey === 'stderr' ? runtimeLogStderrRemainder : runtimeLogStdoutRemainder) + raw;
+    const lines = combined.split(/\r?\n/);
+    const remainder = lines.pop() || '';
+    if (streamKey === 'stderr') runtimeLogStderrRemainder = remainder.slice(-6500);
+    else runtimeLogStdoutRemainder = remainder.slice(-6500);
+    for (const line of lines) {
+        if (!line) continue;
+        const at = new Date().toISOString();
+        const sequence = ++runtimeLogSequence.value;
+        const id = `${runtimeLogInstanceId}:${sequence}`;
+        addRuntimeLogEntry({ id, at, level: normalizeCapturedLogLevel(line, level), text: line, host: runtimeLogRenderExternalHost || runtimeLogRenderServiceName, serviceName: runtimeLogRenderServiceName, instance: runtimeLogRenderInstanceId });
+    }
+    const pending = streamKey === 'stderr' ? runtimeLogStderrRemainder : runtimeLogStdoutRemainder;
+    if (pending.length >= 6400) {
+        const at = new Date().toISOString();
+        const sequence = ++runtimeLogSequence.value;
+        addRuntimeLogEntry({ id: `${runtimeLogInstanceId}:${sequence}`, at, level, text: pending, host: runtimeLogRenderExternalHost || runtimeLogRenderServiceName, serviceName: runtimeLogRenderServiceName, instance: runtimeLogRenderInstanceId });
+        if (streamKey === 'stderr') runtimeLogStderrRemainder = '';
+        else runtimeLogStdoutRemainder = '';
+    }
+}
+
+process.stdout.write = function(chunk, encoding, callback) {
+    try { recordRuntimeLogChunk('info', chunk); } catch (error) {}
+    return originalStdoutWrite.apply(process.stdout, arguments);
+};
+process.stderr.write = function(chunk, encoding, callback) {
+    try { recordRuntimeLogChunk('error', chunk); } catch (error) {}
+    return originalStderrWrite.apply(process.stderr, arguments);
+};
+
+async function rotateRuntimeLogFile(requiredBytes) {
+    let size = 0;
+    try { size = (await fs.promises.stat(runtimeLogFilePath)).size; } catch (error) { if (error?.code !== 'ENOENT') throw error; }
+    if (size + requiredBytes <= LOG_DASHBOARD_FILE_MAX_BYTES) return;
+    for (let index = 2; index >= 1; index--) {
+        const current = index === 1 ? runtimeLogFilePath : `${runtimeLogFilePath}.${index - 1}`;
+        const next = `${runtimeLogFilePath}.${index}`;
+        try {
+            await fs.promises.rename(current, next);
+        } catch (error) {
+            if (error?.code !== 'ENOENT') throw error;
+        }
+    }
+}
+
+async function flushRuntimeLogDiskWrites() {
+    if (!runtimeLogDiskReady || runtimeLogDiskWriteRunning || !runtimeLogPendingDiskWrites.length) return false;
+    runtimeLogDiskWriteRunning = true;
+    try {
+        while (runtimeLogPendingDiskWrites.length) {
+            const batch = runtimeLogPendingDiskWrites.splice(0, 250);
+            const data = batch.map(item => JSON.stringify(item)).join('\n') + '\n';
+            try {
+                await rotateRuntimeLogFile(Buffer.byteLength(data));
+                await fs.promises.appendFile(runtimeLogFilePath, data, { encoding: 'utf8', mode: 0o600 });
+            } catch (writeError) {
+                runtimeLogPendingDiskWrites.unshift(...batch);
+                throw writeError;
+            }
+        }
+        return true;
+    } catch (error) {
+        originalStderrWrite(`[runtime-log-local-disk-write-failed] ${String(error?.message || error)}\n`);
+        return false;
+    } finally {
+        runtimeLogDiskWriteRunning = false;
+    }
+}
+
+async function initializeRuntimeLogStorage() {
+    let restored = [];
+    try {
+        await fs.promises.mkdir(runtimeLogDirectory, { recursive: true, mode: 0o700 });
+        for (const file of [`${runtimeLogFilePath}.2`, `${runtimeLogFilePath}.1`, runtimeLogFilePath]) {
+            try {
+                const contents = await fs.promises.readFile(file, 'utf8');
+                for (const line of contents.split(/\r?\n/)) {
+                    if (!line || line.length > 12000) continue;
+                    try {
+                        const item = JSON.parse(line);
+                        if (item?.id && Number.isFinite(Date.parse(String(item.at || ''))) && typeof item.text === 'string') restored.push(item);
+                    } catch (error) {}
+                }
+            } catch (error) {
+                if (error?.code !== 'ENOENT') throw error;
+            }
+        }
+        const liveEntries = [...runtimeLogBuffer];
+        const merged = new Map();
+        for (const item of [...restored, ...liveEntries]) merged.set(String(item.id), item);
+        const ordered = [...merged.values()].sort((a, b) => String(a.at).localeCompare(String(b.at)) || String(a.id).localeCompare(String(b.id))).slice(-LOG_DASHBOARD_MAX_ENTRIES);
+        runtimeLogBuffer.splice(0, runtimeLogBuffer.length);
+        runtimeLogSeenIds.clear();
+        for (const item of ordered) {
+            runtimeLogSeenIds.add(String(item.id));
+            runtimeLogBuffer.push(item);
+        }
+        runtimeLogDiskReady = true;
+        if (!runtimeLogDiskTimer) {
+            runtimeLogDiskTimer = setInterval(() => { void flushRuntimeLogDiskWrites(); }, 500);
+            if (typeof runtimeLogDiskTimer.unref === 'function') runtimeLogDiskTimer.unref();
+        }
+        await flushRuntimeLogDiskWrites();
+        console.info('[runtime-log-local-storage-ready]', {
+            directory: runtimeLogDirectory,
+            file: path.basename(runtimeLogFilePath),
+            restoredEntries: restored.length,
+            bufferedEntries: runtimeLogBuffer.length,
+            maxEntries: LOG_DASHBOARD_MAX_ENTRIES,
+            maxFileBytes: LOG_DASHBOARD_FILE_MAX_BYTES,
+            storage: 'local-render-jsonl-no-mongodb-log-collection',
+            diskMountConfigured: !!(process.env.TFBOT_LOG_DIR || process.env.RENDER_DISK_PATH)
+        });
+        return true;
+    } catch (error) {
+        runtimeLogDiskReady = false;
+        originalStderrWrite(`[runtime-log-local-storage-unavailable] directory=${runtimeLogDirectory} error=${String(error?.message || error)}; logs remain in memory and Render stdout/stderr\n`);
+        return false;
+    }
+}
+
+async function flushRuntimeLogForwardQueue() {
+    if (!runtimeLogForwardTarget || runtimeLogForwardRunning || !runtimeLogPendingForwardWrites.length) return false;
+    runtimeLogForwardRunning = true;
+    try {
+        const batch = runtimeLogPendingForwardWrites.slice(0, 100);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 3500);
+        try {
+            const response = await fetch(runtimeLogForwardTarget, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-TFBOT-Cluster-Token': runtimeLogForwardToken, 'Accept': 'application/json' },
+                body: JSON.stringify({ logs: batch }),
+                cache: 'no-store',
+                redirect: 'manual',
+                signal: controller.signal
+            });
+            const payload = await response.json().catch(() => null);
+            if (!response.ok || payload?.ok !== true) throw new Error(`log_forward_http_${response.status}`);
+            runtimeLogPendingForwardWrites.splice(0, batch.length);
+            return true;
+        } finally {
+            clearTimeout(timer);
+        }
+    } catch (error) {
+        originalStderrWrite(`[runtime-log-forward-failed] ${String(error?.message || error)}; queued=${runtimeLogPendingForwardWrites.length}\n`);
+        return false;
+    } finally {
+        runtimeLogForwardRunning = false;
+    }
+}
+
+function startRuntimeLogForwarder() {
+    if (typeof TFBOT_CLUSTER_ENABLED === 'undefined' || !TFBOT_CLUSTER_ENABLED || TFBOT_CLUSTER_COORDINATOR_ONLY) return false;
+    runtimeLogForwardTarget = `${TFBOT_CLUSTER_COORDINATOR_URL}${TFBOT_LOG_INGEST_PATH}`;
+    runtimeLogForwardToken = TFBOT_CLUSTER_TOKEN;
+    for (const item of runtimeLogBuffer.slice(-3000)) {
+        runtimeLogPendingForwardWrites.push({ ...item, text: item.text, remote: false });
+    }
+    if (!runtimeLogForwardTimer) {
+        runtimeLogForwardTimer = setInterval(() => { void flushRuntimeLogForwardQueue(); }, 700);
+        if (typeof runtimeLogForwardTimer.unref === 'function') runtimeLogForwardTimer.unref();
+    }
+    console.info('[runtime-log-forwarder-ready]', { target: TFBOT_COORDINATOR_HOST, path: TFBOT_LOG_INGEST_PATH, queueLimit: 3000, batchLimit: 100, storage: 'local-disk-on-each-render-service-and-coordinator-aggregation' });
+    return true;
+}
+
 const EventEmitter = require('events');
 const { AsyncLocalStorage } = require('async_hooks');
 
@@ -546,7 +839,7 @@ function createRenderPinoLogger(options = {}) {
     return pino(options, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r67';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r68';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -554,6 +847,8 @@ const TFBOT_ROUTER_RESOLVE_PATH = '/__tfbot/router/resolve';
 const TFBOT_ROUTER_OK_PATH = '/__tfbot/router/ok';
 const TFBOT_WORKER_CONTROL_PATH = '/__tfbot/worker/control';
 const TFBOT_WORKER_POLL_PATH = '/__tfbot/worker/poll';
+const TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD = Math.max(2, Math.min(4, Number(process.env.TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD || 2)));
+const tfbotCoordinatorActiveProbeFailures = new Map();
 const TFBOT_ROUTER_STATE_ID = 'active-domain';
 const TFBOT_PRIMARY_DOMAIN = Object.freeze({ host: 'tf.bot.adamdh7.org', url: 'https://tf.bot.adamdh7.org', priority: 0 });
 const TFBOT_COORDINATOR_HOST = 'tfbot7.onrender.com';
@@ -568,6 +863,17 @@ const TFBOT_ROUTER_SERVING_DOMAINS = Object.freeze([
 const TFBOT_ROUTER_DOMAIN_BY_HOST = new Map(TFBOT_ROUTER_SERVING_DOMAINS.map(item => [item.host, item]));
 function normalizeTfbotHost(value) {
     return String(value || '').trim().toLowerCase().replace(/^https?:\/\//, '').split('/')[0].split(':')[0].replace(/\.$/, '');
+}
+function normalizeTfbotRequestPath(value) {
+    const normalized = String(value || '/').trim().replace(/\\/g, '/').replace(/\/{2,}/g, '/');
+    return normalized.startsWith('/') ? normalized : `/${normalized}`;
+}
+function normalizeTfbotRequestUrl(value) {
+    const raw = String(value || '/').trim();
+    const queryIndex = raw.indexOf('?');
+    const pathname = queryIndex >= 0 ? raw.slice(0, queryIndex) : raw;
+    const query = queryIndex >= 0 ? raw.slice(queryIndex) : '';
+    return `${normalizeTfbotRequestPath(pathname)}${query}`;
 }
 function detectTfbotRuntimeHost() {
     const externalHost = normalizeTfbotHost(process.env.RENDER_EXTERNAL_HOSTNAME || '');
@@ -1416,9 +1722,9 @@ async function persistOutgoingRetryMessage(sessionId, jid, message, jidAliases =
         await promiseWithTimeout(db.collection('baileys_outgoing_messages').updateOne(
             { _id: record._id },
             { $set: record },
-            { upsert: true }
-        ), BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS, 'Baileys outgoing retry message persistence');
-        console.info('[message-retry-store-write-completed]', { sessionId, messageId, remoteJid, aliasCount: remoteJidAliases.length });
+            { upsert: true, writeConcern: { w: 'majority', wtimeout: BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS } }
+        ), BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS + 300, 'Baileys outgoing retry message persistence');
+        console.info('[message-retry-store-write-completed]', { sessionId, messageId, remoteJid, aliasCount: remoteJidAliases.length, durableWriteConcern: 'majority' });
         return true;
     } catch (error) {
         console.warn('[message-retry-store-write-failed]', { sessionId, messageId, error: error?.message || String(error) });
@@ -2455,12 +2761,27 @@ async function connectMongo(options = {}) {
             }
         }
         if (!skipStorageInitialization) await migrateTfbotStorage(targetDb);
+        if (!skipStorageInitialization) {
+            try {
+                const retiredPhysicalLogs = await targetDb.listCollections({ name: 'server_runtime_logs' }, { nameOnly: true }).toArray();
+                let physicalLogCollectionDropped = false;
+                if (retiredPhysicalLogs.length) {
+                    await targetDb.collection('server_runtime_logs').drop();
+                    physicalLogCollectionDropped = true;
+                }
+                const retiredLogicalLogDelete = await targetDb.collection(TFBOT_APP_DATA_COLLECTION).deleteMany({ $or: [{ __tfbotBucket: 'server_runtime_logs' }, { _id: { $regex: '^server_runtime_logs::' } }] });
+                const removedLegacyLogDocuments = Number(retiredLogicalLogDelete?.deletedCount || 0);
+                if (physicalLogCollectionDropped || removedLegacyLogDocuments) console.info('[runtime-log-mongodb-legacy-cleanup]', { physicalLogCollectionDropped, removedLegacyLogDocuments, activeStorage: 'local-render-jsonl', mongoLogReads: false, mongoLogWrites: false });
+            } catch (legacyLogCleanupError) {
+                console.error('[runtime-log-mongodb-legacy-cleanup-failed]', { error: legacyLogCleanupError?.message || String(legacyLogCleanupError), activeStorage: 'local-render-jsonl', action: 'startup_must_stop_until_legacy_mongodb_logs_are_removed' });
+                throw new Error(`tfbot_legacy_mongodb_log_cleanup_failed:${legacyLogCleanupError?.message || String(legacyLogCleanupError)}`);
+            }
+        }
         const listedPhysicalCollections = (await targetDb.listCollections({}, { nameOnly: true }).toArray()).map(item => String(item.name || '')).filter(name => !name.startsWith('system.'));
-        const retiredPhysicalLogCollectionPresent = listedPhysicalCollections.includes('server_runtime_logs');
-        const actualPhysicalCollections = listedPhysicalCollections.filter(name => name !== 'server_runtime_logs').sort();
+        const actualPhysicalCollections = listedPhysicalCollections.sort();
         const expectedPhysicalCollections = [TFBOT_APP_DATA_COLLECTION, TFBOT_WHATSAPP_COLLECTION].sort();
         const unexpectedPhysicalCollections = actualPhysicalCollections.filter(name => !expectedPhysicalCollections.includes(name));
-        console.info('[tfbot-storage-layout-verified]', { database: TFBOT_DATABASE_NAME, expectedPhysicalCollections, actualPhysicalCollections, physicalCollectionCount: actualPhysicalCollections.length, unexpectedPhysicalCollections, retiredPhysicalLogCollectionPresent, role: coordinatorOnly ? 'coordinator' : 'serving' });
+        console.info('[tfbot-storage-layout-verified]', { database: TFBOT_DATABASE_NAME, expectedPhysicalCollections, actualPhysicalCollections, physicalCollectionCount: actualPhysicalCollections.length, unexpectedPhysicalCollections, role: coordinatorOnly ? 'coordinator' : 'serving' });
         if (unexpectedPhysicalCollections.length || actualPhysicalCollections.length !== 2) throw new Error(`tfbot_storage_layout_must_have_exactly_two_collections:${actualPhysicalCollections.join(',')}`);
         db = createTfbotDatabase(targetDb);
         if (skipStorageInitialization) {
@@ -4145,7 +4466,7 @@ function isSameOriginFrontendApiRequest(req) {
 app.use((req, res, next) => {
     const originalSend = res.send.bind(res);
     const originalSendFile = res.sendFile.bind(res);
-    const skipEmbeddedBotPage = () => isBotIframeDocumentRequest(req);
+    const skipEmbeddedBotPage = () => isBotIframeDocumentRequest(req) || normalizeTfbotRequestPath(req.path) === LOG_DASHBOARD_PATH;
     res.send = function(body) {
         let outgoing = body;
         let contentType = String(res.getHeader('Content-Type') || '');
@@ -4215,7 +4536,12 @@ app.use((req, res, next) => {
 
 app.use((req, res, next) => {
     if (!TFBOT_CLUSTER_ENABLED || req.method === 'OPTIONS' || isValidClusterHop(req)) return next();
-    const requestPath = String(req.path || '/');
+    const requestPath = normalizeTfbotRequestPath(req.path || '/');
+    if (requestPath === LOG_DASHBOARD_PATH) {
+        if (TFBOT_CLUSTER_ENABLED && !TFBOT_CLUSTER_COORDINATOR_ONLY) return res.redirect(307, `${TFBOT_CLUSTER_COORDINATOR_URL}${normalizeTfbotRequestUrl(req.originalUrl || LOG_DASHBOARD_PATH)}`);
+        return next();
+    }
+    if (requestPath === TFBOT_LOG_INGEST_PATH) return next();
     if (requestPath === '/ok' || requestPath === TFBOT_CLUSTER_HEALTH_PATH || requestPath === TFBOT_ROUTER_OK_PATH || requestPath === TFBOT_ROUTER_RESOLVE_PATH || requestPath === TFBOT_WORKER_CONTROL_PATH || requestPath === TFBOT_WORKER_POLL_PATH || requestPath.startsWith('/__tfbot/router/')) return next();
     const requestHost = normalizeTfbotHost(req.get('host') || req.hostname || '');
     const active = TFBOT_CLUSTER_COORDINATOR_ONLY ? tfbotCoordinatorSelectionCache : tfbotActiveDomainCache;
@@ -4227,7 +4553,7 @@ app.use((req, res, next) => {
     }
     if (requestHost !== activeHost) {
         let destination;
-        try { destination = new URL(String(req.originalUrl || req.url || '/'), `${activeUrl}/`); }
+        try { destination = new URL(normalizeTfbotRequestUrl(req.originalUrl || req.url || '/'), `${activeUrl}/`); }
         catch (error) { return res.status(503).json({ ok: false, error: 'tfbot_active_url_invalid' }); }
         res.setHeader('Cache-Control', 'no-store, max-age=0');
         res.setHeader('Access-Control-Allow-Origin', '*');
@@ -4248,8 +4574,9 @@ app.use((req, res, next) => {
 });
 
 app.use((req, res, next) => {
-    if (!TFBOT_CLUSTER_ENABLED || !db || req.method === 'OPTIONS' || isValidClusterHop(req) || String(req.path || '') === '/ok' || String(req.path || '') === TFBOT_CLUSTER_HEALTH_PATH || String(req.path || '') === TFBOT_WORKER_CONTROL_PATH || String(req.path || '') === TFBOT_WORKER_POLL_PATH || String(req.path || '').startsWith('/__tfbot/router/')) return next();
-    const requestPath = String(req.path || '/');
+    if (!TFBOT_CLUSTER_ENABLED || !db || req.method === 'OPTIONS' || isValidClusterHop(req) || normalizeTfbotRequestPath(req.path || '') === '/ok' || normalizeTfbotRequestPath(req.path || '') === LOG_DASHBOARD_PATH || normalizeTfbotRequestPath(req.path || '') === TFBOT_LOG_INGEST_PATH || normalizeTfbotRequestPath(req.path || '') === TFBOT_CLUSTER_HEALTH_PATH || String(req.path || '') === TFBOT_WORKER_CONTROL_PATH || normalizeTfbotRequestPath(req.path || '') === TFBOT_WORKER_POLL_PATH || normalizeTfbotRequestPath(req.path || '').startsWith('/__tfbot/router/')) return next();
+    const requestPath = normalizeTfbotRequestPath(req.path || '/');
+    if (requestPath === LOG_DASHBOARD_PATH || requestPath === TFBOT_LOG_INGEST_PATH) return next();
     if (/\.(?:css|js|mjs|map|png|jpe?g|webp|gif|svg|ico|woff2?|ttf|otf|mp4|webm|pdf)$/i.test(requestPath)) return next();
     void registerCurrentClusterInstance(false).catch(error => console.warn('[cluster-instance-page-touch-failed]', { path: requestPath, error: error?.message || String(error) }));
     clusterInFlightRequests++;
@@ -4265,7 +4592,8 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-API-Token');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     if (req.method === 'OPTIONS') return res.sendStatus(204);
-    const requestPath = String(req.path || '/').replace(/\/+$/, '') || '/';
+    const requestPath = normalizeTfbotRequestPath(req.path || '/').replace(/\/+$/, '') || '/';
+    if (requestPath === LOG_DASHBOARD_PATH || requestPath === TFBOT_LOG_INGEST_PATH) return next();
     if (requestPath === '/ok' || requestPath === TFBOT_CLUSTER_HEALTH_PATH || requestPath === TFBOT_ROUTER_OK_PATH || requestPath === TFBOT_ROUTER_RESOLVE_PATH || requestPath === TFBOT_WORKER_CONTROL_PATH || requestPath === TFBOT_WORKER_POLL_PATH || isValidClusterHop(req)) return next();
     if (requestPath === '/list') return next();
     if (requestPath === '/') {
@@ -4286,7 +4614,7 @@ const PUBLIC_HTML_ROOT = path.resolve(__dirname, 'public');
 
 app.use((req, res, next) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
-    const requestPath = String(req.path || '/');
+    const requestPath = normalizeTfbotRequestPath(req.path || '/');
     if (isBotIframeDocumentRequest(req)) return next();
     const relativePath = requestPath === '/' ? 'index.html' : requestPath.replace(/^\/+/, '');
     if (!relativePath.toLowerCase().endsWith('.html')) return next();
@@ -4528,6 +4856,37 @@ async function refreshTfbotActiveDomain(force = false) {
                 selectionPhase = `probe-active-or-fallback:${domain.host}`;
                 const domainHealth = await probeTfbotServingDomain(domain);
                 checked.push({ domain, health: domainHealth });
+                if (domain.host === previousHost) {
+                    if (domainHealth?.ok === true && !domainHealth.suspended) {
+                        tfbotCoordinatorActiveProbeFailures.delete(domain.host);
+                    } else if (!domainHealth?.suspended && previousSelection?.generation) {
+                        const previousFailure = tfbotCoordinatorActiveProbeFailures.get(domain.host) || { count: 0, firstFailureAt: Date.now() };
+                        previousFailure.count++;
+                        previousFailure.lastFailureAt = Date.now();
+                        tfbotCoordinatorActiveProbeFailures.set(domain.host, previousFailure);
+                        if (previousFailure.count < TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD) {
+                            const heldSelection = {
+                                ...previousSelection,
+                                checkedAt: new Date(),
+                                healthy: true,
+                                source: 'tfbot7-active-host-temporarily-held-after-transient-probe-failure',
+                                activeProbeFailureCount: previousFailure.count
+                            };
+                            tfbotCoordinatorSelectionCache = heldSelection;
+                            tfbotActiveDomainCache = heldSelection;
+                            tfbotCoordinatorSelectionAt = Date.now();
+                            tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
+                            console.warn('[tfbot-router-active-host-failure-held]', {
+                                activeHost: domain.host,
+                                consecutiveProbeFailures: previousFailure.count,
+                                requiredFailuresBeforeFallback: TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD,
+                                probeResult: domainHealth?.suspended ? 'suspended' : 'no-response-or-invalid-health',
+                                action: 'keep_current_host_and_session_owner_on_first_transient_failure_then_probe_again'
+                            });
+                            return heldSelection;
+                        }
+                    }
+                }
                 if (domainHealth?.ok === true && !domainHealth.suspended) {
                     selectedItem = { domain, health: domainHealth };
                     break;
@@ -4559,6 +4918,8 @@ async function refreshTfbotActiveDomain(force = false) {
             }
             const checkedAt = new Date();
             const selected = selectedItem.domain;
+            if (selected.host !== previousHost) tfbotCoordinatorActiveProbeFailures.delete(previousHost);
+            tfbotCoordinatorActiveProbeFailures.delete(selected.host);
             const selectedIndex = TFBOT_ROUTER_SERVING_DOMAINS.findIndex(item => item.host === selected.host);
             const nextFallbackCursor = (selectedIndex + 1) % TFBOT_ROUTER_SERVING_DOMAINS.length;
             tfbotCoordinatorFallbackCursor = nextFallbackCursor;
@@ -4607,6 +4968,7 @@ async function refreshTfbotActiveDomain(force = false) {
                 pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS,
                 activeProbeIntervalMs: TFBOT_ROUTER_ACTIVE_PROBE_MS,
                 maxHostsPerCycle: 2,
+                activeFailureThreshold: TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD,
                 fallbackContacted: checked.length > 1,
                 fallbackOnlyAfterActiveHostFailure: true,
                 selectionMode: previousIndex >= 0 ? 'probe-current-active-host-first-then-one-fallback-only-if-active-fails' : 'probe-one-persisted-fallback-candidate-per-cycle-until-healthy',
@@ -4904,7 +5266,7 @@ async function proxyClusterRequest(req, res, instance, timeoutOverride = TFBOT_C
 
 app.use((req, res, next) => {
     if (!TFBOT_CLUSTER_ENABLED || !db || isValidClusterHop(req) || String(req.path || '') === TFBOT_CLUSTER_HEALTH_PATH) return next();
-    const requestPath = String(req.path || '/');
+    const requestPath = normalizeTfbotRequestPath(req.path || '/');
     if (requestPath !== '/get-code') return next();
     if (!TFBOT_CLUSTER_COORDINATOR_ONLY && tfbotWorkerActive && !tfbotWorkerStopping) return next();
     void (async () => {
@@ -6021,6 +6383,319 @@ app.get('/manifest.json', (req, res) => res.sendFile(path.join(__dirname, 'manif
 app.get('/sw.js', (req, res) => res.sendFile(path.join(__dirname, 'sw.js')));
 app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s Us Adam D’H7"));
 app.get('/ok', (req, res) => res.send('ok'));
+
+
+async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIMIT, sinceValue = 0, olderCursorValue = null) {
+    const limit = Math.max(20, Math.min(250, Number(requestedLimit) || LOG_DASHBOARD_PAGE_LIMIT));
+    const since = Math.max(0, Number(sinceValue) || 0);
+    const all = runtimeLogBuffer.slice().sort((a, b) => String(a.at).localeCompare(String(b.at)) || String(a.id).localeCompare(String(b.id)));
+    const beforeAt = olderCursorValue && typeof olderCursorValue === 'object' ? new Date(olderCursorValue.beforeAt || 0) : null;
+    const beforeId = String(olderCursorValue?.beforeId || '').trim();
+    const older = !!(beforeAt && Number.isFinite(beforeAt.getTime()) && beforeAt.getTime() >= 0 && beforeId);
+    const incremental = !older && since > 0;
+    let logs = [];
+    let hasOlder = false;
+    let nextOlderCursor = null;
+    if (older) {
+        const olderEntries = all.filter(item => {
+            const at = Date.parse(String(item.at || '')) || 0;
+            return at < beforeAt.getTime() || at === beforeAt.getTime() && String(item.id) < beforeId;
+        });
+        logs = olderEntries.slice(-limit);
+        hasOlder = olderEntries.length > logs.length;
+        if (logs.length) nextOlderCursor = { beforeAt: logs[0].at, beforeId: String(logs[0].id) };
+    } else if (incremental) {
+        logs = all.filter(item => (Date.parse(String(item.at || '')) || 0) >= Math.max(0, since - 2000)).slice(0, limit);
+    } else {
+        logs = all.slice(-limit);
+        hasOlder = all.length > logs.length;
+        if (logs.length) nextOlderCursor = { beforeAt: logs[0].at, beforeId: String(logs[0].id) };
+    }
+    const nextSince = logs.reduce((latest, item) => Math.max(latest, Date.parse(String(item.at || '')) || 0), since);
+    return { logs, nextSince, hasOlder: older || !incremental ? hasOlder : null, olderCursor: older || !incremental ? nextOlderCursor : null };
+}
+
+app.post(TFBOT_LOG_INGEST_PATH, (req, res) => {
+    if (!TFBOT_CLUSTER_ENABLED || !TFBOT_CLUSTER_COORDINATOR_ONLY || !isValidClusterToken(req)) return res.status(404).type('text/plain').send('Not found');
+    const incoming = Array.isArray(req.body?.logs) ? req.body.logs.slice(0, 100) : [];
+    if (!incoming.length) return res.status(400).json({ ok: false, error: 'logs_array_required' });
+    let accepted = 0;
+    for (const item of incoming) {
+        if (!item || typeof item !== 'object') continue;
+        const id = String(item.id || '').slice(0, 260);
+        const at = String(item.at || '');
+        const host = String(item.host || '').trim().slice(0, 180);
+        const text = String(item.text || '').slice(0, 6500);
+        if (!id || !Number.isFinite(Date.parse(at)) || !host || !text) continue;
+        if (addRuntimeLogEntry({ id: `remote:${host}:${id}`, at, level: item.level || 'log', text, host, serviceName: item.serviceName || host, instance: item.instance || host, remote: true }, { disk: true, forward: false })) accepted++;
+    }
+    return res.status(200).json({ ok: true, accepted, received: incoming.length, storage: 'local-render-jsonl' });
+});
+
+app.get(LOG_DASHBOARD_PATH, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'");
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    res.removeHeader('Access-Control-Allow-Origin');
+
+    const now = Date.now();
+    const clientKey = String(req.ip || req.socket?.remoteAddress || 'unknown').slice(0, 100);
+    const rate = logDashboardRateLimits.get(clientKey) || { startedAt: now, count: 0 };
+    if (now - rate.startedAt > 60000) { rate.startedAt = now; rate.count = 0; }
+    rate.count++;
+    logDashboardRateLimits.set(clientKey, rate);
+    if (logDashboardRateLimits.size > 2000) {
+        for (const [key, value] of logDashboardRateLimits.entries()) {
+            if (now - value.startedAt > 120000 || logDashboardRateLimits.size > 1800) logDashboardRateLimits.delete(key);
+            if (logDashboardRateLimits.size <= 1800) break;
+        }
+    }
+    if (rate.count > 900) return res.status(429).type('text/plain').send('Trop de requêtes.');
+
+    if (String(req.query?.format || '').toLowerCase() === 'json') {
+        const requestedLimit = Math.max(20, Math.min(250, Number(req.query?.limit) || LOG_DASHBOARD_PAGE_LIMIT));
+        const since = Math.max(0, Number(req.query?.since) || 0);
+        const olderRequested = String(req.query?.older || '') === '1';
+        const olderCursor = olderRequested ? { beforeAt: String(req.query?.beforeAt || ''), beforeId: String(req.query?.beforeId || '') } : null;
+        if (olderRequested && (!Number.isFinite(new Date(olderCursor.beforeAt).getTime()) || !olderCursor.beforeId)) return res.status(400).json({ ok: false, error: 'invalid_older_log_cursor' });
+        const snapshot = await collectRuntimeLogSnapshot(requestedLimit, since, olderCursor);
+        return res.status(200).json({ ok: true, count: snapshot.logs.length, logs: snapshot.logs, nextSince: snapshot.nextSince, hasOlder: snapshot.hasOlder, olderCursor: snapshot.olderCursor, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, serviceScope: runtimeLogServiceScope, port: runtimeLogPort, instanceId: runtimeLogInstanceId, storage: 'local-render-jsonl', serverTime: new Date().toISOString() });
+    }
+
+    const initialLogs = runtimeLogBuffer.filter(item => (Date.parse(String(item.at || '')) || 0) >= runtimeLogDeploymentStartedAt.getTime()).slice(-Math.min(30, LOG_DASHBOARD_PAGE_LIMIT));
+    const firstPaintLogs = initialLogs.length ? initialLogs : [{
+        id: `dashboard-loading:${runtimeLogInstanceId}`,
+        at: new Date().toISOString(),
+        level: 'info',
+        text: '[runtime-log-dashboard] chargement des logs locaux Render…'
+    }];
+    const escapeLogHtml = value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const initialRowsHtml = firstPaintLogs.map(item => {
+        const id = escapeLogHtml(item.id || '');
+        const date = escapeLogHtml(String(item.at || '').replace('T', ' ').replace('Z', ''));
+        const level = escapeLogHtml(String(item.level || 'log').toUpperCase());
+        const text = escapeLogHtml(item.text || '');
+        return `<article class="log" data-id="${id}"><header class="meta"><em class="level ${escapeLogHtml(item.level || 'log')}">${level}</em><span class="separator">;</span><time class="date">${date}</time><button class="copy-log" type="button" aria-label="Copier ce log"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg></button></header><pre class="message">${text}</pre></article>`;
+    }).join('');
+    const initialLogsJson = JSON.stringify(firstPaintLogs).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
+    const html = `<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title></title>
+<style>
+:root{color-scheme:dark;background:#000;color:#fff;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0;width:100%;min-height:100%;background:#000;color:#fff;overscroll-behavior:none;overscroll-behavior-x:none}
+body{min-height:100vh;min-height:100svh;overflow-x:hidden;touch-action:pan-y}
+#load-older{position:sticky;top:0;z-index:9;display:none;margin:8px auto 0;padding:9px 14px;border:1px solid #555;border-radius:8px;background:#111;color:#fff;font:600 12px/1.35 system-ui,-apple-system,sans-serif;cursor:pointer}
+#load-older.visible{display:block}#load-older:disabled{opacity:.6;cursor:wait}
+#logs{width:100%;padding:14px 8px max(22px,env(safe-area-inset-bottom));overscroll-behavior:none}
+.log{position:relative;width:100%;padding:8px 2px 10px;color:#fff;white-space:normal;overflow-wrap:anywhere}
+.meta{display:flex;align-items:center;gap:6px;min-height:19px;padding-right:34px;font-size:11px;line-height:1.45}
+.level{font-weight:800;font-style:italic;white-space:nowrap;color:#fff}
+.level.error,.level.fatal,.level.warn,.level.info,.level.debug,.level.trace{color:#fff}
+.separator{font-style:normal;color:#fff}
+.date{font-style:italic;color:#fff;white-space:nowrap}
+.message{display:block;margin:4px 32px 0 0;padding:0;color:#fff;font-size:11px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-family:inherit;user-select:text}
+.copy-log,#copy-all{position:absolute;top:5px;right:0;width:27px;height:27px;display:grid;place-items:center;border:0;padding:0;margin:0;background:transparent;color:#fff;opacity:.9;cursor:pointer}
+.copy-log:active,#copy-all:active{opacity:1}.copy-log svg,#copy-all svg{display:block;width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+#copy-all{position:fixed;z-index:10;top:max(10px,env(safe-area-inset-top));right:max(12px,env(safe-area-inset-right));width:34px;height:34px;opacity:1}
+#jump{position:fixed;z-index:8;right:max(12px,env(safe-area-inset-right));bottom:max(14px,env(safe-area-inset-bottom));width:42px;height:42px;display:none;place-items:center;padding:0;border:0;border-radius:0;background:transparent;color:#fff;cursor:pointer;opacity:1}
+#jump.visible{display:grid}#jump svg{width:27px;height:27px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+#unseen-count{position:absolute;right:0;top:-15px;min-width:16px;max-width:80px;overflow:hidden;color:#fff;background:#000;font:800 12px/1 system-ui,-apple-system,sans-serif;text-align:right;white-space:nowrap}
+@media(max-width:560px){#logs{padding-left:6px;padding-right:6px}.meta{font-size:10px}.message{font-size:10px}.log{padding-top:7px;padding-bottom:9px}}
+</style>
+</head>
+<body>
+<button id="copy-all" type="button" aria-label="Copier tous les logs"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg></button>
+<button id="load-older" type="button">Charger les anciens logs</button>
+<main id="logs" aria-live="off">${initialRowsHtml}</main>
+<button id="jump" type="button" aria-label="Aller aux nouveaux logs ou en bas"><span id="unseen-count" aria-live="off"></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v15M6 13l6 6 6-6"/></svg></button>
+<script>
+window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
+(() => {
+ const endpoint = location.pathname;
+     const deploymentStartedAtMs = ${runtimeLogDeploymentStartedAt.getTime()};
+ const logsNode = document.getElementById('logs');
+ const jumpButton = document.getElementById('jump');
+ const copyAllButton = document.getElementById('copy-all');
+ const loadOlderButton = document.getElementById('load-older');
+ const unseenCountNode = document.getElementById('unseen-count');
+ let allLogs = Array.isArray(window.__SERVER_LOG_SNAPSHOT__) ? window.__SERVER_LOG_SNAPSHOT__ : [];
+ let lastFetchError = '';
+ let requestRunning = false;
+ let pollTimer = null;
+ let firstUnseenId = '';
+ let unseenCount = 0;
+ let jumpAction = 'unseen';
+ let hasRendered = false;
+ let logCursor = 0;
+ let initialLoadDone = false;
+ let olderCursor = null;
+ let hasOlder = false;
+ let olderRequestRunning = false;
+ const maxRows = ${LOG_DASHBOARD_PAGE_LIMIT};
+ const textOf = value => String(value == null ? '' : value);
+ const levelClass = value => textOf(value).toLowerCase().replace(/[^a-z0-9_-]/g,'');
+ function atBottom(){return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 8;}
+ function rowFor(id){return [...logsNode.querySelectorAll('.log')].find(row => row.dataset.id === id) || null;}
+ function visibleAnchor(){
+   const rows = logsNode.querySelectorAll('.log');
+   for(const row of rows){const box=row.getBoundingClientRect();if(box.bottom>0)return {id:row.dataset.id,top:box.top};}
+   return null;
+ }
+ function updateJump(){
+   jumpButton.classList.toggle('visible',!atBottom() || unseenCount>0);
+   unseenCountNode.textContent=unseenCount>0?(unseenCount>99?'99+':String(unseenCount)):'';
+ }
+ function copyText(item){
+   return textOf(item.level).toUpperCase() + ' ; ' + textOf(item.at).replace('T',' ').replace('Z','') + '\\n' + textOf(item.text);
+ }
+ async function writeClipboard(value){
+   if(navigator.clipboard&&navigator.clipboard.writeText){await navigator.clipboard.writeText(value);return true;}
+   const area=document.createElement('textarea');area.value=value;area.setAttribute('readonly','');area.style.position='fixed';area.style.left='-9999px';area.style.top='0';document.body.appendChild(area);area.select();const copied=document.execCommand('copy');area.remove();if(!copied)throw new Error('clipboard_unavailable');return true;
+ }
+ async function copyAll(){
+   try{
+     while(hasOlder&&olderCursor){const loaded=await loadOlder(true);if(!loaded)throw new Error('older_log_page_unavailable');}
+     await writeClipboard(allLogs.map(copyText).join('\\n\\n'));
+     copyAllButton.style.opacity='.5';window.setTimeout(()=>{copyAllButton.style.opacity='1';},500);
+   }catch(error){copyAllButton.style.opacity='1';}
+ }
+ copyAllButton.addEventListener('click',copyAll);
+ loadOlderButton.addEventListener('click',()=>{void loadOlder(false);});
+ function updateOlderButton(){loadOlderButton.classList.toggle('visible',hasOlder&&!!olderCursor);loadOlderButton.disabled=olderRequestRunning;loadOlderButton.textContent=olderRequestRunning?'Chargement des anciens logs…':hasOlder?'Charger les anciens logs':'Tous les logs sont chargés';}
+ function makeRow(item){
+   const row=document.createElement('article');row.className='log';row.dataset.id=textOf(item.id);
+   const meta=document.createElement('header');meta.className='meta';
+   const level=document.createElement('em');level.className='level '+levelClass(item.level);level.textContent=textOf(item.level).toUpperCase();
+   const separator=document.createElement('span');separator.className='separator';separator.textContent=';';
+   const date=document.createElement('time');date.className='date';date.textContent=(textOf(item.host)?'['+textOf(item.host)+'] ':'')+textOf(item.at).replace('T',' ').replace('Z','');
+   const copy=document.createElement('button');copy.className='copy-log';copy.type='button';copy.setAttribute('aria-label','Copier ce log');
+   copy.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg>';
+   copy.addEventListener('click',()=>copyOne(item,copy));
+   meta.append(level,separator,date,copy);
+   const content=document.createElement('pre');content.className='message';content.textContent=textOf(item.text);
+   row.append(meta,content);
+   return row;
+ }
+ async function copyOne(item,button){
+   try{await writeClipboard(copyText(item));button.style.opacity='.45';window.setTimeout(()=>{button.style.opacity='.9';},550);}catch(error){}
+ }
+ function render(nextLogs, options={}){
+   const oldIds=new Set(allLogs.map(item=>textOf(item.id)));
+   const incoming=(Array.isArray(nextLogs)?nextLogs:[]).filter(item=>!textOf(item.id).startsWith('dashboard-loading:')&&(Date.parse(textOf(item.at))||0)>=deploymentStartedAtMs);
+   const merged=new Map(allLogs.map(item=>[textOf(item.id),item]));
+   for(const item of incoming)merged.set(textOf(item.id),item);
+   const next=Array.from(merged.values()).sort((a,b)=>textOf(a.at).localeCompare(textOf(b.at))||textOf(a.id).localeCompare(textOf(b.id)));
+   const added=next.filter(item=>!oldIds.has(textOf(item.id))&&!textOf(item.id).startsWith('dashboard-loading:'));
+   const wasAtBottom=options.older?false:(!hasRendered||atBottom());
+   const anchor=wasAtBottom?null:visibleAnchor();
+   if(!options.older&&!wasAtBottom&&added.length){if(!firstUnseenId)firstUnseenId=textOf(added[0].id);unseenCount+=added.length;}
+   allLogs=next;
+   const fragment=document.createDocumentFragment();
+   for(const item of allLogs)fragment.appendChild(makeRow(item));
+   logsNode.replaceChildren(fragment);
+   hasRendered=true;
+   if(wasAtBottom){
+     firstUnseenId='';unseenCount=0;jumpAction='unseen';
+     window.scrollTo(0,document.documentElement.scrollHeight);
+   }else if(anchor){
+     const restored=rowFor(anchor.id);
+     if(restored){const nextTop=restored.getBoundingClientRect().top;window.scrollBy(0,nextTop-anchor.top);}
+   }
+   updateJump();
+   updateOlderButton();
+ }
+ async function loadOlder(fromCopy=false){
+   if(!hasOlder||!olderCursor||olderRequestRunning)return false;
+   olderRequestRunning=true;updateOlderButton();
+   try{
+     const query='?format=json&limit='+maxRows+'&older=1&beforeAt='+encodeURIComponent(olderCursor.beforeAt)+'&beforeId='+encodeURIComponent(olderCursor.beforeId);
+     const response=await fetch(endpoint+query,{cache:'no-store',credentials:'same-origin',headers:{'Accept':'application/json'}});
+     if(!response.ok)throw new Error('HTTP '+response.status);
+     const payload=await response.json();
+     if(!payload||payload.ok!==true||!Array.isArray(payload.logs))throw new Error('invalid_older_log_response');
+     if((Date.parse(textOf(payload.deploymentStartedAt))||0)!==deploymentStartedAtMs)throw new Error('deployment_timestamp_mismatch');
+     render(payload.logs,{older:true});
+     olderCursor=payload.olderCursor||null;
+     hasOlder=payload.hasOlder===true;
+     updateOlderButton();
+     return true;
+   }catch(error){
+     loadOlderButton.textContent='Erreur : réessayer';
+     if(fromCopy)throw error;
+     return false;
+   }finally{olderRequestRunning=false;updateOlderButton();}
+ }
+ async function load(){
+   if(requestRunning)return;
+   requestRunning=true;
+   try{
+     const query=initialLoadDone?('?format=json&limit=160&since='+Math.max(0,logCursor-2000)):('?format=json&limit='+maxRows);
+     const response=await fetch(endpoint+query,{cache:'no-store',credentials:'same-origin',headers:{'Accept':'application/json'}});
+     if(!response.ok)throw new Error('HTTP '+response.status);
+     const payload=await response.json();
+     if(!payload||payload.ok!==true||!Array.isArray(payload.logs))throw new Error('invalid_log_response');
+     if((Date.parse(textOf(payload.deploymentStartedAt))||0)!==deploymentStartedAtMs)throw new Error('deployment_timestamp_mismatch');
+     lastFetchError='';
+     if(Number.isFinite(Number(payload.nextSince)))logCursor=Math.max(logCursor,Number(payload.nextSince));
+     if(!initialLoadDone){hasOlder=payload.hasOlder===true;olderCursor=payload.olderCursor||null;}
+     initialLoadDone=true;
+     if(payload.logs.length)render(payload.logs);
+     updateOlderButton();
+   }catch(error){
+     const detail='dashboard_fetch_failed: '+textOf(error&&error.message?error.message:error).slice(0,180);
+     if(detail!==lastFetchError){
+       lastFetchError=detail;
+       const existing=allLogs.filter(item=>!textOf(item.id).startsWith('dashboard-client-error:'));
+       existing.push({id:'dashboard-client-error:'+Date.now(),at:new Date().toISOString(),level:'error',text:'[runtime-log-dashboard] '+detail});
+       render(existing,false);
+     }
+   }finally{requestRunning=false;}
+ }
+ jumpButton.addEventListener('click',()=>{
+   if(jumpAction==='unseen'&&firstUnseenId){
+     const target=rowFor(firstUnseenId);
+     if(target){target.scrollIntoView({block:'start',behavior:'smooth'});jumpAction='bottom';updateJump();return;}
+   }
+   window.scrollTo({top:document.documentElement.scrollHeight,behavior:'smooth'});
+   jumpAction='unseen';firstUnseenId='';
+   window.setTimeout(updateJump,450);
+ });
+ let scrollFrame=0;
+ window.addEventListener('scroll',()=>{
+   if(scrollFrame)return;
+   scrollFrame=window.requestAnimationFrame(()=>{
+     scrollFrame=0;
+     if(atBottom()){firstUnseenId='';unseenCount=0;jumpAction='unseen';}
+     updateJump();
+   });
+ },{passive:true});
+ document.addEventListener('gesturestart',event=>event.preventDefault(),{passive:false});
+ document.addEventListener('touchmove',event=>{if(event.touches&&event.touches.length>1)event.preventDefault();},{passive:false});
+ document.addEventListener('wheel',event=>{if(event.ctrlKey||event.metaKey)event.preventDefault();},{passive:false});
+ document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&['+','=','-','0'].includes(String(event.key).toLowerCase()))event.preventDefault();});
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden)void load();});
+ void load();
+ updateOlderButton();
+ pollTimer=window.setInterval(load,5000);
+ window.addEventListener('pagehide',()=>{if(pollTimer)window.clearInterval(pollTimer);});
+})();
+</script>
+</body>
+</html>`;
+    return res.status(200).type('html').send(html);
+});
 
 const handleTFSlugRequest = (req, res) => {
     const match = String(req.path || '').match(/(?:^|\/)TF-([A-Za-z0-9_-]{1,80})(?:\/.*)?$/i);
@@ -7504,13 +8179,25 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const saved = await persistOutgoingRetryMessage(sessionId, remoteJid, messageToPersist, aliases, accountPhone, accountJid, accountLid);
                 if (!saved) {
                     outgoingRetryPreflightIds.delete(`${sessionId}:${messageId}`);
+                    const retryTimer = setTimeout(() => {
+                        const latestRuntime = activeSessions.get(sessionId);
+                        if (serverShuttingDown || latestRuntime?.sock !== sock || !db) return;
+                        void persistOutgoingRetryMessage(sessionId, remoteJid, messageToPersist, aliases, accountPhone, accountJid, accountLid).then(retrySaved => {
+                            if (!retrySaved) return;
+                            outgoingRetryPreflightIds.set(`${sessionId}:${messageId}`, Date.now());
+                            while (outgoingRetryPreflightIds.size > 5000) outgoingRetryPreflightIds.delete(outgoingRetryPreflightIds.keys().next().value);
+                            console.info('[message-retry-preflight-background-save-completed]', { sessionId, messageId, remoteJid, action: 'durable_retry_copy_saved_without_blocking_message_relay' });
+                        }).catch(retryError => console.warn('[message-retry-preflight-background-save-failed]', { sessionId, messageId, error: retryError?.message || String(retryError) }));
+                    }, Math.max(250, Math.min(1500, BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS)));
+                    if (typeof retryTimer.unref === 'function') retryTimer.unref();
                     console.error('[message-retry-preflight-memory-fallback]', {
                         sessionId,
                         messageId,
                         remoteJid,
                         timeoutMs: BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS,
                         memoryCopyAvailable: true,
-                        action: 'allow_delivery_using_session_scoped_memory_copy_and_retry_durable_save_after_relay'
+                        backgroundDurableRetryScheduled: true,
+                        action: 'allow_delivery_using_session_scoped_memory_copy_and_retry_durable_save_without_blocking_relay'
                     });
                     return;
                 }
@@ -7535,13 +8222,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     if (found.sessionId !== sessionId || found.id !== key?.id || !found.fromMe) continue;
                     const recentChatAliases = [...new Set([found.from, ...(Array.isArray(found.chatAliases) ? found.chatAliases : []), found.key?.remoteJidAlt, found.key?.participantAlt, found.key?.participantPn].map(value => String(value || '').trim()).filter(Boolean))];
                     const recentChatMatches = !requestedChatJid || recentChatAliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, requestedChatJid));
-                    if (!recentChatMatches && !(key?.fromMe === true && found.fromMe === true)) continue;
+                    if (!recentChatMatches && !(key?.fromMe === true && found.fromMe === true) && !(key?.fromMe == null && found.fromMe === true && !requestedChatJid)) continue;
                     exactRecentMessage = found;
                     if (!recentChatMatches) console.warn('[message-retry-cache-hit-exact-session-id-alias-fallback]', { sessionId, messageId: key.id, requestedChatJid, storedChatAliases: recentChatAliases, lookupScope: 'same_session_memory' });
                     break;
                 }
                 if (exactRecentMessage) {
-                    console.debug('[message-retry-cache-hit]', { sessionId, messageId: key.id, match: requestedChatJid ? 'exact_chat_or_known_alias' : 'outgoing_message_id' });
+                    console.debug('[message-retry-cache-hit]', { sessionId, messageId: key.id, match: requestedChatJid ? 'exact_chat_or_known_alias' : 'same_session_outgoing_message_id_without_chat_jid' });
                     return exactRecentMessage.message;
                 }
                 if (!key?.id || !db) {
@@ -11194,7 +11881,13 @@ async function shutdownServer(signal) {
     if (httpServer) await new Promise(resolve => {
         try { httpServer.close(() => resolve()); } catch (e) { resolve(); }
     });
+    if (runtimeLogDiskTimer) { clearInterval(runtimeLogDiskTimer); runtimeLogDiskTimer = null; }
     console.info('[server-shutdown-completed]', { signal, processInstanceId });
+    try {
+        const logDrainDeadline = Date.now() + 5000;
+        while (runtimeLogDiskWriteRunning && Date.now() < logDrainDeadline) await new Promise(resolve => setTimeout(resolve, 40));
+        if (runtimeLogPendingDiskWrites.length) await flushRuntimeLogDiskWrites();
+    } catch (logFlushError) { originalStderrWrite(`[runtime-log-final-flush-failed] ${String(logFlushError?.message || logFlushError)}\n`); }
     try { if (mongoClient) await mongoClient.close(); } catch (error) { console.warn('[server-shutdown-mongo-close-failed]', error?.message || String(error)); }
 }
 
@@ -11205,6 +11898,8 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
 }
 
 async function main() {
+    await initializeRuntimeLogStorage();
+    startRuntimeLogForwarder();
     console.info('[runtime-build]', {
         build: RUNTIME_FIX_BUILD,
         database: TFBOT_DATABASE_NAME,
@@ -11227,6 +11922,10 @@ async function main() {
         clusterWorkerCoordinatorPollMs: TFBOT_WORKER_COORDINATOR_POLL_MS,
         clusterNonActiveDomainsRedirectStatus: 307,
         clusterPollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS,
+        clusterActiveFailureThreshold: TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD,
+        runtimeLogStorage: 'local-render-jsonl',
+        runtimeLogDashboardPath: LOG_DASHBOARD_PATH,
+        runtimeLogsForwardedToCoordinator: TFBOT_CLUSTER_ENABLED && !TFBOT_CLUSTER_COORDINATOR_ONLY,
         clusterInactiveWorkersConnectMongo: false,
         clusterCoordinatorConnectMongo: TFBOT_CLUSTER_COORDINATOR_ONLY,
         clusterInactiveWorkersRestoreSessions: false,
