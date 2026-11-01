@@ -181,7 +181,10 @@
                 activeOriginConfirmed = false;
                 showSplash();
                 frame.classList.remove('ready');
-                frame.src = origin + '/';
+                const passHash = (window.location.hash && window.location.hash.includes('pwen'))
+                    ? '#pwen'
+                    : '';
+                frame.src = origin.replace(/\/+$/, '') + '/' + passHash;
                 if (loadTimer) clearTimeout(loadTimer);
                 loadTimer = setTimeout(function() {
                     if (!frameLoaded) {
