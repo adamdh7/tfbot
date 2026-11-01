@@ -3,8 +3,8 @@ const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(pr
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 7000)));
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r99-self-chat-lid-retry-same-session-public-async-logs';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r99')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+const TFBOT_CLUSTER_CODE_REVISION = 'r100-self-chat-pn-lid-multikey-store-identity-refresh';
+const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r100')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
@@ -1384,6 +1384,8 @@ let expiredSessionCleanupPromise = null;
 const messageQueues = new WeakMap();
 const outgoingMessageCache = new Set();
 const outgoingRetryMessageMemory = new Map();
+const outgoingRetryAliasMemory = new Map();
+const ownIdentityRefreshPromises = new Map();
 const OUTGOING_RETRY_MEMORY_TTL_MS = Math.max(60000, Math.min(86400000, Number(process.env.OUTGOING_RETRY_MEMORY_TTL_MS || 21600000)));
 const OUTGOING_RETRY_MEMORY_MAX_ENTRIES = Math.max(500, Math.min(10000, Number(process.env.OUTGOING_RETRY_MEMORY_MAX_ENTRIES || 3000)));
 const outgoingRetryPreflightIds = new Map();
@@ -1464,6 +1466,8 @@ function cleanupSessionVolatileCaches(sessionId) {
     authWriteFailures.delete(id);
     for (const key of [...outgoingMessageCache]) if (key.startsWith(`${id}:`)) outgoingMessageCache.delete(key);
     for (const key of [...outgoingRetryMessageMemory.keys()]) if (key.startsWith(`${id}:`)) outgoingRetryMessageMemory.delete(key);
+    for (const [key, value] of [...outgoingRetryAliasMemory.entries()]) if (key.startsWith(`${id}|`) || String(value || '').startsWith(`${id}:`)) outgoingRetryAliasMemory.delete(key);
+    ownIdentityRefreshPromises.delete(id);
     for (const key of [...outgoingMessageIdCache.keys()]) if (key.startsWith(`${id}:`)) outgoingMessageIdCache.delete(key);
     for (const key of [...outgoingTextEchoCache.keys()]) if (key.startsWith(`${id}:`)) outgoingTextEchoCache.delete(key);
     for (let index = recentMsgsCache.length - 1; index >= 0; index--) if (recentMsgsCache[index]?.sessionId === id) recentMsgsCache.splice(index, 1);
@@ -1498,7 +1502,7 @@ function rememberLidPhonePair(sessionId, first, second, source = 'message_key') 
     if (!sessionId || !lid || !phone) return false;
     const sessionKey = `${sessionId}:${lid}`;
     const currentSessionRecord = lidPhoneResolutionCache.get(sessionKey);
-    const trustedSessionSources = new Set(['signal_lid_mapping', 'signal_pn_lid_mapping', 'lid_mapping_update', 'message_key', 'cached_group_metadata']);
+    const trustedSessionSources = new Set(['signal_lid_mapping', 'signal_pn_lid_mapping', 'lid_mapping_update', 'message_key', 'cached_group_metadata', 'authenticated_own_identity']);
     const trustedSessionEvidence = trustedSessionSources.has(source);
     const sessionConflict = !!(currentSessionRecord?.phone && currentSessionRecord.phone !== phone);
     if (sessionConflict && !trustedSessionEvidence) {
@@ -1791,6 +1795,55 @@ async function resolveLidForPhone(sessionId, sock, phoneValue) {
     return /@lid$/i.test(remembered) ? { lid: remembered, source: 'session_lid_cache' } : null;
 }
 
+async function refreshAuthenticatedSessionOwnIdentity(sessionId, sock, credentials, source = 'connection_update') {
+    if (!sessionId || !sock) return null;
+    const currentRuntime = activeSessions.get(sessionId);
+    if (currentRuntime?.sock !== sock) return null;
+    const existing = ownIdentityRefreshPromises.get(sessionId);
+    if (existing?.sock === sock && existing.promise) return existing.promise;
+    const refreshPromise = (async () => {
+        const creds = credentials || currentRuntime?.authState?.creds || {};
+        let phone = getAuthenticatedPhoneNumber(sock.user || null, creds) || normalizedJidNumber(currentRuntime?.ownPhoneJid || '');
+        let phoneJid = phone ? normalizePhoneCacheJid(`${phone}@s.whatsapp.net`) : normalizePhoneCacheJid(currentRuntime?.ownPhoneJid || '');
+        let lid = normalizeLidCacheKey(getAuthenticatedLid(sock.user || null, creds) || currentRuntime?.ownLidJid || getRememberedLidForPhone(sessionId, phoneJid));
+        let identitySource = 'authenticated_credentials';
+        if (phoneJid && !/@lid$/i.test(lid)) {
+            const mapped = await resolveLidForPhone(sessionId, sock, phoneJid).catch(() => null);
+            if (mapped?.lid) {
+                lid = normalizeLidCacheKey(mapped.lid);
+                identitySource = mapped.source || 'pn_to_lid_mapping';
+            }
+        }
+        if ((!phoneJid || !/^\d{6,20}@s\.whatsapp\.net$/i.test(phoneJid)) && /@lid$/i.test(lid)) {
+            try {
+                phoneJid = normalizePhoneCacheJid(await promiseWithTimeout(sock.signalRepository?.lidMapping?.getPNForLID?.(lid), 1500, 'Own LID-to-PN lookup'));
+                if (phoneJid) {
+                    phone = phoneJid.split('@')[0];
+                    identitySource = 'lid_to_pn_mapping';
+                }
+            } catch (error) {
+                console.warn('[session-own-lid-pn-resolution-failed]', { sessionId, source, error: error?.message || String(error) });
+            }
+        }
+        const ownLidJid = /@lid$/i.test(lid) ? lid : '';
+        if (phoneJid && ownLidJid) rememberLidPhonePair(sessionId, ownLidJid, phoneJid, 'authenticated_own_identity');
+        const liveRuntime = activeSessions.get(sessionId);
+        if (liveRuntime?.sock === sock) {
+            liveRuntime.ownPhoneJid = phoneJid || liveRuntime.ownPhoneJid || '';
+            liveRuntime.ownLidJid = ownLidJid || liveRuntime.ownLidJid || '';
+            liveRuntime.ownIdentityUpdatedAt = Date.now();
+        }
+        console.info('[session-own-identity-refreshed]', { sessionId, source, identitySource, phoneAvailable: !!phoneJid, lidAvailable: !!ownLidJid, mappingPersistQueued: !!(phoneJid && ownLidJid) });
+        return { phoneJid, lidJid: ownLidJid, source: identitySource };
+    })();
+    ownIdentityRefreshPromises.set(sessionId, { sock, promise: refreshPromise });
+    try {
+        return await refreshPromise;
+    } finally {
+        if (ownIdentityRefreshPromises.get(sessionId)?.promise === refreshPromise) ownIdentityRefreshPromises.delete(sessionId);
+    }
+}
+
 function cacheMessageIdentityAliases(sessionId, message) {
     const key = message?.key || {};
     const pairs = [];
@@ -2041,31 +2094,101 @@ async function finishMessageProcessingClaim(sessionId, messageId, accountIdentit
     }
 }
 
+function normalizeOutgoingRetryAlias(value) {
+    const phoneJid = normalizePhoneCacheJid(value);
+    if (phoneJid) return phoneJid;
+    const lidJid = normalizeLidCacheKey(value);
+    return /@lid$/i.test(lidJid) ? lidJid : '';
+}
+
+function getOutgoingRetryAliasMemoryKey(sessionId, alias, messageId) {
+    const normalizedAlias = normalizeOutgoingRetryAlias(alias);
+    const id = String(messageId || '').trim();
+    return sessionId && normalizedAlias && id ? `${sessionId}|${normalizedAlias}|${id}` : '';
+}
+
+function buildOutgoingRetryLookupKeys(sessionId, messageId, aliases = []) {
+    const id = String(messageId || '').trim();
+    if (!sessionId || !id) return [];
+    const keys = [`${sessionId}|id|${id}`];
+    const phoneAliases = new Set();
+    const lidAliases = new Set();
+    for (const value of Array.isArray(aliases) ? aliases : []) {
+        const normalized = normalizeOutgoingRetryAlias(value);
+        if (!normalized) continue;
+        if (/@s\.whatsapp\.net$/i.test(normalized)) phoneAliases.add(normalized);
+        else if (/@lid$/i.test(normalized)) lidAliases.add(normalized);
+    }
+    for (const phone of phoneAliases) keys.push(`${sessionId}|pn|${phone}|${id}`);
+    for (const lid of lidAliases) keys.push(`${sessionId}|lid|${lid}|${id}`);
+    return [...new Set(keys)];
+}
+
+function removeOutgoingRetryMessageMemory(cacheKey, removeAliases = false) {
+    const entry = outgoingRetryMessageMemory.get(cacheKey);
+    if (!entry) return false;
+    if (removeAliases) {
+        for (const alias of Array.isArray(entry.lookupAliases) ? entry.lookupAliases : []) {
+            const aliasKey = getOutgoingRetryAliasMemoryKey(entry.sessionId, alias, entry.messageId);
+            if (aliasKey) outgoingRetryAliasMemory.delete(aliasKey);
+        }
+    }
+    outgoingRetryMessageMemory.delete(cacheKey);
+    return true;
+}
+
 function cacheOutgoingRetryMessageMemory(sessionId, message, extraAliases = []) {
     const messageId = String(message?.key?.id || '').trim();
     if (!sessionId || !messageId || !message?.message || message?.key?.fromMe === false) return false;
     const cacheKey = `${sessionId}:${messageId}`;
-    const aliases = [...new Set([message?.key?.remoteJid, message?.key?.remoteJidAlt, message?.key?.participant, message?.key?.participantAlt, message?.key?.participantPn, message?.key?.senderPn, ...(Array.isArray(extraAliases) ? extraAliases : [])].map(value => String(value || '').trim()).filter(Boolean))].slice(0, 24);
-    const entry = { sessionId, messageId, key: { ...(message.key || {}), fromMe: true }, aliases, message: message.message, cachedAt: Date.now() };
-    outgoingRetryMessageMemory.delete(cacheKey);
+    const aliases = [...new Set([message?.key?.remoteJid, message?.key?.remoteJidAlt, message?.key?.participant, message?.key?.participantAlt, message?.key?.participantPn, message?.key?.senderPn, ...(Array.isArray(extraAliases) ? extraAliases : [])].map(value => String(value || '').trim()).filter(Boolean))].slice(0, 32);
+    const lookupAliases = [...new Set(aliases.map(normalizeOutgoingRetryAlias).filter(Boolean))];
+    removeOutgoingRetryMessageMemory(cacheKey, true);
+    const entry = { sessionId, messageId, key: { ...(message.key || {}), fromMe: true }, aliases, lookupAliases, message: message.message, cachedAt: Date.now() };
     outgoingRetryMessageMemory.set(cacheKey, entry);
+    for (const alias of lookupAliases) {
+        const aliasKey = getOutgoingRetryAliasMemoryKey(sessionId, alias, messageId);
+        if (aliasKey) outgoingRetryAliasMemory.set(aliasKey, entry);
+    }
     const now = Date.now();
     for (const [key, value] of outgoingRetryMessageMemory) {
-        if (now - Number(value?.cachedAt || 0) > OUTGOING_RETRY_MEMORY_TTL_MS) outgoingRetryMessageMemory.delete(key);
+        if (now - Number(value?.cachedAt || 0) > OUTGOING_RETRY_MEMORY_TTL_MS) removeOutgoingRetryMessageMemory(key);
         else if (outgoingRetryMessageMemory.size <= OUTGOING_RETRY_MEMORY_MAX_ENTRIES) break;
     }
-    while (outgoingRetryMessageMemory.size > OUTGOING_RETRY_MEMORY_MAX_ENTRIES) outgoingRetryMessageMemory.delete(outgoingRetryMessageMemory.keys().next().value);
+    while (outgoingRetryMessageMemory.size > OUTGOING_RETRY_MEMORY_MAX_ENTRIES) removeOutgoingRetryMessageMemory(outgoingRetryMessageMemory.keys().next().value);
+    for (const [aliasKey, aliasEntry] of outgoingRetryAliasMemory) {
+        if (now - Number(aliasEntry?.cachedAt || 0) > OUTGOING_RETRY_MEMORY_TTL_MS) outgoingRetryAliasMemory.delete(aliasKey);
+    }
+    const aliasLimit = OUTGOING_RETRY_MEMORY_MAX_ENTRIES * 12;
+    while (outgoingRetryAliasMemory.size > aliasLimit) outgoingRetryAliasMemory.delete(outgoingRetryAliasMemory.keys().next().value);
     return true;
 }
-function getOutgoingRetryMessageMemory(sessionId, messageId) {
-    const cacheKey = `${String(sessionId || '')}:${String(messageId || '').trim()}`;
-    const entry = outgoingRetryMessageMemory.get(cacheKey);
-    if (!entry) return null;
-    if (Date.now() - Number(entry.cachedAt || 0) > OUTGOING_RETRY_MEMORY_TTL_MS) {
-        outgoingRetryMessageMemory.delete(cacheKey);
-        return null;
+
+function getOutgoingRetryMessageMemory(sessionId, messageId, requestedAliases = []) {
+    const normalizedSessionId = String(sessionId || '');
+    const normalizedMessageId = String(messageId || '').trim();
+    const cacheKey = `${normalizedSessionId}:${normalizedMessageId}`;
+    const now = Date.now();
+    let entry = outgoingRetryMessageMemory.get(cacheKey);
+    let lookupMode = 'message_id';
+    if (entry && now - Number(entry.cachedAt || 0) > OUTGOING_RETRY_MEMORY_TTL_MS) {
+        removeOutgoingRetryMessageMemory(cacheKey);
+        entry = null;
     }
-    return entry;
+    if (!entry) {
+        for (const alias of Array.isArray(requestedAliases) ? requestedAliases : []) {
+            const aliasKey = getOutgoingRetryAliasMemoryKey(normalizedSessionId, alias, normalizedMessageId);
+            const indexedEntry = aliasKey ? outgoingRetryAliasMemory.get(aliasKey) : null;
+            if (indexedEntry && indexedEntry.sessionId === normalizedSessionId && indexedEntry.messageId === normalizedMessageId && now - Number(indexedEntry.cachedAt || 0) <= OUTGOING_RETRY_MEMORY_TTL_MS) {
+                entry = indexedEntry;
+                lookupMode = /@lid$/i.test(normalizeOutgoingRetryAlias(alias)) ? 'lid_alias' : 'pn_alias';
+                break;
+            }
+            if (aliasKey && indexedEntry) outgoingRetryAliasMemory.delete(aliasKey);
+        }
+    }
+    if (!entry) return null;
+    return { ...entry, lookupMode };
 }
 
 function cacheRecentMessage(sessionId, message, extraAliases = []) {
@@ -2154,33 +2277,48 @@ async function persistOutgoingRetryMessage(sessionId, jid, message, jidAliases =
     const messageId = String(message.key.id);
     const remoteJid = String(message.key.remoteJid || jid || '');
     const remoteJidAlt = String(message.key.remoteJidAlt || '');
-    const remoteJidAliases = [...new Set([remoteJid, remoteJidAlt, jid, message?.key?.participant, message?.key?.participantAlt, message?.key?.participantPn, message?.key?.senderPn, ...(Array.isArray(jidAliases) ? jidAliases : [])].map(value => String(value || '').trim()).filter(Boolean))].slice(0, 24);
+    const remoteJidAliases = [...new Set([remoteJid, remoteJidAlt, jid, message?.key?.participant, message?.key?.participantAlt, message?.key?.participantPn, message?.key?.senderPn, ...(Array.isArray(jidAliases) ? jidAliases : [])].map(value => String(value || '').trim()).filter(Boolean))].slice(0, 32);
+    const accountPhoneJid = normalizePhoneCacheJid(accountPhone) || normalizePhoneCacheJid(`${normalizePhoneNumber(accountPhone)}@s.whatsapp.net`);
+    const accountLidJid = normalizeLidCacheKey(accountLid || '');
+    const phoneAliases = [...new Set(remoteJidAliases.map(normalizePhoneCacheJid).filter(Boolean))];
+    const lidAliases = [...new Set(remoteJidAliases.map(normalizeLidCacheKey).filter(value => /@lid$/i.test(value)))];
+    const isSelfChatRetry = !!((accountPhoneJid && phoneAliases.includes(accountPhoneJid)) || (/@lid$/i.test(accountLidJid) && lidAliases.includes(accountLidJid)));
+    const rememberedOwnLid = accountPhoneJid ? getRememberedLidForPhone(sessionId, accountPhoneJid) : '';
+    const mappedLidAlias = accountPhoneJid ? lidAliases.find(value => getRememberedPhoneForLid(sessionId, value) === accountPhoneJid) || '' : '';
+    const retryPhoneJid = isSelfChatRetry ? (accountPhoneJid || phoneAliases[0] || '') : '';
+    const retryLidJid = isSelfChatRetry ? (/@lid$/i.test(accountLidJid) ? accountLidJid : rememberedOwnLid || mappedLidAlias || (/@lid$/i.test(normalizeLidCacheKey(remoteJidAlt)) ? normalizeLidCacheKey(remoteJidAlt) : '')) : '';
+    const selfRetryAliases = isSelfChatRetry ? [retryPhoneJid, retryLidJid].filter(Boolean) : [];
+    const retryLookupKeys = buildOutgoingRetryLookupKeys(sessionId, messageId, selfRetryAliases);
     const normalizedMessage = { ...message, key: { ...(message.key || {}), id: messageId, remoteJid, ...(remoteJidAlt ? { remoteJidAlt } : {}), fromMe: true } };
-    cacheOutgoingRetryMessageMemory(sessionId, normalizedMessage, remoteJidAliases);
+    cacheOutgoingRetryMessageMemory(sessionId, normalizedMessage, [...remoteJidAliases, ...selfRetryAliases]);
     const record = {
         _id: `${sessionId}:${messageId}`,
         sessionId,
         accountPhone: normalizePhoneNumber(accountPhone),
         accountJid: String(accountJid || ''),
-        accountLid: normalizeLidCacheKey(accountLid || ''),
+        accountLid: accountLidJid,
         messageId,
         remoteJid,
         remoteJidAlt,
         remoteJidAliases,
+        isSelfChatRetry,
+        retryPhoneJid,
+        retryLidJid,
+        retryLookupKeys,
         messageKey: { id: messageId, remoteJid, remoteJidAlt, participant: String(message?.key?.participant || ''), participantAlt: String(message?.key?.participantAlt || ''), participantPn: String(message?.key?.participantPn || ''), senderPn: String(message?.key?.senderPn || ''), fromMe: true },
         fromMe: true,
         message: message.message,
         messageTimestamp: Number(message.messageTimestamp) || Math.floor(Date.now() / 1000),
         createdAt: new Date()
     };
-    console.info('[message-retry-store-write-started]', { sessionId, messageId, destinationType: getWhatsAppDestinationType(remoteJid), messageType: Object.keys(message.message || {}).join(',') || 'unknown', aliasCount: remoteJidAliases.length, persistenceMode, durableWriteRequested: true });
+    console.info('[message-retry-store-write-started]', { sessionId, messageId, destinationType: getWhatsAppDestinationType(remoteJid), messageType: Object.keys(message.message || {}).join(',') || 'unknown', aliasCount: remoteJidAliases.length, selfChatRetry: isSelfChatRetry, retryKeys: { messageId: true, pn: !!retryPhoneJid, lid: !!retryLidJid }, persistenceMode, durableWriteRequested: true });
     try {
         await promiseWithTimeout(db.collection('baileys_outgoing_messages').updateOne(
             { _id: record._id },
             { $set: record },
             { upsert: true, writeConcern: { w: 'majority', wtimeout: BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS } }
         ), BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS + 300, 'Baileys outgoing retry message persistence');
-        console.info('[message-retry-store-write-completed]', { sessionId, messageId, remoteJid, aliasCount: remoteJidAliases.length, persistenceMode, durableWriteConcern: 'majority' });
+        console.info('[message-retry-store-write-completed]', { sessionId, messageId, remoteJid, aliasCount: remoteJidAliases.length, selfChatRetry: isSelfChatRetry, retryKeys: { messageId: true, pn: !!retryPhoneJid, lid: !!retryLidJid }, persistenceMode, durableWriteConcern: 'majority' });
         return true;
     } catch (error) {
         console.warn('[message-retry-store-write-failed]', { sessionId, messageId, destinationType: getWhatsAppDestinationType(remoteJid), messageType: Object.keys(message.message || {}).join(',') || 'unknown', persistenceMode, failureClass: classifyWhatsAppFailure(error), errorName: error?.name || error?.constructor?.name || null, error: String(error?.message || error).slice(0, 700) });
@@ -2676,9 +2814,9 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         const outgoingContent = content;
         const outgoingDiagnosticText = getOutgoingDiagnosticText(outgoingContent);
         const outgoingDiagnosticType = Object.keys(outgoingContent || {}).join(',') || 'unknown';
-        let ownLidJid = normalizeLidCacheKey(getAuthenticatedLid(sock.user || null, ownAuthCreds));
-        const authenticatedPhone = getAuthenticatedPhoneNumber(sock.user || null, ownAuthCreds) || normalizePhoneNumber(sock.user?.phoneNumber || '');
-        let ownPhoneJid = authenticatedPhone ? normalizePhoneCacheJid(`${authenticatedPhone}@s.whatsapp.net`) : '';
+        const authenticatedPhone = getAuthenticatedPhoneNumber(sock.user || null, ownAuthCreds) || normalizePhoneNumber(sock.user?.phoneNumber || '') || normalizedJidNumber(activeSession?.ownPhoneJid || '');
+        let ownPhoneJid = authenticatedPhone ? normalizePhoneCacheJid(`${authenticatedPhone}@s.whatsapp.net`) : normalizePhoneCacheJid(activeSession?.ownPhoneJid || '');
+        let ownLidJid = normalizeLidCacheKey(getAuthenticatedLid(sock.user || null, ownAuthCreds) || activeSession?.ownLidJid || getRememberedLidForPhone(sessionId, ownPhoneJid));
         if (/@lid$/i.test(ownLidJid)) {
             try {
                 const liveOwnPhoneJid = normalizePhoneCacheJid(await promiseWithTimeout(sock.signalRepository?.lidMapping?.getPNForLID?.(ownLidJid), 1500, 'Self chat PN lookup'));
@@ -2891,10 +3029,11 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 const preflightSaved = outgoingRetryPreflightIds.has(`${sessionId}:${result.key.id}`);
                 outgoingRetryPreflightIds.delete(`${sessionId}:${result.key.id}`);
                 if (!preflightSaved) {
-                    const outgoingAccountPhone = getAuthenticatedPhoneNumber(sock.user, activeSessions.get(sessionId)?.authState?.creds) || normalizedJidNumber(sock.user?.id || sock.user?.phoneNumber || '');
+                    const outgoingRuntime = activeSessions.get(sessionId);
+                    const outgoingAccountPhone = getAuthenticatedPhoneNumber(sock.user, outgoingRuntime?.authState?.creds) || normalizedJidNumber(sock.user?.id || sock.user?.phoneNumber || '') || normalizedJidNumber(outgoingRuntime?.ownPhoneJid || '');
                     const outgoingAccountJid = String(sock.user?.id || sock.user?.phoneNumber || '');
                     const outgoingAliases = [originalDestinationJid, destinationJid, alternateDestinationJid, isSelfChatDestination ? ownLidJid : '', isSelfChatDestination ? ownPhoneJid : '', result.key?.remoteJidAlt, result.key?.participant, result.key?.participantAlt, result.key?.participantPn].filter(Boolean);
-                    void persistOutgoingRetryMessage(sessionId, sentDestinationJid, result, outgoingAliases, outgoingAccountPhone, outgoingAccountJid, getAuthenticatedLid(sock.user, activeSessions.get(sessionId)?.authState?.creds), 'background_after_relay_fallback')
+                    void persistOutgoingRetryMessage(sessionId, sentDestinationJid, result, outgoingAliases, outgoingAccountPhone, outgoingAccountJid, getAuthenticatedLid(sock.user, outgoingRuntime?.authState?.creds) || outgoingRuntime?.ownLidJid || '', 'background_after_relay_fallback')
                         .then(saved => {
                             if (saved) console.info('[message-retry-post-send-fallback-saved]', { sessionId, messageId: result.key.id, action: 'durable_retry_copy_saved_after_relay_without_blocking_chat_queue' });
                             else console.warn('[message-retry-post-send-fallback-memory-only]', { sessionId, messageId: result.key.id, action: 'session_memory_copy_retained_for_retry' });
@@ -3409,6 +3548,7 @@ async function connectMongo(options = {}) {
         await db.collection('baileys_outgoing_messages').createIndex({ accountPhone: 1, messageId: 1, fromMe: 1, createdAt: -1 }, { name: 'baileys_retry_account_message_lookup' });
         await db.collection('baileys_outgoing_messages').createIndex({ accountLid: 1, messageId: 1, fromMe: 1, createdAt: -1 }, { name: 'baileys_retry_lid_message_lookup' });
         await db.collection('baileys_outgoing_messages').createIndex({ sessionId: 1, messageId: 1, fromMe: 1, createdAt: -1 }, { name: 'baileys_retry_session_message_lookup' });
+        await db.collection('baileys_outgoing_messages').createIndex({ sessionId: 1, messageId: 1, retryLookupKeys: 1, fromMe: 1 }, { name: 'baileys_retry_session_pn_lid_alias_lookup' });
         await db.collection('session_owners').createIndex({ Number: 1 }, { name: 'session_owners_account_number_lookup' });
         await db.collection('session_owners').createIndex({ OwnerLid: 1 }, { name: 'session_owners_owner_lid_lookup' });
         try {
@@ -9229,10 +9369,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 if (!remoteJid) throw new Error('outgoing_retry_preflight_destination_missing');
                 const activeRuntime = activeSessions.get(sessionId);
                 const authCreds = activeRuntime?.authState?.creds || state.creds;
-                const accountPhone = getAuthenticatedPhoneNumber(sock.user, authCreds) || normalizedJidNumber(sock.user?.id || sock.user?.phoneNumber || '');
+                const accountPhone = getAuthenticatedPhoneNumber(sock.user, authCreds) || normalizedJidNumber(sock.user?.id || sock.user?.phoneNumber || '') || normalizedJidNumber(activeRuntime?.ownPhoneJid || '');
                 const accountJid = String(sock.user?.id || sock.user?.phoneNumber || authCreds?.me?.id || '');
-                const accountLid = normalizeLidCacheKey(getAuthenticatedLid(sock.user, authCreds));
-                const accountPhoneJid = accountPhone ? normalizePhoneCacheJid(`${accountPhone}@s.whatsapp.net`) : '';
+                const accountPhoneJid = accountPhone ? normalizePhoneCacheJid(`${accountPhone}@s.whatsapp.net`) : normalizePhoneCacheJid(activeRuntime?.ownPhoneJid || '');
+                const accountLid = normalizeLidCacheKey(getAuthenticatedLid(sock.user, authCreds) || activeRuntime?.ownLidJid || getRememberedLidForPhone(sessionId, accountPhoneJid));
                 const remoteJidAlt = String(fullMessage.key?.remoteJidAlt || '').trim();
                 const isSelfChatMessage = !!((accountPhoneJid && (normalizePhoneCacheJid(remoteJid) === accountPhoneJid || normalizePhoneCacheJid(destinationJid) === accountPhoneJid)) || (accountLid && (normalizeLidCacheKey(remoteJid) === accountLid || normalizeLidCacheKey(remoteJidAlt) === accountLid)));
                 const effectiveRemoteJidAlt = remoteJidAlt || (isSelfChatMessage ? accountLid : '');
@@ -9246,7 +9386,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 outgoingRetryPreflightIds.set(`${sessionId}:${messageId}`, Date.now());
                 while (outgoingRetryPreflightIds.size > 5000) outgoingRetryPreflightIds.delete(outgoingRetryPreflightIds.keys().next().value);
                     const preflightText = getOutgoingDiagnosticText(messageToPersist?.message || {});
-                console.info('[message-retry-preflight-start]', { sessionId, messageId, destinationType: isSelfChatMessage ? 'self_chat_pn' : getWhatsAppDestinationType(remoteJid), messageType: Object.keys(messageToPersist?.message || {}).join(',') || 'unknown', messageTextLength: preflightText.length, messageTextHash: preflightText ? shortLogHash(preflightText) : null, aliasCount: aliases.length, memoryCached: true, ownLidCached: !!(isSelfChatMessage && accountLid), writeBeforeRelay: true, persistenceMode: 'awaited_before_relay' });
+                console.info('[message-retry-preflight-start]', { sessionId, messageId, destinationType: isSelfChatMessage ? 'self_chat_pn' : getWhatsAppDestinationType(remoteJid), messageType: Object.keys(messageToPersist?.message || {}).join(',') || 'unknown', messageTextLength: preflightText.length, messageTextHash: preflightText ? shortLogHash(preflightText) : null, aliasCount: aliases.length, memoryCached: true, ownPhoneCached: !!accountPhoneJid, ownLidCached: !!(isSelfChatMessage && accountLid), retryKeyPlan: isSelfChatMessage ? ['messageId', 'pn', ...(accountLid ? ['lid'] : [])] : ['messageId'], writeBeforeRelay: true, persistenceMode: 'awaited_before_relay' });
                 if (!db) {
                     console.error('[message-retry-preflight-database-unavailable]', { sessionId, messageId, destinationType: isSelfChatMessage ? 'self_chat_pn' : 'other', memoryFallbackAvailable: true });
                     return;
@@ -9270,7 +9410,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     console.error('[message-retry-preflight-persist-failed]', { sessionId, messageId, elapsedMs: Date.now() - startedAt, attempts: retryDelays.length, error: lastPersistenceError || 'database_unavailable' });
                     throw new Error('outgoing_retry_preflight_persist_failed');
                 }
-                console.info('[message-retry-preflight-ready]', { sessionId, messageId, elapsedMs: Date.now() - startedAt, destinationType: isSelfChatMessage ? 'self_chat_pn' : 'other', memoryCached: true, durableStoreReady: true, ownLidCached: !!(isSelfChatMessage && accountLid) });
+                console.info('[message-retry-preflight-ready]', { sessionId, messageId, elapsedMs: Date.now() - startedAt, destinationType: isSelfChatMessage ? 'self_chat_pn' : 'other', memoryCached: true, durableStoreReady: true, ownPhoneCached: !!accountPhoneJid, ownLidCached: !!(isSelfChatMessage && accountLid), retryKeyPlan: isSelfChatMessage ? ['messageId', 'pn', ...(accountLid ? ['lid'] : [])] : ['messageId'] });
             },
             getMessage: async (key) => {
                 const messageId = String(key?.id || '').trim();
@@ -9278,9 +9418,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const requestedParticipant = String(key?.participant || key?.participantAlt || key?.participantPn || key?.senderPn || '').trim();
                 const requestedAliases = [...new Set([requestedChatJid, key?.remoteJidAlt, key?.participant, key?.participantAlt, key?.participantPn, key?.senderPn].map(value => String(value || '').trim()).filter(Boolean))];
                 const retryFromMe = key?.fromMe === true;
-                const ownPhone = getAuthenticatedPhoneNumber(sock.user, state.creds);
-                const ownPhoneJid = ownPhone ? normalizePhoneCacheJid(`${ownPhone}@s.whatsapp.net`) : '';
-                const ownLid = getAuthenticatedLid(sock.user, state.creds);
+                const retryRuntimeIdentity = activeSessions.get(sessionId);
+                const ownPhone = getAuthenticatedPhoneNumber(sock.user, state.creds) || normalizedJidNumber(retryRuntimeIdentity?.ownPhoneJid || '');
+                const ownPhoneJid = ownPhone ? normalizePhoneCacheJid(`${ownPhone}@s.whatsapp.net`) : normalizePhoneCacheJid(retryRuntimeIdentity?.ownPhoneJid || '');
+                const ownLid = normalizeLidCacheKey(getAuthenticatedLid(sock.user, state.creds) || retryRuntimeIdentity?.ownLidJid || getRememberedLidForPhone(sessionId, ownPhoneJid));
                 const requestMatchesOwnIdentity = requestedAliases.some(alias => {
                     if (ownPhoneJid && (normalizePhoneCacheJid(alias) === ownPhoneJid || areEquivalentWhatsAppChatJids(sessionId, alias, ownPhoneJid))) return true;
                     return !!ownLid && normalizeLidCacheKey(alias) === normalizeLidCacheKey(ownLid);
@@ -9304,9 +9445,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     return undefined;
                 }
                 if (sameSessionOutgoingAllowed) {
-                    const memoryHit = getOutgoingRetryMessageMemory(sessionId, messageId);
+                    const memoryHit = getOutgoingRetryMessageMemory(sessionId, messageId, requestedAliases);
                     if (memoryHit?.message) {
-                        console.info('[message-retry-cache-hit-same-session-id-index]', { sessionId, messageId, fromMe: retryFromMe, requestedChatJidPresent: !!requestedChatJid, participantType, aliasesAvailable: memoryHit.aliases.length, lookupScope: 'same_session_message_id_without_chat_jid_dependency' });
+                        console.info('[message-retry-cache-hit-same-session-id-index]', { sessionId, messageId, fromMe: retryFromMe, requestedChatJidPresent: !!requestedChatJid, participantType, aliasesAvailable: memoryHit.aliases.length, match: memoryHit.lookupMode, lookupScope: 'same_session_message_id_first_then_pn_lid_alias' });
                         return memoryHit.message;
                     }
                 }
@@ -9331,12 +9472,19 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 }
                 try {
                     const retryCollection = db.collection('baileys_outgoing_messages');
-                    const projection = { message: 1, messageKey: 1, remoteJid: 1, remoteJidAlt: 1, remoteJidAliases: 1, fromMe: 1, accountPhone: 1, accountLid: 1, accountJid: 1, sessionId: 1, messageId: 1, messageTimestamp: 1 };
+                    const projection = { message: 1, messageKey: 1, remoteJid: 1, remoteJidAlt: 1, remoteJidAliases: 1, retryLookupKeys: 1, retryPhoneJid: 1, retryLidJid: 1, isSelfChatRetry: 1, fromMe: 1, accountPhone: 1, accountLid: 1, accountJid: 1, sessionId: 1, messageId: 1, messageTimestamp: 1 };
                     let stored = await retryCollection.findOne({ _id: `${sessionId}:${messageId}`, sessionId, messageId, fromMe: true }, { projection });
                     let lookupScope = 'same_session_id';
                     if (!stored?.message && sameSessionOutgoingAllowed) {
                         stored = await retryCollection.findOne({ sessionId, messageId, fromMe: true }, { projection, sort: { createdAt: -1 } });
                         if (stored?.message) lookupScope = 'same_session_message_id_fallback_without_chat_jid';
+                    }
+                    if (!stored?.message && sameSessionOutgoingAllowed) {
+                        const requestedRetryKeys = buildOutgoingRetryLookupKeys(sessionId, messageId, requestedAliases).slice(1);
+                        if (requestedRetryKeys.length) {
+                            stored = await retryCollection.findOne({ sessionId, messageId, fromMe: true, retryLookupKeys: { $in: requestedRetryKeys } }, { projection, sort: { createdAt: -1 } });
+                            if (stored?.message) lookupScope = 'same_session_pn_lid_message_id_alias_key';
+                        }
                     }
                     const retryMayReferToOwnMessage = retryFromMe || key?.fromMe === undefined || key?.fromMe === null || outgoingIdKnown;
                     const allowCrossSessionLookup = retryMayReferToOwnMessage && !retryFromMe && !requestMatchesOwnIdentity;
@@ -9379,7 +9527,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         activeSessions.set(sessionId, {
             ...(previousBootstrapSession || {}),
             id: sessionId,
-            number: getAuthenticatedPhoneNumber(null, state.creds) || null,
+            number: getAuthenticatedPhoneNumber(sock.user || null, state.creds) || null,
+            ownPhoneJid: getAuthenticatedPhoneNumber(sock.user || null, state.creds) ? normalizePhoneCacheJid(`${getAuthenticatedPhoneNumber(sock.user || null, state.creds)}@s.whatsapp.net`) : '',
+            ownLidJid: normalizeLidCacheKey(getAuthenticatedLid(sock.user || null, state.creds)),
+            ownIdentityUpdatedAt: previousBootstrapSession?.ownIdentityUpdatedAt || 0,
             format: connectionFormat,
             status: 'initialisation',
             createdAt: previousBootstrapSession?.createdAt || Date.now(),
@@ -9397,6 +9548,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         sock.ev.on('creds.update', () => {
             const liveUser = sock.user || null;
             const hasIdentity = !!(getAuthenticatedPhoneNumber(liveUser, state.creds) || getAuthenticatedLid(liveUser, state.creds));
+            if (hasIdentity) void refreshAuthenticatedSessionOwnIdentity(sessionId, sock, state.creds, 'creds_update').catch(error => console.warn('[session-own-identity-refresh-failed]', { sessionId, source: 'creds_update', error: error?.message || String(error) }));
             const persistCredentialUpdate = hasIdentity
                 ? ensureAccountRuntimeLockForIdentity(sessionId, liveUser, state.creds).then(() => saveCreds())
                 : saveCreds();
@@ -9426,6 +9578,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             const liveUser = sock.user || null;
             const hasIdentity = !!(getAuthenticatedPhoneNumber(liveUser, state.creds) || getAuthenticatedLid(liveUser, state.creds));
             if (hasIdentity && (update?.connection === 'open' || update?.connection === 'connecting' || update?.qr)) {
+                void refreshAuthenticatedSessionOwnIdentity(sessionId, sock, state.creds, `connection_${update?.connection || 'qr'}`).catch(error => console.warn('[session-own-identity-refresh-failed]', { sessionId, source: update?.connection || 'qr', error: error?.message || String(error) }));
                 void ensureAccountRuntimeLockForIdentity(sessionId, liveUser, state.creds)
                     .then(() => saveCreds())
                     .catch(error => console.error('[session-account-lock-after-identity-event-failed]', { sessionId, connection: update?.connection || null, error: error?.message || String(error) }));
@@ -9433,6 +9586,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             if (current.openEventSeen && ['synchronisation', 'initialisation'].includes(String(current.status || '').toLowerCase())) scheduleSessionOpenReadinessRetry(sessionId, sock, hasAuthenticatedWhatsAppCredentials(state.creds, liveUser) && hasIdentity ? 300 : 2000);
         });
         console.info('[auth-state-listener-attached]', { sessionId, event: 'creds.update', accountIdentityKnown: !!(getAuthenticatedPhoneNumber(sock.user, state.creds) || getAuthenticatedLid(sock.user, state.creds)), accountLockBootstrap: true });
+        if (getAuthenticatedPhoneNumber(sock.user, state.creds) || getAuthenticatedLid(sock.user, state.creds)) void refreshAuthenticatedSessionOwnIdentity(sessionId, sock, state.creds, 'auth_listener_attached').catch(error => console.warn('[session-own-identity-refresh-failed]', { sessionId, source: 'auth_listener_attached', error: error?.message || String(error) }));
 
         sock.ev.on('messages.upsert', up => {
             try {
@@ -10570,8 +10724,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const activeMessageSocketReady = activeMessageSession?.sock === sock && (sock?.ws?.isOpen === true || Number(activeMessageReadyState) === 1 || String(activeMessageReadyState).toUpperCase() === 'OPEN' || activeMessageSession?.openEventSeen === true && !isSocketDefinitelyClosed(sock));
                 const earlyReceivedChat = String(m?.key?.remoteJid || m?.key?.remoteJidAlt || 'unknown-chat');
                 const earlyReceivedId = String(m?.key?.id || 'missing-id');
-                const earlyReceivedOwnPhone = getAuthenticatedPhoneNumber(sock.user, activeMessageCredentials || state.creds);
-                const earlyReceivedOwnLid = getAuthenticatedLid(sock.user, activeMessageCredentials || state.creds);
+                const earlyReceivedOwnPhone = getAuthenticatedPhoneNumber(sock.user, activeMessageCredentials || state.creds) || normalizedJidNumber(activeMessageSession?.ownPhoneJid || '');
+                const earlyReceivedOwnLid = getAuthenticatedLid(sock.user, activeMessageCredentials || state.creds) || activeMessageSession?.ownLidJid || getRememberedLidForPhone(sessionId, earlyReceivedOwnPhone ? `${earlyReceivedOwnPhone}@s.whatsapp.net` : '');
                 const activeMessageOperational = activeMessageSession?.sock === sock && isAuthenticatedSocketOperational(activeMessageSession, sock);
                 if (activeMessageOperational && !['connecte', 'connected'].includes(String(activeMessageSession.status || '').toLowerCase())) {
                     await restoreAuthenticatedSessionRuntimeStatus(sessionId, activeMessageSession, sock, 'incoming_message_verified_open_socket');
