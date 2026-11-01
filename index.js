@@ -3,8 +3,8 @@ const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(pr
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 7000)));
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r98-self-chat-retry-diagnostics-session-cleanup';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r98')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+const TFBOT_CLUSTER_CODE_REVISION = 'r99-self-chat-lid-retry-same-session-public-async-logs';
+const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r99')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
@@ -72,7 +72,7 @@ const path = require('path');
 const EventEmitter = require('events');
 const { AsyncLocalStorage } = require('async_hooks');
 const TFBOT_DIAGNOSTIC_PHONE = String(process.env.TFBOT_DIAGNOSTIC_PHONE || '18298617960').replace(/\D/g, '');
-const TFBOT_DIAGNOSTIC_SESSION_ID = String(process.env.TFBOT_DIAGNOSTIC_SESSION_ID || 'session_1793548714115_7qh53e').trim();
+const TFBOT_DIAGNOSTIC_SESSION_ID = String(process.env.TFBOT_DIAGNOSTIC_SESSION_ID || '').trim();
 const TFBOT_DIAGNOSTIC_LOG_PATH = path.join(__dirname, 'logs.txt');
 const TFBOT_DIAGNOSTIC_LOG_MAX_BYTES = Math.max(1048576, Math.min(16777216, Number(process.env.TFBOT_DIAGNOSTIC_LOG_MAX_BYTES || 8388608)));
 const tfbotOriginalConsole = { log: console.log.bind(console), info: console.info.bind(console), warn: console.warn.bind(console), error: console.error.bind(console), debug: console.debug.bind(console) };
@@ -80,10 +80,65 @@ const tfbotDiagnosticSerialize = value => {
     try { return JSON.stringify(value, (key, item) => typeof item === 'bigint' ? String(item) : item instanceof Error ? { name: item.name, message: item.message, stack: String(item.stack || '').slice(0, 3000) } : item); }
     catch (error) { return String(value); }
 };
+const tfbotDiagnosticQueue = [];
+let tfbotDiagnosticWriterRunning = false;
+let tfbotDiagnosticDroppedEntries = 0;
+let tfbotDiagnosticTargetCacheAt = 0;
+let tfbotDiagnosticTargetCache = null;
+function enqueueTfbotDiagnosticRecord(record) {
+    try {
+        if (tfbotDiagnosticQueue.length >= 4000) {
+            const removeCount = tfbotDiagnosticQueue.length - 3000;
+            tfbotDiagnosticQueue.splice(0, removeCount);
+            tfbotDiagnosticDroppedEntries += removeCount;
+        }
+        tfbotDiagnosticQueue.push(`${JSON.stringify(record)}\n`);
+        if (!tfbotDiagnosticWriterRunning) {
+            tfbotDiagnosticWriterRunning = true;
+            setImmediate(flushTfbotDiagnosticQueue);
+        }
+    } catch (error) {}
+}
+async function flushTfbotDiagnosticQueue() {
+    try {
+        while (tfbotDiagnosticQueue.length) {
+            const batch = tfbotDiagnosticQueue.splice(0, 48);
+            let content = batch.join('');
+            if (tfbotDiagnosticDroppedEntries) {
+                const dropped = tfbotDiagnosticDroppedEntries;
+                tfbotDiagnosticDroppedEntries = 0;
+                content = `${JSON.stringify({ name: 'Adam', date: new Date().toISOString(), level: 'WARN', event: 'diagnostic-log-queue-overflow', content: `${dropped} entrée(s) de diagnostic ont été abandonnées pour protéger la latence du bot.` })}\n${content}`;
+            }
+            try {
+                const currentStat = await fs.promises.stat(TFBOT_DIAGNOSTIC_LOG_PATH).catch(() => null);
+                const contentBytes = Buffer.byteLength(content, 'utf8');
+                if (currentStat && currentStat.size + contentBytes > TFBOT_DIAGNOSTIC_LOG_MAX_BYTES) {
+                    const current = await fs.promises.readFile(TFBOT_DIAGNOSTIC_LOG_PATH).catch(() => Buffer.alloc(0));
+                    const keepBytes = Math.max(0, TFBOT_DIAGNOSTIC_LOG_MAX_BYTES - contentBytes - 65536);
+                    const tail = current.subarray(Math.max(0, current.length - keepBytes));
+                    await fs.promises.writeFile(TFBOT_DIAGNOSTIC_LOG_PATH, tail);
+                }
+                await fs.promises.appendFile(TFBOT_DIAGNOSTIC_LOG_PATH, content, 'utf8');
+            } catch (writeError) {}
+        }
+    } finally {
+        tfbotDiagnosticWriterRunning = false;
+        if (tfbotDiagnosticQueue.length && !tfbotDiagnosticWriterRunning) {
+            tfbotDiagnosticWriterRunning = true;
+            setImmediate(flushTfbotDiagnosticQueue);
+        }
+    }
+}
 function getTfbotDiagnosticSession() {
+    const now = Date.now();
+    if (now - tfbotDiagnosticTargetCacheAt < 750) return tfbotDiagnosticTargetCache;
     try {
         const preferredRuntime = TFBOT_DIAGNOSTIC_SESSION_ID ? activeSessions.get(TFBOT_DIAGNOSTIC_SESSION_ID) : null;
-        if (preferredRuntime) return { sessionId: TFBOT_DIAGNOSTIC_SESSION_ID, name: String(preferredRuntime?.sock?.user?.name || preferredRuntime?.sock?.user?.notify || preferredRuntime?.ownerName || 'Adam').slice(0, 80), phone: TFBOT_DIAGNOSTIC_PHONE };
+        if (preferredRuntime) {
+            tfbotDiagnosticTargetCache = { sessionId: TFBOT_DIAGNOSTIC_SESSION_ID, name: String(preferredRuntime?.sock?.user?.name || preferredRuntime?.sock?.user?.notify || preferredRuntime?.ownerName || 'Adam').slice(0, 80), phone: TFBOT_DIAGNOSTIC_PHONE };
+            tfbotDiagnosticTargetCacheAt = now;
+            return tfbotDiagnosticTargetCache;
+        }
         const matches = [...activeSessions.entries()].filter(([sessionId, runtime]) => {
             const credentials = runtime?.authState?.creds || null;
             const phone = normalizePhoneNumber(getAuthenticatedPhoneNumber(runtime?.sock?.user || null, credentials) || runtime?.number || runtime?.sock?.user?.phoneNumber || '');
@@ -91,24 +146,33 @@ function getTfbotDiagnosticSession() {
         }).sort((a, b) => {
             const aConnected = ['connecte', 'connected'].includes(String(a[1]?.status || '').toLowerCase()) ? 1 : 0;
             const bConnected = ['connecte', 'connected'].includes(String(b[1]?.status || '').toLowerCase()) ? 1 : 0;
-            return bConnected - aConnected || Number(b[1]?.connectedAt || b[1]?.readyAt || 0) - Number(a[1]?.connectedAt || a[1]?.readyAt || 0);
+            return bConnected - aConnected || Number(b[1]?.connectedAt || b[1]?.readyAt || b[1]?.lastMessageAt || 0) - Number(a[1]?.connectedAt || a[1]?.readyAt || a[1]?.lastMessageAt || 0);
         });
-        if (!matches.length) return null;
+        if (!matches.length) {
+            tfbotDiagnosticTargetCache = null;
+            tfbotDiagnosticTargetCacheAt = now;
+            return null;
+        }
         const [sessionId, runtime] = matches[0];
-        return { sessionId, name: String(runtime?.sock?.user?.name || runtime?.sock?.user?.notify || runtime?.ownerName || 'Adam').slice(0, 80), phone: TFBOT_DIAGNOSTIC_PHONE };
+        tfbotDiagnosticTargetCache = { sessionId, name: String(runtime?.sock?.user?.name || runtime?.sock?.user?.notify || runtime?.ownerName || 'Adam').slice(0, 80), phone: TFBOT_DIAGNOSTIC_PHONE };
+        tfbotDiagnosticTargetCacheAt = now;
+        return tfbotDiagnosticTargetCache;
     } catch (error) {
+        tfbotDiagnosticTargetCache = null;
+        tfbotDiagnosticTargetCacheAt = 0;
         return null;
     }
 }
 function sanitizeTfbotDiagnosticLog(value, sessionId) {
     let output = String(value || '');
     if (sessionId) output = output.split(sessionId).join('[selected-session]');
-    output = output.replace(/("(?:text|caption|bodyPreview|messageTextPreview|messageContent|contentPreview|pushName|senderName|participantName|contactName)"\s*:\s*)("(?:\\.|[^"\\])*")/gi, '$1"[redacted]"');
-    output = output.replace(/("(?:token|authorization|apiKey|api_key|password|pairingCode|pairing_code|advSecretKey|noiseKey|identityKey|signedIdentityKey)"\s*:\s*)("(?:\\.|[^"\\])*")/gi, '$1"[redacted]"');
+    output = output.replace(/("(?:text|caption|conversation|bodyPreview|bodyText|messageText|responseMessageText|messageTextPreview|messageContent|argumentPreview|contentPreview|quotedText|rawText|pushName|senderName|participantName|contactName)"\s*:\s*)"(?:\\.|[^"\\])*"/gi, '$1"[redacted]"');
+    output = output.replace(/("(?:token|authorization|apiKey|api_key|password|pairingCode|pairing_code|code|qr|qrString|qr_string|advSecretKey|noiseKey|identityKey|signedIdentityKey)"\s*:\s*)"(?:\\.|[^"\\])*"/gi, '$1"[redacted]"');
+    output = output.replace(/\b([A-Za-z0-9._-]{3,100})(@(?:hosted\.)?lid)\b/gi, (_, id, suffix) => `[jid:${shortLogHash(id)}]${suffix}`);
     output = output.replace(/\b(\d{7,20}(?::\d+)?)(@s\.whatsapp\.net|@lid|@hosted)\b/gi, (_, id, suffix) => `[jid:${shortLogHash(id)}]${suffix}`);
     output = output.replace(/\b(\d{8,22}-\d{4,22})(@g\.us)\b/gi, (_, id, suffix) => `[group:${shortLogHash(id)}]${suffix}`);
     output = output.replace(/\bsession_\d+_[a-z0-9]+\b/gi, '[session]');
-    output = output.replace(/\b\d{8,15}\b/g, value => value === TFBOT_DIAGNOSTIC_PHONE ? `[phone:${value.slice(-2).padStart(value.length, '*')}]` : `[number:${shortLogHash(value)}]`);
+    output = output.replace(/\b\d{8,15}\b/g, number => number === TFBOT_DIAGNOSTIC_PHONE ? `[phone:${number.slice(-2).padStart(number.length, '*')}]` : `[number:${shortLogHash(number)}]`);
     return output.slice(0, 12000);
 }
 for (const level of Object.keys(tfbotOriginalConsole)) {
@@ -116,25 +180,16 @@ for (const level of Object.keys(tfbotOriginalConsole)) {
         try {
             const serialized = args.map(value => typeof value === 'string' ? value : tfbotDiagnosticSerialize(value)).join(' ');
             const target = getTfbotDiagnosticSession();
-            const targetLog = !!target && (serialized.includes(target.sessionId) || serialized.includes(TFBOT_DIAGNOSTIC_PHONE));
+            const targetLog = !!target && (serialized.includes(target.sessionId) || !!target.phone && serialized.includes(target.phone));
             if (targetLog) {
-                const record = { name: target.name, sessionId: target.sessionId, date: new Date().toISOString(), level: level.toUpperCase(), event: String(args.find(value => typeof value === 'string') || 'runtime').slice(0, 180), content: sanitizeTfbotDiagnosticLog(serialized, target.sessionId) };
-                const line = `${JSON.stringify(record)}\n`;
-                fs.appendFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, line, 'utf8');
-                try {
-                    const stat = fs.statSync(TFBOT_DIAGNOSTIC_LOG_PATH);
-                    if (stat.size > TFBOT_DIAGNOSTIC_LOG_MAX_BYTES) {
-                        const current = fs.readFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, 'utf8');
-                        fs.writeFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, current.slice(-Math.floor(TFBOT_DIAGNOSTIC_LOG_MAX_BYTES * 0.75)), 'utf8');
-                    }
-                } catch (trimError) {}
+                const record = { name: target.name, sessionId: shortLogHash(target.sessionId), date: new Date().toISOString(), level: level.toUpperCase(), event: sanitizeTfbotDiagnosticLog(String(args.find(value => typeof value === 'string') || 'runtime'), target.sessionId).slice(0, 180), content: sanitizeTfbotDiagnosticLog(serialized, target.sessionId) };
+                enqueueTfbotDiagnosticRecord(record);
             }
         } catch (error) {}
         tfbotOriginalConsole[level](...args);
     };
 }
-try { fs.appendFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, `${JSON.stringify({ name: 'Adam', sessionId: TFBOT_DIAGNOSTIC_SESSION_ID || null, date: new Date().toISOString(), level: 'INFO', event: 'diagnostic-log-start', content: 'Journal de diagnostic démarré; les entrées précédentes sont conservées jusqu’à la rotation par taille.' })}\n`, 'utf8'); } catch (error) {}
-
+enqueueTfbotDiagnosticRecord({ name: 'Adam', sessionId: TFBOT_DIAGNOSTIC_SESSION_ID ? shortLogHash(TFBOT_DIAGNOSTIC_SESSION_ID) : null, date: new Date().toISOString(), level: 'INFO', event: 'diagnostic-log-start', content: 'Journal public de diagnostic démarré; les identifiants, codes et contenus privés sont masqués. Écriture asynchrone pour ne pas ralentir les envois ni les connexions.' });
 
 function applyBaileysLidPnDecryptRetryPatch() {
     const marker = 'self-chat PN identity selected before Signal decryption';
@@ -710,13 +765,14 @@ const baileysRetryResendDoubleEncryptionPatchStatus = applyBaileysRetryResendDou
 const baileysOwnLidRetryAddressingPatchStatus = applyBaileysOwnLidRetryAddressingPatch();
 const baileysMessageRetryManagerDeviceJidPatchStatus = applyBaileysMessageRetryManagerDeviceJidPatch();
 const baileysCompanionRegRefreshPatchStatus = applyBaileysCompanionRegRefreshPatch();
-console.info('[tfbot-local-diagnostics-ready]', { phone: TFBOT_DIAGNOSTIC_PHONE ? `[phone:${TFBOT_DIAGNOSTIC_PHONE.slice(-2).padStart(TFBOT_DIAGNOSTIC_PHONE.length, '*')}]` : null, sessionId: TFBOT_DIAGNOSTIC_SESSION_ID || null, file: 'logs.txt', storage: 'local_filesystem_only', publicRead: false, access: 'admin-token' });
+console.info('[tfbot-local-diagnostics-ready]', { phone: TFBOT_DIAGNOSTIC_PHONE ? `[phone:${TFBOT_DIAGNOSTIC_PHONE.slice(-2).padStart(TFBOT_DIAGNOSTIC_PHONE.length, '*')}]` : null, sessionId: TFBOT_DIAGNOSTIC_SESSION_ID || null, file: 'logs.txt', storage: 'local_filesystem_only', publicRead: true, access: 'public-redacted-log', writer: 'asynchronous' });
 console.info('[baileys-lid-pn-decrypt-retry-patch]', baileysLidPnDecryptPatchStatus);
 console.info('[baileys-self-chat-placeholder-resend-patch]', baileysSelfChatPlaceholderResendPatchStatus);
 console.info('[baileys-outgoing-retry-preflight-patch]', { ...baileysOutgoingRetryPreflightPatchStatus, action: baileysOutgoingRetryPreflightPatchStatus.applied ? 'preload_internal_retry_manager_and_persist_generated_full_message_before_network_relay' : 'leave_installed_baileys_source_unchanged' });
 console.info('[baileys-retry-resend-double-encryption-patch]', { ...baileysRetryResendDoubleEncryptionPatchStatus, action: baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'avoid_duplicate_pairwise_encryption_on_retry_resend' : 'not_applicable_or_source_shape_not_matched' });
 console.info('[baileys-own-lid-retry-addressing-patch]', { ...baileysOwnLidRetryAddressingPatchStatus, action: baileysOwnLidRetryAddressingPatchStatus.applied ? 'preserve_chat_recipient_for_own_lid_device_retry' : 'not_applicable_or_source_shape_not_matched' });
 console.info('[baileys-signal-transaction-patch]', { ...baileysSignalTransactionPatchStatus, action: baileysSignalTransactionPatchStatus.applied ? 'serialize_signal_crypto_methods_inside_session_store_transaction' : 'leave_installed_baileys_source_unchanged' });
+enqueueTfbotDiagnosticRecord({ name: 'Adam', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus }) });
 
 const {
     default: makeWASocket,
@@ -1327,6 +1383,9 @@ let expiredSessionCleanupPromise = null;
 
 const messageQueues = new WeakMap();
 const outgoingMessageCache = new Set();
+const outgoingRetryMessageMemory = new Map();
+const OUTGOING_RETRY_MEMORY_TTL_MS = Math.max(60000, Math.min(86400000, Number(process.env.OUTGOING_RETRY_MEMORY_TTL_MS || 21600000)));
+const OUTGOING_RETRY_MEMORY_MAX_ENTRIES = Math.max(500, Math.min(10000, Number(process.env.OUTGOING_RETRY_MEMORY_MAX_ENTRIES || 3000)));
 const outgoingRetryPreflightIds = new Map();
 const pendingInboundMessagesBySession = new Map();
 const outgoingMessageIdCache = new Map();
@@ -1404,6 +1463,7 @@ function cleanupSessionVolatileCaches(sessionId) {
     authWriteActivityAt.delete(id);
     authWriteFailures.delete(id);
     for (const key of [...outgoingMessageCache]) if (key.startsWith(`${id}:`)) outgoingMessageCache.delete(key);
+    for (const key of [...outgoingRetryMessageMemory.keys()]) if (key.startsWith(`${id}:`)) outgoingRetryMessageMemory.delete(key);
     for (const key of [...outgoingMessageIdCache.keys()]) if (key.startsWith(`${id}:`)) outgoingMessageIdCache.delete(key);
     for (const key of [...outgoingTextEchoCache.keys()]) if (key.startsWith(`${id}:`)) outgoingTextEchoCache.delete(key);
     for (let index = recentMsgsCache.length - 1; index >= 0; index--) if (recentMsgsCache[index]?.sessionId === id) recentMsgsCache.splice(index, 1);
@@ -1981,6 +2041,33 @@ async function finishMessageProcessingClaim(sessionId, messageId, accountIdentit
     }
 }
 
+function cacheOutgoingRetryMessageMemory(sessionId, message, extraAliases = []) {
+    const messageId = String(message?.key?.id || '').trim();
+    if (!sessionId || !messageId || !message?.message || message?.key?.fromMe === false) return false;
+    const cacheKey = `${sessionId}:${messageId}`;
+    const aliases = [...new Set([message?.key?.remoteJid, message?.key?.remoteJidAlt, message?.key?.participant, message?.key?.participantAlt, message?.key?.participantPn, message?.key?.senderPn, ...(Array.isArray(extraAliases) ? extraAliases : [])].map(value => String(value || '').trim()).filter(Boolean))].slice(0, 24);
+    const entry = { sessionId, messageId, key: { ...(message.key || {}), fromMe: true }, aliases, message: message.message, cachedAt: Date.now() };
+    outgoingRetryMessageMemory.delete(cacheKey);
+    outgoingRetryMessageMemory.set(cacheKey, entry);
+    const now = Date.now();
+    for (const [key, value] of outgoingRetryMessageMemory) {
+        if (now - Number(value?.cachedAt || 0) > OUTGOING_RETRY_MEMORY_TTL_MS) outgoingRetryMessageMemory.delete(key);
+        else if (outgoingRetryMessageMemory.size <= OUTGOING_RETRY_MEMORY_MAX_ENTRIES) break;
+    }
+    while (outgoingRetryMessageMemory.size > OUTGOING_RETRY_MEMORY_MAX_ENTRIES) outgoingRetryMessageMemory.delete(outgoingRetryMessageMemory.keys().next().value);
+    return true;
+}
+function getOutgoingRetryMessageMemory(sessionId, messageId) {
+    const cacheKey = `${String(sessionId || '')}:${String(messageId || '').trim()}`;
+    const entry = outgoingRetryMessageMemory.get(cacheKey);
+    if (!entry) return null;
+    if (Date.now() - Number(entry.cachedAt || 0) > OUTGOING_RETRY_MEMORY_TTL_MS) {
+        outgoingRetryMessageMemory.delete(cacheKey);
+        return null;
+    }
+    return entry;
+}
+
 function cacheRecentMessage(sessionId, message, extraAliases = []) {
     const id = message?.key?.id;
     if (!sessionId || !id || !message?.message) return;
@@ -2006,6 +2093,7 @@ function cacheRecentMessage(sessionId, message, extraAliases = []) {
     const existingIndex = recentMsgsCache.findIndex(item => item.sessionId === sessionId && item.id === id);
     if (existingIndex >= 0) recentMsgsCache.splice(existingIndex, 1);
     recentMsgsCache.push(entry);
+    if (entry.fromMe) cacheOutgoingRetryMessageMemory(sessionId, message, entry.chatAliases);
     if (recentMsgsCache.length > 1000) recentMsgsCache.splice(0, recentMsgsCache.length - 1000);
     persistQuotedMessageForCommands(sessionId, message, entry.chatAliases);
 }
@@ -2058,12 +2146,17 @@ function persistQuotedMessageForCommands(sessionId, message, aliases = []) {
     }
 }
 
-async function persistOutgoingRetryMessage(sessionId, jid, message, jidAliases = [], accountPhone = '', accountJid = '', accountLid = '') {
-    if (!db || !sessionId || !message?.key?.id || !message?.message) return false;
+async function persistOutgoingRetryMessage(sessionId, jid, message, jidAliases = [], accountPhone = '', accountJid = '', accountLid = '', persistenceMode = 'background_without_blocking_message_dispatch') {
+    if (!db || !sessionId || !message?.key?.id || !message?.message) {
+        console.warn('[message-retry-store-write-skipped]', { sessionId: sessionId || null, messageId: message?.key?.id || null, databaseAvailable: !!db, messageComplete: !!(message?.key?.id && message?.message), persistenceMode });
+        return false;
+    }
     const messageId = String(message.key.id);
     const remoteJid = String(message.key.remoteJid || jid || '');
     const remoteJidAlt = String(message.key.remoteJidAlt || '');
-    const remoteJidAliases = [...new Set([remoteJid, remoteJidAlt, jid, ...(Array.isArray(jidAliases) ? jidAliases : [])].map(value => String(value || '').trim()).filter(Boolean))].slice(0, 8);
+    const remoteJidAliases = [...new Set([remoteJid, remoteJidAlt, jid, message?.key?.participant, message?.key?.participantAlt, message?.key?.participantPn, message?.key?.senderPn, ...(Array.isArray(jidAliases) ? jidAliases : [])].map(value => String(value || '').trim()).filter(Boolean))].slice(0, 24);
+    const normalizedMessage = { ...message, key: { ...(message.key || {}), id: messageId, remoteJid, ...(remoteJidAlt ? { remoteJidAlt } : {}), fromMe: true } };
+    cacheOutgoingRetryMessageMemory(sessionId, normalizedMessage, remoteJidAliases);
     const record = {
         _id: `${sessionId}:${messageId}`,
         sessionId,
@@ -2074,21 +2167,23 @@ async function persistOutgoingRetryMessage(sessionId, jid, message, jidAliases =
         remoteJid,
         remoteJidAlt,
         remoteJidAliases,
+        messageKey: { id: messageId, remoteJid, remoteJidAlt, participant: String(message?.key?.participant || ''), participantAlt: String(message?.key?.participantAlt || ''), participantPn: String(message?.key?.participantPn || ''), senderPn: String(message?.key?.senderPn || ''), fromMe: true },
         fromMe: true,
         message: message.message,
         messageTimestamp: Number(message.messageTimestamp) || Math.floor(Date.now() / 1000),
         createdAt: new Date()
     };
+    console.info('[message-retry-store-write-started]', { sessionId, messageId, destinationType: getWhatsAppDestinationType(remoteJid), messageType: Object.keys(message.message || {}).join(',') || 'unknown', aliasCount: remoteJidAliases.length, persistenceMode, durableWriteRequested: true });
     try {
         await promiseWithTimeout(db.collection('baileys_outgoing_messages').updateOne(
             { _id: record._id },
             { $set: record },
             { upsert: true, writeConcern: { w: 'majority', wtimeout: BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS } }
         ), BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS + 300, 'Baileys outgoing retry message persistence');
-        console.info('[message-retry-store-write-completed]', { sessionId, messageId, remoteJid, aliasCount: remoteJidAliases.length, durableWriteConcern: 'majority' });
+        console.info('[message-retry-store-write-completed]', { sessionId, messageId, remoteJid, aliasCount: remoteJidAliases.length, persistenceMode, durableWriteConcern: 'majority' });
         return true;
     } catch (error) {
-        console.warn('[message-retry-store-write-failed]', { sessionId, messageId, destinationType: getWhatsAppDestinationType(remoteJid), messageType: Object.keys(message.message || {}).join(',') || 'unknown', failureClass: classifyWhatsAppFailure(error), errorName: error?.name || error?.constructor?.name || null, error: String(error?.message || error).slice(0, 700) });
+        console.warn('[message-retry-store-write-failed]', { sessionId, messageId, destinationType: getWhatsAppDestinationType(remoteJid), messageType: Object.keys(message.message || {}).join(',') || 'unknown', persistenceMode, failureClass: classifyWhatsAppFailure(error), errorName: error?.name || error?.constructor?.name || null, error: String(error?.message || error).slice(0, 700) });
         return false;
     }
 }
@@ -2760,6 +2855,8 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 destinationResolution = retryTargetJid.endsWith('@s.whatsapp.net') ? 'pn_fallback_after_lid_failure' : 'lid_fallback_after_pn_failure';
             }
         }
+        const responseDiagnosticText = getOutgoingDiagnosticText(result?.message || {});
+        const preflightPersistedBeforeRelay = !!(result?.key?.id && outgoingRetryPreflightIds.has(`${sessionId}:${result.key.id}`));
         console.info('[whatsapp-send-completed]', {
             sessionId,
             connectedAccountJid: sock.user?.id || null,
@@ -2768,11 +2865,17 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             destinationResolution,
             destinationType: sentDestinationJid.endsWith('@g.us') ? 'group' : sentDestinationJid.endsWith('@newsletter') ? 'channel' : sentDestinationJid.endsWith('@s.whatsapp.net') ? 'private_pn' : sentDestinationJid.endsWith('@lid') ? 'private_lid' : 'other',
             messageType: outgoingDiagnosticType,
-            messageText: outgoingDiagnosticText || null,
-            responseMessageText: getOutgoingDiagnosticText(result?.message || {}) || null,
+            messageTextLength: outgoingDiagnosticText.length,
+            messageTextHash: outgoingDiagnosticText ? shortLogHash(outgoingDiagnosticText) : null,
+            responseMessageType: Object.keys(result?.message || {}).join(',') || 'unknown',
+            responseMessageTextLength: responseDiagnosticText.length,
+            responseMessageTextHash: responseDiagnosticText ? shortLogHash(responseDiagnosticText) : null,
             responseMessageId: result?.key?.id || null,
             responseChatJid: result?.key?.remoteJid || null,
+            acceptedBySendMessage: !!result?.key?.id,
             responseAccepted: !!result?.key?.id,
+            preflightPersistedBeforeRelay,
+            persistenceMode: preflightPersistedBeforeRelay ? 'awaited_before_relay' : 'background_after_relay_fallback_or_not_confirmed',
             durationMs: Date.now() - sendStartedAt
         });
         if (sessionId && result?.key?.id) {
@@ -2791,7 +2894,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                     const outgoingAccountPhone = getAuthenticatedPhoneNumber(sock.user, activeSessions.get(sessionId)?.authState?.creds) || normalizedJidNumber(sock.user?.id || sock.user?.phoneNumber || '');
                     const outgoingAccountJid = String(sock.user?.id || sock.user?.phoneNumber || '');
                     const outgoingAliases = [originalDestinationJid, destinationJid, alternateDestinationJid, isSelfChatDestination ? ownLidJid : '', isSelfChatDestination ? ownPhoneJid : '', result.key?.remoteJidAlt, result.key?.participant, result.key?.participantAlt, result.key?.participantPn].filter(Boolean);
-                    void persistOutgoingRetryMessage(sessionId, sentDestinationJid, result, outgoingAliases, outgoingAccountPhone, outgoingAccountJid, getAuthenticatedLid(sock.user, activeSessions.get(sessionId)?.authState?.creds))
+                    void persistOutgoingRetryMessage(sessionId, sentDestinationJid, result, outgoingAliases, outgoingAccountPhone, outgoingAccountJid, getAuthenticatedLid(sock.user, activeSessions.get(sessionId)?.authState?.creds), 'background_after_relay_fallback')
                         .then(saved => {
                             if (saved) console.info('[message-retry-post-send-fallback-saved]', { sessionId, messageId: result.key.id, action: 'durable_retry_copy_saved_after_relay_without_blocking_chat_queue' });
                             else console.warn('[message-retry-post-send-fallback-memory-only]', { sessionId, messageId: result.key.id, action: 'session_memory_copy_retained_for_retry' });
@@ -3305,6 +3408,7 @@ async function connectMongo(options = {}) {
         }
         await db.collection('baileys_outgoing_messages').createIndex({ accountPhone: 1, messageId: 1, fromMe: 1, createdAt: -1 }, { name: 'baileys_retry_account_message_lookup' });
         await db.collection('baileys_outgoing_messages').createIndex({ accountLid: 1, messageId: 1, fromMe: 1, createdAt: -1 }, { name: 'baileys_retry_lid_message_lookup' });
+        await db.collection('baileys_outgoing_messages').createIndex({ sessionId: 1, messageId: 1, fromMe: 1, createdAt: -1 }, { name: 'baileys_retry_session_message_lookup' });
         await db.collection('session_owners').createIndex({ Number: 1 }, { name: 'session_owners_account_number_lookup' });
         await db.collection('session_owners').createIndex({ OwnerLid: 1 }, { name: 'session_owners_owner_lid_lookup' });
         try {
@@ -5066,12 +5170,6 @@ process.on('uncaughtException', (error) => {
 
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
-app.get('/logs.txt', (req, res) => {
-    res.set('Cache-Control', 'no-store, private').type('text/plain');
-    if (!isAuthorizedAdmin(req)) return res.status(401).type('text/plain').send('NON AUTORISE.');
-    try { return res.send(fs.existsSync(TFBOT_DIAGNOSTIC_LOG_PATH) ? fs.readFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, 'utf8') : ''); }
-    catch (error) { return res.status(500).send(''); }
-});
 app.get('/dh7adam', async (req, res) => {
     const instanceKey = String(TFBOT_CLUSTER_INSTANCE_HOST || process.env.RENDER_EXTERNAL_HOSTNAME || 'local');
     globalOwnerAutomationLocalDisabled.add(instanceKey);
@@ -5242,6 +5340,18 @@ app.use((req, res, next) => {
         return res.status(503).json({ ok: false, error: 'tfbot_worker_starting', state: tfbotWorkerState, retryAfterMs: 5000 });
     }
     next();
+});
+
+app.get('/logs.txt', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.type('text/plain');
+    fs.readFile(TFBOT_DIAGNOSTIC_LOG_PATH, 'utf8', (error, content) => {
+        if (error && error.code !== 'ENOENT') return res.status(500).send('');
+        return res.status(200).send(content || '');
+    });
 });
 
 app.use((req, res, next) => {
@@ -9136,7 +9246,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 outgoingRetryPreflightIds.set(`${sessionId}:${messageId}`, Date.now());
                 while (outgoingRetryPreflightIds.size > 5000) outgoingRetryPreflightIds.delete(outgoingRetryPreflightIds.keys().next().value);
                     const preflightText = getOutgoingDiagnosticText(messageToPersist?.message || {});
-                console.info('[message-retry-preflight-start]', { sessionId, messageId, destinationType: isSelfChatMessage ? 'self_chat_pn' : getWhatsAppDestinationType(remoteJid), messageType: Object.keys(messageToPersist?.message || {}).join(',') || 'unknown', messageText: preflightText || null, messageTextHash: preflightText ? shortLogHash(preflightText) : null, aliasCount: aliases.length, memoryCached: true, ownLidCached: !!(isSelfChatMessage && accountLid), writeBeforeRelay: true });
+                console.info('[message-retry-preflight-start]', { sessionId, messageId, destinationType: isSelfChatMessage ? 'self_chat_pn' : getWhatsAppDestinationType(remoteJid), messageType: Object.keys(messageToPersist?.message || {}).join(',') || 'unknown', messageTextLength: preflightText.length, messageTextHash: preflightText ? shortLogHash(preflightText) : null, aliasCount: aliases.length, memoryCached: true, ownLidCached: !!(isSelfChatMessage && accountLid), writeBeforeRelay: true, persistenceMode: 'awaited_before_relay' });
                 if (!db) {
                     console.error('[message-retry-preflight-database-unavailable]', { sessionId, messageId, destinationType: isSelfChatMessage ? 'self_chat_pn' : 'other', memoryFallbackAvailable: true });
                     return;
@@ -9149,7 +9259,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     if (serverShuttingDown || latestRuntime?.sock !== sock || !db) break;
                     if (retryDelays[attempt]) await new Promise(resolve => setTimeout(resolve, retryDelays[attempt]));
                     try {
-                        persisted = await persistOutgoingRetryMessage(sessionId, remoteJid, messageToPersist, aliases, accountPhone, accountJid, accountLid);
+                        persisted = await persistOutgoingRetryMessage(sessionId, remoteJid, messageToPersist, aliases, accountPhone, accountJid, accountLid, 'awaited_before_relay');
                         if (persisted) break;
                         lastPersistenceError = 'store_write_returned_false';
                     } catch (error) {
@@ -9163,81 +9273,103 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 console.info('[message-retry-preflight-ready]', { sessionId, messageId, elapsedMs: Date.now() - startedAt, destinationType: isSelfChatMessage ? 'self_chat_pn' : 'other', memoryCached: true, durableStoreReady: true, ownLidCached: !!(isSelfChatMessage && accountLid) });
             },
             getMessage: async (key) => {
+                const messageId = String(key?.id || '').trim();
                 const requestedChatJid = String(key?.remoteJid || '').trim();
-                const logRetryCacheMiss = (databaseAvailable) => {
-                    const retryMissKey = `${sessionId}:${String(key?.id || 'missing-id')}`;
+                const requestedParticipant = String(key?.participant || key?.participantAlt || key?.participantPn || key?.senderPn || '').trim();
+                const requestedAliases = [...new Set([requestedChatJid, key?.remoteJidAlt, key?.participant, key?.participantAlt, key?.participantPn, key?.senderPn].map(value => String(value || '').trim()).filter(Boolean))];
+                const retryFromMe = key?.fromMe === true;
+                const ownPhone = getAuthenticatedPhoneNumber(sock.user, state.creds);
+                const ownPhoneJid = ownPhone ? normalizePhoneCacheJid(`${ownPhone}@s.whatsapp.net`) : '';
+                const ownLid = getAuthenticatedLid(sock.user, state.creds);
+                const requestMatchesOwnIdentity = requestedAliases.some(alias => {
+                    if (ownPhoneJid && (normalizePhoneCacheJid(alias) === ownPhoneJid || areEquivalentWhatsAppChatJids(sessionId, alias, ownPhoneJid))) return true;
+                    return !!ownLid && normalizeLidCacheKey(alias) === normalizeLidCacheKey(ownLid);
+                });
+                const sameSessionOutgoingAllowed = retryFromMe || requestMatchesOwnIdentity;
+                const outgoingIdKnown = !!messageId && (retryFromMe || outgoingMessageCache.has(`${sessionId}:id:${messageId}`) || isRecentOutgoingMessageId(sessionId, messageId));
+                const diagnosticChatType = getWhatsAppDestinationType(requestedChatJid);
+                const participantType = getWhatsAppDestinationType(requestedParticipant);
+                console.info('[message-retry-lookup-start]', { sessionId, messageId: messageId || null, requestedChatType: diagnosticChatType, requestedChatJidPresent: !!requestedChatJid, requestedRemoteJidAltType: getWhatsAppDestinationType(key?.remoteJidAlt || ''), requestedParticipantType: participantType, requestedFromMe: typeof key?.fromMe === 'boolean' ? key.fromMe : null, outgoingIdKnown, sameSessionOutgoingAllowed, lookupScope: retryFromMe && !requestedChatJid ? 'same_session_fromMe_id_only_no_chat_jid' : 'same_session_message_id_first' });
+                const logRetryCacheMiss = (databaseAvailable, reason) => {
+                    const retryMissKey = `${sessionId}:${messageId || 'missing-id'}`;
                     const now = Date.now();
                     const lastLoggedAt = Number(retryMessageMissLogTimes.get(retryMissKey) || 0);
-                    if (now - lastLoggedAt < 30000) return;
+                    if (now - lastLoggedAt < 15000) return;
                     retryMessageMissLogTimes.set(retryMissKey, now);
                     while (retryMessageMissLogTimes.size > 4000) retryMessageMissLogTimes.delete(retryMessageMissLogTimes.keys().next().value);
-                    console.info('[message-retry-cache-miss]', { sessionId, messageId: key?.id || null, requestedChatJid: requestedChatJid || null, requestedFromMe: typeof key?.fromMe === 'boolean' ? key.fromMe : null, fromMeFieldMissing: key?.fromMe === undefined || key?.fromMe === null, databaseAvailable, repeatedRetryLogSuppressedForMs: 30000 });
+                    console.warn('[message-retry-cache-miss]', { sessionId, messageId: messageId || null, requestedChatJidPresent: !!requestedChatJid, requestedChatType: diagnosticChatType, requestedParticipantType: participantType, requestedFromMe: typeof key?.fromMe === 'boolean' ? key.fromMe : null, databaseAvailable, sameSessionOnly: retryFromMe, reason: reason || null, repeatedRetryLogSuppressedForMs: 15000 });
                 };
-                const outgoingIdKnown = !!key?.id && (key?.fromMe === true || outgoingMessageCache.has(`${sessionId}:id:${String(key.id)}`) || isRecentOutgoingMessageId(sessionId, key.id));
-                console.info('[message-retry-lookup-start]', { sessionId, messageId: key?.id || null, requestedChatType: getWhatsAppDestinationType(requestedChatJid), requestedRemoteJidAlt: key?.remoteJidAlt || null, requestedParticipant: key?.participant || key?.participantAlt || key?.participantPn || key?.senderPn || null, requestedFromMe: typeof key?.fromMe === 'boolean' ? key.fromMe : null, outgoingIdKnown, lookupScope: 'same_session_first_then_verified_same_account' });
+                if (!messageId) {
+                    logRetryCacheMiss(!!db, 'retry_key_message_id_missing');
+                    return undefined;
+                }
+                if (sameSessionOutgoingAllowed) {
+                    const memoryHit = getOutgoingRetryMessageMemory(sessionId, messageId);
+                    if (memoryHit?.message) {
+                        console.info('[message-retry-cache-hit-same-session-id-index]', { sessionId, messageId, fromMe: retryFromMe, requestedChatJidPresent: !!requestedChatJid, participantType, aliasesAvailable: memoryHit.aliases.length, lookupScope: 'same_session_message_id_without_chat_jid_dependency' });
+                        return memoryHit.message;
+                    }
+                }
                 let exactRecentMessage = null;
-                for (let i = recentMsgsCache.length - 1; i >= 0; i--) {
-                    const found = recentMsgsCache[i];
-                    if (found.sessionId !== sessionId || found.id !== key?.id || !found.fromMe) continue;
-                    const recentChatAliases = [...new Set([found.from, ...(Array.isArray(found.chatAliases) ? found.chatAliases : []), found.key?.remoteJidAlt, found.key?.participantAlt, found.key?.participantPn].map(value => String(value || '').trim()).filter(Boolean))];
-                    const recentChatMatches = !requestedChatJid || recentChatAliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, requestedChatJid));
-                    if (!recentChatMatches && !outgoingIdKnown) continue;
+                for (let index = recentMsgsCache.length - 1; index >= 0; index--) {
+                    const found = recentMsgsCache[index];
+                    if (found.sessionId !== sessionId || String(found.id) !== messageId || !found.fromMe) continue;
+                    const recentAliases = [...new Set([found.from, ...(Array.isArray(found.chatAliases) ? found.chatAliases : []), found.key?.remoteJidAlt, found.key?.participant, found.key?.participantAlt, found.key?.participantPn, found.key?.senderPn].map(value => String(value || '').trim()).filter(Boolean))];
+                    const chatMatches = !requestedChatJid || recentAliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, requestedChatJid));
+                    if (!sameSessionOutgoingAllowed && !chatMatches) continue;
                     exactRecentMessage = found;
-                    if (!recentChatMatches) console.info('[message-retry-cache-hit-cross-jid-same-session]', { sessionId, messageId: key.id, requestedChatType: /@lid$/i.test(requestedChatJid) ? 'lid' : 'pn_or_other', storedChatType: /@lid$/i.test(String(found.from || '')) ? 'lid' : /@s\.whatsapp\.net$/i.test(String(found.from || '')) ? 'pn' : 'other', lookupScope: 'same_session_outgoing_message_id' });
                     break;
                 }
-                if (exactRecentMessage) {
-                    console.info('[message-retry-cache-hit]', { sessionId, messageId: key.id, match: requestedChatJid ? 'same_session_message_id_with_alias_or_verified_outgoing_id' : 'same_session_outgoing_message_id_without_chat_jid' });
+                if (exactRecentMessage?.message) {
+                    cacheOutgoingRetryMessageMemory(sessionId, { key: exactRecentMessage.key || { id: messageId, remoteJid: exactRecentMessage.from, fromMe: true }, message: exactRecentMessage.message }, exactRecentMessage.chatAliases || []);
+                    console.info('[message-retry-cache-hit]', { sessionId, messageId, match: !requestedChatJid ? 'same_session_message_id_without_remote_jid' : 'same_session_message_id_with_verified_chat_alias', sameSession: true });
                     return exactRecentMessage.message;
                 }
-                if (!key?.id || !db) {
-                    logRetryCacheMiss(!!db);
+                if (!db) {
+                    logRetryCacheMiss(false, sameSessionOutgoingAllowed ? 'same_session_memory_and_database_unavailable' : 'database_unavailable');
                     return undefined;
                 }
                 try {
                     const retryCollection = db.collection('baileys_outgoing_messages');
-                    const projection = { message: 1, remoteJid: 1, remoteJidAlt: 1, remoteJidAliases: 1, fromMe: 1, accountPhone: 1, sessionId: 1, messageTimestamp: 1 };
-                    let stored = await retryCollection.findOne(
-                        { _id: `${sessionId}:${String(key.id)}` },
-                        { projection }
-                    );
-                    let lookupScope = 'same_session';
-                    const retryMayReferToOwnMessage = key?.fromMe === true || key?.fromMe === undefined || key?.fromMe === null || outgoingIdKnown;
-                    if (!stored?.message && retryMayReferToOwnMessage) {
-                        const retryAccountPhone = getAuthenticatedPhoneNumber(sock.user, state.creds) || '';
-                        const retryAccountLid = getAuthenticatedLid(sock.user, state.creds) || '';
+                    const projection = { message: 1, messageKey: 1, remoteJid: 1, remoteJidAlt: 1, remoteJidAliases: 1, fromMe: 1, accountPhone: 1, accountLid: 1, accountJid: 1, sessionId: 1, messageId: 1, messageTimestamp: 1 };
+                    let stored = await retryCollection.findOne({ _id: `${sessionId}:${messageId}`, sessionId, messageId, fromMe: true }, { projection });
+                    let lookupScope = 'same_session_id';
+                    if (!stored?.message && sameSessionOutgoingAllowed) {
+                        stored = await retryCollection.findOne({ sessionId, messageId, fromMe: true }, { projection, sort: { createdAt: -1 } });
+                        if (stored?.message) lookupScope = 'same_session_message_id_fallback_without_chat_jid';
+                    }
+                    const retryMayReferToOwnMessage = retryFromMe || key?.fromMe === undefined || key?.fromMe === null || outgoingIdKnown;
+                    const allowCrossSessionLookup = retryMayReferToOwnMessage && !retryFromMe && !requestMatchesOwnIdentity;
+                    if (!stored?.message && allowCrossSessionLookup) {
+                        const retryAccountPhone = ownPhone;
+                        const retryAccountLid = ownLid;
                         const retryAccountJid = String(sock.user?.id || state.creds?.me?.id || '').trim();
                         const sameAccountClauses = [];
                         if (retryAccountPhone) sameAccountClauses.push({ accountPhone: retryAccountPhone });
-                        if (retryAccountLid) sameAccountClauses.push({ accountLid: retryAccountLid });
+                        if (retryAccountLid) sameAccountClauses.push({ accountLid: normalizeLidCacheKey(retryAccountLid) });
                         if (!sameAccountClauses.length && retryAccountJid) sameAccountClauses.push({ accountJid: retryAccountJid });
                         if (sameAccountClauses.length) {
-                            stored = await retryCollection.findOne(
-                                { sessionId: { $ne: sessionId }, messageId: String(key.id), fromMe: true, $or: sameAccountClauses },
-                                { projection, sort: { createdAt: -1 } }
-                            );
+                            stored = await retryCollection.findOne({ sessionId: { $ne: sessionId }, messageId, fromMe: true, $or: sameAccountClauses }, { projection, sort: { createdAt: -1 } });
                             if (stored?.message) lookupScope = 'same_authenticated_account_other_session';
                         }
                     }
-                    const storedChatAliases = [...new Set([stored?.remoteJid, stored?.remoteJidAlt, ...(Array.isArray(stored?.remoteJidAliases) ? stored.remoteJidAliases : [])].map(value => String(value || '').trim()).filter(Boolean))];
-                    const storedChatMatches = !requestedChatJid || storedChatAliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, requestedChatJid));
-                    if (stored?.message && stored.fromMe === true && retryMayReferToOwnMessage && (stored.sessionId === sessionId || lookupScope === 'same_authenticated_account_other_session')) {
+                    const storedAliases = [...new Set([stored?.remoteJid, stored?.remoteJidAlt, ...(Array.isArray(stored?.remoteJidAliases) ? stored.remoteJidAliases : [])].map(value => String(value || '').trim()).filter(Boolean))];
+                    const storedChatMatches = !requestedChatJid || storedAliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, requestedChatJid));
+                    if (stored?.message && stored.fromMe === true && (stored.sessionId === sessionId || lookupScope === 'same_authenticated_account_other_session') && (sameSessionOutgoingAllowed || storedChatMatches)) {
                         const restoredMessage = fixBuffers(stored.message);
-                        cacheRecentMessage(sessionId, { key: { id: key.id, remoteJid: stored.remoteJid || requestedChatJid || '', remoteJidAlt: stored.remoteJidAlt || '', fromMe: true }, message: restoredMessage, messageTimestamp: stored.messageTimestamp || Math.floor(Date.now() / 1000) });
-                        if (storedChatMatches) {
-                            console.info('[message-retry-store-hit]', { sessionId, messageId: String(key.id), chatMatch: !!requestedChatJid, lookupScope, storedSessionMatch: stored.sessionId === sessionId });
-                        } else {
-                            console.info('[message-retry-store-hit-cross-jid-same-account]', { sessionId, messageId: String(key.id), requestedChatType: /@lid$/i.test(requestedChatJid) ? 'lid' : 'pn_or_other', lookupScope, storedSessionMatch: stored.sessionId === sessionId, outgoingIdKnown });
-                        }
+                        const restoredKey = { ...(stored.messageKey || {}), id: messageId, remoteJid: String(stored.remoteJid || requestedChatJid || ''), remoteJidAlt: String(stored.remoteJidAlt || ''), fromMe: true };
+                        cacheRecentMessage(sessionId, { key: restoredKey, message: restoredMessage, messageTimestamp: stored.messageTimestamp || Math.floor(Date.now() / 1000) }, storedAliases);
+                        cacheOutgoingRetryMessageMemory(sessionId, { key: restoredKey, message: restoredMessage }, storedAliases);
+                        console.info('[message-retry-store-hit]', { sessionId, messageId, chatMatch: storedChatMatches, lookupScope, storedSessionMatch: stored.sessionId === sessionId, fromMe: true, requestedChatJidPresent: !!requestedChatJid, participantType, crossSessionLookup: lookupScope === 'same_authenticated_account_other_session' });
                         return restoredMessage;
                     }
-                    if (stored?.message) {
-                        console.warn('[message-retry-chat-mismatch]', { sessionId, messageId: String(key.id), requestedChatJid: requestedChatJid || null, storedChatAliases, lookupScope, storedSessionMatch: stored.sessionId === sessionId, storedFromMe: stored.fromMe === true });
-                    }
+                    if (stored?.message) console.warn('[message-retry-chat-mismatch]', { sessionId, messageId, requestedChatJidPresent: !!requestedChatJid, storedChatAliasesCount: storedAliases.length, lookupScope, storedSessionMatch: stored.sessionId === sessionId, storedFromMe: stored.fromMe === true, sameSessionOutgoingAllowed });
+                    logRetryCacheMiss(true, retryFromMe ? 'from_me_message_not_found_in_same_session_by_id' : 'message_not_found_in_session_or_verified_account_scope');
+                    console.warn('[message-retry-lookup-exhausted]', { sessionId, messageId, requestedChatJidPresent: !!requestedChatJid, requestedChatType: diagnosticChatType, requestedParticipantType: participantType, fromMe: retryFromMe, sameSessionOutgoingAllowed, crossSessionLookupAllowed: allowCrossSessionLookup, storeDocumentFound: !!stored?.message, lookupScope });
                 } catch (error) {
-                    console.warn('[message-retry-store-read-failed]', { sessionId, messageId: String(key.id), error: error?.message || String(error) });
+                    console.warn('[message-retry-store-read-failed]', { sessionId, messageId, requestedChatJidPresent: !!requestedChatJid, requestedParticipantType: participantType, error: error?.message || String(error) });
+                    logRetryCacheMiss(true, 'database_read_failed');
                 }
-                logRetryCacheMiss(true);
                 return undefined;
             }
         });
@@ -10450,7 +10582,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         || outgoingMessageCache.has(`${sessionId}:${earlyReceivedChat}:${earlyReceivedId}`)
                         || isRecentOutgoingMessageId(sessionId, earlyReceivedId);
                     if (!alreadyPersistedOutgoing) {
-                        void persistOutgoingRetryMessage(sessionId, earlyReceivedChat, m, [earlyReceivedChat, m?.key?.remoteJidAlt].filter(Boolean), earlyReceivedOwnPhone, sock.user?.id || '', earlyReceivedOwnLid)
+                        void persistOutgoingRetryMessage(sessionId, earlyReceivedChat, m, [earlyReceivedChat, m?.key?.remoteJidAlt].filter(Boolean), earlyReceivedOwnPhone, sock.user?.id || '', earlyReceivedOwnLid, 'background_without_blocking_message_dispatch')
                             .then(savedOwnerMessage => {
                                 if (savedOwnerMessage) console.info('[owner-outgoing-message-retry-copy-saved]', { sessionId, messageId: earlyReceivedId, chatJid: earlyReceivedChat, sessionStatus: activeMessageSession?.status || null, persistenceMode: 'background_without_blocking_message_dispatch' });
                             })
