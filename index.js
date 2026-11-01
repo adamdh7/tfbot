@@ -3,8 +3,8 @@ const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(pr
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 7000)));
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r102-self-chat-own-lid-retry-identity-no-autorecreate';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r102')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+const TFBOT_CLUSTER_CODE_REVISION = 'r103-baileys-single-encryption-self-chat-retry';
+const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r103')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
@@ -574,122 +574,83 @@ function applyBaileysOutgoingRetryPreflightPatch() {
 }
 
 function applyBaileysRetryResendDoubleEncryptionPatch() {
-    const marker = '__tfbotRetryDeviceFanoutDisabledBeforeSingleRecipientEncryptionV79';
-    const assertMarker = '__tfbotAssertRetryRecipientSessionBeforeEncryptionV79';
+    const marker = '__tfbotRetryResendSingleEncryptionV103';
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
-        const searchDirectories = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
-        const candidates = [...new Set(searchDirectories.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs', 'ts'].map(extension => path.join(directory, folder, `messages-send.${extension}`)))))];
+        const roots = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
+        const candidates = [...new Set(roots.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `messages-send.${extension}`)))) )];
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
-        if (!filePath) return { applied: false, reason: 'messages_send_module_not_found', issue: 'Baileys#2839' };
+        if (!filePath) return { applied: false, reason: 'messages_send_module_not_found', issue: 'Baileys#2781' };
         let source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker) && source.includes(assertMarker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), issue: 'Baileys#2839', deviceFanoutDisabledForDirectRetry: true, retrySessionAssertedBeforeEncryption: true };
-        let changed = false;
-        if (!source.includes(marker)) {
-            const devicesAnchor = source.indexOf('const devices');
-            const blockStartPattern = /if\s*\(\s*participant\s*\)\s*\{/g;
-            blockStartPattern.lastIndex = Math.max(0, devicesAnchor);
-            const blockMatch = blockStartPattern.exec(source);
-            if (!blockMatch) return { applied: false, reason: 'retry_participant_block_not_found', file: path.basename(filePath), issue: 'Baileys#2839' };
-            const openBrace = source.indexOf('{', blockMatch.index);
-            let depth = 0;
-            let closeBrace = -1;
-            let quote = '';
-            let escaped = false;
-            for (let index = openBrace; index < source.length; index++) {
-                const character = source[index];
-                if (quote) {
-                    if (escaped) escaped = false;
-                    else if (character === '\\') escaped = true;
-                    else if (character === quote) quote = '';
-                    continue;
-                }
-                if (character === '"' || character === "'" || character === '`') { quote = character; continue; }
-                if (character === '{') depth++;
-                else if (character === '}') {
-                    depth--;
-                    if (depth === 0) { closeBrace = index; break; }
-                }
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), issue: 'Baileys#2781', skipsSecondEncryptionWhenParticipantNodeExists: true };
+        const retryPatterns = [
+            /if\s*\(\s*isRetryResend\s*\)\s*\{/g,
+            /if\s*\(\s*isRetryResend\s*&&\s*participant(?:\?\.)?\s*\)\s*\{/g,
+            /if\s*\(\s*isRetryResend\s*&&\s*!participants\.length\s*\)\s*\{/g
+        ];
+        let match = null;
+        for (const pattern of retryPatterns) {
+            const matches = [...source.matchAll(pattern)];
+            if (matches.length === 1) {
+                match = matches[0];
+                break;
             }
-            if (closeBrace < 0) return { applied: false, reason: 'retry_participant_block_unbalanced', file: path.basename(filePath), issue: 'Baileys#2839' };
-            const originalBlock = source.slice(blockMatch.index, closeBrace + 1);
-            if (!/devices\.push\s*\(/.test(originalBlock) || !/device_fanout\s*:\s*['"]false['"]/.test(originalBlock)) {
-                return { applied: false, reason: 'retry_participant_block_shape_not_supported', file: path.basename(filePath), issue: 'Baileys#2839' };
-            }
-            const hasNonGroupGuard = /!isGroup\s*&&\s*!isStatus/.test(originalBlock);
-            const replacementBlock = hasNonGroupGuard
-                ? `if (participant) {\n\t\t\t\tif (!isGroup && !isStatus) {\n\t\t\t\t\tadditionalAttributes = { ...additionalAttributes, device_fanout: 'false' };\n\t\t\t\t} else {\n\t\t\t\t\tconst { user, device } = jidDecode(participant.jid);\n\t\t\t\t\tdevices.push({ user, device, jid: participant.jid });\n\t\t\t\t}\n\t\t\t\tconst ${marker} = true;\n\t\t\t}`
-                : `if (participant) {\n\t\t\t\tconst { user, device } = jidDecode(participant.jid);\n\t\t\t\tdevices.push({ user, device, jid: participant.jid });\n\t\t\t\tconst ${marker} = true;\n\t\t\t}`;
-            source = source.slice(0, blockMatch.index) + replacementBlock + source.slice(closeBrace + 1);
-            changed = true;
+            if (matches.length > 1) return { applied: false, reason: 'ambiguous_retry_resend_blocks', matches: matches.length, file: path.basename(filePath), issue: 'Baileys#2781' };
         }
-        if (!source.includes(assertMarker)) {
-            const retryBlockStart = source.search(/if\s*\(\s*isRetryResend(?:\s*&&\s*!participants\.length)?\s*\)\s*\{/);
-            if (retryBlockStart < 0) return { applied: false, reason: 'dedicated_retry_block_not_found', file: path.basename(filePath), issue: 'Baileys#2839' };
-            const encryptPattern = /const\s*\{\s*type\s*,\s*ciphertext\s*:\s*encryptedContent\s*\}\s*=\s*await\s+signalRepository\.encryptMessage\s*\(/g;
-            encryptPattern.lastIndex = retryBlockStart;
-            const encryptMatch = encryptPattern.exec(source);
-            if (!encryptMatch) return { applied: false, reason: 'dedicated_retry_encrypt_call_not_found', file: path.basename(filePath), issue: 'Baileys#2839' };
-            const insert = `const ${assertMarker} = true;\n\t\t\tawait assertSessions([participant.jid]);\n\t\t\t`;
-            source = source.slice(0, encryptMatch.index) + insert + source.slice(encryptMatch.index);
-            changed = true;
+        if (!match) {
+            const participantAnchor = /const\s+isParticipantLid\s*=\s*isLidUser\s*\(\s*participant(?:!)?\.jid\s*\)/.exec(source);
+            if (!participantAnchor) return { applied: false, reason: 'retry_resend_identity_anchor_not_found', file: path.basename(filePath), issue: 'Baileys#2781' };
+            const before = source.slice(Math.max(0, participantAnchor.index - 500), participantAnchor.index);
+            const localIf = [...before.matchAll(/if\s*\(\s*isRetryResend\s*\)\s*\{/g)].pop();
+            if (!localIf) return { applied: false, reason: 'retry_resend_guard_not_found', file: path.basename(filePath), issue: 'Baileys#2781' };
+            const absoluteIndex = Math.max(0, participantAnchor.index - 500) + localIf.index;
+            match = { index: absoluteIndex, 0: localIf[0] };
         }
-        if (!source.includes(marker) || !source.includes(assertMarker) || !/await\s+assertSessions\(\[participant\.jid\]\)\s*;/.test(source)) {
-            return { applied: false, reason: 'retry_fanout_assertion_verification_failed', file: path.basename(filePath), issue: 'Baileys#2839' };
-        }
-        fs.writeFileSync(filePath, source, 'utf8');
-        return { applied: true, alreadyApplied: !changed, file: path.basename(filePath), issue: 'Baileys#2839', deviceFanoutDisabledForDirectRetry: true, retrySessionAssertedBeforeEncryption: true, action: 'prevent_one_to_one_device_retry_from_entering_both_fanout_and_direct_encryption_paths' };
+        const originalGuard = match[0];
+        const replacementGuard = `if (isRetryResend && !participants.length) {`;
+        const patched = source.slice(0, match.index) + replacementGuard + source.slice(match.index + originalGuard.length);
+        const verified = patched.includes(replacementGuard) && patched.includes('const isParticipantLid') && !patched.includes(marker);
+        if (!verified) return { applied: false, reason: 'single_encryption_patch_verification_failed', file: path.basename(filePath), issue: 'Baileys#2781' };
+        const finalSource = patched.replace(replacementGuard, `${replacementGuard}\n\t\tconst ${marker} = true;`);
+        fs.writeFileSync(filePath, finalSource, 'utf8');
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), issue: 'Baileys#2781', skipsSecondEncryptionWhenParticipantNodeExists: true, preservesParticipantNode: true, preservesGroupRetryWhenNoParticipantNode: true };
     } catch (error) {
-        return { applied: false, reason: String(error?.message || error).slice(0, 180), issue: 'Baileys#2839' };
+        return { applied: false, reason: String(error?.message || error).slice(0, 180), issue: 'Baileys#2781' };
     }
 }
 
 function applyBaileysOwnLidRetryAddressingPatch() {
-    const marker = '__tfbotOwnLidRetryIdentityResolvedV102';
+    const marker = '__tfbotOwnLidRetryIdentityResolvedV103';
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
-        const searchDirectories = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
-        const candidates = [...new Set(searchDirectories.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `messages-send.${extension}`)))) )];
+        const roots = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
+        const candidates = [...new Set(roots.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `messages-send.${extension}`)))) )];
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
         if (!filePath) return { applied: false, reason: 'messages_send_module_not_found', issue: 'Baileys#2856' };
         let source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), ownLidIdentityCheck: true, hostedLidSupported: true, preservesConversationDestination: true };
-        const retryBlockPattern = /if\s*\(\s*isRetryResend\s*\)\s*\{/;
-        const retryMatch = retryBlockPattern.exec(source);
-        if (!retryMatch) return { applied: false, reason: 'retry_resend_identity_block_not_found', file: path.basename(filePath), issue: 'Baileys#2856' };
-        const openBrace = source.indexOf('{', retryMatch.index);
-        const closeBrace = findTfbotMatchingBraceEnd(source, openBrace);
-        if (closeBrace < 0) return { applied: false, reason: 'retry_resend_identity_block_unbalanced', file: path.basename(filePath), issue: 'Baileys#2856' };
-        let block = source.slice(retryMatch.index, closeBrace + 1);
-        const identityPattern = /const\s+isParticipantLid\s*=\s*isLidUser\s*\(\s*participant(?:!)?\.jid\s*\)\s*;?\s*const\s+isMe\s*=\s*areJidsSameUser\s*\(\s*participant(?:!)?\.jid\s*,\s*isParticipantLid\s*\?\s*meLid\s*:\s*meId\s*\)\s*;?/;
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), issue: 'Baileys#2856', ownLidIdentityCheck: true, hostedLidSupported: true, preservesParticipantAddress: true };
+        const expressionPattern = /const\s+isMe\s*=\s*areJidsSameUser\s*\(\s*participant(?:!)?\.jid\s*,\s*isParticipantLid\s*\?\s*meLid\s*:\s*meId\s*\)\s*;?/;
+        const matches = [...source.matchAll(new RegExp(expressionPattern.source, 'g'))];
+        if (matches.length !== 1) return { applied: false, reason: `expected_one_retry_own_identity_expression_found_${matches.length}`, file: path.basename(filePath), issue: 'Baileys#2856' };
+        const match = matches[0];
         const replacement = `const __tfbotRetryParticipantJid = String(participant?.jid || '').trim();
-const isParticipantLid = /@(?:hosted\\.)?lid$/i.test(__tfbotRetryParticipantJid);
-const __tfbotRetryOwnLidDirectMatch = isParticipantLid && Boolean(meLid) && areJidsSameUser(__tfbotRetryParticipantJid, meLid);
 let __tfbotRetryParticipantPn = '';
-if (isParticipantLid && !__tfbotRetryOwnLidDirectMatch && signalRepository?.lidMapping?.getPNForLID) {
+if (isParticipantLid && signalRepository?.lidMapping?.getPNForLID) {
     try {
         const __tfbotNormalizedRetryLid = __tfbotRetryParticipantJid.replace(/:\\d+(?=@(?:hosted\\.)?lid$)/i, '');
         __tfbotRetryParticipantPn = String(await signalRepository.lidMapping.getPNForLID(__tfbotNormalizedRetryLid) || '').trim();
     } catch (error) {}
 }
-const __tfbotRetryOwnLidMatch = __tfbotRetryOwnLidDirectMatch || (isParticipantLid && Boolean(__tfbotRetryParticipantPn) && areJidsSameUser(__tfbotRetryParticipantPn, meId));
+const __tfbotRetryOwnLidMatch = isParticipantLid && ((Boolean(meLid) && areJidsSameUser(__tfbotRetryParticipantJid, meLid)) || (Boolean(__tfbotRetryParticipantPn) && areJidsSameUser(__tfbotRetryParticipantPn, meId)));
 const __tfbotRetryOwnPnMatch = !isParticipantLid && areJidsSameUser(__tfbotRetryParticipantJid, meId);
 const isMe = Boolean(__tfbotRetryOwnLidMatch || __tfbotRetryOwnPnMatch);
 const ${marker} = true;`;
-        if (identityPattern.test(block)) {
-            block = block.replace(identityPattern, replacement);
-        } else {
-            const isMePattern = /const\s+isMe\s*=\s*[^;\n]+;?/;
-            if (!isMePattern.test(block)) return { applied: false, reason: 'retry_identity_expression_not_found', file: path.basename(filePath), issue: 'Baileys#2856' };
-            block = block.replace(isMePattern, replacement);
-        }
-        if (!block.includes(marker) || !block.includes('const isMe = Boolean(__tfbotRetryOwnLidMatch || __tfbotRetryOwnPnMatch)') || !block.includes('getPNForLID')) return { applied: false, reason: 'own_lid_identity_patch_verification_failed', file: path.basename(filePath), issue: 'Baileys#2856' };
-        const patched = source.slice(0, retryMatch.index) + block + source.slice(closeBrace + 1);
-        if (!patched.includes(marker)) return { applied: false, reason: 'own_lid_identity_marker_missing_after_patch', file: path.basename(filePath), issue: 'Baileys#2856' };
-        fs.writeFileSync(filePath, patched, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), issue: 'Baileys#2856', ownLidIdentityCheck: true, hostedLidSupported: true, mappedPnFallback: true, preservesConversationDestination: true, action: 'resolve_own_regular_or_hosted_lid_participant_as_self_before_device_sent_message_wrapping' };
+        source = source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
+        if (!source.includes(marker) || !source.includes('getPNForLID') || !source.includes('const isMe = Boolean(__tfbotRetryOwnLidMatch || __tfbotRetryOwnPnMatch)')) return { applied: false, reason: 'own_lid_identity_patch_verification_failed', file: path.basename(filePath), issue: 'Baileys#2856' };
+        fs.writeFileSync(filePath, source, 'utf8');
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), issue: 'Baileys#2856', ownLidIdentityCheck: true, hostedLidSupported: true, mappedPnFallback: true, preservesParticipantAddress: true };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180), issue: 'Baileys#2856' };
     }
