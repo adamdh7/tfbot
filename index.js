@@ -7,8 +7,8 @@ const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(pr
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 7000)));
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(250, Math.min(1800, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 900)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r90-qr-auth-flush-before-promotion';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r90')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+const TFBOT_CLUSTER_CODE_REVISION = 'r91-self-signal-owner-command-pairing';
+const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r91')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
@@ -96,7 +96,6 @@ if (__tfbotSelfChatPn && /@(?:hosted\.)?lid$/i.test(String(decryptionJid || ''))
     const ${mappingMarker} = true;
     try {
         await repository?.lidMapping?.storeLIDPNMappings?.([{ lid: decryptionJid, pn: __tfbotSelfChatPn }]);
-        if (__tfbotDecryptionJid === __tfbotSelfChatPn) await repository?.migrateSession?.(__tfbotSelfChatPn, decryptionJid);
     } catch (mappingError) {
         logger.debug({ err: mappingError, lid: decryptionJid, pn: __tfbotSelfChatPn }, 'self-chat PN/LID session mapping update skipped');
     }
@@ -104,6 +103,7 @@ if (__tfbotSelfChatPn && /@(?:hosted\.)?lid$/i.test(String(decryptionJid || ''))
         if (source.includes(marker)) {
             let upgradedSource = source;
             if (!upgradedSource.includes(originalLidFallback) && upgradedSource.includes(previousLidFallback)) upgradedSource = upgradedSource.replace(previousLidFallback, originalLidFallback);
+            upgradedSource = upgradedSource.replace(/^\s*if \(__tfbotDecryptionJid === __tfbotSelfChatPn\) await repository\?\.migrateSession\?\.\(__tfbotSelfChatPn, decryptionJid\);\s*$/gm, '');
             if (!upgradedSource.includes(mappingMarker)) {
                 if (!upgradedSource.includes(primaryDecryptCall)) return { applied: false, reason: 'self_chat_decrypt_mapping_anchor_not_found', file: path.basename(filePath) };
                 upgradedSource = upgradedSource.replace(primaryDecryptCall, mappingInjection);
@@ -111,9 +111,9 @@ if (__tfbotSelfChatPn && /@(?:hosted\.)?lid$/i.test(String(decryptionJid || ''))
             if (!upgradedSource.includes(originalLidFallback) || !upgradedSource.includes(mappingMarker)) return { applied: false, reason: 'self_chat_decrypt_patch_upgrade_verification_failed', file: path.basename(filePath) };
             if (upgradedSource !== source) {
                 fs.writeFileSync(filePath, upgradedSource, 'utf8');
-                return { applied: true, alreadyApplied: false, upgradedExistingPatch: true, file: path.basename(filePath), selfChatPrimary: 'authenticated PN from remoteJidAlt', mappingPersisted: true, sessionMigration: true };
+                return { applied: true, alreadyApplied: false, upgradedExistingPatch: true, file: path.basename(filePath), selfChatPrimary: 'authenticated PN from remoteJidAlt', mappingPersisted: true, sessionMigration: false };
             }
-            return { applied: true, alreadyApplied: true, file: path.basename(filePath), mappingPersisted: true, sessionMigration: true };
+            return { applied: true, alreadyApplied: true, file: path.basename(filePath), mappingPersisted: true, sessionMigration: false };
         }
         const declarationPattern = /const\s+decryptionJid\s*=\s*await\s+getDecryptionJid\(\s*author\s*,\s*repository\s*\)\s*;?/;
         const declarationMatch = declarationPattern.exec(source);
@@ -159,7 +159,7 @@ if (__tfbotSelfChatPn && /@(?:hosted\.)?lid$/i.test(String(decryptionJid || ''))
         const patchedSource = source.slice(0, caseStart) + patchedCaseBlock;
         if (!patchedSource.includes(marker) || !patchedSource.includes('jid: __tfbotDecryptionJid') || !patchedSource.includes('jid: alternateIdentity') || !patchedSource.includes(mappingMarker)) return { applied: false, reason: 'decrypt_patch_verification_failed', file: path.basename(filePath) };
         fs.writeFileSync(filePath, patchedSource, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), selfChatPrimary: 'authenticated PN from remoteJidAlt', mappingPersisted: true, sessionMigration: true };
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), selfChatPrimary: 'authenticated PN from remoteJidAlt', mappingPersisted: true, sessionMigration: false };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
@@ -759,7 +759,7 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
     const signalPeerCandidates = [...new Set([details.peerJid, details.remoteJid, ...(Array.isArray(details.aliases) ? details.aliases : [])].map(value => String(value || '').trim()).filter(Boolean))];
     const selfPeer = !details.isGroup && signalPeerCandidates.some(peerJid => ownSignalJids.some(ownJid => areEquivalentWhatsAppChatJids(sessionId, peerJid, ownJid)));
     const privateRepairRequired = !details.isGroup && (['signal_session_missing', 'bad_mac', 'message_counter_error'].includes(kind) || previous.count >= SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD && kind === 'signal_decryption_error');
-    if (privateRepairRequired && !selfPeer) {
+    if (privateRepairRequired) {
         const repairKey = `${sessionId}:${details.peerJid}:private-pairwise-session`;
         if (Number(signalPrivatePeerRepairCooldowns.get(repairKey) || 0) <= now && !signalRecoveryTimers.has(repairKey)) {
             signalPrivatePeerRepairCooldowns.set(repairKey, now + SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS);
@@ -769,8 +769,14 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
                 const repository = current?.sock?.signalRepository;
                 if (!current || current.status === 'deconnecte' || typeof repository?.deleteSession !== 'function') return;
                 try {
-                    await repository.deleteSession([details.peerJid]);
-                    void flushAuthWritesForSession(sessionId).catch(() => {});
+                    const currentCredentials = current.authState?.creds || null;
+                    const currentUser = current.sock?.user || null;
+                    const ownPhone = getAuthenticatedPhoneNumber(currentUser, currentCredentials);
+                    const ownPhoneJid = ownPhone ? `${ownPhone}@s.whatsapp.net` : '';
+                    const ownLid = getAuthenticatedLid(currentUser, currentCredentials);
+                    const repairJids = selfPeer ? [...new Set([details.peerJid, ownPhoneJid, ownLid].filter(Boolean))] : [details.peerJid];
+                    await repository.deleteSession(repairJids);
+                    await flushAuthWritesForSession(sessionId);
                 } catch (error) {}
             }, 180);
             signalRecoveryTimers.set(repairKey, repairTimer);
@@ -2342,16 +2348,17 @@ async function resetSignalPeerSessionForSendRetry(sock, sessionId, jid, allowOwn
         ownPhoneJid && peerPhoneJid && ownPhoneJid === peerPhoneJid ||
         /@lid$/i.test(ownLidJid) && /@lid$/i.test(peerLidJid) && ownLidJid === peerLidJid
     );
-    if (isOwnPeer) return false;
+    if (isOwnPeer && !allowOwnPeer) return false;
     const repository = sock?.signalRepository;
     if (typeof repository?.deleteSession !== 'function') return false;
-    const repairJid = isOwnPeer && /@lid$/i.test(ownLidJid) ? ownLidJid : peerJid;
+    const repairJids = isOwnPeer ? [...new Set([peerJid, ownPhoneJid, ownLidJid].filter(Boolean))] : [peerJid];
+    const repairJid = repairJids.join('|');
     const key = `${sessionId}:send:${isOwnPeer ? 'self' : repairJid}`;
     const now = Date.now();
     if (Number(signalPeerSendRepairCooldowns.get(key) || 0) > now) return false;
     signalPeerSendRepairCooldowns.set(key, now + 30000);
     while (signalPeerSendRepairCooldowns.size > 4000) signalPeerSendRepairCooldowns.delete(signalPeerSendRepairCooldowns.keys().next().value);
-    await repository.deleteSession([repairJid]);
+    await repository.deleteSession(repairJids);
     await flushAuthWritesForSession(sessionId);
     return true;
 }
@@ -2541,8 +2548,9 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             const transientSignalFailure = /No sessions|SessionError|MessageCounterError|Bad MAC|pre.?key|failed to decrypt|Chain closed|smax-invalid|statusCode\s*[:=]\s*479|\b479\b/i.test(errorText);
             if (transientSignalFailure && isSelfChatDestination) {
                 try {
+                    await resetSignalPeerSessionForSendRetry(sock, sessionId, destinationJid, true).catch(() => false);
                     await flushAuthWritesForSession(sessionId);
-                    await new Promise(resolve => setTimeout(resolve, 180));
+                    await new Promise(resolve => setTimeout(resolve, 250));
                     result = await sendTo(destinationJid);
                     sentDestinationJid = destinationJid;
                     destinationResolution = `${destinationResolution}_self_signal_repaired_retry`;
@@ -6374,7 +6382,8 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
                 return;
             }
             const socketReadyState = socket?.ws?.readyState ?? socket?.ws?._socket?.readyState ?? socket?.socket?.readyState;
-            const challengeReady = !!String(active?.qrString || '').trim() || String(active?.status || '').toLowerCase() === 'qr_disponible';
+            const websocketReady = socket?.ws?.isOpen === true || Number(socketReadyState) === 1 || String(socketReadyState).toUpperCase() === 'OPEN' || active?.openEventSeen === true;
+            const challengeReady = websocketReady || !!String(active?.qrString || '').trim() || String(active?.status || '').toLowerCase() === 'qr_disponible';
             if (!challengeReady) {
                 schedule(350, 'waiting_for_pairing_challenge');
                 return;
@@ -6449,6 +6458,25 @@ app.all('/get-code', async (req, res) => {
     if (!validSuppliedSessionId && connectionFormat === 'pair' && db) {
         const pendingCutoff = new Date(Date.now() - PAIRING_SESSION_TTL_MS);
         pendingOwner = await db.collection('session_owners').findOne({ PairingNumber: number, pairingPending: true, pairingStartedAt: { $gte: pendingCutoff }, connectionStatus: { $in: ['pairing_starting', 'pairing'] } }, { sort: { pairingStartedAt: -1 } }).catch(() => null);
+        if (!pendingOwner) {
+            const failedOwners = await db.collection('session_owners').find({ PairingNumber: number, connectionStatus: { $in: ['reauth_required', 'pairing_expired', 'pairing_error', 'deconnecte', 'duplicate_account'] } }).sort({ updatedAt: -1, pairingStartedAt: -1 }).limit(25).toArray().catch(() => []);
+            for (const failedOwner of failedOwners) {
+                if (!failedOwner?.sessionId) continue;
+                const failedId = String(failedOwner.sessionId);
+                const failedRuntime = activeSessions.get(failedId);
+                const failedAuth = await db.collection('baileys_auth').findOne({ _id: `auth-${failedId}-creds` }, { projection: { 'creds.registered': 1, 'creds.me.id': 1, 'creds.me.lid': 1 } }).catch(() => null);
+                const failedHasIdentity = failedAuth?.creds?.registered === true || !!(failedAuth?.creds?.me?.id || failedAuth?.creds?.me?.lid) || !!getAuthenticatedPhoneNumber(failedRuntime?.sock?.user, failedRuntime?.authState?.creds) || !!getAuthenticatedLid(failedRuntime?.sock?.user, failedRuntime?.authState?.creds);
+                const failedSocketLive = !!failedRuntime?.sock && !isSocketDefinitelyClosed(failedRuntime.sock);
+                if (failedHasIdentity || failedSocketLive) continue;
+                const failedReconnect = reconnectTimers.get(failedId);
+                if (failedReconnect) clearTimeout(failedReconnect);
+                reconnectTimers.delete(failedId);
+                await releaseSessionRuntimeLock(failedId).catch(() => {});
+                await db.collection('session_account_runtime_locks').deleteMany({ sessionId: failedId }).catch(() => {});
+                await db.collection('session_runtime_locks').deleteMany({ _id: failedId }).catch(() => {});
+                await deleteMongoSession(failedId).catch(() => {});
+            }
+        }
     }
     let sId = validSuppliedSessionId ? suppliedSessionId : (pendingOwner?.sessionId || `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
     let replacedStaleSessionId = '';
@@ -6460,7 +6488,7 @@ app.all('/get-code', async (req, res) => {
         const stalePairingStatuses = new Set(['reauth_required', 'pairing_expired', 'pairing_error', 'duplicate_account']);
         const persistedAuth = !suppliedRuntime && db ? await db.collection('baileys_auth').findOne({ _id: `auth-${suppliedSessionId}-creds` }, { projection: { 'creds.registered': 1, 'creds.me.id': 1, 'creds.me.lid': 1 } }).catch(() => null) : null;
         const suppliedRegistered = suppliedRuntime?.authState?.creds?.registered === true || persistedAuth?.creds?.registered === true;
-        const suppliedIdentity = !!(getAuthenticatedPhoneNumber(suppliedRuntime?.sock?.user, suppliedRuntime?.authState?.creds) || getAuthenticatedLid(suppliedRuntime?.sock?.user, suppliedRuntime?.authState?.creds) || persistedAuth?.creds?.me?.id || persistedAuth?.creds?.me?.lid || suppliedOwner?.Number || suppliedOwner?.AccountJid || suppliedOwner?.OwnerLid);
+        const suppliedIdentity = !!(getAuthenticatedPhoneNumber(suppliedRuntime?.sock?.user, suppliedRuntime?.authState?.creds) || getAuthenticatedLid(suppliedRuntime?.sock?.user, suppliedRuntime?.authState?.creds) || persistedAuth?.creds?.me?.id || persistedAuth?.creds?.me?.lid || hasPersistedWhatsAppAccountIdentity(suppliedOwner));
         const suppliedSocketCanContinue = !!suppliedRuntime?.sock && !isSocketDefinitelyClosed(suppliedRuntime.sock);
         const runtimeConnected = ['connecte', 'connected'].includes(runtimePairingStatus) && !!suppliedRuntime?.sock;
         const suppliedStatus = runtimeConnected ? runtimePairingStatus : suppliedOwner?.reauthRequired === true ? 'reauth_required' : stalePairingStatuses.has(persistedPairingStatus) ? persistedPairingStatus : (runtimePairingStatus || persistedPairingStatus);
@@ -6543,7 +6571,7 @@ app.all('/get-code', async (req, res) => {
                 const checkSess = activeSessions.get(sId);
                 const ownerState = await db.collection('session_owners').findOne({ sessionId: sId }, { projection: { connectionStatus: 1, pairingPending: 1, Number: 1, AccountJid: 1, OwnerLid: 1 } }).catch(() => null);
                 const credentials = checkSess?.authState?.creds;
-                const hasIdentity = !!(getAuthenticatedPhoneNumber(checkSess?.sock?.user, credentials) || getAuthenticatedLid(checkSess?.sock?.user, credentials) || credentials?.me?.id || credentials?.me?.lid || ownerState?.Number || ownerState?.AccountJid || ownerState?.OwnerLid);
+                const hasIdentity = !!(getAuthenticatedPhoneNumber(checkSess?.sock?.user, credentials) || getAuthenticatedLid(checkSess?.sock?.user, credentials) || credentials?.me?.id || credentials?.me?.lid || hasPersistedWhatsAppAccountIdentity(ownerState));
                 const socketCanContinue = !!checkSess?.sock && !isSocketDefinitelyClosed(checkSess.sock);
                 if (credentials?.registered === true || hasIdentity || socketCanContinue || reconnectTimers.has(sId) || ownerState?.pairingPending !== true) {
                     console.info('[pairing-session-expiry-deferred]', { sessionId: sId, registered: credentials?.registered === true, identityAvailable: hasIdentity, socketCanContinue, action: 'preserve_auth_and_socket_until_whatsapp_reports_a_real_close_or_logout' });
@@ -8108,6 +8136,16 @@ function normalizePhoneNumber(number) {
     return String(number || '').replace(/[^0-9]/g, '');
 }
 
+function hasPersistedWhatsAppAccountIdentity(record = {}) {
+    const values = [record.Number, record.number, record.OwnerNumber, record.ownerNumber, record.AccountJid, record.accountJid, record.OwnerLid, record.ownerLid, record.phoneNumber];
+    return values.some(value => {
+        const text = String(value || '').trim();
+        if (/@(?:s\.whatsapp\.net|hosted\.)?lid$/i.test(text) || /@s\.whatsapp\.net$/i.test(text)) return true;
+        const digits = normalizePhoneNumber(text);
+        return digits.length >= 6 && digits.length <= 20 && !/^0+$/.test(digits);
+    });
+}
+
 function getGlobalSuperOwnerNumbers() {
     const configured = [
         '18092813169',
@@ -8583,7 +8621,7 @@ async function sendActionError(sock, jid, actionName, error, language, userName,
 const canonicalCommandAliases = {
     ai: 'ai', ia: 'ai', asistan: 'ai', iu: 'ai', tfasistan: 'ai', lang: 'lang', language: 'lang', image: 'imaj', imagen: 'imaj', imaj: 'imaj',
     search: 'cheche', chercher: 'cheche', buscar: 'cheche', cheche: 'cheche',
-    menu: 'menu', meni: 'menu', 'menú': 'menu', qrbot: 'qrbot', qr: 'qr', code: 'code', codigo: 'code', kòd: 'code',
+    menu: 'menu', meni: 'menu', 'menú': 'menu', cmds: 'menu', qrbot: 'qrbot', qr: 'qr', code: 'code', codigo: 'code', kòd: 'code',
     link: 'lien', lien: 'lien', enlace: 'lien', lyen: 'lien', sites: 'sites', sit: 'sites',
     tagall: 'tagall', tagtout: 'tagall', etiquetartodo: 'tagall', tout: 'tagall', hidetag: 'hidetag',
     kick: 'kick', expulse: 'kick', expulsar: 'kick', sipli: 'kick', add: 'add', añadir: 'add',
@@ -8635,16 +8673,16 @@ const commandsWithoutArguments = new Set([
 
 function hasExplicitAiCommandPrefix(body) {
     let source = String(body || '').trim();
-    source = source.replace(/^[*`_\s]*(?:[○●]\s*)?/u, '').replace(/^[.!/]+\s*/u, '').trim();
-    const match = source.match(/^([\p{L}\p{N}_-]+)[*`_]*(?:(?:\s+|[:：,]\s*)([\s\S]*)|$)/u);
+    source = source.replace(/^\./u, '').trim();
+    const match = source.match(/^([\p{L}\p{N}_-]+)(?:(?:\s+|[:：,]\s*)([\s\S]*)|$)/u);
     if (!match) return false;
     return new Set(['ai', 'ia', 'asistan', 'iu', 'tfasistan']).has(normalizeText(match[1]));
 }
 
 function parseIncomingCommand(body, language, context = {}) {
     let source = String(body || '').trim();
-    source = source.replace(/^[*`_\s]*(?:[○●]\s*)?/u, '').replace(/^[.!/]+\s*/u, '').trim();
-    const match = source.match(/^([\p{L}\p{N}_-]+)[*`_]*(?:(?:\s+|[:：,]\s*)([\s\S]*)|$)/u);
+    source = source.replace(/^\./u, '').trim();
+    const match = source.match(/^([\p{L}\p{N}_-]+)(?:(?:\s+|[:：,]\s*)([\s\S]*)|$)/u);
     if (!match) return null;
     const command = normalizeText(match[1]);
     const args = String(match[2] || '').trim();
@@ -10569,6 +10607,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             console.warn('[private-message-skipped-without-pn]', { sessionId, messageId: msgId, sourceChatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null });
                             return;
                         }
+                        const explicitPhoneAliases = [rawFrom, m.key.remoteJidAlt, m.key.senderPn, m.key.participantPn]
+                            .map(value => normalizePhoneCacheJid(value))
+                            .filter(Boolean);
+                        senderJids.push(...explicitPhoneAliases);
                         const senderNumbers = [...new Set(senderJids.filter(identity => !/@lid(?:$|:)/i.test(String(identity || ''))).map(normalizedJidNumber).filter(Boolean))];
                         const sNum = senderNumbers[0] || '';
                         const ownerNumber = normalizePhoneNumber(sOwnerTop?.Number || '');
@@ -10580,8 +10622,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const senderMatchesAuthenticatedAccount = !!authenticatedAccountNumber && senderNumbers.includes(authenticatedAccountNumber);
                         const configuredOwnerAccess = getConfiguredOwnerAccessIdentities(sOwnerTop, sessionId);
                         const configuredOwnerMatch = matchConfiguredOwnerAccess(configuredOwnerAccess, senderJids, senderNumbers, rawFrom, isGroup, sessionId);
+                        const globalOwnerMatch = senderNumbers.some(number => getGlobalSuperOwnerNumbers().has(normalizePhoneNumber(number)));
                         const ownerNumberCandidates = [...configuredOwnerAccess.numbers];
-                        const isOwnerReal = !!isFromMe || senderMatchesAuthenticatedAccount || senderMatchesOwnLid || privateChatMatchesOwnLid || configuredOwnerMatch.matched;
+                        const isOwnerReal = !!isFromMe || senderMatchesAuthenticatedAccount || senderMatchesOwnLid || privateChatMatchesOwnLid || configuredOwnerMatch.matched || globalOwnerMatch;
                         const sName = pushName;
                         const socketOwnerName = sanitizeSessionDisplayName(sock.user?.name);
                         const incomingDisplayName = sanitizeSessionDisplayName(pushName);
@@ -12385,7 +12428,7 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
             const credsDoc = await collection.findOne({ _id: `auth-${staleSessionId}-creds` }, { projection: { 'creds.registered': 1, 'creds.me.id': 1, 'creds.me.lid': 1 } }).catch(() => null);
             const credentialsRegistered = credsDoc?.creds?.registered === true;
             const credentialsHaveIdentity = !!(credsDoc?.creds?.me?.id || credsDoc?.creds?.me?.lid);
-            const ownerHasAccountIdentity = !!(owner.Number || owner.AccountJid || owner.OwnerLid || owner.accountJid || owner.phoneNumber);
+            const ownerHasAccountIdentity = hasPersistedWhatsAppAccountIdentity(owner);
             const hasRecoverableAccountCredentials = credentialsRegistered || credentialsHaveIdentity || ownerHasAccountIdentity;
             const isReauthExpired = status === 'reauth_required' || owner.reauthRequired === true;
             if (hasRecoverableAccountCredentials) {
