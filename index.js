@@ -2,9 +2,9 @@ try { require('dotenv').config(); } catch (e) {}
 const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(process.env.MESSAGE_QUEUE_TASK_TIMEOUT_MS || 45000)));
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 7000)));
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
-const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(250, Math.min(1800, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 900)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r96-vv-vv2-viewonce-resend';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r96')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
+const TFBOT_CLUSTER_CODE_REVISION = 'r97-outgoing-retry-durable-self-chat-logs-phone';
+const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r97')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
@@ -71,26 +71,66 @@ const fs = require('fs');
 const path = require('path');
 const EventEmitter = require('events');
 const { AsyncLocalStorage } = require('async_hooks');
-const TFBOT_DIAGNOSTIC_SESSION_ID = String(process.env.TFBOT_DIAGNOSTIC_SESSION_ID || 'session_1793548714115_7qh53e').trim();
+const TFBOT_DIAGNOSTIC_PHONE = String(process.env.TFBOT_DIAGNOSTIC_PHONE || '18298617960').replace(/\D/g, '');
 const TFBOT_DIAGNOSTIC_LOG_PATH = path.join(__dirname, 'logs.txt');
+const TFBOT_DIAGNOSTIC_LOG_MAX_BYTES = Math.max(1048576, Math.min(16777216, Number(process.env.TFBOT_DIAGNOSTIC_LOG_MAX_BYTES || 8388608)));
 const tfbotOriginalConsole = { log: console.log.bind(console), info: console.info.bind(console), warn: console.warn.bind(console), error: console.error.bind(console), debug: console.debug.bind(console) };
 const tfbotDiagnosticSerialize = value => {
     try { return JSON.stringify(value, (key, item) => typeof item === 'bigint' ? String(item) : item instanceof Error ? { name: item.name, message: item.message, stack: String(item.stack || '').slice(0, 3000) } : item); }
     catch (error) { return String(value); }
 };
+function getTfbotDiagnosticSession() {
+    try {
+        const matches = [...activeSessions.entries()].filter(([sessionId, runtime]) => {
+            const credentials = runtime?.authState?.creds || null;
+            const phone = normalizePhoneNumber(getAuthenticatedPhoneNumber(runtime?.sock?.user || null, credentials) || runtime?.number || runtime?.sock?.user?.phoneNumber || '');
+            return !!TFBOT_DIAGNOSTIC_PHONE && phone === TFBOT_DIAGNOSTIC_PHONE;
+        }).sort((a, b) => {
+            const aConnected = ['connecte', 'connected'].includes(String(a[1]?.status || '').toLowerCase()) ? 1 : 0;
+            const bConnected = ['connecte', 'connected'].includes(String(b[1]?.status || '').toLowerCase()) ? 1 : 0;
+            return bConnected - aConnected || Number(b[1]?.connectedAt || b[1]?.readyAt || 0) - Number(a[1]?.connectedAt || a[1]?.readyAt || 0);
+        });
+        if (!matches.length) return null;
+        const [sessionId, runtime] = matches[0];
+        return { sessionId, name: String(runtime?.sock?.user?.name || runtime?.sock?.user?.notify || runtime?.ownerName || 'Adam').slice(0, 80), phone: TFBOT_DIAGNOSTIC_PHONE };
+    } catch (error) {
+        return null;
+    }
+}
+function sanitizeTfbotDiagnosticLog(value, sessionId) {
+    let output = String(value || '');
+    if (sessionId) output = output.split(sessionId).join('[selected-session]');
+    output = output.replace(/("(?:text|caption|bodyPreview|messageTextPreview|messageContent|contentPreview|pushName|senderName|participantName|contactName)"\s*:\s*)("(?:\\.|[^"\\])*")/gi, '$1"[redacted]"');
+    output = output.replace(/("(?:token|authorization|apiKey|api_key|password|pairingCode|pairing_code|advSecretKey|noiseKey|identityKey|signedIdentityKey)"\s*:\s*)("(?:\\.|[^"\\])*")/gi, '$1"[redacted]"');
+    output = output.replace(/\b(\d{7,20}(?::\d+)?)(@s\.whatsapp\.net|@lid|@hosted)\b/gi, (_, id, suffix) => `[jid:${shortLogHash(id)}]${suffix}`);
+    output = output.replace(/\b(\d{8,22}-\d{4,22})(@g\.us)\b/gi, (_, id, suffix) => `[group:${shortLogHash(id)}]${suffix}`);
+    output = output.replace(/\bsession_\d+_[a-z0-9]+\b/gi, '[session]');
+    output = output.replace(/\b\d{8,15}\b/g, value => value === TFBOT_DIAGNOSTIC_PHONE ? `[phone:${value.slice(-2).padStart(value.length, '*')}]` : `[number:${shortLogHash(value)}]`);
+    return output.slice(0, 12000);
+}
 for (const level of Object.keys(tfbotOriginalConsole)) {
     console[level] = (...args) => {
         try {
             const serialized = args.map(value => typeof value === 'string' ? value : tfbotDiagnosticSerialize(value)).join(' ');
-            if (TFBOT_DIAGNOSTIC_SESSION_ID && serialized.includes(TFBOT_DIAGNOSTIC_SESSION_ID)) {
-                const record = { name: 'Adam', date: new Date().toISOString(), level: level.toUpperCase(), event: String(args.find(value => typeof value === 'string') || 'runtime').slice(0, 180), content: serialized.slice(0, 16000) };
-                fs.appendFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, `${JSON.stringify(record)}\n`, 'utf8');
+            const target = getTfbotDiagnosticSession();
+            const targetLog = !!target && (serialized.includes(target.sessionId) || serialized.includes(TFBOT_DIAGNOSTIC_PHONE));
+            if (targetLog) {
+                const record = { name: target.name, date: new Date().toISOString(), level: level.toUpperCase(), event: String(args.find(value => typeof value === 'string') || 'runtime').slice(0, 180), content: sanitizeTfbotDiagnosticLog(serialized, target.sessionId) };
+                const line = `${JSON.stringify(record)}\n`;
+                fs.appendFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, line, 'utf8');
+                try {
+                    const stat = fs.statSync(TFBOT_DIAGNOSTIC_LOG_PATH);
+                    if (stat.size > TFBOT_DIAGNOSTIC_LOG_MAX_BYTES) {
+                        const current = fs.readFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, 'utf8');
+                        fs.writeFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, current.slice(-Math.floor(TFBOT_DIAGNOSTIC_LOG_MAX_BYTES * 0.75)), 'utf8');
+                    }
+                } catch (trimError) {}
             }
         } catch (error) {}
         tfbotOriginalConsole[level](...args);
     };
 }
-try { if (!fs.existsSync(TFBOT_DIAGNOSTIC_LOG_PATH)) fs.writeFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, '', 'utf8'); } catch (error) {}
+try { fs.writeFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, '', 'utf8'); } catch (error) {}
 
 
 function applyBaileysLidPnDecryptRetryPatch() {
@@ -667,7 +707,7 @@ const baileysRetryResendDoubleEncryptionPatchStatus = applyBaileysRetryResendDou
 const baileysOwnLidRetryAddressingPatchStatus = applyBaileysOwnLidRetryAddressingPatch();
 const baileysMessageRetryManagerDeviceJidPatchStatus = applyBaileysMessageRetryManagerDeviceJidPatch();
 const baileysCompanionRegRefreshPatchStatus = applyBaileysCompanionRegRefreshPatch();
-console.info('[tfbot-local-diagnostics-ready]', { sessionId: TFBOT_DIAGNOSTIC_SESSION_ID, file: 'logs.txt', storage: 'local_filesystem_only' });
+console.info('[tfbot-local-diagnostics-ready]', { phone: TFBOT_DIAGNOSTIC_PHONE ? `[phone:${TFBOT_DIAGNOSTIC_PHONE.slice(-2).padStart(TFBOT_DIAGNOSTIC_PHONE.length, '*')}]` : null, file: 'logs.txt', storage: 'local_filesystem_only', publicRead: true });
 console.info('[baileys-lid-pn-decrypt-retry-patch]', baileysLidPnDecryptPatchStatus);
 console.info('[baileys-self-chat-placeholder-resend-patch]', baileysSelfChatPlaceholderResendPatchStatus);
 console.info('[baileys-outgoing-retry-preflight-patch]', { ...baileysOutgoingRetryPreflightPatchStatus, action: baileysOutgoingRetryPreflightPatchStatus.applied ? 'preload_internal_retry_manager_and_persist_generated_full_message_before_network_relay' : 'leave_installed_baileys_source_unchanged' });
@@ -901,9 +941,8 @@ function createRenderPinoLogger(options = {}) {
                     try { parsed = JSON.parse(line); } catch (error) { parsed = { msg: line }; }
                     const diagnosticArgs = [parsed?.msg || parsed?.message || '', parsed];
                     const recoverySessionId = String(parsed?.sessionId || options?.base?.sessionId || '').trim();
-                    if (recoverySessionId && recoverySessionId === TFBOT_DIAGNOSTIC_SESSION_ID) {
-                        const record = { name: 'Adam', date: new Date().toISOString(), level: String(parsed?.level || 'BAILEYS'), event: String(parsed?.msg || parsed?.message || 'baileys'), content: JSON.stringify({ component: options?.base?.component || 'baileys', ...parsed }).slice(0, 16000) };
-                        fs.appendFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, `${JSON.stringify(record)}\n`, 'utf8');
+                    if (recoverySessionId && getTfbotDiagnosticSession()?.sessionId === recoverySessionId) {
+                        console.info('[baileys-runtime-diagnostic]', { sessionId: recoverySessionId, component: options?.base?.component || 'baileys', ...parsed });
                     }
                     if (!isSignalDecryptionFailure(diagnosticArgs)) continue;
                     console.warn('[baileys-signal-decryption-failure]', { sessionId: recoverySessionId || null, message: String(parsed?.msg || parsed?.message || '').slice(0, 220), remoteJid: parsed?.key?.remoteJid || parsed?.remoteJid || null, remoteJidAlt: parsed?.key?.remoteJidAlt || null, participant: parsed?.key?.participant || parsed?.participant || null, messageId: parsed?.key?.id || parsed?.messageId || null });
@@ -2682,7 +2721,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 if (!preflightSaved) {
                     const outgoingAccountPhone = getAuthenticatedPhoneNumber(sock.user, activeSessions.get(sessionId)?.authState?.creds) || normalizedJidNumber(sock.user?.id || sock.user?.phoneNumber || '');
                     const outgoingAccountJid = String(sock.user?.id || sock.user?.phoneNumber || '');
-                    const outgoingAliases = [originalDestinationJid, destinationJid, alternateDestinationJid, isSelfChatDestination ? ownLidJid : '', result.key?.remoteJidAlt, result.key?.participant, result.key?.participantAlt, result.key?.participantPn].filter(Boolean);
+                    const outgoingAliases = [originalDestinationJid, destinationJid, alternateDestinationJid, isSelfChatDestination ? ownLidJid : '', isSelfChatDestination ? ownPhoneJid : '', result.key?.remoteJidAlt, result.key?.participant, result.key?.participantAlt, result.key?.participantPn].filter(Boolean);
                     void persistOutgoingRetryMessage(sessionId, sentDestinationJid, result, outgoingAliases, outgoingAccountPhone, outgoingAccountJid, getAuthenticatedLid(sock.user, activeSessions.get(sessionId)?.authState?.creds))
                         .then(saved => {
                             if (saved) console.info('[message-retry-post-send-fallback-saved]', { sessionId, messageId: result.key.id, action: 'durable_retry_copy_saved_after_relay_without_blocking_chat_queue' });
@@ -4958,23 +4997,13 @@ process.on('uncaughtException', (error) => {
 
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
-const isLogsRequestAuthorized = req => {
-    const expected = String(process.env.ADMIN_API_TOKEN || process.env.TOKEN || '');
-    const supplied = String(req.query?.token || req.get('X-API-Key') || req.get('X-API-Token') || '').trim();
-    if (!expected || !supplied) return false;
-    const expectedBuffer = Buffer.from(expected);
-    const suppliedBuffer = Buffer.from(supplied);
-    return expectedBuffer.length === suppliedBuffer.length && crypto.timingSafeEqual(expectedBuffer, suppliedBuffer);
-};
 app.get('/logs.txt', (req, res) => {
     res.set('Cache-Control', 'no-store').type('text/plain');
-    if (!isLogsRequestAuthorized(req)) return res.status(403).send('Forbidden');
     try { return res.send(fs.existsSync(TFBOT_DIAGNOSTIC_LOG_PATH) ? fs.readFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, 'utf8') : ''); }
     catch (error) { return res.status(500).send(''); }
 });
 app.get('/logs', (req, res) => {
-    if (!isLogsRequestAuthorized(req)) return res.status(403).type('text/plain').send('Forbidden');
-    res.set('Cache-Control', 'no-store').type('html').send(`<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"><meta name="color-scheme" content="dark"><title>Logs</title><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:#000;color:#fff;overflow:hidden;overscroll-behavior:none;touch-action:pan-y;-webkit-text-size-adjust:100%;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}body{display:flex;flex-direction:column}header{height:42px;min-height:42px;display:flex;align-items:center;gap:18px;padding:0 10px}button{appearance:none;border:0;background:transparent;color:#fff;padding:4px;display:inline-flex;align-items:center;justify-content:center}svg{width:22px;height:22px;stroke:#fff;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}#entries{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;white-space:pre-wrap;overflow-wrap:anywhere;padding:0 8px 12px;scrollbar-width:none}#entries::-webkit-scrollbar{display:none}.entry{padding:0 0 8px}.head{display:flex;align-items:center;gap:8px;min-height:24px;font-size:12px;font-weight:700}.head button{margin-left:auto}.content{font-size:11px;line-height:1.25;white-space:pre-wrap;overflow-wrap:anywhere}.empty{font-size:12px}</style></head><body><header><button id="copyAll" aria-label="Copier tous les logs"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button><button id="bottom" aria-label="Aller en bas"><svg viewBox="0 0 24 24"><path d="M12 3v15m-6-6 6 6 6-6M5 21h14"/></svg></button></header><main id="entries"><div class="empty">Chargement…</div></main><script>const entries=document.getElementById('entries');let raw='';const esc=value=>String(value??'');const copyIcon='<svg viewBox="0 0 24 24"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>';async function load(){try{const logToken=new URLSearchParams(location.search).get('token')||'';const response=await fetch('/logs.txt?token='+encodeURIComponent(logToken)+'&t='+Date.now(),{cache:'no-store'});if(!response.ok)throw Error('logs unavailable');const next=await response.text();if(next===raw)return;const wasBottom=entries.scrollHeight-entries.scrollTop-entries.clientHeight<60;raw=next;entries.replaceChildren();const lines=raw.split('\\n').filter(Boolean);if(!lines.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='Aucun log pour cette session.';entries.append(empty);return}for(const line of lines){let item;try{item=JSON.parse(line)}catch(error){item={name:'Adam',date:'',level:'LOG',event:'runtime',content:line}}const block=document.createElement('section');block.className='entry';const head=document.createElement('div');head.className='head';const label=document.createElement('span');label.textContent=esc(item.name)+' ; '+esc(item.date)+' ; '+esc(item.level);const copy=document.createElement('button');copy.innerHTML=copyIcon;copy.setAttribute('aria-label','Copier ce log');copy.addEventListener('click',()=>navigator.clipboard?.writeText(line));head.append(label,copy);const content=document.createElement('div');content.className='content';content.textContent=esc(item.content||item.event||line);block.append(head,content);entries.append(block)}if(wasBottom)entries.scrollTop=entries.scrollHeight}catch(error){if(!raw)entries.textContent='Logs indisponibles.'}}document.getElementById('copyAll').addEventListener('click',()=>navigator.clipboard?.writeText(raw));document.getElementById('bottom').addEventListener('click',()=>entries.scrollTop=entries.scrollHeight);load();setInterval(load,2000);for(const eventName of ['gesturestart','gesturechange','gestureend'])document.addEventListener(eventName,event=>event.preventDefault(),{passive:false});document.addEventListener('wheel',event=>{if(event.ctrlKey)event.preventDefault()},{passive:false});document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&['+','=','-','0'].includes(String(event.key).toLowerCase()))event.preventDefault()})</script></body></html>`);
+    res.set('Cache-Control', 'no-store').type('html').send(`<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"><meta name="color-scheme" content="dark"><title>Logs</title><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:#000;color:#fff;overflow:hidden;overscroll-behavior:none;touch-action:pan-y;-webkit-text-size-adjust:100%;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}body{display:flex;flex-direction:column}header{height:42px;min-height:42px;display:flex;align-items:center;gap:18px;padding:0 10px}button{appearance:none;border:0;background:transparent;color:#fff;padding:4px;display:inline-flex;align-items:center;justify-content:center}svg{width:22px;height:22px;stroke:#fff;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}#entries{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;white-space:pre-wrap;overflow-wrap:anywhere;padding:0 8px 12px;scrollbar-width:none}#entries::-webkit-scrollbar{display:none}.entry{padding:0 0 8px}.head{display:flex;align-items:center;gap:8px;min-height:24px;font-size:12px;font-weight:700}.head button{margin-left:auto}.content{font-size:11px;line-height:1.25;white-space:pre-wrap;overflow-wrap:anywhere}.empty{font-size:12px}</style></head><body><header><button id="copyAll" aria-label="Copier tous les logs"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button><button id="bottom" aria-label="Aller en bas"><svg viewBox="0 0 24 24"><path d="M12 3v15m-6-6 6 6 6-6M5 21h14"/></svg></button></header><main id="entries"><div class="empty">Chargement…</div></main><script>const entries=document.getElementById('entries');let raw='';const esc=value=>String(value??'');const copyIcon='<svg viewBox="0 0 24 24"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>';async function load(){try{const response=await fetch('/logs.txt?t='+Date.now(),{cache:'no-store'});if(!response.ok)throw Error('logs unavailable');const next=await response.text();if(next===raw)return;const wasBottom=entries.scrollHeight-entries.scrollTop-entries.clientHeight<60;raw=next;entries.replaceChildren();const lines=raw.split('\n').filter(Boolean);if(!lines.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='Aucun log pour ce numéro.';entries.append(empty);return}for(const line of lines){let item;try{item=JSON.parse(line)}catch(error){item={name:'Adam',date:'',level:'LOG',event:'runtime',content:line}}const block=document.createElement('section');block.className='entry';const head=document.createElement('div');head.className='head';const label=document.createElement('span');label.textContent=esc(item.name)+' ; '+esc(item.date)+' ; '+esc(item.level);const copy=document.createElement('button');copy.innerHTML=copyIcon;copy.setAttribute('aria-label','Copier ce log');copy.addEventListener('click',()=>navigator.clipboard?.writeText(line));head.append(label,copy);const content=document.createElement('div');content.className='content';content.textContent=esc(item.content||item.event||line);block.append(head,content);entries.append(block)}if(wasBottom)entries.scrollTop=entries.scrollHeight}catch(error){if(!raw)entries.textContent='Logs indisponibles.'}}document.getElementById('copyAll').addEventListener('click',()=>navigator.clipboard?.writeText(raw));document.getElementById('bottom').addEventListener('click',()=>entries.scrollTop=entries.scrollHeight);load();setInterval(load,2000);for(const eventName of ['gesturestart','gesturechange','gestureend'])document.addEventListener(eventName,event=>event.preventDefault(),{passive:false});document.addEventListener('wheel',event=>{if(event.ctrlKey)event.preventDefault()},{passive:false});document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&['+','=','-','0'].includes(String(event.key).toLowerCase()))event.preventDefault()})</script></body></html>`);
 });
 app.get('/dh7adam', async (req, res) => {
     const instanceKey = String(TFBOT_CLUSTER_INSTANCE_HOST || process.env.RENDER_EXTERNAL_HOSTNAME || 'local');
@@ -9017,15 +9046,21 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             keepAliveIntervalMs: 15000,
             persistOutgoingMessage: async (destinationJid, fullMessage) => {
                 if (!fullMessage?.key?.id || !fullMessage?.message) throw new Error('outgoing_retry_preflight_message_incomplete');
+                const startedAt = Date.now();
                 const messageId = String(fullMessage.key.id);
-                const remoteJid = String(fullMessage.key.remoteJid || destinationJid || '');
-                const messageToPersist = { ...fullMessage, key: { ...fullMessage.key, fromMe: true, remoteJid } };
+                const remoteJid = String(fullMessage.key.remoteJid || destinationJid || '').trim();
+                if (!remoteJid) throw new Error('outgoing_retry_preflight_destination_missing');
                 const activeRuntime = activeSessions.get(sessionId);
                 const authCreds = activeRuntime?.authState?.creds || state.creds;
                 const accountPhone = getAuthenticatedPhoneNumber(sock.user, authCreds) || normalizedJidNumber(sock.user?.id || sock.user?.phoneNumber || '');
                 const accountJid = String(sock.user?.id || sock.user?.phoneNumber || authCreds?.me?.id || '');
-                const accountLid = getAuthenticatedLid(sock.user, authCreds);
-                const aliases = [...new Set([destinationJid, remoteJid, fullMessage.key?.remoteJidAlt, fullMessage.key?.participant, fullMessage.key?.participantAlt, fullMessage.key?.participantPn, fullMessage.key?.senderPn].map(value => String(value || '').trim()).filter(Boolean))].slice(0, 16);
+                const accountLid = normalizeLidCacheKey(getAuthenticatedLid(sock.user, authCreds));
+                const accountPhoneJid = accountPhone ? normalizePhoneCacheJid(`${accountPhone}@s.whatsapp.net`) : '';
+                const remoteJidAlt = String(fullMessage.key?.remoteJidAlt || '').trim();
+                const isSelfChatMessage = !!((accountPhoneJid && (normalizePhoneCacheJid(remoteJid) === accountPhoneJid || normalizePhoneCacheJid(destinationJid) === accountPhoneJid)) || (accountLid && (normalizeLidCacheKey(remoteJid) === accountLid || normalizeLidCacheKey(remoteJidAlt) === accountLid)));
+                const effectiveRemoteJidAlt = remoteJidAlt || (isSelfChatMessage ? accountLid : '');
+                const messageToPersist = { ...fullMessage, key: { ...fullMessage.key, fromMe: true, remoteJid, ...(effectiveRemoteJidAlt ? { remoteJidAlt: effectiveRemoteJidAlt } : {}) } };
+                const aliases = [...new Set([remoteJid, destinationJid, effectiveRemoteJidAlt, accountPhoneJid, accountLid, accountJid, fullMessage.key?.participant, fullMessage.key?.participantAlt, fullMessage.key?.participantPn, fullMessage.key?.senderPn].map(value => String(value || '').trim()).filter(Boolean))].slice(0, 16);
                 cacheRecentMessage(sessionId, messageToPersist, aliases);
                 rememberOutgoingMessageId(sessionId, messageId);
                 outgoingMessageCache.add(`${sessionId}:id:${messageId}`);
@@ -9033,18 +9068,31 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 if (outgoingMessageCache.size > 5000) outgoingMessageCache.delete(outgoingMessageCache.values().next().value);
                 outgoingRetryPreflightIds.set(`${sessionId}:${messageId}`, Date.now());
                 while (outgoingRetryPreflightIds.size > 5000) outgoingRetryPreflightIds.delete(outgoingRetryPreflightIds.keys().next().value);
-                if (db) {
-                    void (async () => {
-                        for (let attempt = 0; attempt < 4; attempt++) {
-                            const latestRuntime = activeSessions.get(sessionId);
-                            if (serverShuttingDown || latestRuntime?.sock !== sock || !db) return;
-                            try {
-                                if (await persistOutgoingRetryMessage(sessionId, remoteJid, messageToPersist, aliases, accountPhone, accountJid, accountLid)) return;
-                            } catch (error) {}
-                            if (attempt < 3) await new Promise(resolve => setTimeout(resolve, [250, 600, 1200][attempt]));
-                        }
-                    })().catch(() => {});
+                console.info('[message-retry-preflight-start]', { sessionId, messageId, destinationType: isSelfChatMessage ? 'self_chat_pn' : /@g\.us$/i.test(remoteJid) ? 'group' : /@newsletter$/i.test(remoteJid) ? 'channel' : 'private', aliasCount: aliases.length, memoryCached: true, ownLidCached: !!(isSelfChatMessage && accountLid) });
+                if (!db) {
+                    console.error('[message-retry-preflight-database-unavailable]', { sessionId, messageId, destinationType: isSelfChatMessage ? 'self_chat_pn' : 'other', memoryFallbackAvailable: true });
+                    return;
                 }
+                let persisted = false;
+                let lastPersistenceError = null;
+                const retryDelays = [0, 300, 800, 1600];
+                for (let attempt = 0; attempt < retryDelays.length; attempt++) {
+                    const latestRuntime = activeSessions.get(sessionId);
+                    if (serverShuttingDown || latestRuntime?.sock !== sock || !db) break;
+                    if (retryDelays[attempt]) await new Promise(resolve => setTimeout(resolve, retryDelays[attempt]));
+                    try {
+                        persisted = await persistOutgoingRetryMessage(sessionId, remoteJid, messageToPersist, aliases, accountPhone, accountJid, accountLid);
+                        if (persisted) break;
+                        lastPersistenceError = 'store_write_returned_false';
+                    } catch (error) {
+                        lastPersistenceError = String(error?.message || error);
+                    }
+                }
+                if (!persisted) {
+                    console.error('[message-retry-preflight-persist-failed]', { sessionId, messageId, elapsedMs: Date.now() - startedAt, attempts: retryDelays.length, error: lastPersistenceError || 'database_unavailable' });
+                    throw new Error('outgoing_retry_preflight_persist_failed');
+                }
+                console.info('[message-retry-preflight-ready]', { sessionId, messageId, elapsedMs: Date.now() - startedAt, destinationType: isSelfChatMessage ? 'self_chat_pn' : 'other', memoryCached: true, durableStoreReady: true, ownLidCached: !!(isSelfChatMessage && accountLid) });
             },
             getMessage: async (key) => {
                 const requestedChatJid = String(key?.remoteJid || '').trim();
@@ -9057,19 +9105,21 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     while (retryMessageMissLogTimes.size > 4000) retryMessageMissLogTimes.delete(retryMessageMissLogTimes.keys().next().value);
                     console.info('[message-retry-cache-miss]', { sessionId, messageId: key?.id || null, requestedChatJid: requestedChatJid || null, requestedFromMe: typeof key?.fromMe === 'boolean' ? key.fromMe : null, fromMeFieldMissing: key?.fromMe === undefined || key?.fromMe === null, databaseAvailable, repeatedRetryLogSuppressedForMs: 30000 });
                 };
+                const outgoingIdKnown = !!key?.id && (key?.fromMe === true || outgoingMessageCache.has(`${sessionId}:id:${String(key.id)}`) || isRecentOutgoingMessageId(sessionId, key.id));
+                console.info('[message-retry-lookup-start]', { sessionId, messageId: key?.id || null, requestedChatType: /@lid$/i.test(requestedChatJid) ? 'lid' : /@s\.whatsapp\.net$/i.test(requestedChatJid) ? 'pn' : /@g\.us$/i.test(requestedChatJid) ? 'group' : 'other', requestedFromMe: typeof key?.fromMe === 'boolean' ? key.fromMe : null, outgoingIdKnown });
                 let exactRecentMessage = null;
                 for (let i = recentMsgsCache.length - 1; i >= 0; i--) {
                     const found = recentMsgsCache[i];
                     if (found.sessionId !== sessionId || found.id !== key?.id || !found.fromMe) continue;
                     const recentChatAliases = [...new Set([found.from, ...(Array.isArray(found.chatAliases) ? found.chatAliases : []), found.key?.remoteJidAlt, found.key?.participantAlt, found.key?.participantPn].map(value => String(value || '').trim()).filter(Boolean))];
                     const recentChatMatches = !requestedChatJid || recentChatAliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, requestedChatJid));
-                    if (!recentChatMatches && !(key?.fromMe === true && found.fromMe === true) && !(key?.fromMe == null && found.fromMe === true && !requestedChatJid)) continue;
+                    if (!recentChatMatches && !outgoingIdKnown) continue;
                     exactRecentMessage = found;
-                    if (!recentChatMatches) console.warn('[message-retry-cache-hit-exact-session-id-alias-fallback]', { sessionId, messageId: key.id, requestedChatJid, storedChatAliases: recentChatAliases, lookupScope: 'same_session_memory' });
+                    if (!recentChatMatches) console.info('[message-retry-cache-hit-cross-jid-same-session]', { sessionId, messageId: key.id, requestedChatType: /@lid$/i.test(requestedChatJid) ? 'lid' : 'pn_or_other', storedChatType: /@lid$/i.test(String(found.from || '')) ? 'lid' : /@s\.whatsapp\.net$/i.test(String(found.from || '')) ? 'pn' : 'other', lookupScope: 'same_session_outgoing_message_id' });
                     break;
                 }
                 if (exactRecentMessage) {
-                    console.debug('[message-retry-cache-hit]', { sessionId, messageId: key.id, match: requestedChatJid ? 'exact_chat_or_known_alias' : 'same_session_outgoing_message_id_without_chat_jid' });
+                    console.info('[message-retry-cache-hit]', { sessionId, messageId: key.id, match: requestedChatJid ? 'same_session_message_id_with_alias_or_verified_outgoing_id' : 'same_session_outgoing_message_id_without_chat_jid' });
                     return exactRecentMessage.message;
                 }
                 if (!key?.id || !db) {
@@ -9084,7 +9134,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         { projection }
                     );
                     let lookupScope = 'same_session';
-                    const retryMayReferToOwnMessage = key?.fromMe === true || key?.fromMe === undefined || key?.fromMe === null;
+                    const retryMayReferToOwnMessage = key?.fromMe === true || key?.fromMe === undefined || key?.fromMe === null || outgoingIdKnown;
                     if (!stored?.message && retryMayReferToOwnMessage) {
                         const retryAccountPhone = getAuthenticatedPhoneNumber(sock.user, state.creds) || '';
                         const retryAccountLid = getAuthenticatedLid(sock.user, state.creds) || '';
@@ -9107,9 +9157,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const restoredMessage = fixBuffers(stored.message);
                         cacheRecentMessage(sessionId, { key: { id: key.id, remoteJid: stored.remoteJid || requestedChatJid || '', remoteJidAlt: stored.remoteJidAlt || '', fromMe: true }, message: restoredMessage, messageTimestamp: stored.messageTimestamp || Math.floor(Date.now() / 1000) });
                         if (storedChatMatches) {
-                            console.info('[message-retry-store-hit]', { sessionId, messageId: String(key.id), chatMatch: !!requestedChatJid, lookupScope, storedSessionId: stored.sessionId });
+                            console.info('[message-retry-store-hit]', { sessionId, messageId: String(key.id), chatMatch: !!requestedChatJid, lookupScope, storedSessionMatch: stored.sessionId === sessionId });
                         } else {
-                            console.warn('[message-retry-store-hit-exact-session-id-alias-fallback]', { sessionId, messageId: String(key.id), requestedChatJid: requestedChatJid || null, storedChatAliases, lookupScope, action: 'return_exact_from_me_message_id_from_same_session_only' });
+                            console.info('[message-retry-store-hit-cross-jid-same-account]', { sessionId, messageId: String(key.id), requestedChatType: /@lid$/i.test(requestedChatJid) ? 'lid' : 'pn_or_other', lookupScope, storedSessionMatch: stored.sessionId === sessionId, outgoingIdKnown });
                         }
                         return restoredMessage;
                     }
