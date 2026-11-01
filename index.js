@@ -4,9 +4,11 @@ for (const method of ['log', 'error', 'warn', 'info', 'debug', 'trace', 'dir', '
     try { console[method] = silenceTfbotConsole; } catch (error) {}
 }
 const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(process.env.MESSAGE_QUEUE_TASK_TIMEOUT_MS || 45000)));
+const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 7000)));
+const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(250, Math.min(1800, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 900)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r80-authenticated-socket-state-and-self-chat-address-preservation';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r80')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+const TFBOT_CLUSTER_CODE_REVISION = 'r83-pn-only-bounded-queue-self-repair';
+const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r83')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
@@ -102,7 +104,10 @@ function applyBaileysLidPnDecryptRetryPatch() {
     msgBuffer = await repository.decryptMessage({ jid: user, type: e2eType, ciphertext: content });
 } catch (decryptError) {
     const userIsLid = /@(?:hosted\.)?lid$/i.test(String(user));
-    let altUser = String(userIsLid ? (stanza.attrs.participant_pn || stanza.attrs.sender_pn || '') : (stanza.attrs.participant_lid || stanza.attrs.sender_lid || '')).trim();
+    const alternateKeyIdentity = userIsLid
+        ? (fullMessage?.key?.remoteJidAlt || fullMessage?.key?.participantPn || fullMessage?.key?.senderPn || '')
+        : (fullMessage?.key?.remoteJid || fullMessage?.key?.participant || '');
+    let altUser = String(alternateKeyIdentity || (userIsLid ? (stanza.attrs.peer_recipient_pn || stanza.attrs.recipient_pn || stanza.attrs.participant_pn || stanza.attrs.sender_pn || '') : (stanza.attrs.participant_lid || stanza.attrs.sender_lid || ''))).trim();
     if (!altUser) {
         try {
             const mappedIdentity = userIsLid
@@ -399,7 +404,7 @@ function applyBaileysOwnLidRetryAddressingPatch() {
     }
 }
 function applyBaileysCompanionRegRefreshPatch() {
-    const socketMarker = '__tfbotCompanionRegRefreshV78';
+    const legacySocketMarker = '__tfbotCompanionRegRefreshV78';
     const ackMarker = '__tfbotPreLoginNotificationAckV78';
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
@@ -409,90 +414,58 @@ function applyBaileysCompanionRegRefreshPatch() {
         const receiveCandidates = [...new Set(searchDirectories.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs', 'ts'].map(extension => path.join(directory, folder, `messages-recv.${extension}`)))))];
         const socketPath = socketCandidates.find(candidate => fs.existsSync(candidate));
         const receivePath = receiveCandidates.find(candidate => fs.existsSync(candidate));
-        if (!socketPath) return { applied: false, reason: 'baileys_socket_module_not_found', issue: 'Baileys#2737', fix: 'companion_reg_refresh' };
-        if (!receivePath) return { applied: false, reason: 'baileys_messages_recv_module_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
+        if (!socketPath) return { applied: false, reason: 'baileys_socket_module_not_found', issue: 'Baileys#2737', companionRefreshPolicy: 'no_unverified_adv_secret_mutation' };
+        if (!receivePath) return { applied: false, reason: 'baileys_messages_recv_module_not_found', file: path.basename(socketPath), issue: 'Baileys#2765' };
 
         let socketSource = fs.readFileSync(socketPath, 'utf8');
         let receiveSource = fs.readFileSync(receivePath, 'utf8');
-        let socketAlreadyApplied = socketSource.includes(socketMarker);
-        let ackAlreadyApplied = receiveSource.includes(ackMarker);
         let socketChanged = false;
         let ackChanged = false;
+        const hadLegacyMutation = socketSource.includes(legacySocketMarker);
 
-        if (!socketAlreadyApplied) {
-            const pairHandlerPattern = /ws\.on\(\s*(['"])CB:iq,type:set,pair-device\1\s*,\s*async\s*\(/;
-            const pairHandlerMatch = pairHandlerPattern.exec(socketSource);
-            if (!pairHandlerMatch) return { applied: false, reason: 'pair_device_handler_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
-
-            const qrBuilderPattern = /const\s+qr\s*=\s*buildPairingQRData\(\s*ref\s*,\s*noiseKeyB64\s*,\s*identityKeyB64\s*,\s*advB64\s*,\s*browser\s*\)\s*;?/;
-            const qrBuilderMatch = qrBuilderPattern.exec(socketSource.slice(pairHandlerMatch.index));
-            if (!qrBuilderMatch) return { applied: false, reason: 'pairing_qr_builder_pattern_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
-            const qrBuilderIndex = pairHandlerMatch.index + qrBuilderMatch.index;
-            const originalQrBuilder = qrBuilderMatch[0];
-            const qrBuilderReplacement = `__tfbotCurrentPairingQRRef = ref;\n\t\t\t\tconst qr = buildPairingQRData(ref, noiseKeyB64, identityKeyB64, creds.advSecretKey, browser);`;
-            socketSource = socketSource.slice(0, qrBuilderIndex) + qrBuilderReplacement + socketSource.slice(qrBuilderIndex + originalQrBuilder.length);
-
-            const advDeclarationPattern = /const\s+advB64\s*=\s*creds\.advSecretKey\s*;?/;
-            const updatedPairStart = socketSource.indexOf('ws.on', pairHandlerMatch.index);
-            const advDeclarationMatch = advDeclarationPattern.exec(socketSource.slice(updatedPairStart));
-            if (!advDeclarationMatch) return { applied: false, reason: 'pairing_adv_secret_declaration_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
-            const advDeclarationIndex = updatedPairStart + advDeclarationMatch.index;
-            const originalAdvDeclaration = advDeclarationMatch[0];
-            socketSource = socketSource.slice(0, advDeclarationIndex) + `${originalAdvDeclaration}\n\t\t\tlet __tfbotCurrentPairingQRRef;` + socketSource.slice(advDeclarationIndex + originalAdvDeclaration.length);
-
-            const updatedHandlerStart = socketSource.indexOf('ws.on', pairHandlerMatch.index);
-            const qrCallPattern = /\bgenPairQR\s*\(\s*\)\s*;?/g;
-            qrCallPattern.lastIndex = updatedHandlerStart;
-            const qrCallMatch = qrCallPattern.exec(socketSource);
-            if (!qrCallMatch || qrCallMatch.index < qrBuilderIndex) return { applied: false, reason: 'initial_pairing_qr_call_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
-
-            let randomBytesExpression = '';
-            const namespacedRandom = socketSource.match(/\b([A-Za-z_$][\w$]*)\.randomBytes\s*\(/);
-            if (namespacedRandom) randomBytesExpression = `${namespacedRandom[1]}.randomBytes(32)`;
-            else if (/\brandomBytes\s*\(/.test(socketSource)) randomBytesExpression = 'randomBytes(32)';
-            else if (/\bcrypto\.randomBytes\s*\(/.test(socketSource)) randomBytesExpression = 'crypto.randomBytes(32)';
-            else return { applied: false, reason: 'crypto_random_bytes_import_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
-
-            const childAccessorMatch = socketSource.match(/\b([A-Za-z_$][\w$]*)\.getBinaryNodeChild\s*\(/);
-            const childAccessor = childAccessorMatch ? `${childAccessorMatch[1]}.getBinaryNodeChild` : 'getBinaryNodeChild';
-            if (!socketSource.includes('getBinaryNodeChild')) return { applied: false, reason: 'binary_node_child_accessor_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
-
-            const handlerInjection = `const ${socketMarker} = true;\n\t\t\tconst __tfbotPreviousCompanionRefreshHandler = ws.__tfbotCompanionRegRefreshHandler;\n\t\t\tif (__tfbotPreviousCompanionRefreshHandler) {\n\t\t\t\tif (typeof ws.off === 'function') ws.off('CB:notification,type:companion_reg_refresh', __tfbotPreviousCompanionRefreshHandler);\n\t\t\t\telse if (typeof ws.removeListener === 'function') ws.removeListener('CB:notification,type:companion_reg_refresh', __tfbotPreviousCompanionRefreshHandler);\n\t\t\t}\n\t\t\tconst __tfbotCompanionRefreshHandler = (node) => {\n\t\t\t\ttry {\n\t\t\t\t\tconst hasRefreshNode = !!${childAccessor}(node, 'companion_reg_refresh') || !!${childAccessor}(node, 'pair-device-rotate-qr');\n\t\t\t\t\tif (!hasRefreshNode) return;\n\t\t\t\t\tif (creds.me) return;\n\t\t\t\t\tcreds.advSecretKey = ${randomBytesExpression}.toString('base64');\n\t\t\t\t\tev.emit('creds.update', { advSecretKey: creds.advSecretKey });\n\t\t\t\t\tif (__tfbotCurrentPairingQRRef !== undefined && __tfbotCurrentPairingQRRef !== null) {\n\t\t\t\t\t\tconst refreshedQr = buildPairingQRData(__tfbotCurrentPairingQRRef, noiseKeyB64, identityKeyB64, creds.advSecretKey, browser);\n\t\t\t\t\t\tev.emit('connection.update', { qr: refreshedQr });\n\t\t\t\t\t}\n\t\t\t\t} catch (refreshError) {\n\t\t\t\t\tlogger.error({ err: refreshError }, 'failed to refresh companion pairing QR');\n\t\t\t\t}\n\t\t\t};\n\t\t\tws.__tfbotCompanionRegRefreshHandler = __tfbotCompanionRefreshHandler;\n\t\t\tws.on('CB:notification,type:companion_reg_refresh', __tfbotCompanionRefreshHandler);\n\t\t\t`;
-            socketSource = socketSource.slice(0, qrCallMatch.index) + handlerInjection + socketSource.slice(qrCallMatch.index);
-            if (!socketSource.includes(socketMarker) || !socketSource.includes('creds.advSecretKey, browser') || !socketSource.includes("CB:notification,type:companion_reg_refresh")) {
-                return { applied: false, reason: 'companion_refresh_patch_verification_failed', file: path.basename(socketPath), issue: 'Baileys#2737' };
+        if (hadLegacyMutation) {
+            const injectionStart = socketSource.indexOf(`const ${legacySocketMarker} = true;`);
+            const handlerEndPattern = /ws\.on\(\s*(['"])CB:notification,type:companion_reg_refresh\1\s*,\s*__tfbotCompanionRefreshHandler\s*\)\s*;?/g;
+            handlerEndPattern.lastIndex = injectionStart;
+            const handlerEndMatch = handlerEndPattern.exec(socketSource);
+            if (injectionStart < 0 || !handlerEndMatch) return { applied: false, reason: 'legacy_companion_refresh_patch_cleanup_anchor_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
+            let injectionLineStart = socketSource.lastIndexOf('\n', injectionStart);
+            injectionLineStart = injectionLineStart < 0 ? 0 : injectionLineStart + 1;
+            let injectionLineEnd = socketSource.indexOf('\n', handlerEndMatch.index + handlerEndMatch[0].length);
+            if (injectionLineEnd < 0) injectionLineEnd = handlerEndMatch.index + handlerEndMatch[0].length;
+            else injectionLineEnd++;
+            socketSource = socketSource.slice(0, injectionLineStart) + socketSource.slice(injectionLineEnd);
+            socketSource = socketSource.replace(/^\s*let __tfbotCurrentPairingQRRef;\s*\r?\n/gm, '');
+            socketSource = socketSource.replace(/^\s*__tfbotCurrentPairingQRRef\s*=\s*ref;\s*\r?\n/gm, '');
+            socketSource = socketSource.replace(/buildPairingQRData\(\s*ref\s*,\s*noiseKeyB64\s*,\s*identityKeyB64\s*,\s*creds\.advSecretKey\s*,\s*browser\s*\)/g, 'buildPairingQRData(ref, noiseKeyB64, identityKeyB64, advB64, browser)');
+            if (socketSource.includes(legacySocketMarker) || socketSource.includes('__tfbotCurrentPairingQRRef') || socketSource.includes('failed to refresh companion pairing QR')) {
+                return { applied: false, reason: 'legacy_companion_refresh_patch_cleanup_verification_failed', file: path.basename(socketPath), issue: 'Baileys#2737' };
             }
+            fs.writeFileSync(socketPath, socketSource, 'utf8');
             socketChanged = true;
         }
 
+        const ackAlreadyApplied = receiveSource.includes(ackMarker) || /const\s+meId\s*=\s*authState\.creds\.me\s*&&\s*authState\.creds\.me\.id[\s\S]{0,500}node\.tag\s*===\s*['"]message['"][\s\S]{0,500}buildAckStanza\(\s*node\s*,\s*errorCode\s*,\s*meId\s*\)/.test(receiveSource);
         if (!ackAlreadyApplied) {
             const directAckPattern = /const\s+stanza\s*=\s*buildAckStanza\(\s*node\s*,\s*errorCode\s*,\s*authState\.creds\.me(?:!|\?)?\.id\s*\)\s*;?/;
             const directAckMatch = directAckPattern.exec(receiveSource);
-            if (!directAckMatch) {
-                const alreadySafe = /const\s+meId\s*=\s*authState\.creds\.me\s*&&\s*authState\.creds\.me\.id[\s\S]{0,500}node\.tag\s*===\s*['"]message['"][\s\S]{0,500}buildAckStanza\(\s*node\s*,\s*errorCode\s*,\s*meId\s*\)/.test(receiveSource);
-                if (!alreadySafe) return { applied: false, reason: 'prelogin_ack_pattern_not_found', file: path.basename(receivePath), issue: 'Baileys#2765' };
-            } else {
-                const usesBoom = /\bBoom\b/.test(receiveSource);
-                const preloginError = usesBoom ? "new Boom('cannot acknowledge a message before creds.me is available')" : "new Error('cannot acknowledge a message before creds.me is available')";
-                const ackReplacement = `const ${ackMarker} = true;\n\t\tconst meId = authState.creds.me && authState.creds.me.id;\n\t\tif (node.tag === 'message' && !meId) {\n\t\t\tthrow ${preloginError};\n\t\t}\n\t\tconst stanza = buildAckStanza(node, errorCode, meId);`;
-                receiveSource = receiveSource.replace(directAckPattern, ackReplacement);
-                if (!receiveSource.includes(ackMarker) || !/node\.tag\s*===\s*'message'\s*&&\s*!meId/.test(receiveSource) || !/buildAckStanza\(node,\s*errorCode,\s*meId\)/.test(receiveSource)) {
-                    return { applied: false, reason: 'prelogin_ack_patch_verification_failed', file: path.basename(receivePath), issue: 'Baileys#2765' };
-                }
-                ackChanged = true;
+            if (!directAckMatch) return { applied: false, reason: 'prelogin_ack_pattern_not_found', file: path.basename(receivePath), issue: 'Baileys#2765', legacySocketMutationRemoved: socketChanged };
+            const usesBoom = /\bBoom\b/.test(receiveSource);
+            const preloginError = usesBoom ? "new Boom('cannot acknowledge a message before creds.me is available')" : "new Error('cannot acknowledge a message before creds.me is available')";
+            const ackReplacement = `const ${ackMarker} = true;\n\t\tconst meId = authState.creds.me && authState.creds.me.id;\n\t\tif (node.tag === 'message' && !meId) {\n\t\t\tthrow ${preloginError};\n\t\t}\n\t\tconst stanza = buildAckStanza(node, errorCode, meId);`;
+            receiveSource = receiveSource.replace(directAckPattern, ackReplacement);
+            if (!receiveSource.includes(ackMarker) || !/node\.tag\s*===\s*'message'\s*&&\s*!meId/.test(receiveSource) || !/buildAckStanza\(node,\s*errorCode,\s*meId\)/.test(receiveSource)) {
+                return { applied: false, reason: 'prelogin_ack_patch_verification_failed', file: path.basename(receivePath), issue: 'Baileys#2765', legacySocketMutationRemoved: socketChanged };
             }
+            fs.writeFileSync(receivePath, receiveSource, 'utf8');
+            ackChanged = true;
         }
-
-        if (socketChanged) fs.writeFileSync(socketPath, socketSource, 'utf8');
-        if (ackChanged) fs.writeFileSync(receivePath, receiveSource, 'utf8');
-        const socketApplied = socketAlreadyApplied || socketChanged;
-        const ackApplied = ackAlreadyApplied || ackChanged || /const\s+meId\s*=\s*authState\.creds\.me\s*&&\s*authState\.creds\.me\.id[\s\S]{0,500}node\.tag\s*===\s*['"]message['"][\s\S]{0,500}buildAckStanza\(\s*node\s*,\s*errorCode\s*,\s*meId\s*\)/.test(receiveSource);
         return {
-            applied: socketApplied && ackApplied,
-            alreadyApplied: socketAlreadyApplied && ackApplied && !ackChanged,
-            socket: { applied: socketApplied, file: path.basename(socketPath), issue: 'Baileys#2737' },
-            preloginAck: { applied: ackApplied, file: path.basename(receivePath), issue: 'Baileys#2765' },
-            action: 'rotate_companion_adv_secret_and_rerender_same_qr_reference; allow_prelogin_notification_ack_without_uninitialized_creds_me'
+            applied: true,
+            alreadyApplied: !socketChanged && ackAlreadyApplied,
+            socket: { applied: socketChanged, file: path.basename(socketPath), issue: 'Baileys#2737', customHandlerInstalled: false, advSecretMutation: false, legacyMutationRemoved: socketChanged },
+            preloginAck: { applied: ackAlreadyApplied || ackChanged, file: path.basename(receivePath), issue: 'Baileys#2765' },
+            action: 'do_not_rotate_adv_secret_or_reuse_a_consumed_pairing_qr_reference; preserve_the_prelogin_ack_guard'
         };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180), issue: 'Baileys#2737/#2765' };
@@ -662,9 +635,14 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
     previous.lastKind = kind;
     signalRecoveryCounters.set(peerKey, previous);
     while (signalRecoveryCounters.size > 2000) signalRecoveryCounters.delete(signalRecoveryCounters.keys().next().value);
-    const selfPeer = !details.isGroup && areEquivalentWhatsAppChatJids(sessionId, details.peerJid, getAuthenticatedLid(activeSessions.get(sessionId)?.sock?.user || null, activeSessions.get(sessionId)?.authState?.creds || null))
-        || !details.isGroup && areEquivalentWhatsAppChatJids(sessionId, details.peerJid, activeSessions.get(sessionId)?.sock?.user?.id || '');
-    const privateRepairRequired = !details.isGroup && ['signal_session_missing', 'bad_mac', 'message_counter_error'].includes(kind) || !details.isGroup && previous.count >= SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD && kind === 'signal_decryption_error';
+    const selfRuntime = activeSessions.get(sessionId);
+    const selfCredentials = selfRuntime?.authState?.creds || null;
+    const selfUser = selfRuntime?.sock?.user || null;
+    const ownPhoneNumber = getAuthenticatedPhoneNumber(selfUser, selfCredentials);
+    const ownPhoneJid = ownPhoneNumber ? `${ownPhoneNumber}@s.whatsapp.net` : '';
+    const ownSignalJids = [...new Set([getAuthenticatedLid(selfUser, selfCredentials), ownPhoneJid, selfUser?.id, selfCredentials?.me?.id, selfCredentials?.me?.lid].map(value => String(value || '').trim()).filter(Boolean))];
+    const selfPeer = !details.isGroup && ownSignalJids.some(ownJid => areEquivalentWhatsAppChatJids(sessionId, details.peerJid, ownJid));
+    const privateRepairRequired = !details.isGroup && (['signal_session_missing', 'bad_mac', 'message_counter_error'].includes(kind) || previous.count >= SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD && kind === 'signal_decryption_error');
     if (privateRepairRequired) {
         const repairKey = `${sessionId}:${details.peerJid}:private-pairwise-session`;
         if (Number(signalPrivatePeerRepairCooldowns.get(repairKey) || 0) <= now && !signalRecoveryTimers.has(repairKey)) {
@@ -710,15 +688,14 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
             if (typeof recoveryTimer.unref === 'function') recoveryTimer.unref();
         }
     }
-    console.warn(details.isGroup ? '[signal-group-session-preserved]' : selfPeer ? '[signal-private-self-chat-session-preserved]' : '[signal-peer-session-preserved]', {
+    console.warn(details.isGroup ? '[signal-group-session-failure]' : selfPeer ? '[signal-private-self-chat-repair]' : '[signal-peer-session-repair]', {
         sessionId,
         peer: details.peerJid,
         groupJid: details.isGroup ? details.remoteJid : null,
         messageId: details.messageId || null,
         attempts: previous.count,
         failureKind: kind,
-        action: 'preserve_all_existing_signal_sessions_and_sender_keys',
-        reason: 'decrypt_failure_or_missing_session_does_not_authorize_deleting_cryptographic_state'
+        repairRequested: privateRepairRequired
     });
     const shouldFlush = previous.count === 1 || previous.count % SIGNAL_RECOVERY_THRESHOLD === 0;
     if (shouldFlush) {
@@ -766,7 +743,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-01-r80';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-01-r83';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1563,30 +1540,38 @@ function getMessageQueue(queueKey, partitionKey = '') {
 }
 
 function createQueueSocketCloseWaiter(sock) {
-    let listener = null;
+    const listeners = [];
     let settled = false;
     let resolveWait;
     const promise = new Promise(resolve => { resolveWait = resolve; });
-    const removeListener = () => {
-        if (!listener || !sock?.ev) return;
-        if (typeof sock.ev.off === 'function') sock.ev.off('connection.update', listener);
-        else if (typeof sock.ev.removeListener === 'function') sock.ev.removeListener('connection.update', listener);
-        listener = null;
+    const removeListeners = () => {
+        for (const item of listeners.splice(0)) {
+            try {
+                if (typeof item.target.off === 'function') item.target.off(item.event, item.listener);
+                else if (typeof item.target.removeListener === 'function') item.target.removeListener(item.event, item.listener);
+            } catch (error) {}
+        }
     };
     const finish = closed => {
         if (settled) return;
         settled = true;
-        removeListener();
+        removeListeners();
         resolveWait(!!closed);
     };
+    if (sock?.ws && typeof sock.ws.on === 'function') {
+        const closeListener = () => finish(true);
+        sock.ws.on('close', closeListener);
+        listeners.push({ target: sock.ws, event: 'close', listener: closeListener });
+    }
     if (sock?.ev && typeof sock.ev.on === 'function') {
-        listener = update => {
+        const updateListener = update => {
             if (String(update?.connection || '').toLowerCase() === 'close') finish(true);
         };
-        sock.ev.on('connection.update', listener);
-        const readyState = sock.ws?.readyState ?? sock.ws?._socket?.readyState ?? sock.socket?.readyState;
-        if (Number(readyState) === 3 || String(readyState).toUpperCase() === 'CLOSED' || sock.ws?.isOpen === false) finish(true);
+        sock.ev.on('connection.update', updateListener);
+        listeners.push({ target: sock.ev, event: 'connection.update', listener: updateListener });
     }
+    const readyState = sock?.ws?.readyState ?? sock?.ws?._socket?.readyState ?? sock?.socket?.readyState;
+    if (Number(readyState) === 3 || String(readyState).toUpperCase() === 'CLOSED' || sock?.ws?.isOpen === false) finish(true);
     return { promise, cancel: () => finish(false) };
 }
 
@@ -1609,36 +1594,59 @@ async function processMessageQueue(queue) {
                         durationMs: Date.now() - startedAt,
                         timeoutMs: MESSAGE_QUEUE_TASK_TIMEOUT_MS,
                         remainingTasks: queue.tasks.length,
-                        partition: queue.partitionKey || '__session__',
-                        action: 'keep_this_chat_partition_serialized_until_the_original_whatsapp_operation_settles_without_closing_the_session'
+                        partition: queue.partitionKey || '__session__'
                     });
                     const socketCloseWaiter = createQueueSocketCloseWaiter(queue.socket);
                     const settledOperation = operation.then(
                         result => ({ type: 'resolved', result }),
                         lateError => ({ type: 'rejected', error: lateError })
                     );
+                    let closeTimer = null;
+                    let hardTimer = null;
+                    const forceClose = new Promise(resolve => {
+                        closeTimer = setTimeout(() => {
+                            const ws = queue.socket?.ws;
+                            try {
+                                if (typeof ws?.terminate === 'function') ws.terminate();
+                                else if (typeof ws?.close === 'function') ws.close();
+                            } catch (closeError) {}
+                            resolve({ type: 'close_requested' });
+                        }, MESSAGE_QUEUE_LATE_GRACE_MS);
+                        if (typeof closeTimer.unref === 'function') closeTimer.unref();
+                    });
+                    const hardTimeout = new Promise(resolve => {
+                        hardTimer = setTimeout(() => resolve({ type: 'stalled' }), MESSAGE_QUEUE_LATE_GRACE_MS + MESSAGE_QUEUE_CLOSE_WAIT_MS);
+                        if (typeof hardTimer.unref === 'function') hardTimer.unref();
+                    });
                     const outcome = await Promise.race([
                         settledOperation,
-                        socketCloseWaiter.promise.then(closed => ({ type: closed ? 'socket_closed' : 'cancelled' }))
+                        socketCloseWaiter.promise.then(closed => ({ type: closed ? 'socket_closed' : 'cancelled' })),
+                        forceClose.then(() => hardTimeout)
                     ]);
+                    if (closeTimer) clearTimeout(closeTimer);
+                    if (hardTimer) clearTimeout(hardTimer);
                     socketCloseWaiter.cancel();
                     if (outcome.type === 'resolved') {
                         task.resolve(outcome.result);
-                        console.info('[message-queue-late-operation-settled]', {
-                            taskId: task.id,
-                            partition: queue.partitionKey || '__session__',
-                            durationMs: Date.now() - startedAt,
-                            action: 'return_the_original_send_result_and_release_only_this_chat_partition'
-                        });
+                    } else if (outcome.type === 'rejected') {
+                        task.reject(outcome.error || new Error('whatsapp_queued_operation_failed'));
                     } else {
-                        const lateError = outcome.error || new Error('whatsapp_socket_closed_during_queued_operation');
-                        task.reject(lateError);
-                        console.warn('[message-queue-late-operation-failed]', {
+                        const queueError = new Error(outcome.type === 'stalled' ? 'whatsapp_message_queue_operation_stalled' : 'whatsapp_socket_closed_during_queued_operation');
+                        task.reject(queueError);
+                        const stalledSession = [...activeSessions.entries()].find(([, runtime]) => runtime?.sock === queue.socket);
+                        if (stalledSession) {
+                            const [stalledSessionId, runtime] = stalledSession;
+                            runtime.status = 'deconnecte';
+                            runtime.active = false;
+                            runtime.disconnectTime = Date.now();
+                            runtime.unconnectedSinceAt = runtime.unconnectedSinceAt || runtime.disconnectTime;
+                            scheduleSessionReconnect(stalledSessionId, runtime.autoExpirePairing === true, runtime.format || 'pair');
+                        }
+                        console.warn('[message-queue-operation-recovered]', {
                             taskId: task.id,
                             partition: queue.partitionKey || '__session__',
                             durationMs: Date.now() - startedAt,
-                            socketClosed: outcome.type === 'socket_closed',
-                            error: lateError?.message || String(lateError)
+                            result: outcome.type
                         });
                     }
                 } else {
@@ -2147,19 +2155,30 @@ function consumeOutgoingTextEcho(sessionId, jid, text) {
     return false;
 }
 
-function getSelfChatAddressPlan(originalDestinationJid, ownPhoneJid, ownLidJid) {
+function getSelfChatAddressPlan(originalDestinationJid, ownPhoneJid) {
     const original = String(originalDestinationJid || '').trim();
-    const isLid = /@lid$/i.test(original);
-    const isPhone = /@s\.whatsapp\.net$/i.test(original);
     const ownPhone = normalizePhoneCacheJid(ownPhoneJid || '');
-    const ownLid = /@lid$/i.test(String(ownLidJid || '')) ? normalizeLidCacheKey(ownLidJid) : '';
-    const primaryJid = isLid
-        ? (ownLid && normalizeLidCacheKey(original) === ownLid ? ownLid : original)
-        : ownPhone || (isPhone ? normalizePhoneCacheJid(original) : ownLid);
-    const fallbackJid = /@lid$/i.test(primaryJid)
-        ? (ownPhone && ownPhone !== primaryJid ? ownPhone : '')
-        : (ownLid && ownLid !== primaryJid ? ownLid : '');
-    return { primaryJid, fallbackJid, originalType: isLid ? 'lid' : isPhone ? 'phone' : 'unknown' };
+    return {
+        primaryJid: ownPhone,
+        fallbackJid: '',
+        originalType: /@lid$/i.test(original) ? 'lid' : /@s\.whatsapp\.net$/i.test(original) ? 'phone' : 'unknown'
+    };
+}
+
+function getAuthenticatedSelfPhoneJid(sessionId, sock, credentials) {
+    const runtime = activeSessions.get(sessionId) || {};
+    const user = sock?.user || null;
+    const ownLid = normalizeLidCacheKey(getAuthenticatedLid(user, credentials));
+    const ownerRecord = sessionOwnersCache.get(sessionId) || {};
+    const ownerLid = normalizeLidCacheKey(ownerRecord.OwnerLid || ownerRecord.ownerLid || '');
+    const ownerNumber = normalizePhoneNumber(ownerRecord.Number || ownerRecord.number || ownerRecord.PairingNumber || '');
+    const authenticatedNumber = getAuthenticatedPhoneNumber(user, credentials);
+    const runtimeNumber = normalizePhoneNumber(runtime.number || '');
+    const pairedOwnerNumber = ownLid && ownerLid === ownLid ? ownerNumber : '';
+    const profileNumber = normalizePhoneNumber(user?.phoneNumber || '');
+    const number = [authenticatedNumber, runtimeNumber, pairedOwnerNumber, profileNumber].find(value => /^\d{6,20}$/.test(String(value || '')));
+    if (number) return normalizePhoneCacheJid(`${number}@s.whatsapp.net`);
+    return normalizePhoneCacheJid(user?.id || credentials?.me?.id || '');
 }
 
 function getMessageQueuePartitionKey(sessionId, jid, session) {
@@ -2184,7 +2203,7 @@ function getMessageQueuePartitionKey(sessionId, jid, session) {
     return `chat:${normalizeOutgoingEchoJid(destination)}`;
 }
 
-async function resetSignalPeerSessionForSendRetry(sock, sessionId, jid) {
+async function resetSignalPeerSessionForSendRetry(sock, sessionId, jid, allowOwnPeer = false) {
     const peerJid = String(jid || '').trim();
     if (!peerJid || /@(?:g\.us|newsletter|broadcast)$/i.test(peerJid)) return false;
     const activeSession = activeSessions.get(sessionId);
@@ -2194,17 +2213,21 @@ async function resetSignalPeerSessionForSendRetry(sock, sessionId, jid) {
     const ownLidJid = normalizeLidCacheKey(getAuthenticatedLid(sock?.user || null, ownCredentials));
     const peerPhoneJid = normalizePhoneCacheJid(peerJid) || normalizePhoneCacheJid(getRememberedPhoneForLid(sessionId, peerJid));
     const peerLidJid = normalizeLidCacheKey(peerJid);
-    if (ownPhoneJid && peerPhoneJid && ownPhoneJid === peerPhoneJid) return false;
-    if (/@lid$/i.test(ownLidJid) && /@lid$/i.test(peerLidJid) && ownLidJid === peerLidJid) return false;
+    const isOwnPeer = !!(
+        ownPhoneJid && peerPhoneJid && ownPhoneJid === peerPhoneJid ||
+        /@lid$/i.test(ownLidJid) && /@lid$/i.test(peerLidJid) && ownLidJid === peerLidJid
+    );
+    if (isOwnPeer && !allowOwnPeer) return false;
     const repository = sock?.signalRepository;
     if (typeof repository?.deleteSession !== 'function') return false;
-    const key = `${sessionId}:send:${peerJid}`;
+    const repairJid = isOwnPeer && /@lid$/i.test(ownLidJid) ? ownLidJid : peerJid;
+    const key = `${sessionId}:send:${isOwnPeer ? 'self' : repairJid}`;
     const now = Date.now();
     if (Number(signalPeerSendRepairCooldowns.get(key) || 0) > now) return false;
     signalPeerSendRepairCooldowns.set(key, now + 30000);
     while (signalPeerSendRepairCooldowns.size > 4000) signalPeerSendRepairCooldowns.delete(signalPeerSendRepairCooldowns.keys().next().value);
-    await repository.deleteSession([peerJid]);
-    void flushAuthWritesForSession(sessionId).catch(() => {});
+    await repository.deleteSession([repairJid]);
+    await flushAuthWritesForSession(sessionId);
     return true;
 }
 
@@ -2268,16 +2291,33 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         sessionId = expectedSessionId;
         activeSession = currentSession;
         const outgoingContent = content;
-        const ownPhoneNumber = getAuthenticatedPhoneNumber(sock.user || null, ownAuthCreds);
-        const ownPhoneJid = normalizePhoneCacheJid(ownPhoneNumber ? `${ownPhoneNumber}@s.whatsapp.net` : (sock.user?.id || sock.user?.phoneNumber || ''));
-        let ownLidJid = getAuthenticatedLid(sock.user || null, ownAuthCreds);
+        let ownLidJid = normalizeLidCacheKey(getAuthenticatedLid(sock.user || null, ownAuthCreds));
+        const ownerRecordForAddress = sessionOwnersCache.get(sessionId) || {};
+        const ownerRecordLid = normalizeLidCacheKey(ownerRecordForAddress.OwnerLid || ownerRecordForAddress.ownerLid || '');
+        const ownerRecordPhone = normalizePhoneNumber(ownerRecordForAddress.Number || ownerRecordForAddress.number || ownerRecordForAddress.PairingNumber || '');
+        const sessionPhone = normalizePhoneNumber(currentSession.number || '');
+        const authenticatedPhone = getAuthenticatedPhoneNumber(sock.user || null, ownAuthCreds);
+        const storedPhoneMatchesLid = !!(ownLidJid && ownerRecordLid === ownLidJid && /^\d{6,20}$/.test(ownerRecordPhone));
+        const ownPhoneNumber = authenticatedPhone || sessionPhone || (storedPhoneMatchesLid ? ownerRecordPhone : '');
+        let ownPhoneJid = ownPhoneNumber ? normalizePhoneCacheJid(`${ownPhoneNumber}@s.whatsapp.net`) : normalizePhoneCacheJid(sock.user?.phoneNumber || '');
         if (!/@lid$/i.test(ownLidJid) && sessionId && ownPhoneJid) {
             const ownLidResolution = await resolveLidForPhone(sessionId, sock, ownPhoneJid);
             ownLidJid = normalizeLidCacheKey(ownLidResolution?.lid || '');
         }
+        if (!ownPhoneJid && /@lid$/i.test(ownLidJid)) {
+            try {
+                const ownPhoneResolution = await resolvePhoneForLid(sessionId, sock, ownLidJid);
+                const ownMappingRecord = lidPhoneResolutionCache.get(`${sessionId}:${ownLidJid}`);
+                const ownMappingFresh = !!(ownPhoneResolution?.phone && ownMappingRecord?.phone && Date.now() - Number(ownMappingRecord.updatedAt || 0) <= LID_PHONE_MAPPING_FRESH_MS);
+                if (ownMappingFresh) ownPhoneJid = normalizePhoneCacheJid(ownPhoneResolution.phone);
+            } catch (ownMappingError) {
+                console.warn('[self-chat-phone-resolution-failed]', { sessionId, error: ownMappingError?.message || String(ownMappingError) });
+            }
+        }
         let destinationPhoneJid = normalizePhoneCacheJid(originalDestinationJid);
         if (!destinationPhoneJid && sessionId && /@lid$/i.test(originalDestinationJid)) {
-            destinationPhoneJid = normalizePhoneCacheJid(getRememberedPhoneForLid(sessionId, originalDestinationJid));
+            const destinationMapping = lidPhoneResolutionCache.get(`${sessionId}:${normalizeLidCacheKey(originalDestinationJid)}`);
+            if (destinationMapping && Date.now() - Number(destinationMapping.updatedAt || 0) <= LID_PHONE_MAPPING_FRESH_MS) destinationPhoneJid = normalizePhoneCacheJid(destinationMapping.phone || '');
         }
         let isSelfChatDestination = !!(
             (/@lid$/i.test(originalDestinationJid) && ownLidJid && normalizeLidCacheKey(originalDestinationJid) === normalizeLidCacheKey(ownLidJid)) ||
@@ -2294,24 +2334,25 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         const originalDestinationIsLid = /@lid$/i.test(originalDestinationJid);
         const originalDestinationIsPhone = /@s\.whatsapp\.net$/i.test(originalDestinationJid);
         const verifiedOwnLidJid = /@lid$/i.test(String(ownLidJid || '')) ? normalizeLidCacheKey(ownLidJid) : '';
-        const selfAddressPlan = isSelfChatDestination ? getSelfChatAddressPlan(originalDestinationJid, ownPhoneJid, verifiedOwnLidJid) : null;
+        const selfAddressPlan = isSelfChatDestination ? getSelfChatAddressPlan(originalDestinationJid, ownPhoneJid) : null;
         const selfPrimaryJid = selfAddressPlan?.primaryJid || '';
-        const selfFallbackJid = selfAddressPlan?.fallbackJid || '';
+        const selfFallbackJid = '';
+        if (isSelfChatDestination && !selfPrimaryJid) throw new Error('self_chat_phone_jid_unavailable');
         if (isSelfChatDestination) {
             console.info('[self-chat-authenticated-address-preserved]', {
                 sessionId,
                 originalDestinationType: selfAddressPlan?.originalType || 'unknown',
                 primaryDestinationType: /@lid$/i.test(selfPrimaryJid) ? 'lid' : /@s\.whatsapp\.net$/i.test(selfPrimaryJid) ? 'phone' : 'unknown',
                 fallbackDestinationType: /@lid$/i.test(selfFallbackJid) ? 'lid' : /@s\.whatsapp\.net$/i.test(selfFallbackJid) ? 'phone' : null,
-                action: 'preserve_the_actual_self_chat_address_and_retry_only_with_the_other_authenticated_alias_after_a_real_send_error'
+                action: 'send_self_chat_only_to_authenticated_phone_jid'
             });
         }
         let destinationJid = isSelfChatDestination ? selfPrimaryJid : originalDestinationJid;
         let destinationResolution = isSelfChatDestination
-            ? (ownPhoneJid && selfPrimaryJid === ownPhoneJid ? 'self_chat_authenticated_phone_primary' : verifiedOwnLidJid && selfPrimaryJid === verifiedOwnLidJid ? 'self_chat_authenticated_lid_primary_fallback' : originalDestinationIsLid ? 'self_chat_original_lid_preserved' : originalDestinationIsPhone ? 'self_chat_original_phone_preserved' : 'self_chat_original_address_preserved')
+            ? 'self_chat_authenticated_phone_primary'
             : /@lid$/i.test(originalDestinationJid) ? 'original_lid_pending_phone_resolution' : 'original_phone_preserved';
-        let alternateDestinationJid = isSelfChatDestination ? selfFallbackJid : '';
-        let alternateDestinationResolution = isSelfChatDestination && selfFallbackJid ? (/\@lid$/i.test(selfFallbackJid) ? 'self_chat_lid_fallback' : 'self_chat_phone_fallback') : '';
+        let alternateDestinationJid = '';
+        let alternateDestinationResolution = '';
         if (!isSelfChatDestination && sessionId && /@lid$/i.test(originalDestinationJid)) {
             try {
                 const normalizedOriginalLid = normalizeLidCacheKey(originalDestinationJid);
@@ -2322,38 +2363,21 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 const liveSignalMapping = resolved?.source === 'signal_lid_mapping';
                 if (mappedPhone && (liveSignalMapping || sessionMappingFresh)) {
                     destinationJid = mappedPhone;
-                    destinationResolution = `private_pn_primary_from_lid_${resolved?.source || 'fresh_session_mapping'}`;
-                    alternateDestinationJid = originalDestinationJid;
-                    alternateDestinationResolution = 'original_lid_fallback';
-                    console.info('[private-send-pn-primary-from-lid]', {
+                    destinationResolution = `private_pn_from_lid_${resolved?.source || 'fresh_session_mapping'}`;
+                    console.info('[private-send-pn-from-lid]', {
                         sessionId,
                         mappingSource: resolved?.source || sessionMapping?.source || 'fresh_session_mapping',
-                        mappingAgeMs: sessionMapping ? Math.max(0, Date.now() - Number(sessionMapping.updatedAt || 0)) : null,
-                        action: 'send_to_verified_phone_jid_first_keep_original_lid_as_fallback'
+                        mappingAgeMs: sessionMapping ? Math.max(0, Date.now() - Number(sessionMapping.updatedAt || 0)) : null
                     });
                 } else {
-                    alternateDestinationJid = mappedPhone;
-                    alternateDestinationResolution = mappedPhone ? 'unverified_phone_fallback' : 'unavailable';
-                    console.info('[private-send-lid-preserved]', {
-                        sessionId,
-                        mappingSource: resolved?.source || null,
-                        mappingFresh: false,
-                        hasPhoneFallback: !!mappedPhone,
-                        action: 'keep_original_lid_until_phone_mapping_is_verified'
-                    });
+                    throw new Error('private_phone_jid_unavailable');
                 }
             } catch (resolveError) {
                 console.warn('[private-send-alternate-resolution-failed]', { sessionId, originalDestinationJid, error: resolveError?.message || String(resolveError) });
             }
-        } else if (!isSelfChatDestination && sessionId && /@s\.whatsapp\.net$/i.test(originalDestinationJid)) {
-            try {
-                const mapped = await resolveLidForPhone(sessionId, sock, originalDestinationJid);
-                alternateDestinationJid = normalizeLidCacheKey(mapped?.lid || getRememberedLidForPhone(sessionId, originalDestinationJid));
-                alternateDestinationResolution = mapped?.source || (alternateDestinationJid ? 'session_or_global_lid_cache' : 'unavailable');
-            } catch (resolveError) {
-                console.warn('[private-send-alternate-resolution-failed]', { sessionId, originalDestinationJid, error: resolveError?.message || String(resolveError) });
-            }
         }
+        if (/@(?:hosted\.)?lid$/i.test(destinationJid)) throw new Error('private_phone_jid_required');
+        if (/@s\.whatsapp\.net$/i.test(originalDestinationJid) && !isSelfChatDestination) destinationResolution = 'private_pn';
         if (alternateDestinationJid === destinationJid) alternateDestinationJid = '';
         console.info('[private-send-target]', {
             sessionId,
@@ -2365,12 +2389,14 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             destinationType: destinationJid.endsWith('@g.us') ? 'group' : destinationJid.endsWith('@newsletter') ? 'channel' : destinationJid.endsWith('@s.whatsapp.net') ? 'private_pn' : destinationJid.endsWith('@lid') ? 'private_lid' : 'other'
         });
         const sendTo = async targetJid => {
-            if (sessionId && /@g\.us$/i.test(String(targetJid || ''))) {
-                await resetGroupSenderKeyMemoryBeforeSend(sessionId, String(targetJid));
+            const sendTargetJid = String(targetJid || '').trim();
+            if (/@(?:hosted\.)?lid$/i.test(sendTargetJid)) throw new Error('private_phone_jid_required');
+            if (sessionId && /@g\.us$/i.test(sendTargetJid)) {
+                await resetGroupSenderKeyMemoryBeforeSend(sessionId, sendTargetJid);
             }
-            const echoToken = rememberOutgoingTextEcho(sessionId, targetJid, outgoingContent);
+            const echoToken = rememberOutgoingTextEcho(sessionId, sendTargetJid, outgoingContent);
             try {
-                return await sock.sendMessage(targetJid, outgoingContent, options);
+                return await sock.sendMessage(sendTargetJid, outgoingContent, options);
             } catch (error) {
                 actualSendFailure = true;
                 if (echoToken) {
@@ -2390,7 +2416,20 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             let failureError = initialError;
             const errorText = String(initialError?.message || initialError || '');
             const transientSignalFailure = /No sessions|SessionError|MessageCounterError|Bad MAC|pre.?key|failed to decrypt|Chain closed|smax-invalid|statusCode\s*[:=]\s*479|\b479\b/i.test(errorText);
-            if (transientSignalFailure && !isSelfChatDestination && !destinationJid.endsWith('@g.us') && !destinationJid.endsWith('@newsletter')) {
+            if (transientSignalFailure && isSelfChatDestination) {
+                try {
+                    const selfRepairJid = verifiedOwnLidJid || destinationJid;
+                    await resetSignalPeerSessionForSendRetry(sock, sessionId, selfRepairJid, true).catch(() => false);
+                    await flushAuthWritesForSession(sessionId);
+                    await new Promise(resolve => setTimeout(resolve, 180));
+                    result = await sendTo(destinationJid);
+                    sentDestinationJid = destinationJid;
+                    destinationResolution = `${destinationResolution}_self_signal_repaired_retry`;
+                } catch (selfRepairError) {
+                    failureError = selfRepairError;
+                    result = null;
+                }
+            } else if (transientSignalFailure && !destinationJid.endsWith('@g.us') && !destinationJid.endsWith('@newsletter')) {
                 try {
                     await resetSignalPeerSessionForSendRetry(sock, sessionId, destinationJid).catch(() => false);
                     result = await sendTo(destinationJid);
@@ -2410,28 +2449,6 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                         if (mappedPhone && mappedPhone !== destinationJid) retryTargetJid = mappedPhone;
                     } catch (resolveError) {
                         console.warn('[private-send-retry-resolution-failed]', { sessionId, originalDestinationJid, error: resolveError?.message || String(resolveError) });
-                    }
-                }
-                if (!retryTargetJid && !isSelfChatDestination && /@s\.whatsapp\.net$/i.test(destinationJid) && transientSignalFailure) {
-                    retryTargetJid = getRememberedLidForPhone(sessionId, destinationJid);
-                    if (!retryTargetJid) {
-                        try {
-                            const mappedLid = normalizeLidCacheKey(await sock?.signalRepository?.lidMapping?.getLIDForPN?.(normalizePhoneCacheJid(destinationJid)));
-                            if (/@lid$/i.test(mappedLid)) retryTargetJid = mappedLid;
-                        } catch (resolveError) {
-                            console.warn('[private-send-reverse-lid-resolution-failed]', { sessionId, destinationJid, error: resolveError?.message || String(resolveError) });
-                        }
-                    }
-                    if (!retryTargetJid && db) {
-                        try {
-                            const mappedRecord = await db.collection('lid_phone_mappings').findOne({ sessionId, phone: normalizePhoneCacheJid(destinationJid) }, { projection: { _id: 1, phone: 1, sessionId: 1 } });
-                            const scopedPrefix = `${sessionId}:`;
-                            const mappedId = String(mappedRecord?._id || '');
-                            const rememberedLid = mappedId.startsWith(scopedPrefix) ? normalizeLidCacheKey(mappedId.slice(scopedPrefix.length)) : '';
-                            if (mappedRecord?.sessionId === sessionId && rememberedLid && /@lid$/i.test(rememberedLid)) retryTargetJid = rememberedLid;
-                        } catch (resolveError) {
-                            console.warn('[private-send-reverse-lid-resolution-failed]', { sessionId, destinationJid, error: resolveError?.message || String(resolveError) });
-                        }
                     }
                 }
                 if (!retryTargetJid) {
@@ -4604,30 +4621,49 @@ async function findQuotedMessageForCommand(sessionId, chatJid, messageId, allowO
 async function getDel3Rules(sessionId, gjid) {
     const cacheKey = `${sessionId}_${gjid}`;
     if (activeDel3RulesCache.has(cacheKey)) return activeDel3RulesCache.get(cacheKey);
+    if (!db) return [];
     const docs = await db.collection('group_del3').find({ sessionId, gjid, active: true }).toArray();
-    const rules = docs.map(doc => ({ format: String(doc.messageFormat || '').trim(), sampleText: doc.sampleText || '' })).filter(rule => rule.format);
+    const rules = docs.map(doc => ({ format: String(doc.messageFormat || '').trim(), sampleText: doc.sampleText || '', activatedAt: doc.activatedAt || doc.updatedAt || doc.createdAt || null })).filter(rule => rule.format);
     setBoundedMapEntry(activeDel3RulesCache, cacheKey, rules, ACTIVE_DEL2_CACHE_MAX_ENTRIES);
     return rules;
 }
 
-async function addDel3Rule(sessionId, gjid, messageFormat, sampleText) {
+async function stageDel3Rule(sessionId, gjid, messageFormat, sampleText) {
+    if (!db) throw new Error('del3_database_unavailable');
     const now = new Date();
     await db.collection('group_del3').updateOne(
         { sessionId, gjid, messageFormat },
-        { $set: { active: true, sampleText: String(sampleText || '').slice(0, 500), updatedAt: now }, $setOnInsert: { createdAt: now } },
+        { $set: { active: false, activationPending: true, sampleText: String(sampleText || '').slice(0, 500), pendingAt: now, updatedAt: now }, $setOnInsert: { createdAt: now } },
         { upsert: true }
     );
-    const rules = await getDel3Rules(sessionId, gjid);
-    const next = rules.filter(rule => rule.format !== messageFormat);
-    next.push({ format: messageFormat, sampleText: String(sampleText || '').slice(0, 500) });
-    setBoundedMapEntry(activeDel3RulesCache, `${sessionId}_${gjid}`, next, ACTIVE_DEL2_CACHE_MAX_ENTRIES);
+    activeDel3RulesCache.delete(`${sessionId}_${gjid}`);
+    return now;
+}
+
+async function activateDel3Rule(sessionId, gjid, messageFormat) {
+    if (!db) throw new Error('del3_database_unavailable');
+    const activatedAt = new Date();
+    const result = await db.collection('group_del3').updateOne(
+        { sessionId, gjid, messageFormat, activationPending: true },
+        { $set: { active: true, activatedAt, updatedAt: activatedAt }, $unset: { activationPending: '', pendingAt: '' } }
+    );
+    if (!result || Number(result.matchedCount || 0) !== 1) throw new Error('del3_pending_rule_not_found');
+    activeDel3RulesCache.delete(`${sessionId}_${gjid}`);
+    const docs = await db.collection('group_del3').find({ sessionId, gjid, active: true }).toArray();
+    const rules = docs.map(doc => ({ format: String(doc.messageFormat || '').trim(), sampleText: doc.sampleText || '', activatedAt: doc.activatedAt || doc.updatedAt || doc.createdAt || null })).filter(rule => rule.format);
+    setBoundedMapEntry(activeDel3RulesCache, `${sessionId}_${gjid}`, rules, ACTIVE_DEL2_CACHE_MAX_ENTRIES);
+    return activatedAt;
+}
+
+async function discardPendingDel3Rule(sessionId, gjid, messageFormat) {
+    if (db) await db.collection('group_del3').deleteMany({ sessionId, gjid, messageFormat, activationPending: true });
+    activeDel3RulesCache.delete(`${sessionId}_${gjid}`);
 }
 
 async function removeDel3Rule(sessionId, gjid, messageFormat) {
-    await db.collection('group_del3').deleteMany({ sessionId, gjid, messageFormat });
-    const rules = await getDel3Rules(sessionId, gjid);
-    const next = rules.filter(rule => rule.format !== messageFormat);
-    setBoundedMapEntry(activeDel3RulesCache, `${sessionId}_${gjid}`, next, ACTIVE_DEL2_CACHE_MAX_ENTRIES);
+    if (db) await db.collection('group_del3').deleteMany({ sessionId, gjid, messageFormat });
+    activeDel3RulesCache.delete(`${sessionId}_${gjid}`);
+    return getDel3Rules(sessionId, gjid);
 }
 
 async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, senderJid, senderAliases, ownerRecord, canBotModerateGroupFn, isProtectedWhatsAppTargetFn) {
@@ -4637,7 +4673,8 @@ async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, se
     const format = getWhatsAppMessageFormat(message);
     if (!format) return false;
     const rules = await getDel3Rules(sessionId, chat);
-    if (!rules.some(rule => rule.format === format)) return false;
+    const matchingRule = rules.find(rule => rule.format === format);
+    if (!matchingRule) return false;
     if (typeof canBotModerateGroupFn === 'function' && !await canBotModerateGroupFn(chat)) {
         console.warn('[del3-skip-bot-permission-unavailable]', { sessionId, group: chat, messageId, format });
         return false;
@@ -4654,9 +4691,10 @@ async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, se
     }
     const timestampRaw = message?.messageTimestamp && typeof message.messageTimestamp.toNumber === 'function' ? message.messageTimestamp.toNumber() : message?.messageTimestamp;
     const timestamp = Number(timestampRaw) || 0;
-    const ageSeconds = timestamp > 0 ? Math.max(0, Math.floor(Date.now() / 1000) - timestamp) : 0;
-    if (ageSeconds > 180 && timestamp > 0) {
-        console.info('[del3-message-skipped-stale]', { sessionId, group: chat, messageId, format, ageSeconds });
+    const messageTimestampMs = timestamp > 0 ? (timestamp < 1000000000000 ? timestamp * 1000 : timestamp) : 0;
+    const activatedAtMs = matchingRule.activatedAt ? new Date(matchingRule.activatedAt).getTime() : 0;
+    if (messageTimestampMs > 0 && activatedAtMs > 0 && messageTimestampMs < activatedAtMs - 5000) {
+        console.info('[del3-message-skipped-before-activation]', { sessionId, group: chat, messageId, format, messageTimestampMs, activatedAtMs });
         return false;
     }
     console.info('[del3-live-delete-validation]', { sessionId, group: chat, messageId, format, action: 'attempt_delete_and_use_whatsapp_server_ack_as_authority' });
@@ -5816,7 +5854,7 @@ async function activateTfbotWorker() {
             tfbotWorkerActive = true;
             tfbotWorkerStarting = false;
             tfbotWorkerState = 'active';
-            void optimizeAdamLogoForBandwidth().catch(error => console.warn('[logo-bandwidth-background-optimization-failed]', error?.message || String(error)));
+            void inspectAdamLogo().catch(error => console.warn('[logo-bandwidth-background-optimization-failed]', error?.message || String(error)));
             await startClusterHeartbeat();
             try {
                 await loadExistingSessions();
@@ -6719,7 +6757,11 @@ function normalizeCaptionText(value) {
 function buildCaption(type, text, userName) {
     const cleanType = String(type || 'Message').replace(/[\r\n]+/g, ' ').trim().slice(0, 48) || 'Message';
     const cleanText = normalizeCaptionText(text);
-    return `*○ ${cleanType}*${cleanText ? `\n${cleanText}` : ''}`;
+    const cleanUserName = (sanitizeSessionDisplayName(userName) || 'Inconnu').replace(/"/g, '');
+    const ownerName = "Adam D'H7";
+    const plainFormattedTypes = new Set(['information', 'info', 'lien', 'link', 'menu']);
+    const content = cleanText ? (plainFormattedTypes.has(normalizeText(cleanType)) ? cleanText : `*_${cleanText}_*`) : '';
+    return `*○ ${cleanType}*\n\n*${ownerName}*\nUtilisateur : "${cleanUserName}"\nPropriétaire : ${ownerName}${content ? `\n\n${content}` : ''}\n\n> *${ownerName}*`;
 }
 
 function splitCaptionBodies(type, text, userName, maxChars = MAX_WHATSAPP_CAPTION_CHARS) {
@@ -6770,7 +6812,7 @@ async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, 
         try {
             lastResult = await queuedSendMessage(sock, jid, { image: deliveryImageBuffer, caption, ...options }, sendOptions.messageOptions || {}, 220);
         } catch (error) {
-            console.error('[whatsapp-send]', { action: String(type || 'Message'), error: error?.message || String(error), imageBytes: deliveryImageBuffer.length, actionOnFailure: 'do_not_transform_image_and_do_not_send_text_fallback' });
+            console.error('[whatsapp-send]', { action: String(type || 'Message'), error: error?.message || String(error), imageBytes: deliveryImageBuffer.length });
             throw error;
         }
     }
@@ -6778,20 +6820,16 @@ async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, 
 }
 const logoPath = path.join(__dirname, 'adamdh7.png');
 let adamLogoBuffer = fs.existsSync(logoPath) ? fs.readFileSync(logoPath) : null;
-let logoOptimizationResult = 'not_checked';
-
-async function optimizeAdamLogoForBandwidth() {
+async function inspectAdamLogo() {
     if (!Buffer.isBuffer(adamLogoBuffer) || !adamLogoBuffer.length) {
-        logoOptimizationResult = 'logo_missing_no_text_fallback';
-        console.warn('[logo-image-source-unavailable]', { action: 'keep_image_send_disabled_without_text_fallback' });
+        console.warn('[logo-image-source-unavailable]');
         return false;
     }
     const isPng = adamLogoBuffer.length >= 8 && adamLogoBuffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
     const isJpeg = adamLogoBuffer.length >= 3 && adamLogoBuffer[0] === 255 && adamLogoBuffer[1] === 216 && adamLogoBuffer[2] === 255;
     const detectedFormat = isPng ? 'png' : isJpeg ? 'jpeg' : 'unsupported';
-    logoOptimizationResult = detectedFormat === 'unsupported' ? 'original_image_bytes_preserved_format_unverified' : 'original_image_bytes_preserved';
-    console.info('[logo-image-source-preserved]', { originalBytes: adamLogoBuffer.length, detectedFormat, fileExtension: path.extname(logoPath).toLowerCase(), action: 'send_original_image_buffer_without_resize_reencode_or_text_fallback' });
-    if (detectedFormat === 'unsupported') console.warn('[logo-image-source-format-warning]', { originalBytes: adamLogoBuffer.length, action: 'do_not_claim_image_thumbnail_or_client_decryption_is_valid_without_a_supported_png_or_jpeg_signature' });
+    console.info('[logo-image-source-preserved]', { originalBytes: adamLogoBuffer.length, detectedFormat, fileExtension: path.extname(logoPath).toLowerCase() });
+    if (detectedFormat === 'unsupported') console.warn('[logo-image-source-format-warning]', { originalBytes: adamLogoBuffer.length });
     return true;
 }
 
@@ -6961,12 +6999,13 @@ app.get('/list', async (req, res) => {
         const remoteOwnerLive = remoteOwner && ownerLease > now && ownerDoc.socketAuthenticated === true && ownerDoc.socketReady === true;
         let status = localSession?.status || ownerDoc.connectionStatus || 'deconnecte';
         if (localSession) {
-            const localReadyState = localSession?.sock?.ws?.readyState ?? localSession?.sock?.ws?._socket?.readyState ?? localSession?.sock?.socket?.readyState;
-            const localSocketReady = !!localSession?.sock && (localSession.sock.ws?.isOpen === true || Number(localReadyState) === 1 || String(localReadyState).toUpperCase() === 'OPEN');
-            const localIdentity = getAuthenticatedPhoneNumber(localSession.sock?.user, localSession.authState?.creds) || getAuthenticatedLid(localSession.sock?.user, localSession.authState?.creds);
-            const localAuthenticated = localSession.authState?.creds?.registered === true && !!localIdentity && localSocketReady && ['connecte', 'connected'].includes(String(localSession.status || '').toLowerCase());
-            if (localAuthenticated) status = 'connecte';
-            else {
+            const localAuthenticated = isAuthenticatedSocketOperational(localSession, localSession.sock);
+            if (localAuthenticated) {
+                status = 'connecte';
+                if (!['connecte', 'connected'].includes(String(localSession.status || '').toLowerCase())) {
+                    await restoreAuthenticatedSessionRuntimeStatus(sessionId, localSession, localSession.sock, 'sessions_list_verified_open_socket');
+                }
+            } else {
                 status = localSession.sock ? 'synchronisation' : (localSession.status === 'reauth_required' ? 'reauth_required' : 'deconnecte');
                 localSession.active = false;
                 if (['connecte', 'connected'].includes(String(localSession.status || '').toLowerCase())) localSession.status = status;
@@ -6989,10 +7028,10 @@ app.get('/list', async (req, res) => {
       }
       for (const localSession of activeSessions.values()) {
         if (ownerIds.has(localSession.id)) continue;
-        const readyState = localSession?.sock?.ws?.readyState ?? localSession?.sock?.ws?._socket?.readyState ?? localSession?.sock?.socket?.readyState;
-        const socketReady = !!localSession?.sock && (localSession.sock.ws?.isOpen === true || Number(readyState) === 1 || String(readyState).toUpperCase() === 'OPEN');
-        const identity = getAuthenticatedPhoneNumber(localSession.sock?.user, localSession.authState?.creds) || getAuthenticatedLid(localSession.sock?.user, localSession.authState?.creds);
-        const isAuthenticated = localSession.authState?.creds?.registered === true && !!identity && socketReady && ['connecte', 'connected'].includes(String(localSession.status || '').toLowerCase());
+        const isAuthenticated = isAuthenticatedSocketOperational(localSession, localSession.sock);
+        if (isAuthenticated && !['connecte', 'connected'].includes(String(localSession.status || '').toLowerCase())) {
+            await restoreAuthenticatedSessionRuntimeStatus(localSession.id, localSession, localSession.sock, 'sessions_list_verified_open_socket');
+        }
         sessionsList.push({ ID: localSession.id, Sessions: isAuthenticated ? 'connecte' : localSession.sock ? 'synchronisation' : (localSession.status || 'deconnecte'), Numero: localSession.number || 'N/A', Name: "Adam D'H7", Format: normalizeConnectionFormat(localSession.format || 'pair'), Mode: 'prive', Alive: localSession.createdAt ? getUptimeString(now - localSession.createdAt) : '0s' });
       }
       const html = `<!DOCTYPE html>
@@ -8192,32 +8231,31 @@ function fitErrorExplanation(value) {
 }
 
 function errorFallbackText(actionName, language, errorClass = 'action_failure') {
-    const action = String(actionName || 'Action').replace(/\s+/g, ' ').slice(0, 40);
     const lang = ['fr', 'en', 'es', 'ht'].includes(language) ? language : 'ht';
     const messages = {
         fr: {
-            permission_or_admin: `L’action « ${action} » nécessite des autorisations supplémentaires. Vérifie les droits applicables, puis réessaie.`,
-            timeout: `L’action « ${action} » n’a pas pu se terminer dans le délai prévu. Réessaie dans quelques instants.`,
-            connection_or_encryption: `La connexion nécessaire à l’action « ${action} » n’est pas disponible. Réessaie lorsque la connexion est rétablie.`,
-            action_failure: `L’action « ${action} » n’a pas pu être terminée. Vérifie les informations fournies et réessaie.`
+            permission_or_admin: 'Droits administrateur requis.',
+            timeout: 'Délai dépassé. Réessaie.',
+            connection_or_encryption: 'Connexion indisponible. Réessaie.',
+            action_failure: 'Action impossible. Vérifie les informations et réessaie.'
         },
         en: {
-            permission_or_admin: `The “${action}” action requires additional permissions. Check the applicable access rights and try again.`,
-            timeout: `The “${action}” action did not complete within the expected time. Please try again shortly.`,
-            connection_or_encryption: `The connection required for “${action}” is unavailable. Please try again when the connection is restored.`,
-            action_failure: `The “${action}” action could not be completed. Check the supplied information and try again.`
+            permission_or_admin: 'Administrator permission required.',
+            timeout: 'Request timed out. Try again.',
+            connection_or_encryption: 'Connection unavailable. Try again.',
+            action_failure: 'Action failed. Check the details and try again.'
         },
         es: {
-            permission_or_admin: `La acción «${action}» requiere permisos adicionales. Comprueba los permisos correspondientes e inténtalo de nuevo.`,
-            timeout: `La acción «${action}» no se completó dentro del plazo previsto. Inténtalo de nuevo en unos momentos.`,
-            connection_or_encryption: `La conexión necesaria para «${action}» no está disponible. Inténtalo de nuevo cuando se restablezca.`,
-            action_failure: `No se pudo completar la acción «${action}». Comprueba la información proporcionada e inténtalo de nuevo.`
+            permission_or_admin: 'Se requieren permisos de administrador.',
+            timeout: 'Tiempo agotado. Inténtalo de nuevo.',
+            connection_or_encryption: 'Conexión no disponible. Inténtalo de nuevo.',
+            action_failure: 'No se pudo completar. Comprueba los datos e inténtalo de nuevo.'
         },
         ht: {
-            permission_or_admin: `Aksyon «${action}» la bezwen plis otorizasyon. Verifye dwa ki aplikab yo epi eseye ankò.`,
-            timeout: `Aksyon «${action}» la pa t fini nan tan ki te prevwa a. Eseye ankò nan kèk moman.`,
-            connection_or_encryption: `Koneksyon ki nesesè pou aksyon «${action}» la pa disponib. Eseye ankò lè koneksyon an retabli.`,
-            action_failure: `Aksyon «${action}» la pa t kapab fini. Verifye enfòmasyon ou bay yo epi eseye ankò.`
+            permission_or_admin: 'Dwa administratè nesesè.',
+            timeout: 'Tan an fini. Eseye ankò.',
+            connection_or_encryption: 'Koneksyon pa disponib. Eseye ankò.',
+            action_failure: 'Aksyon an pa t fini. Verifye enfòmasyon yo epi eseye ankò.'
         }
     };
     const category = Object.prototype.hasOwnProperty.call(messages[lang], errorClass) ? errorClass : 'action_failure';
@@ -8246,9 +8284,8 @@ async function sendActionError(sock, jid, actionName, error, language, userName,
     const rawError = redactActionError(error);
     console.error('[action-error]', { action: String(actionName || 'Action'), error: rawError.slice(0, 1200) });
     const explanation = await explainActionError(error, language, actionName, userName, messageTimestamp);
-    const visibleExplanation = explanation;
     try {
-        await sendPlainExplanationMessage(sock, jid, visibleExplanation);
+        await sendImageCaptioned(sock, jid, adamLogoBuffer, actionName || 'Action', explanation, userName || 'Inconnu');
     } catch (sendError) {
         console.error('[action-error-send]', sendError?.message || sendError);
     }
@@ -8352,9 +8389,6 @@ async function sendPlainExplanationMessage(sock, jid, text) {
 }
 
 async function sendFormatted(sock, from, type, text, pushName, isAI = false, hostName = "Adam D'H7", sendOptions = {}) {
-    const normalizedType = normalizeText(type);
-    if (normalizedType === 'explication' || normalizedType === 'explanation') return sendPlainExplanationMessage(sock, from, text);
-    if (normalizedType === 'information' || normalizedType === 'info') return queuedSendMessage(sock, from, { text: String(text || '').trim() }, sendOptions.messageOptions || {}, 220);
     return sendImageCaptioned(sock, from, adamLogoBuffer, type, text, pushName || 'Inconnu', sendOptions);
 }
 
@@ -8788,14 +8822,23 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             qrString: existingSessionRecord?.qrString || null,
             pairingNumber: existingSessionRecord?.pairingNumber || null,
             autoExpirePairing: existingSessionRecord?.autoExpirePairing === true,
-            disconnectTime: null,
-            connectedAt: null,
+            openEventSeen: existingSessionRecord?.openEventSeen === true,
+            openReadinessStartedAt: Number(existingSessionRecord?.openReadinessStartedAt || 0) || null,
+            openReadinessDiagnosticAt: Number(existingSessionRecord?.openReadinessDiagnosticAt || 0),
+            disconnectTime: existingSessionRecord?.disconnectTime || null,
+            connectedAt: Number(existingSessionRecord?.connectedAt || 0) || null,
+            readyAt: Number(existingSessionRecord?.readyAt || sessionData.readyAt || 0) || null,
             lastPongAt: Date.now(),
             lastSocketActivityAt: Date.now(),
             lastMessageAt: 0,
             wsPongMonitoring: !!(sock.ws && typeof sock.ws.on === 'function'),
             receivedPong: false
         });
+        const sessionAfterBootstrapReplacement = activeSessions.get(sessionId);
+        if (sessionAfterBootstrapReplacement?.openEventSeen === true) {
+            scheduleSessionOpenReadinessRetry(sessionId, sock, state.creds?.registered === true && (getAuthenticatedPhoneNumber(sock.user, state.creds) || getAuthenticatedLid(sock.user, state.creds)) ? 300 : 1200);
+            console.info('[session-open-event-preserved-after-bootstrap-replacement]', { sessionId, registered: state.creds?.registered === true, identityAvailable: !!(getAuthenticatedPhoneNumber(sock.user, state.creds) || getAuthenticatedLid(sock.user, state.creds)), action: 'continue_readiness_after_preserving_the_actual_baileys_open_event' });
+        }
         if (sock.ws && typeof sock.ws.on === 'function') {
             const markSocketPong = () => {
                 const liveSession = activeSessions.get(sessionId);
@@ -9739,6 +9782,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const earlyReceivedId = String(m?.key?.id || 'missing-id');
                 const earlyReceivedOwnPhone = getAuthenticatedPhoneNumber(sock.user, activeMessageCredentials || state.creds);
                 const earlyReceivedOwnLid = getAuthenticatedLid(sock.user, activeMessageCredentials || state.creds);
+                const activeMessageOperational = activeMessageSession?.sock === sock && isAuthenticatedSocketOperational(activeMessageSession, sock);
+                if (activeMessageOperational && !['connecte', 'connected'].includes(String(activeMessageSession.status || '').toLowerCase())) {
+                    await restoreAuthenticatedSessionRuntimeStatus(sessionId, activeMessageSession, sock, 'incoming_message_verified_open_socket');
+                }
                 if (m?.key?.fromMe === true && m?.message && earlyReceivedId !== 'missing-id') {
                     cacheRecentMessage(sessionId, m);
                     const alreadyPersistedOutgoing = outgoingMessageCache.has(`${sessionId}:id:${earlyReceivedId}`)
@@ -9752,7 +9799,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             .catch(ownerMessageSaveError => console.warn('[owner-outgoing-message-retry-copy-save-failed]', { sessionId, messageId: earlyReceivedId, error: ownerMessageSaveError?.message || String(ownerMessageSaveError) }));
                     }
                 }
-                const activeMessageAuthenticated = activeMessageSession?.sock === sock && activeMessageSession.status === 'connecte' && activeMessageCredentials?.registered === true && !!activeMessageIdentity && activeMessageSocketReady;
+                const activeMessageAuthenticated = activeMessageOperational;
                 if (!activeMessageAuthenticated) {
                     const deferred = enqueuePendingInboundMessage(sessionId, sock, m);
                     console.info(deferred ? '[message-deferred-until-session-open]' : '[message-ignored]', { sessionId, messageId: m?.key?.id || null, chatJid: m?.key?.remoteJid || m?.key?.remoteJidAlt || null, reason: deferred ? 'session_transition_authentication_pending' : 'session_not_authenticated_and_active', registered: activeMessageCredentials?.registered === true, identityAvailable: !!activeMessageIdentity, socketReady: activeMessageSocketReady, deferred });
@@ -10128,10 +10175,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         for (const senderIdentity of [...senderJids]) {
                             const normalizedSenderIdentity = normalizedLidForMapping(senderIdentity);
                             if (!/@lid$/i.test(normalizedSenderIdentity)) continue;
-                            const cachedPhoneIdentity = getRememberedPhoneForLid(sessionId, normalizedSenderIdentity);
+                            const mappingRecord = lidPhoneResolutionCache.get(`${sessionId}:${normalizedSenderIdentity}`);
+                            const mappingIsFresh = !!(mappingRecord?.phone && Date.now() - Number(mappingRecord.updatedAt || 0) <= LID_PHONE_MAPPING_FRESH_MS);
+                            const cachedPhoneIdentity = mappingIsFresh ? normalizePhoneCacheJid(mappingRecord.phone) : '';
                             const isCurrentPrivateChatLid = !rawChatIsGroup && !rawChatIsChannel && normalizedSenderIdentity === normalizedRawChatForMapping;
                             const explicitPhoneAlias = isCurrentPrivateChatLid ? senderJids.map(normalizePhoneCacheJid).find(Boolean) || '' : '';
-                            const knownPhoneIdentity = cachedPhoneIdentity || explicitPhoneAlias;
+                            const knownPhoneIdentity = explicitPhoneAlias || cachedPhoneIdentity;
                             if (cachedPhoneIdentity && !(isFromMe && normalizedSenderIdentity === normalizedRawChatForMapping)) senderJids.push(cachedPhoneIdentity);
                             if (isCurrentPrivateChatLid && knownPhoneIdentity) {
                                 mappedPrivateChatPhoneJid = knownPhoneIdentity;
@@ -10165,39 +10214,38 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         if (!rawChatIsGroup && !rawChatIsChannel && /@lid$/i.test(normalizedRawChatForMapping)) {
                             const directPhoneCandidates = [
                                 { value: m.key.remoteJidAlt, source: 'remoteJidAlt' },
-                                { value: !isFromMe ? m.key.senderPn : null, source: 'senderPn' },
-                                { value: !isFromMe ? m.key.participantPn : null, source: 'participantPn' },
-                                { value: mappedPrivateChatPhoneJid, source: mappedPrivateChatPhoneResolution || 'lid_mapping' },
-                                { value: getRememberedPhoneForLid(sessionId, normalizedRawChatForMapping), source: 'lid_phone_cache' }
+                                { value: m.key.senderPn, source: 'senderPn' },
+                                { value: m.key.participantPn, source: 'participantPn' },
+                                { value: mappedPrivateChatPhoneJid, source: mappedPrivateChatPhoneResolution || 'live_mapping' }
                             ];
                             let directPhoneCandidate = directPhoneCandidates.find(candidate => normalizePhoneCacheJid(candidate.value));
                             if (!directPhoneCandidate) {
                                 const resolved = await resolvePhoneForLid(sessionId, sock, normalizedRawChatForMapping);
-                                if (resolved?.phone) directPhoneCandidate = { value: resolved.phone, source: resolved.source };
+                                const resolvedRecord = lidPhoneResolutionCache.get(`${sessionId}:${normalizedRawChatForMapping}`);
+                                const resolvedFresh = !!(resolved?.phone && resolvedRecord?.phone && Date.now() - Number(resolvedRecord.updatedAt || 0) <= LID_PHONE_MAPPING_FRESH_MS);
+                                if (resolvedFresh) directPhoneCandidate = { value: resolved.phone, source: resolved.source };
                             }
                             const directPhone = normalizePhoneCacheJid(directPhoneCandidate?.value || '');
                             const authenticatedRouteNumber = getAuthenticatedPhoneNumber(sock.user, state.creds);
                             const authenticatedRouteLid = normalizeLidCacheKey(getAuthenticatedLid(sock.user, state.creds));
                             const storedOwnerLid = normalizeLidCacheKey(sOwnerTop?.OwnerLid || sOwnerTop?.ownerLid || '');
-                            const mappedToOwnAccount = !!(directPhone && authenticatedRouteNumber && normalizePhoneNumber(directPhone.split('@')[0]) === authenticatedRouteNumber);
+                            const storedOwnerNumber = normalizePhoneNumber(sOwnerTop?.Number || sOwnerTop?.number || '');
                             const matchesStoredOwnLid = !!(storedOwnerLid && storedOwnerLid === normalizedRawChatForMapping);
                             const matchesAuthenticatedOwnLid = !!(authenticatedRouteLid && authenticatedRouteLid === normalizedRawChatForMapping);
+                            const ownRouteNumber = authenticatedRouteNumber || (matchesStoredOwnLid ? storedOwnerNumber : '');
+                            const mappedToOwnAccount = !!(directPhone && ownRouteNumber && normalizePhoneNumber(directPhone.split('@')[0]) === ownRouteNumber);
                             if (directPhone) {
-                                if (!isFromMe) {
-                                    senderJids.push(directPhone);
-                                    from = normalizedRawChatForMapping;
-                                    privateReplyTargetResolution = `private_lid_preferred_pn_fallback_${directPhoneCandidate?.source || 'lid_mapping'}`;
-                                } else if (authenticatedRouteNumber && (mappedToOwnAccount || matchesStoredOwnLid || matchesAuthenticatedOwnLid)) {
-                                    from = `${authenticatedRouteNumber}@s.whatsapp.net`;
-                                    privateReplyTargetResolution = 'self_chat_lid_resolved_to_authenticated_phone';
-                                } else {
-                                    privateReplyTargetResolution = 'original_lid_preserved_for_from_me_non_self_chat';
-                                }
-                            } else if (isFromMe && authenticatedRouteNumber && (matchesStoredOwnLid || matchesAuthenticatedOwnLid)) {
-                                from = `${authenticatedRouteNumber}@s.whatsapp.net`;
-                                privateReplyTargetResolution = 'self_chat_lid_resolved_to_authenticated_phone_without_cached_mapping';
+                                from = directPhone;
+                                if (!isFromMe) senderJids.push(directPhone);
+                                privateReplyTargetResolution = isFromMe && (mappedToOwnAccount || matchesStoredOwnLid || matchesAuthenticatedOwnLid)
+                                    ? 'self_chat_pn_from_live_alias'
+                                    : `private_pn_from_lid_${directPhoneCandidate?.source || 'live_mapping'}`;
+                            } else if (isFromMe && ownRouteNumber && (matchesStoredOwnLid || matchesAuthenticatedOwnLid)) {
+                                from = `${ownRouteNumber}@s.whatsapp.net`;
+                                privateReplyTargetResolution = 'self_chat_pn_from_authenticated_owner';
                             } else {
-                                privateReplyTargetResolution = 'original_lid_preferred_no_pn_mapping';
+                                from = '';
+                                privateReplyTargetResolution = 'private_phone_jid_unavailable';
                             }
                         }
                         const uniqueSenderJids = [...new Set(senderJids)];
@@ -10213,6 +10261,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 resolutionSource: privateReplyTargetResolution,
                                 targetType: /@s\.whatsapp\.net$/i.test(from) ? 'private_pn' : /@lid$/i.test(from) ? 'private_lid' : 'private_other'
                             });
+                        }
+                        if (!rawChatIsGroup && !rawChatIsChannel && !normalizePhoneCacheJid(from)) {
+                            console.warn('[private-message-skipped-without-pn]', { sessionId, messageId: msgId, sourceChatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null });
+                            return;
                         }
                         const senderNumbers = [...new Set(senderJids.filter(identity => !/@lid(?:$|:)/i.test(String(identity || ''))).map(normalizedJidNumber).filter(Boolean))];
                         const sNum = senderNumbers[0] || '';
@@ -10718,20 +10770,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 }, commandTimeoutMs);
                                 if (typeof timeoutId.unref === 'function') timeoutId.unref();
 
-                                const explanationTexts = new Set(Object.entries(t)
-                                    .filter(([key, value]) => /(?:_usage|_required|_error|_failed|_unavailable|_unsupported|_not_supported|_not_found|_invalid)$/i.test(key) && typeof value === 'string')
-                                    .map(([, value]) => normalizeEchoText(value)).filter(Boolean));
                                 const safeSendFormatted = async (...sendArgs) => {
                                     if (isCancelled || terminalResponseSent) return null;
                                     try {
-                                        const targetJid = sendArgs[1];
-                                        const messageType = sendArgs[2];
-                                        const messageText = sendArgs[3];
-                                        const normalizedType = normalizeText(messageType);
-                                        const isExplanation = normalizedType === 'explication' || normalizedType === 'explanation' || explanationTexts.has(normalizeEchoText(messageText));
-                                        const result = isExplanation
-                                            ? await sendPlainExplanationMessage(sock, targetJid, messageText)
-                                            : await sendFormatted(...sendArgs);
+                                        const result = await sendFormatted(...sendArgs);
                                         terminalResponseSent = true;
                                         responseSentForLog = true;
                                         terminalResponsePromise = Promise.resolve(result);
@@ -10941,8 +10983,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 
                                                 let lienTextForm = '';
                                                 if (metadataLien && metadataLien.subject) lienTextForm += `*${metadataLien.subject}*\n`;
-                                                lienTextForm += link;
-                                                if (metadataLien && metadataLien.desc) lienTextForm += `\n\n${metadataLien.desc.toString().trim()}`;
+                                                lienTextForm += `> _${link}_`;
+                                                if (metadataLien && metadataLien.desc) lienTextForm += `\n\n𓆩♛𓆪  *_Règlement du groupe_* :\n\n${metadataLien.desc.toString().trim()}`;
 
                                                 const lienCapTitle = t.cmd_lien.charAt(0).toUpperCase() + t.cmd_lien.slice(1);
                                                 let linkImage = adamLogoBuffer;
@@ -11284,8 +11326,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             const quotedDel3OwnerProtected = !!(sOwnerTop && isProtectedWhatsAppTarget(quotedDel3Participant, sOwnerTop, sock.user?.id || '', [quotedDel3Key.remoteJid, quotedDel3Key.remoteJidAlt, quotedDel3Key.participant, quotedDel3Key.participantAlt, quotedDel3Key.participantPn, quotedDel3Key.senderPn].filter(Boolean).join(' ')));
                                             const currentDel3Rules = await getDel3Rules(sessionId, from);
                                             const del3AlreadyEnabled = !!del3Format && currentDel3Rules.some(rule => rule.format === del3Format);
-                                            const botCanModerateDel3 = await canBotModerateGroup(from);
-                                            if (!botCanModerateDel3 && !del3AlreadyEnabled) {
+                                            const botCanModerateDel3 = await canBotModerateGroup(from, true);
+                                            if (!botCanModerateDel3) {
                                                 await safeSendFormatted(sock, from, t.cmd_del3, t.del3_bot_admin_required, pushName, true, activeHostName);
                                                 break;
                                             }
@@ -11301,10 +11343,30 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 console.info('[del3-rule-deactivated]', { sessionId, group: from, format: del3Format, selectedSamplePreserved: true });
                                                 break;
                                             }
-                                            await addDel3Rule(sessionId, from, del3Format, extractBody({ message: quotedDel3Message }));
-                                            console.info('[del3-rule-activated]', { sessionId, group: from, format: del3Format, selectedSamplePreservedUntilConfirmation: true, futureMessages: 'same_group_same_whatsapp_format_except_host_and_bot' });
-                                            const del3ActivationConfirmation = await safeSendFormatted(sock, from, t.cmd_del3, t.del3_activated, pushName, false, activeHostName);
-                                            if (del3ActivationConfirmation?.key?.id && !quotedDel3OwnerProtected && !quotedDel3FromMe) {
+                                            await stageDel3Rule(sessionId, from, del3Format, extractBody({ message: quotedDel3Message }));
+                                            console.info('[del3-rule-staged]', { sessionId, group: from, format: del3Format, selectedSamplePreserved: true, activationRequiresDeliveredConfirmation: true });
+                                            let del3ActivationConfirmation = null;
+                                            try {
+                                                del3ActivationConfirmation = await safeSendFormatted(sock, from, t.cmd_del3, t.del3_activated, pushName, false, activeHostName);
+                                            } catch (del3ConfirmationError) {
+                                                await discardPendingDel3Rule(sessionId, from, del3Format).catch(() => {});
+                                                throw del3ConfirmationError;
+                                            }
+                                            if (!del3ActivationConfirmation?.key?.id) {
+                                                await discardPendingDel3Rule(sessionId, from, del3Format).catch(() => {});
+                                                console.warn('[del3-rule-not-activated]', { sessionId, group: from, format: del3Format, reason: 'activation_confirmation_not_delivered', selectedSamplePreserved: true });
+                                                break;
+                                            }
+                                            try {
+                                                const activatedAt = await activateDel3Rule(sessionId, from, del3Format);
+                                                console.info('[del3-rule-activated]', { sessionId, group: from, format: del3Format, activatedAt, confirmationMessageId: del3ActivationConfirmation.key.id, futureMessages: 'same_group_same_whatsapp_format_except_host_and_bot' });
+                                            } catch (del3ActivationError) {
+                                                await discardPendingDel3Rule(sessionId, from, del3Format).catch(() => {});
+                                                console.error('[del3-rule-activation-failed-after-confirmation]', { sessionId, group: from, format: del3Format, error: del3ActivationError?.message || String(del3ActivationError), selectedSamplePreserved: true });
+                                                try { await sendImageCaptioned(sock, from, adamLogoBuffer, t.cmd_del3, t.command_error, pushName); } catch (sendError) {}
+                                                break;
+                                            }
+                                            if (!quotedDel3OwnerProtected && !quotedDel3FromMe) {
                                                 try {
                                                     const del3SampleDeletion = await queuedDeleteMessageWithAck(sock, from, quotedDel3Key, 180, 6500);
                                                     console.info('[del3-selected-sample-deleted-after-confirmation]', { sessionId, group: from, sampleMessageId: quotedDel3Id, format: del3Format, confirmationMessageId: del3ActivationConfirmation.key.id, acknowledgementStatus: del3SampleDeletion?.acknowledgementStatus || null });
@@ -11376,16 +11438,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             let resendTargetVO = from;
                                             if (internalCommand === 'vv2') {
                                                 const ownerCredentialsVO = activeSessions.get(sessionId)?.authState?.creds || state.creds || null;
-                                                const selfLidVO = normalizeLidCacheKey(getAuthenticatedLid(sock.user || null, ownerCredentialsVO) || sock.user?.lid || '');
-                                                const selfPhoneVO = normalizePhoneNumber(getAuthenticatedPhoneNumber(sock.user || null, ownerCredentialsVO) || normalizedJidNumber(sock.user?.id || sock.user?.phoneNumber || ''));
-                                                const ownSocketJidVO = String(sock.user?.id || '').trim();
-                                                const ownSocketPhoneVO = /@s\.whatsapp\.net$/i.test(ownSocketJidVO) ? ownSocketJidVO : '';
-                                                resendTargetVO = selfPhoneVO
-                                                    ? `${selfPhoneVO}@s.whatsapp.net`
-                                                    : /@lid$/i.test(selfLidVO)
-                                                        ? selfLidVO
-                                                        : ownSocketPhoneVO || ownSocketJidVO || String(sock.user?.phoneNumber || '').trim();
-                                                if (!resendTargetVO) {
+                                                resendTargetVO = getAuthenticatedSelfPhoneJid(sessionId, sock, ownerCredentialsVO);
+                                                if (!resendTargetVO || !/@s\.whatsapp\.net$/i.test(resendTargetVO)) {
                                                     await safeSendFormatted(sock, from, t.cmd_vv2 || 'vv2', t.vv_self_unavailable || t.command_error, pushName, true, activeHostName);
                                                     break;
                                                 }
@@ -12561,7 +12615,7 @@ async function main() {
         return;
     }
     await connectMongo();
-    await optimizeAdamLogoForBandwidth();
+    await inspectAdamLogo();
     tfbotWorkerActive = true;
     tfbotWorkerState = 'active';
     httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
