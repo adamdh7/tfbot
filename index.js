@@ -3,8 +3,8 @@ const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(pr
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 7000)));
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r101-self-chat-retry-stanza-id-lid-addressing-public-log-redaction';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r101')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+const TFBOT_CLUSTER_CODE_REVISION = 'r102-self-chat-own-lid-retry-identity-no-autorecreate';
+const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r102')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
@@ -382,12 +382,13 @@ function applyBaileysSelfChatPlaceholderResendPnPatch() {
         const keyMatch = keyAnchor.exec(block);
         if (!keyMatch) return { applied: false, reason: 'retry_message_key_anchor_not_found', file: path.basename(filePath) };
         const injection = `${keyMatch[0]}
-const __tfbotRetryNodeId = String(node?.attrs?.id || getBinaryNodeChild(node, 'retry')?.attrs?.id || '').trim();
+const __tfbotRetryChild = Array.isArray(node?.content) ? node.content.find(child => child?.tag === 'retry') : null;
+const __tfbotRetryNodeId = String(node?.attrs?.id || __tfbotRetryChild?.attrs?.id || '').trim();
 const __tfbotDecodedRetryId = String(msgKey?.id || '').trim();
 if (!__tfbotDecodedRetryId && __tfbotRetryNodeId) msgKey.id = __tfbotRetryNodeId;
-const __tfbotOwnPnJid = String(authState?.creds?.me?.id || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
+const __tfbotOwnPnJid = String(authState?.creds?.me?.id || '').trim().replace(/:\d+(?=@s\.whatsapp\.net$)/i, '');
 const __tfbotOwnLidJid = String(authState?.creds?.me?.lid || '').trim();
-const __tfbotRetryChatJid = String(msgKey?.remoteJid || node?.attrs?.recipient || '').trim();
+const __tfbotRetryChatJid = String(node?.attrs?.recipient || msgKey?.remoteJid || msgKey?.remoteJidAlt || '').trim();
 const __tfbotIsSelfChatRetry = msgKey?.fromMe === true && Boolean(__tfbotOwnPnJid) && Boolean(__tfbotRetryChatJid) && ((__tfbotOwnLidJid && areJidsSameUser(__tfbotRetryChatJid, __tfbotOwnLidJid)) || areJidsSameUser(__tfbotRetryChatJid, __tfbotOwnPnJid));
 if (!String(msgKey?.id || '').trim()) {
     logger.warn({ stanzaIdPresent: Boolean(__tfbotRetryNodeId), decodedIdPresent: Boolean(__tfbotDecodedRetryId), fromMe: msgKey?.fromMe === true, remoteJidType: /@(?:hosted\\.)?lid$/i.test(__tfbotRetryChatJid) ? 'lid' : /@s\\.whatsapp\\.net$/i.test(__tfbotRetryChatJid) ? 'pn' : 'unknown' }, 'retry request ignored because no message id was available in decoded key or retry stanza');
@@ -645,54 +646,50 @@ function applyBaileysRetryResendDoubleEncryptionPatch() {
 }
 
 function applyBaileysOwnLidRetryAddressingPatch() {
-    const marker = '__tfbotOwnLidRetryRecipientAddressingV101';
-    const identityMarker = '__tfbotOwnLidRetryIdentityCheckV101';
+    const marker = '__tfbotOwnLidRetryIdentityResolvedV102';
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
         const searchDirectories = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
-        const candidates = [...new Set(searchDirectories.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs', 'ts'].map(extension => path.join(directory, folder, `messages-send.${extension}`)))))];
+        const candidates = [...new Set(searchDirectories.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `messages-send.${extension}`)))) )];
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
         if (!filePath) return { applied: false, reason: 'messages_send_module_not_found', issue: 'Baileys#2856' };
         let source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker) && source.includes(identityMarker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), issue: 'Baileys#2856', ownLidIdentityCheck: true, ownLidChatRecipient: true };
-        let changed = false;
-        const retryBlockMatch = /if\s*\(\s*isRetryResend\s*\)\s*\{/.exec(source) || /if\s*\(\s*isRetryResend\s*&&[^)]*\)\s*\{/.exec(source);
-        if (!retryBlockMatch) return { applied: false, reason: 'retry_resend_identity_block_not_found', file: path.basename(filePath), issue: 'Baileys#2856' };
-        const retryOpenBrace = source.indexOf('{', retryBlockMatch.index);
-        const retryCloseBrace = findTfbotMatchingBraceEnd(source, retryOpenBrace);
-        if (retryCloseBrace < 0) return { applied: false, reason: 'retry_resend_identity_block_unbalanced', file: path.basename(filePath), issue: 'Baileys#2856' };
-        let retryBlock = source.slice(retryBlockMatch.index, retryCloseBrace + 1);
-        if (!retryBlock.includes(identityMarker)) {
-            const participantLidPattern = /const\s+isParticipantLid\s*=\s*isLidUser\s*\(\s*participant(?:!)?\.jid\s*\)\s*;?/;
-            if (participantLidPattern.test(retryBlock)) {
-                retryBlock = retryBlock.replace(participantLidPattern, match => `${match.replace(/isLidUser\s*\(\s*participant(?:!)?\.jid\s*\)/, 'isLidUser(participant.jid) || isHostedLidUser(participant.jid)')}\nconst ${identityMarker} = true;`);
-                changed = true;
-            } else {
-                const isMePattern = /(?:const|let|var)\s+isMe\s*=\s*[^;\n]+;?/;
-                if (isMePattern.test(retryBlock)) {
-                    retryBlock = retryBlock.replace(isMePattern, `const __tfbotOwnLidRetryDevice = Boolean(meLid) && (isLidUser(participant.jid) || isHostedLidUser(participant.jid)) && areJidsSameUser(participant.jid, meLid);\nconst isMe = __tfbotOwnLidRetryDevice || areJidsSameUser(participant.jid, meId);\nconst ${identityMarker} = true;`);
-                    changed = true;
-                } else if (!retryBlock.includes('isOwnDeviceJid(')) {
-                    return { applied: false, reason: 'retry_identity_symbol_not_found', file: path.basename(filePath), issue: 'Baileys#2856' };
-                }
-            }
-            source = source.slice(0, retryBlockMatch.index) + retryBlock + source.slice(retryCloseBrace + 1);
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), ownLidIdentityCheck: true, hostedLidSupported: true, preservesConversationDestination: true };
+        const retryBlockPattern = /if\s*\(\s*isRetryResend\s*\)\s*\{/;
+        const retryMatch = retryBlockPattern.exec(source);
+        if (!retryMatch) return { applied: false, reason: 'retry_resend_identity_block_not_found', file: path.basename(filePath), issue: 'Baileys#2856' };
+        const openBrace = source.indexOf('{', retryMatch.index);
+        const closeBrace = findTfbotMatchingBraceEnd(source, openBrace);
+        if (closeBrace < 0) return { applied: false, reason: 'retry_resend_identity_block_unbalanced', file: path.basename(filePath), issue: 'Baileys#2856' };
+        let block = source.slice(retryMatch.index, closeBrace + 1);
+        const identityPattern = /const\s+isParticipantLid\s*=\s*isLidUser\s*\(\s*participant(?:!)?\.jid\s*\)\s*;?\s*const\s+isMe\s*=\s*areJidsSameUser\s*\(\s*participant(?:!)?\.jid\s*,\s*isParticipantLid\s*\?\s*meLid\s*:\s*meId\s*\)\s*;?/;
+        const replacement = `const __tfbotRetryParticipantJid = String(participant?.jid || '').trim();
+const isParticipantLid = /@(?:hosted\\.)?lid$/i.test(__tfbotRetryParticipantJid);
+const __tfbotRetryOwnLidDirectMatch = isParticipantLid && Boolean(meLid) && areJidsSameUser(__tfbotRetryParticipantJid, meLid);
+let __tfbotRetryParticipantPn = '';
+if (isParticipantLid && !__tfbotRetryOwnLidDirectMatch && signalRepository?.lidMapping?.getPNForLID) {
+    try {
+        const __tfbotNormalizedRetryLid = __tfbotRetryParticipantJid.replace(/:\\d+(?=@(?:hosted\\.)?lid$)/i, '');
+        __tfbotRetryParticipantPn = String(await signalRepository.lidMapping.getPNForLID(__tfbotNormalizedRetryLid) || '').trim();
+    } catch (error) {}
+}
+const __tfbotRetryOwnLidMatch = __tfbotRetryOwnLidDirectMatch || (isParticipantLid && Boolean(__tfbotRetryParticipantPn) && areJidsSameUser(__tfbotRetryParticipantPn, meId));
+const __tfbotRetryOwnPnMatch = !isParticipantLid && areJidsSameUser(__tfbotRetryParticipantJid, meId);
+const isMe = Boolean(__tfbotRetryOwnLidMatch || __tfbotRetryOwnPnMatch);
+const ${marker} = true;`;
+        if (identityPattern.test(block)) {
+            block = block.replace(identityPattern, replacement);
+        } else {
+            const isMePattern = /const\s+isMe\s*=\s*[^;\n]+;?/;
+            if (!isMePattern.test(block)) return { applied: false, reason: 'retry_identity_expression_not_found', file: path.basename(filePath), issue: 'Baileys#2856' };
+            block = block.replace(isMePattern, replacement);
         }
-        if (!source.includes(marker)) {
-            const stanzaCreationIndex = source.indexOf('const stanza', retryBlockMatch.index);
-            const addressToIndex = source.indexOf('stanza.attrs.to = destinationJid', stanzaCreationIndex >= 0 ? stanzaCreationIndex : retryBlockMatch.index);
-            const insertionAnchor = source.indexOf('if (shouldIncludeDeviceIdentity)', addressToIndex >= 0 ? addressToIndex : retryBlockMatch.index);
-            if (stanzaCreationIndex < 0 || addressToIndex < 0 || insertionAnchor < 0) return { applied: false, reason: 'retry_stanza_address_insertion_anchor_not_found', file: path.basename(filePath), issue: 'Baileys#2856' };
-            const insertion = `if (participant && isRetryResend && !isJidGroup(destinationJid) && Boolean(meLid) && (isLidUser(participant.jid) || isHostedLidUser(participant.jid)) && areJidsSameUser(participant.jid, meLid)) {\n\t\t\t\tstanza.attrs.to = participant.jid;\n\t\t\t\tstanza.attrs.recipient = destinationJid;\n\t\t\t}\n\t\t\tconst ${marker} = true;\n\t\t\t`;
-            source = source.slice(0, insertionAnchor) + insertion + source.slice(insertionAnchor);
-            changed = true;
-        }
-        const retryIdentityApplied = source.includes(identityMarker) || source.includes('isOwnDeviceJid(');
-        const recipientApplied = source.includes(marker) && source.includes('stanza.attrs.recipient = destinationJid');
-        if (!retryIdentityApplied || !recipientApplied) return { applied: false, reason: 'own_lid_retry_addressing_verification_failed', file: path.basename(filePath), issue: 'Baileys#2856' };
-        if (changed) fs.writeFileSync(filePath, source, 'utf8');
-        return { applied: true, alreadyApplied: !changed, file: path.basename(filePath), issue: 'Baileys#2856', ownLidIdentityCheck: true, ownLidChatRecipient: true, action: 'recognize_regular_or_hosted_own_lid_and_set_chat_recipient_on_single_device_retry' };
+        if (!block.includes(marker) || !block.includes('const isMe = Boolean(__tfbotRetryOwnLidMatch || __tfbotRetryOwnPnMatch)') || !block.includes('getPNForLID')) return { applied: false, reason: 'own_lid_identity_patch_verification_failed', file: path.basename(filePath), issue: 'Baileys#2856' };
+        const patched = source.slice(0, retryMatch.index) + block + source.slice(closeBrace + 1);
+        if (!patched.includes(marker)) return { applied: false, reason: 'own_lid_identity_marker_missing_after_patch', file: path.basename(filePath), issue: 'Baileys#2856' };
+        fs.writeFileSync(filePath, patched, 'utf8');
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), issue: 'Baileys#2856', ownLidIdentityCheck: true, hostedLidSupported: true, mappedPnFallback: true, preservesConversationDestination: true, action: 'resolve_own_regular_or_hosted_lid_participant_as_self_before_device_sent_message_wrapping' };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180), issue: 'Baileys#2856' };
     }
@@ -889,6 +886,7 @@ console.info('[baileys-outgoing-retry-preflight-patch]', { ...baileysOutgoingRet
 console.info('[baileys-retry-resend-double-encryption-patch]', { ...baileysRetryResendDoubleEncryptionPatchStatus, action: baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'avoid_duplicate_pairwise_encryption_on_retry_resend' : 'not_applicable_or_source_shape_not_matched' });
 console.info('[baileys-own-lid-retry-addressing-patch]', { ...baileysOwnLidRetryAddressingPatchStatus, action: baileysOwnLidRetryAddressingPatchStatus.applied ? 'preserve_chat_recipient_for_own_lid_device_retry' : 'not_applicable_or_source_shape_not_matched' });
 console.info('[baileys-signal-transaction-patch]', { ...baileysSignalTransactionPatchStatus, action: baileysSignalTransactionPatchStatus.applied ? 'serialize_signal_crypto_methods_inside_session_store_transaction' : 'leave_installed_baileys_source_unchanged' });
+enqueueTfbotDiagnosticRecord({ name: 'Adam', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION }) });
 enqueueTfbotDiagnosticRecord({ name: 'Adam', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus }) });
 
 const {
