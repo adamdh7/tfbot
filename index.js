@@ -7,8 +7,8 @@ const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(pr
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 7000)));
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(250, Math.min(1800, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 900)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r83-pn-only-bounded-queue-self-repair';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r83')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+const TFBOT_CLUSTER_CODE_REVISION = 'r84-live-pn-self-chat-lid-decrypt-qr-refresh-vv';
+const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r84')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
@@ -78,62 +78,65 @@ const { AsyncLocalStorage } = require('async_hooks');
 
 
 function applyBaileysLidPnDecryptRetryPatch() {
-    const marker = 'primary identity failed to decrypt, retrying with stanza-provided PN/LID pairing';
+    const marker = 'self-chat PN identity selected before Signal decryption';
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
         const searchDirectories = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
-        const candidates = [...new Set(searchDirectories.flatMap(directory => [
-            path.join(directory, 'Utils', 'decode-wa-message.js'),
-            path.join(directory, 'utils', 'decode-wa-message.js'),
-            path.join(directory, 'Utils', 'decode-wa-message.cjs'),
-            path.join(directory, 'Utils', 'decode-wa-message.ts')
-        ]))];
+        const candidates = [...new Set(searchDirectories.flatMap(directory => ['Utils', 'utils'].flatMap(folder => ['js', 'cjs', 'mjs', 'ts'].map(extension => path.join(directory, folder, `decode-wa-message.${extension}`)))))];
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
         if (!filePath) return { applied: false, reason: 'decrypt_module_not_found' };
-        const source = fs.readFileSync(filePath, 'utf8');
+        let source = fs.readFileSync(filePath, 'utf8');
         if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath) };
-        const casePattern = /case\s+(['\"])pkmsg\1\s*:\s*case\s+(['\"])msg\2\s*:/;
+        const declarationPattern = /const\s+decryptionJid\s*=\s*await\s+getDecryptionJid\(\s*author\s*,\s*repository\s*\)\s*;?/;
+        const declarationMatch = declarationPattern.exec(source);
+        if (!declarationMatch) return { applied: false, reason: 'decryption_jid_declaration_not_found', file: path.basename(filePath) };
+        const selfPhoneSelection = `\nconst __tfbotSelfChatPn = fullMessage?.key?.fromMe === true && /@(?:hosted\\.)?lid$/i.test(String(fullMessage?.key?.remoteJid || '')) ? String(fullMessage?.key?.remoteJidAlt || '').trim() : '';\nconst __tfbotDecryptionJid = /@s\\.whatsapp\\.net$/i.test(__tfbotSelfChatPn) ? __tfbotSelfChatPn : decryptionJid;`;
+        source = source.slice(0, declarationMatch.index + declarationMatch[0].length) + selfPhoneSelection + source.slice(declarationMatch.index + declarationMatch[0].length);
+        const casePattern = /case\s+(['"])pkmsg\1\s*:\s*case\s+(['"])msg\2\s*:/;
         const caseStart = source.search(casePattern);
         if (caseStart < 0) return { applied: false, reason: 'decrypt_case_not_found', file: path.basename(filePath) };
         const caseBlock = source.slice(caseStart);
-        if (!/const\s+user\s*=/.test(caseBlock.slice(0, 1000))) return { applied: false, reason: 'decrypt_user_selection_not_found', file: path.basename(filePath) };
-        const decryptCallPattern = /msgBuffer\s*=\s*await\s+repository\.decryptMessage\(\s*\{\s*jid:\s*user,\s*type:\s*e2eType,\s*ciphertext:\s*content\s*\}\s*\)\s*;?/;
-        if (!decryptCallPattern.test(caseBlock.slice(0, 2500))) return { applied: false, reason: 'decrypt_call_pattern_not_found', file: path.basename(filePath) };
+        const decryptCallPattern = /msgBuffer\s*=\s*await\s+repository\.decryptMessage\(\s*\{\s*jid:\s*(?:user|decryptionJid)\s*,\s*type:\s*e2eType\s*,\s*ciphertext:\s*content\s*\}\s*\)\s*;?/;
+        const decryptCallMatch = decryptCallPattern.exec(caseBlock);
+        if (!decryptCallMatch) return { applied: false, reason: 'decrypt_call_pattern_not_found', file: path.basename(filePath) };
         const replacement = `try {
-    msgBuffer = await repository.decryptMessage({ jid: user, type: e2eType, ciphertext: content });
+    msgBuffer = await repository.decryptMessage({ jid: __tfbotDecryptionJid, type: e2eType, ciphertext: content });
 } catch (decryptError) {
-    const userIsLid = /@(?:hosted\.)?lid$/i.test(String(user));
-    const alternateKeyIdentity = userIsLid
-        ? (fullMessage?.key?.remoteJidAlt || fullMessage?.key?.participantPn || fullMessage?.key?.senderPn || '')
-        : (fullMessage?.key?.remoteJid || fullMessage?.key?.participant || '');
-    let altUser = String(alternateKeyIdentity || (userIsLid ? (stanza.attrs.peer_recipient_pn || stanza.attrs.recipient_pn || stanza.attrs.participant_pn || stanza.attrs.sender_pn || '') : (stanza.attrs.participant_lid || stanza.attrs.sender_lid || ''))).trim();
-    if (!altUser) {
+    const primaryIdentity = String(__tfbotDecryptionJid || '').trim();
+    const primaryIsLid = /@(?:hosted\\.)?lid$/i.test(primaryIdentity);
+    const alternateCandidates = primaryIsLid
+        ? [fullMessage?.key?.remoteJidAlt, fullMessage?.key?.participantPn, fullMessage?.key?.senderPn, stanza.attrs.peer_recipient_pn, stanza.attrs.recipient_pn, stanza.attrs.participant_pn, stanza.attrs.sender_pn]
+        : [fullMessage?.key?.remoteJidAlt, fullMessage?.key?.participantAlt, stanza.attrs.participant_lid, stanza.attrs.sender_lid, stanza.attrs.peer_recipient_lid];
+    let alternateIdentity = alternateCandidates.map(value => String(value || '').trim()).find(value => value && value !== primaryIdentity && /@(?:hosted\\.)?lid$|@s\\.whatsapp\\.net$/i.test(value)) || '';
+    if (!alternateIdentity) {
         try {
-            const mappedIdentity = userIsLid
-                ? await repository?.lidMapping?.getPNForLID?.(String(user))
-                : await repository?.lidMapping?.getLIDForPN?.(String(user));
-            altUser = String(mappedIdentity || '').trim();
+            const mappedIdentity = primaryIsLid
+                ? await repository?.lidMapping?.getPNForLID?.(primaryIdentity)
+                : await repository?.lidMapping?.getLIDForPN?.(primaryIdentity);
+            alternateIdentity = String(mappedIdentity || '').trim();
         } catch (mappingError) {}
     }
-    if (!altUser || altUser === user || !/@(?:hosted\.)?lid$|@s\.whatsapp\.net$/i.test(altUser)) throw decryptError;
-    logger.debug({ key: fullMessage.key, primary: user, retryWith: altUser }, '${marker}');
+    if (!alternateIdentity || alternateIdentity === primaryIdentity || !/@(?:hosted\\.)?lid$|@s\\.whatsapp\\.net$/i.test(alternateIdentity)) throw decryptError;
     try {
-        msgBuffer = await repository.decryptMessage({ jid: altUser, type: e2eType, ciphertext: content });
+        msgBuffer = await repository.decryptMessage({ jid: alternateIdentity, type: e2eType, ciphertext: content });
+        if (primaryIsLid && /@s\\.whatsapp\\.net$/i.test(alternateIdentity)) {
+            try { await repository?.lidMapping?.storeLIDPNMappings?.([{ lid: primaryIdentity, pn: alternateIdentity }]); } catch (mappingStoreError) {}
+        }
+        logger.debug({ key: fullMessage.key, primary: primaryIdentity, retryWith: alternateIdentity }, '${marker}');
     } catch {
         throw decryptError;
     }
 }`;
         const patchedCaseBlock = caseBlock.replace(decryptCallPattern, replacement);
         const patchedSource = source.slice(0, caseStart) + patchedCaseBlock;
-        if (!patchedSource.includes(marker)) return { applied: false, reason: 'patch_verification_failed', file: path.basename(filePath) };
+        if (!patchedSource.includes(marker) || !patchedSource.includes('jid: __tfbotDecryptionJid') || !patchedSource.includes('jid: alternateIdentity')) return { applied: false, reason: 'decrypt_patch_verification_failed', file: path.basename(filePath) };
         fs.writeFileSync(filePath, patchedSource, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath) };
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), selfChatPrimary: 'authenticated PN from remoteJidAlt', retryIdentity: 'alternate PN/LID then live Signal mapping' };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
 }
-
 function applyBaileysSignalTransactionPatch() {
     const marker = '__tfbotAtomicSignalTransactionsV64';
     try {
@@ -404,8 +407,8 @@ function applyBaileysOwnLidRetryAddressingPatch() {
     }
 }
 function applyBaileysCompanionRegRefreshPatch() {
-    const legacySocketMarker = '__tfbotCompanionRegRefreshV78';
-    const ackMarker = '__tfbotPreLoginNotificationAckV78';
+    const socketMarker = '__tfbotCompanionRegRefreshHandlerV84';
+    const ackMarker = '__tfbotPreLoginNotificationAckV84';
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
@@ -414,58 +417,102 @@ function applyBaileysCompanionRegRefreshPatch() {
         const receiveCandidates = [...new Set(searchDirectories.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs', 'ts'].map(extension => path.join(directory, folder, `messages-recv.${extension}`)))))];
         const socketPath = socketCandidates.find(candidate => fs.existsSync(candidate));
         const receivePath = receiveCandidates.find(candidate => fs.existsSync(candidate));
-        if (!socketPath) return { applied: false, reason: 'baileys_socket_module_not_found', issue: 'Baileys#2737', companionRefreshPolicy: 'no_unverified_adv_secret_mutation' };
+        if (!socketPath) return { applied: false, reason: 'baileys_socket_module_not_found', issue: 'Baileys#2737' };
         if (!receivePath) return { applied: false, reason: 'baileys_messages_recv_module_not_found', file: path.basename(socketPath), issue: 'Baileys#2765' };
 
         let socketSource = fs.readFileSync(socketPath, 'utf8');
         let receiveSource = fs.readFileSync(receivePath, 'utf8');
         let socketChanged = false;
         let ackChanged = false;
-        const hadLegacyMutation = socketSource.includes(legacySocketMarker);
 
-        if (hadLegacyMutation) {
-            const injectionStart = socketSource.indexOf(`const ${legacySocketMarker} = true;`);
-            const handlerEndPattern = /ws\.on\(\s*(['"])CB:notification,type:companion_reg_refresh\1\s*,\s*__tfbotCompanionRefreshHandler\s*\)\s*;?/g;
-            handlerEndPattern.lastIndex = injectionStart;
-            const handlerEndMatch = handlerEndPattern.exec(socketSource);
-            if (injectionStart < 0 || !handlerEndMatch) return { applied: false, reason: 'legacy_companion_refresh_patch_cleanup_anchor_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
-            let injectionLineStart = socketSource.lastIndexOf('\n', injectionStart);
-            injectionLineStart = injectionLineStart < 0 ? 0 : injectionLineStart + 1;
-            let injectionLineEnd = socketSource.indexOf('\n', handlerEndMatch.index + handlerEndMatch[0].length);
-            if (injectionLineEnd < 0) injectionLineEnd = handlerEndMatch.index + handlerEndMatch[0].length;
-            else injectionLineEnd++;
-            socketSource = socketSource.slice(0, injectionLineStart) + socketSource.slice(injectionLineEnd);
-            socketSource = socketSource.replace(/^\s*let __tfbotCurrentPairingQRRef;\s*\r?\n/gm, '');
-            socketSource = socketSource.replace(/^\s*__tfbotCurrentPairingQRRef\s*=\s*ref;\s*\r?\n/gm, '');
-            socketSource = socketSource.replace(/buildPairingQRData\(\s*ref\s*,\s*noiseKeyB64\s*,\s*identityKeyB64\s*,\s*creds\.advSecretKey\s*,\s*browser\s*\)/g, 'buildPairingQRData(ref, noiseKeyB64, identityKeyB64, advB64, browser)');
-            if (socketSource.includes(legacySocketMarker) || socketSource.includes('__tfbotCurrentPairingQRRef') || socketSource.includes('failed to refresh companion pairing QR')) {
-                return { applied: false, reason: 'legacy_companion_refresh_patch_cleanup_verification_failed', file: path.basename(socketPath), issue: 'Baileys#2737' };
+        if (!socketSource.includes(socketMarker)) {
+            const legacyMarker = '__tfbotCompanionRegRefreshV78';
+            if (socketSource.includes(legacyMarker)) {
+                const legacyStart = socketSource.indexOf(`const ${legacyMarker} = true;`);
+                const legacyEndPattern = /ws\.on\(\s*(['"])CB:notification,type:companion_reg_refresh\1\s*,\s*__tfbotCompanionRefreshHandler\s*\)\s*;?/g;
+                legacyEndPattern.lastIndex = legacyStart;
+                const legacyEnd = legacyEndPattern.exec(socketSource);
+                if (legacyStart < 0 || !legacyEnd) return { applied: false, reason: 'legacy_companion_refresh_cleanup_failed', file: path.basename(socketPath), issue: 'Baileys#2737' };
+                let lineStart = socketSource.lastIndexOf('\n', legacyStart);
+                lineStart = lineStart < 0 ? 0 : lineStart + 1;
+                let lineEnd = socketSource.indexOf('\n', legacyEnd.index + legacyEnd[0].length);
+                lineEnd = lineEnd < 0 ? legacyEnd.index + legacyEnd[0].length : lineEnd + 1;
+                socketSource = socketSource.slice(0, lineStart) + socketSource.slice(lineEnd);
+                socketSource = socketSource.replace(/^\s*let __tfbotCurrentPairingQRRef;\s*\r?\n/gm, '');
+                socketSource = socketSource.replace(/^\s*__tfbotCurrentPairingQRRef\s*=\s*ref;\s*\r?\n/gm, '');
+                socketSource = socketSource.replace(/buildPairingQRData\(\s*ref\s*,\s*noiseKeyB64\s*,\s*identityKeyB64\s*,\s*creds\.advSecretKey\s*,\s*browser\s*\)/g, 'buildPairingQRData(ref, noiseKeyB64, identityKeyB64, advB64, browser)');
             }
-            fs.writeFileSync(socketPath, socketSource, 'utf8');
+
+            const pairHandlerPattern = /ws\.on\(\s*(['"])CB:iq,type:set,pair-device\1\s*,\s*async\s*\(/;
+            const pairHandlerMatch = pairHandlerPattern.exec(socketSource);
+            if (!pairHandlerMatch) return { applied: false, reason: 'pair_device_handler_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
+            const handlerSource = socketSource.slice(pairHandlerMatch.index);
+            const advPattern = /const\s+advB64\s*=\s*creds\.advSecretKey\s*;?/;
+            const advMatch = advPattern.exec(handlerSource);
+            if (!advMatch) return { applied: false, reason: 'pairing_adv_secret_declaration_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
+            const qrPattern = /const\s+qr\s*=\s*buildPairingQRData\(\s*ref\s*,\s*noiseKeyB64\s*,\s*identityKeyB64\s*,\s*advB64\s*,\s*browser\s*\)\s*;?/;
+            const qrMatch = qrPattern.exec(handlerSource);
+            if (!qrMatch) return { applied: false, reason: 'pairing_qr_builder_pattern_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
+
+            const childAccessorMatch = socketSource.match(/\b([A-Za-z_$][\w$]*)\.getBinaryNodeChild\s*\(/);
+            const childAccessor = childAccessorMatch ? `${childAccessorMatch[1]}.getBinaryNodeChild` : socketSource.includes('getBinaryNodeChild') ? 'getBinaryNodeChild' : '';
+            if (!childAccessor) return { applied: false, reason: 'binary_node_child_accessor_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
+
+            const namespacedRandom = socketSource.match(/\b([A-Za-z_$][\w$]*)\.randomBytes\s*\(/);
+            const randomBytesExpression = namespacedRandom ? `${namespacedRandom[1]}.randomBytes(32)` : /\brandomBytes\s*\(/.test(socketSource) ? 'randomBytes(32)' : '';
+            if (!randomBytesExpression) return { applied: false, reason: 'crypto_random_bytes_import_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
+
+            const outerInjection = `let __tfbotRefreshPairingQRV84 = null;\n\t\tws.on('CB:notification,type:companion_reg_refresh', node => {\n\t\t\ttry {\n\t\t\t\tconst hasRefreshNode = !!${childAccessor}(node, 'companion_reg_refresh') || !!${childAccessor}(node, 'pair-device-rotate-qr');\n\t\t\t\tif (!hasRefreshNode || creds.me || typeof __tfbotRefreshPairingQRV84 !== 'function') return;\n\t\t\t\tcreds.advSecretKey = ${randomBytesExpression}.toString('base64');\n\t\t\t\tev.emit('creds.update', { advSecretKey: creds.advSecretKey });\n\t\t\t\t__tfbotRefreshPairingQRV84();\n\t\t\t} catch (refreshError) {\n\t\t\t\tlogger.warn({ err: refreshError }, 'companion registration refresh failed');\n\t\t\t}\n\t\t});\n\t\t`;
+            socketSource = socketSource.slice(0, pairHandlerMatch.index) + outerInjection + socketSource.slice(pairHandlerMatch.index);
+
+            const updatedPairStart = socketSource.indexOf(pairHandlerMatch[0]) + pairHandlerMatch[0].length;
+            const updatedAdvMatch = advPattern.exec(socketSource.slice(updatedPairStart));
+            if (!updatedAdvMatch) return { applied: false, reason: 'pairing_adv_secret_declaration_lost', file: path.basename(socketPath), issue: 'Baileys#2737' };
+            const updatedAdvIndex = updatedPairStart + updatedAdvMatch.index;
+            const advEnd = updatedAdvIndex + updatedAdvMatch[0].length;
+            const currentRefInjection = `\n\t\t\tlet __tfbotCurrentPairingQRRefV84 = null;\n\t\t\t__tfbotRefreshPairingQRV84 = () => {\n\t\t\t\tif (!__tfbotCurrentPairingQRRefV84) return false;\n\t\t\t\tev.emit('connection.update', { qr: buildPairingQRData(__tfbotCurrentPairingQRRefV84, noiseKeyB64, identityKeyB64, creds.advSecretKey, browser) });\n\t\t\t\treturn true;\n\t\t\t};`;
+            socketSource = socketSource.slice(0, advEnd) + currentRefInjection + socketSource.slice(advEnd);
+
+            const updatedQrPattern = /const\s+qr\s*=\s*buildPairingQRData\(\s*ref\s*,\s*noiseKeyB64\s*,\s*identityKeyB64\s*,\s*advB64\s*,\s*browser\s*\)\s*;?/;
+            const updatedPairHandlerStart = socketSource.indexOf(pairHandlerMatch[0]);
+            updatedQrPattern.lastIndex = updatedPairHandlerStart;
+            const updatedQrMatch = updatedQrPattern.exec(socketSource);
+            if (!updatedQrMatch) return { applied: false, reason: 'pairing_qr_builder_recheck_failed', file: path.basename(socketPath), issue: 'Baileys#2737' };
+            const qrReplacement = `__tfbotCurrentPairingQRRefV84 = ref;\n\t\t\t\tconst qr = buildPairingQRData(ref, noiseKeyB64, identityKeyB64, creds.advSecretKey, browser);`;
+            socketSource = socketSource.slice(0, updatedQrMatch.index) + qrReplacement + socketSource.slice(updatedQrMatch.index + updatedQrMatch[0].length);
+
+            if (!socketSource.includes(socketMarker)) {
+                const insertionIndex = socketSource.indexOf('let __tfbotRefreshPairingQRV84 = null;');
+                if (insertionIndex < 0) return { applied: false, reason: 'companion_refresh_handler_verification_failed', file: path.basename(socketPath), issue: 'Baileys#2737' };
+                socketSource = socketSource.slice(0, insertionIndex) + `const ${socketMarker} = true;\n\t\t` + socketSource.slice(insertionIndex);
+            }
+            if (!socketSource.includes(socketMarker) || !socketSource.includes("CB:notification,type:companion_reg_refresh") || !socketSource.includes('__tfbotCurrentPairingQRRefV84') || !socketSource.includes('creds.advSecretKey, browser')) {
+                return { applied: false, reason: 'companion_refresh_patch_verification_failed', file: path.basename(socketPath), issue: 'Baileys#2737' };
+            }
             socketChanged = true;
         }
 
         const ackAlreadyApplied = receiveSource.includes(ackMarker) || /const\s+meId\s*=\s*authState\.creds\.me\s*&&\s*authState\.creds\.me\.id[\s\S]{0,500}node\.tag\s*===\s*['"]message['"][\s\S]{0,500}buildAckStanza\(\s*node\s*,\s*errorCode\s*,\s*meId\s*\)/.test(receiveSource);
         if (!ackAlreadyApplied) {
             const directAckPattern = /const\s+stanza\s*=\s*buildAckStanza\(\s*node\s*,\s*errorCode\s*,\s*authState\.creds\.me(?:!|\?)?\.id\s*\)\s*;?/;
-            const directAckMatch = directAckPattern.exec(receiveSource);
-            if (!directAckMatch) return { applied: false, reason: 'prelogin_ack_pattern_not_found', file: path.basename(receivePath), issue: 'Baileys#2765', legacySocketMutationRemoved: socketChanged };
+            if (!directAckPattern.test(receiveSource)) return { applied: false, reason: 'prelogin_ack_pattern_not_found', file: path.basename(receivePath), issue: 'Baileys#2765' };
             const usesBoom = /\bBoom\b/.test(receiveSource);
             const preloginError = usesBoom ? "new Boom('cannot acknowledge a message before creds.me is available')" : "new Error('cannot acknowledge a message before creds.me is available')";
             const ackReplacement = `const ${ackMarker} = true;\n\t\tconst meId = authState.creds.me && authState.creds.me.id;\n\t\tif (node.tag === 'message' && !meId) {\n\t\t\tthrow ${preloginError};\n\t\t}\n\t\tconst stanza = buildAckStanza(node, errorCode, meId);`;
             receiveSource = receiveSource.replace(directAckPattern, ackReplacement);
             if (!receiveSource.includes(ackMarker) || !/node\.tag\s*===\s*'message'\s*&&\s*!meId/.test(receiveSource) || !/buildAckStanza\(node,\s*errorCode,\s*meId\)/.test(receiveSource)) {
-                return { applied: false, reason: 'prelogin_ack_patch_verification_failed', file: path.basename(receivePath), issue: 'Baileys#2765', legacySocketMutationRemoved: socketChanged };
+                return { applied: false, reason: 'prelogin_ack_patch_verification_failed', file: path.basename(receivePath), issue: 'Baileys#2765' };
             }
-            fs.writeFileSync(receivePath, receiveSource, 'utf8');
             ackChanged = true;
         }
+
+        if (socketChanged) fs.writeFileSync(socketPath, socketSource, 'utf8');
+        if (ackChanged) fs.writeFileSync(receivePath, receiveSource, 'utf8');
         return {
-            applied: true,
+            applied: socketSource.includes(socketMarker) && (ackAlreadyApplied || ackChanged),
             alreadyApplied: !socketChanged && ackAlreadyApplied,
-            socket: { applied: socketChanged, file: path.basename(socketPath), issue: 'Baileys#2737', customHandlerInstalled: false, advSecretMutation: false, legacyMutationRemoved: socketChanged },
-            preloginAck: { applied: ackAlreadyApplied || ackChanged, file: path.basename(receivePath), issue: 'Baileys#2765' },
-            action: 'do_not_rotate_adv_secret_or_reuse_a_consumed_pairing_qr_reference; preserve_the_prelogin_ack_guard'
+            socket: { applied: socketSource.includes(socketMarker), file: path.basename(socketPath) },
+            preloginAck: { applied: ackAlreadyApplied || ackChanged, file: path.basename(receivePath) }
         };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180), issue: 'Baileys#2737/#2765' };
@@ -743,7 +790,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-01-r83';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-01-r84';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -2165,20 +2212,20 @@ function getSelfChatAddressPlan(originalDestinationJid, ownPhoneJid) {
     };
 }
 
-function getAuthenticatedSelfPhoneJid(sessionId, sock, credentials) {
-    const runtime = activeSessions.get(sessionId) || {};
+async function getAuthenticatedSelfPhoneJid(sessionId, sock, credentials) {
     const user = sock?.user || null;
     const ownLid = normalizeLidCacheKey(getAuthenticatedLid(user, credentials));
-    const ownerRecord = sessionOwnersCache.get(sessionId) || {};
-    const ownerLid = normalizeLidCacheKey(ownerRecord.OwnerLid || ownerRecord.ownerLid || '');
-    const ownerNumber = normalizePhoneNumber(ownerRecord.Number || ownerRecord.number || ownerRecord.PairingNumber || '');
-    const authenticatedNumber = getAuthenticatedPhoneNumber(user, credentials);
-    const runtimeNumber = normalizePhoneNumber(runtime.number || '');
-    const pairedOwnerNumber = ownLid && ownerLid === ownLid ? ownerNumber : '';
-    const profileNumber = normalizePhoneNumber(user?.phoneNumber || '');
-    const number = [authenticatedNumber, runtimeNumber, pairedOwnerNumber, profileNumber].find(value => /^\d{6,20}$/.test(String(value || '')));
-    if (number) return normalizePhoneCacheJid(`${number}@s.whatsapp.net`);
-    return normalizePhoneCacheJid(user?.id || credentials?.me?.id || '');
+    if (ownLid) {
+        try {
+            const livePhone = normalizePhoneCacheJid(await promiseWithTimeout(sock?.signalRepository?.lidMapping?.getPNForLID?.(ownLid), 1500, 'Self PN lookup'));
+            if (livePhone) {
+                rememberLidPhonePair(sessionId, ownLid, livePhone, 'signal_lid_mapping');
+                return livePhone;
+            }
+        } catch (error) {}
+    }
+    const number = getAuthenticatedPhoneNumber(user, credentials) || normalizePhoneNumber(user?.phoneNumber || '');
+    return /^\d{6,20}$/.test(String(number || '')) ? normalizePhoneCacheJid(`${number}@s.whatsapp.net`) : '';
 }
 
 function getMessageQueuePartitionKey(sessionId, jid, session) {
@@ -2271,7 +2318,9 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
     const expectedSessionId = sessionId;
     const expectedSession = activeSession;
     let actualSendFailure = false;
-    const originalDestinationJid = String(jid || '').trim();
+    const requestedDestinationJid = String(jid || '').trim();
+    const legacyPrivateMatch = requestedDestinationJid.match(/^(\+?\d{6,20})(?::\d+)?@c\.us$/i);
+    const originalDestinationJid = normalizePhoneCacheJid(requestedDestinationJid) || (legacyPrivateMatch ? `${normalizePhoneNumber(legacyPrivateMatch[1])}@s.whatsapp.net` : requestedDestinationJid);
     const queuePartitionKey = getMessageQueuePartitionKey(expectedSessionId, originalDestinationJid, expectedSession);
     return queueMessage(async () => {
         const currentSession = activeSessions.get(expectedSessionId);
@@ -2292,27 +2341,21 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         activeSession = currentSession;
         const outgoingContent = content;
         let ownLidJid = normalizeLidCacheKey(getAuthenticatedLid(sock.user || null, ownAuthCreds));
-        const ownerRecordForAddress = sessionOwnersCache.get(sessionId) || {};
-        const ownerRecordLid = normalizeLidCacheKey(ownerRecordForAddress.OwnerLid || ownerRecordForAddress.ownerLid || '');
-        const ownerRecordPhone = normalizePhoneNumber(ownerRecordForAddress.Number || ownerRecordForAddress.number || ownerRecordForAddress.PairingNumber || '');
-        const sessionPhone = normalizePhoneNumber(currentSession.number || '');
-        const authenticatedPhone = getAuthenticatedPhoneNumber(sock.user || null, ownAuthCreds);
-        const storedPhoneMatchesLid = !!(ownLidJid && ownerRecordLid === ownLidJid && /^\d{6,20}$/.test(ownerRecordPhone));
-        const ownPhoneNumber = authenticatedPhone || sessionPhone || (storedPhoneMatchesLid ? ownerRecordPhone : '');
-        let ownPhoneJid = ownPhoneNumber ? normalizePhoneCacheJid(`${ownPhoneNumber}@s.whatsapp.net`) : normalizePhoneCacheJid(sock.user?.phoneNumber || '');
-        if (!/@lid$/i.test(ownLidJid) && sessionId && ownPhoneJid) {
-            const ownLidResolution = await resolveLidForPhone(sessionId, sock, ownPhoneJid);
-            ownLidJid = normalizeLidCacheKey(ownLidResolution?.lid || '');
-        }
-        if (!ownPhoneJid && /@lid$/i.test(ownLidJid)) {
+        const authenticatedPhone = getAuthenticatedPhoneNumber(sock.user || null, ownAuthCreds) || normalizePhoneNumber(sock.user?.phoneNumber || '');
+        let ownPhoneJid = authenticatedPhone ? normalizePhoneCacheJid(`${authenticatedPhone}@s.whatsapp.net`) : '';
+        if (/@lid$/i.test(ownLidJid)) {
             try {
-                const ownPhoneResolution = await resolvePhoneForLid(sessionId, sock, ownLidJid);
-                const ownMappingRecord = lidPhoneResolutionCache.get(`${sessionId}:${ownLidJid}`);
-                const ownMappingFresh = !!(ownPhoneResolution?.phone && ownMappingRecord?.phone && Date.now() - Number(ownMappingRecord.updatedAt || 0) <= LID_PHONE_MAPPING_FRESH_MS);
-                if (ownMappingFresh) ownPhoneJid = normalizePhoneCacheJid(ownPhoneResolution.phone);
+                const liveOwnPhoneJid = normalizePhoneCacheJid(await promiseWithTimeout(sock.signalRepository?.lidMapping?.getPNForLID?.(ownLidJid), 1500, 'Self chat PN lookup'));
+                if (liveOwnPhoneJid) {
+                    ownPhoneJid = liveOwnPhoneJid;
+                    rememberLidPhonePair(sessionId, ownLidJid, liveOwnPhoneJid, 'signal_lid_mapping');
+                }
             } catch (ownMappingError) {
                 console.warn('[self-chat-phone-resolution-failed]', { sessionId, error: ownMappingError?.message || String(ownMappingError) });
             }
+        } else if (!ownLidJid && ownPhoneJid) {
+            const ownLidResolution = await resolveLidForPhone(sessionId, sock, ownPhoneJid);
+            ownLidJid = normalizeLidCacheKey(ownLidResolution?.lid || '');
         }
         let destinationPhoneJid = normalizePhoneCacheJid(originalDestinationJid);
         if (!destinationPhoneJid && sessionId && /@lid$/i.test(originalDestinationJid)) {
@@ -2390,7 +2433,8 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         });
         const sendTo = async targetJid => {
             const sendTargetJid = String(targetJid || '').trim();
-            if (/@(?:hosted\.)?lid$/i.test(sendTargetJid)) throw new Error('private_phone_jid_required');
+            const platformDestination = /@g\.us$/i.test(sendTargetJid) || /@newsletter$/i.test(sendTargetJid) || /@broadcast$/i.test(sendTargetJid);
+            if (!platformDestination && !/@s\.whatsapp\.net$/i.test(sendTargetJid)) throw new Error('private_phone_jid_required');
             if (sessionId && /@g\.us$/i.test(sendTargetJid)) {
                 await resetGroupSenderKeyMemoryBeforeSend(sessionId, sendTargetJid);
             }
@@ -6525,7 +6569,7 @@ const translations = {
     del3_delete_failed: "Le format du message sélectionné n’a pas pu être identifié. Aucune règle automatique n’a été modifiée.",
     del3_deleted_unclassified: "Le format du message sélectionné n’a pas pu être identifié. Aucune règle automatique n’a été modifiée.",
     del3_usage: "Dans un groupe, un administrateur peut répondre à n’importe quel message, quel que soit son auteur, avec del3 pour activer ou désactiver la suppression automatique des futurs messages de même format. Le message sélectionné est conservé et les messages du propriétaire du compte restent protégés. Le bot doit également être administrateur du groupe.",
-    vv_usage: "Réponds à une image, une vidéo, un audio, un document ou un sticker standard avec vv pour le renvoyer dans cette conversation. Les médias à vue unique ne sont pas pris en charge.", vv_media_required: "Le message sélectionné ne contient pas de média pris en charge.", vv_self_unavailable: "Le chat personnel de ce compte n’a pas pu être identifié.",
+    vv_usage: "Réponds à une image, une vidéo, un audio, un document ou un sticker avec vv pour le renvoyer dans cette conversation.", vv_media_required: "Le message sélectionné ne contient pas de média pris en charge.", vv_self_unavailable: "Le chat personnel de ce compte n’a pas pu être identifié.",
     del3_bot_admin_required: "Le bot doit être administrateur du groupe pour appliquer cette règle.",
     del_usage: "Réponds au message à supprimer avec del.",
     del2_usage: "Utilisation : del2 suivi d’une mention ou d’un numéro international. Tu peux également répondre au message du membre.",
@@ -6533,8 +6577,7 @@ const translations = {
     no_eligible_target: "Aucun membre correspondant et éligible n’a été trouvé dans ce groupe.",
     delete_failed: "La suppression n’a pas pu être effectuée. Vérifie les autorisations applicables et réessaie.",
     del_completed: "La demande de suppression a été traitée.",
-    vv2_usage: "Réponds à une image, une vidéo, un audio, un document ou un sticker standard avec vv2 pour le recevoir dans le chat personnel du compte connecté. Commande réservée au propriétaire du compte ; les médias à vue unique ne sont pas pris en charge.",
-    vv_view_once_not_supported: "Les médias à vue unique ne peuvent pas être transférés. Demande à l’expéditeur de partager une version standard.",
+    vv2_usage: "Réponds à une image, une vidéo, un audio, un document ou un sticker avec vv2 pour le recevoir dans Vous. Commande réservée au propriétaire.",
     vv2_media_required: "Le message sélectionné ne contient pas de média pris en charge.",
     pending_msg: "Message en cours de chargement.",
     msg_unloaded: "Contenu du message indisponible.",
@@ -6551,7 +6594,7 @@ const translations = {
     group_required: "Cette commande est disponible uniquement dans un groupe WhatsApp.",
     admin_required: "Cette action est réservée aux administrateurs du groupe ou au propriétaire du compte connecté.",
     command_error: "L’action n’a pas pu être terminée. Vérifie les informations et autorisations requises, puis réessaie.",
-info_text: "*IA & recherche*\\nai <question> — Assistant IA\\nimage <description> — Générer une image\\nchercher <question> — Recherche Web\\nlang <fr|en|es|ht> — Langue\\n\\n*Session*\\nmenu — Commandes\\ninfo — Aide\\nqrbot — Nouvelle session\\ncode <numéro> — Code d’association\\nqr <texte> — QR code\\nlien — Lien du groupe\\nsit — Plateformes\\nalive — Durée de session\\nping — Latence\\nurl — Lien du média\\nvv — Renvoyer un média standard\\nvv2 — Envoyer un média standard dans Vous (owner)\\n\\n*Groupe*\\ntagall / hidetag — Mentions\\nkick / add — Membres\\npromote / demote — Rôle administrateur\\nkickall / kickall2 — Retrait de membres\\nclose / open — Autoriser les messages\\nwelcome — Accueil\\nnolink / nolink2 — Filtre de liens\\ndel — Supprimer un message\\ndel2 — Suppression par membre\\ndel3 — Suppression par format"
+info_text: "*IA & recherche*\\nai <question> — Assistant IA\\nimage <description> — Générer une image\\nchercher <question> — Recherche Web\\nlang <fr|en|es|ht> — Langue\\n\\n*Session*\\nmenu — Commandes\\ninfo — Aide\\nqrbot — Nouvelle session\\ncode <numéro> — Code d’association\\nqr <texte> — QR code\\nlien — Lien du groupe\\nsit — Plateformes\\nalive — Durée de session\\nping — Latence\\nurl — Lien du média\\nvv — Renvoyer un média\\nvv2 — Envoyer un média dans Vous (owner)\\n\\n*Groupe*\\ntagall / hidetag — Mentions\\nkick / add — Membres\\npromote / demote — Rôle administrateur\\nkickall / kickall2 — Retrait de membres\\nclose / open — Autoriser les messages\\nwelcome — Accueil\\nnolink / nolink2 — Filtre de liens\\ndel — Supprimer un message\\ndel2 — Suppression par membre\\ndel3 — Suppression par format"
   },
   en: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "search",
@@ -6588,7 +6631,7 @@ info_text: "*IA & recherche*\\nai <question> — Assistant IA\\nimage <descripti
     del3_delete_failed: "The selected message format could not be identified. No automatic rule was changed.",
     del3_deleted_unclassified: "The selected message format could not be identified. No automatic rule was changed.",
     del3_usage: "In a group, an administrator can reply to any message, regardless of its sender, with del3 to enable or disable automatic deletion of future messages in the same format. The selected message is kept, and messages from the account owner are protected. The bot must also be a group administrator.",
-    vv_usage: "Reply to a regular image, video, audio, document, or sticker with vv to resend it in the current conversation. View-once media is not supported.", vv_media_required: "The selected message does not contain supported media.", vv_self_unavailable: "The connected account’s personal chat could not be identified.",
+    vv_usage: "Reply to an image, video, audio, document, or sticker with vv to resend it in this chat.", vv_media_required: "The selected message does not contain supported media.", vv_self_unavailable: "The connected account’s personal chat could not be identified.",
     del3_bot_admin_required: "The bot must be a group administrator to apply this rule.",
     del_usage: "Reply to the message you want to delete with del.",
     del2_usage: "Usage: del2 followed by a mention or international number. You can also reply to the member’s message.",
@@ -6596,8 +6639,7 @@ info_text: "*IA & recherche*\\nai <question> — Assistant IA\\nimage <descripti
     no_eligible_target: "No eligible group member matched the supplied target.",
     delete_failed: "The deletion could not be completed. Check the applicable permissions and try again.",
     del_completed: "The deletion request has been processed.",
-    vv2_usage: "Reply to a regular image, video, audio, document, or sticker with vv2 to receive it in the connected account’s personal chat. This command is restricted to the account owner; view-once media is not supported.",
-    vv_view_once_not_supported: "View-once media cannot be forwarded. Ask the sender to share a regular copy.",
+    vv2_usage: "Reply to an image, video, audio, document, or sticker with vv2 to receive it in You. This command is restricted to the account owner.",
     vv2_media_required: "The selected message does not contain supported media.",
     pending_msg: "Message is loading.",
     msg_unloaded: "Message content is unavailable.",
@@ -6614,7 +6656,7 @@ info_text: "*IA & recherche*\\nai <question> — Assistant IA\\nimage <descripti
     group_required: "This command is available only in a WhatsApp group.",
     admin_required: "This action is available to group administrators or the connected-account owner.",
     command_error: "The action could not be completed. Check the supplied information and required permissions, then try again.",
-info_text: "*AI & search*\\nai <question> — AI assistant\\nimage <description> — Generate an image\\nsearch <question> — Web search\\nlang <fr|en|es|ht> — Language\\n\\n*Session*\\nmenu — Commands\\ninfo — Help\\nqrbot — New session\\ncode <number> — Pairing code\\nqr <text> — QR code\\nlink — Group link\\nsit — Platforms\\nalive — Session uptime\\nping — Latency\\nurl — Media link\\nvv — Resend regular media\\nvv2 — Send regular media to You (owner)\\n\\n*Group*\\ntagall / hidetag — Mentions\\nkick / add — Members\\npromote / demote — Admin role\\nkickall / kickall2 — Remove members\\nclose / open — Message permissions\\nwelcome — Welcome messages\\nnolink / nolink2 — Link filter\\ndel — Delete a message\\ndel2 — Per-member deletion\\ndel3 — Delete by format"
+info_text: "*AI & search*\\nai <question> — AI assistant\\nimage <description> — Generate an image\\nsearch <question> — Web search\\nlang <fr|en|es|ht> — Language\\n\\n*Session*\\nmenu — Commands\\ninfo — Help\\nqrbot — New session\\ncode <number> — Pairing code\\nqr <text> — QR code\\nlink — Group link\\nsit — Platforms\\nalive — Session uptime\\nping — Latency\\nurl — Media link\\nvv — Resend media\\nvv2 — Send media to You (owner)\\n\\n*Group*\\ntagall / hidetag — Mentions\\nkick / add — Members\\npromote / demote — Admin role\\nkickall / kickall2 — Remove members\\nclose / open — Message permissions\\nwelcome — Welcome messages\\nnolink / nolink2 — Link filter\\ndel — Delete a message\\ndel2 — Per-member deletion\\ndel3 — Delete by format"
   },
   es: {
     cmd_ai: "ia", cmd_lang: "lang", cmd_imaj: "imagen", cmd_cheche: "buscar",
@@ -6651,7 +6693,7 @@ info_text: "*AI & search*\\nai <question> — AI assistant\\nimage <description>
     del3_delete_failed: "No se pudo identificar el formato del mensaje seleccionado. No se modificó ninguna regla automática.",
     del3_deleted_unclassified: "No se pudo identificar el formato del mensaje seleccionado. No se modificó ninguna regla automática.",
     del3_usage: "En un grupo, un administrador puede responder a cualquier mensaje, sin importar quién lo haya enviado, con del3 para activar o desactivar la eliminación automática de futuros mensajes del mismo formato. El mensaje seleccionado se conserva y los mensajes del propietario de la cuenta permanecen protegidos. El bot también debe ser administrador del grupo.",
-    vv_usage: "Responde a una imagen, vídeo, audio, documento o sticker normal con vv para reenviarlo en esta conversación. Los archivos de visualización única no son compatibles.", vv_media_required: "El mensaje seleccionado no contiene contenido multimedia compatible.", vv_self_unavailable: "No se pudo identificar el chat personal de la cuenta conectada.",
+    vv_usage: "Responde a una imagen, vídeo, audio, documento o sticker con vv para reenviarlo en este chat.", vv_media_required: "El mensaje seleccionado no contiene contenido multimedia compatible.", vv_self_unavailable: "No se pudo identificar el chat personal de la cuenta conectada.",
     del3_bot_admin_required: "El bot debe ser administrador del grupo para aplicar esta regla.",
     del_usage: "Responde al mensaje que deseas eliminar con del.",
     del2_usage: "Uso: del2 seguido de una mención o un número internacional. También puedes responder al mensaje del miembro.",
@@ -6659,8 +6701,7 @@ info_text: "*AI & search*\\nai <question> — AI assistant\\nimage <description>
     no_eligible_target: "No se encontró ningún miembro que cumpla los requisitos para esta acción.",
     delete_failed: "No se pudo completar la eliminación. Comprueba los permisos correspondientes e inténtalo de nuevo.",
     del_completed: "La solicitud de eliminación se ha procesado.",
-    vv2_usage: "Responde a una imagen, vídeo, audio, documento o sticker normal con vv2 para recibirlo en el chat personal de la cuenta conectada. Este comando está reservado al propietario de la cuenta; los archivos de visualización única no son compatibles.",
-    vv_view_once_not_supported: "El contenido de visualización única no se puede reenviar. Pide al remitente que comparta una versión normal.",
+    vv2_usage: "Responde a una imagen, vídeo, audio, documento o sticker con vv2 para recibirlo en Tú. Este comando está reservado al propietario.",
     vv2_media_required: "El mensaje seleccionado no contiene contenido multimedia compatible.",
     pending_msg: "El mensaje se está cargando.",
     msg_unloaded: "El contenido del mensaje no está disponible.",
@@ -6677,7 +6718,7 @@ info_text: "*AI & search*\\nai <question> — AI assistant\\nimage <description>
     group_required: "Este comando solo está disponible en grupos de WhatsApp.",
     admin_required: "Esta acción está disponible para los administradores del grupo o el propietario de la cuenta conectada.",
     command_error: "No se pudo completar la acción. Comprueba la información y los permisos necesarios e inténtalo de nuevo.",
-info_text: "*IA y búsqueda*\\nia <pregunta> — Asistente IA\\nimagen <descripción> — Crear imagen\\nbuscar <pregunta> — Buscar en la Web\\nlang <fr|en|es|ht> — Idioma\\n\\n*Sesión*\\nmenú — Comandos\\ninfo — Ayuda\\nqrbot — Nueva sesión\\ncódigo <número> — Código de vinculación\\nqr <texto> — Código QR\\nenlace — Enlace del grupo\\nsit — Plataformas\\nalive — Tiempo de sesión\\nping — Latencia\\nurl — Enlace multimedia\\nvv — Reenviar medio normal\\nvv2 — Enviar medio normal a Tú (propietario)\\n\\n*Grupo*\\netiquetartodo / hidetag — Menciones\\nexpulsar / añadir — Miembros\\npromover / degradar — Rol de administrador\\nborrartodo / borrartodo2 — Retirar miembros\\ncerrar / abrir — Permisos de mensajes\\nbienvenida — Mensajes de bienvenida\\nsinenlace / sinenlace2 — Filtro de enlaces\\ndel — Eliminar un mensaje\\ndel2 — Eliminación por miembro\\ndel3 — Eliminación por formato"
+info_text: "*IA y búsqueda*\\nia <pregunta> — Asistente IA\\nimagen <descripción> — Crear imagen\\nbuscar <pregunta> — Buscar en la Web\\nlang <fr|en|es|ht> — Idioma\\n\\n*Sesión*\\nmenú — Comandos\\ninfo — Ayuda\\nqrbot — Nueva sesión\\ncódigo <número> — Código de vinculación\\nqr <texto> — Código QR\\nenlace — Enlace del grupo\\nsit — Plataformas\\nalive — Tiempo de sesión\\nping — Latencia\\nurl — Enlace multimedia\\nvv — Reenviar medio\\nvv2 — Enviar medio a Tú (propietario)\\n\\n*Grupo*\\netiquetartodo / hidetag — Menciones\\nexpulsar / añadir — Miembros\\npromover / degradar — Rol de administrador\\nborrartodo / borrartodo2 — Retirar miembros\\ncerrar / abrir — Permisos de mensajes\\nbienvenida — Mensajes de bienvenida\\nsinenlace / sinenlace2 — Filtro de enlaces\\ndel — Eliminar un mensaje\\ndel2 — Eliminación por miembro\\ndel3 — Eliminación por formato"
   },
   ht: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "imaj", cmd_cheche: "cheche",
@@ -6714,7 +6755,7 @@ info_text: "*IA y búsqueda*\\nia <pregunta> — Asistente IA\\nimagen <descripc
     del3_delete_failed: "Yo pa t kapab idantifye fòma mesaj ou chwazi a. Okenn règ otomatik pa chanje.",
     del3_deleted_unclassified: "Yo pa t kapab idantifye fòma mesaj ou chwazi a. Okenn règ otomatik pa chanje.",
     del3_usage: "Nan yon gwoup, yon administratè ka reponn sou nenpòt mesaj, kèlkeswa moun ki voye li, ak del3 pou aktive oswa dezaktive efasman otomatik pwochen mesaj ki gen menm fòma a. Mesaj ou chwazi a rete nan konvèsasyon an, epi mesaj pwopriyetè kont lan pwoteje. Bot la dwe administratè gwoup la tou.",
-    vv_usage: "Reponn sou yon imaj, videyo, odyo, dokiman oswa sticker nòmal ak vv pou voye li ankò nan konvèsasyon sa a. Medya ki parèt yon sèl fwa pa sipòte.", vv_media_required: "Mesaj ou chwazi a pa gen yon medya ki sipòte.", vv_self_unavailable: "Li pa posib idantifye chat pèsonèl kont ki konekte a.",
+    vv_usage: "Reponn sou yon imaj, videyo, odyo, dokiman oswa sticker ak vv pou voye li ankò nan chat sa a.", vv_media_required: "Mesaj ou chwazi a pa gen yon medya ki sipòte.", vv_self_unavailable: "Li pa posib idantifye chat pèsonèl kont ki konekte a.",
     del3_bot_admin_required: "Bot la dwe administratè gwoup la pou aplike règ sa a.",
     del_usage: "Reponn sou mesaj ou vle efase a ak del.",
     del2_usage: "Itilizasyon : del2 epi mete yon mansyon oswa yon nimewo entènasyonal. Ou kapab reponn tou sou mesaj manm nan.",
@@ -6722,8 +6763,7 @@ info_text: "*IA y búsqueda*\\nia <pregunta> — Asistente IA\\nimagen <descripc
     no_eligible_target: "Pa gen manm ki kalifye pou aksyon sa a nan gwoup la.",
     delete_failed: "Efasman an pa t kapab fini. Verifye otorizasyon ki aplikab yo epi eseye ankò.",
     del_completed: "Demann efasman an trete.",
-    vv2_usage: "Reponn sou yon imaj, videyo, odyo, dokiman oswa sticker nòmal ak vv2 pou resevwa li nan chat pèsonèl kont ki konekte a. Se pwopriyetè kont lan sèlman ki ka itilize kòmand sa a; medya ki parèt yon sèl fwa pa sipòte.",
-    vv_view_once_not_supported: "Medya ki ka wè yon sèl fwa pa ka voye ankò. Mande moun ki voye li a pou pataje yon vèsyon nòmal.",
+    vv2_usage: "Reponn sou yon imaj, videyo, odyo, dokiman oswa sticker ak vv2 pou resevwa li nan Ou. Se pwopriyetè kont lan sèlman ki ka itilize kòmand sa a.",
     vv2_media_required: "Mesaj ou chwazi a pa gen yon medya ki sipòte.",
     pending_msg: "Mesaj la ap chaje.",
     msg_unloaded: "Kontni mesaj la pa disponib.",
@@ -6740,7 +6780,7 @@ info_text: "*IA y búsqueda*\\nia <pregunta> — Asistente IA\\nimagen <descripc
     group_required: "Kòmand sa a disponib sèlman nan yon gwoup WhatsApp.",
     admin_required: "Aksyon sa a disponib pou administratè gwoup la oswa pwopriyetè kont ki konekte a.",
     command_error: "Aksyon an pa t kapab fini. Verifye enfòmasyon yo ak otorizasyon ki nesesè yo, epi eseye ankò.",
-info_text: "*IA ak rechèch*\\nai <kesyon> — Asistan IA\\nimaj <deskripsyon> — Kreye imaj\\ncheche <kesyon> — Rechèch sou entènèt\\nlang <fr|en|es|ht> — Lang\\n\\n*Sesyon*\\nmeni — Kòmand yo\\ninfo — Èd\\nqrbot — Nouvo sesyon\\nkòd <nimewo> — Kòd koneksyon\\nqr <tèks> — QR code\\nlyen — Lyen gwoup\\nsit — Platfòm\\nalive — Dire sesyon\\nping — Latansi\\nurl — Lyen medya\\nvv — Voye medya nòmal ankò\\nvv2 — Voye medya nòmal nan Ou (pwopriyetè)\\n\\n*Gwoup*\\ntout / hidetag — Mansyon\\nkick / add — Manm\\npromote / demote — Dwa administratè\\nsiptout / siptout2 — Retire manm\\nfèmen / ouvri — Pèmisyon mesaj\\nbyenveni — Mesaj akeyi\\nnolyen / nolyen2 — Filtè lyen\\ndel — Efase yon mesaj\\ndel2 — Efase pa manm\\ndel3 — Efase selon fòma"
+info_text: "*IA ak rechèch*\\nai <kesyon> — Asistan IA\\nimaj <deskripsyon> — Kreye imaj\\ncheche <kesyon> — Rechèch sou entènèt\\nlang <fr|en|es|ht> — Lang\\n\\n*Sesyon*\\nmeni — Kòmand yo\\ninfo — Èd\\nqrbot — Nouvo sesyon\\nkòd <nimewo> — Kòd koneksyon\\nqr <tèks> — QR code\\nlyen — Lyen gwoup\\nsit — Platfòm\\nalive — Dire sesyon\\nping — Latansi\\nurl — Lyen medya\\nvv — Voye medya ankò\\nvv2 — Voye medya nan Ou (pwopriyetè)\\n\\n*Gwoup*\\ntout / hidetag — Mansyon\\nkick / add — Manm\\npromote / demote — Dwa administratè\\nsiptout / siptout2 — Retire manm\\nfèmen / ouvri — Pèmisyon mesaj\\nbyenveni — Mesaj akeyi\\nnolyen / nolyen2 — Filtè lyen\\ndel — Efase yon mesaj\\ndel2 — Efase pa manm\\ndel3 — Efase selon fòma"
   }
 };
 
@@ -6837,7 +6877,7 @@ app.get('/sitemap.xml', (req, res) => res.sendFile(path.join(__dirname, 'sitemap
 app.get('/manifest.json', (req, res) => res.sendFile(path.join(__dirname, 'manifest.json')));
 app.get('/sw.js', (req, res) => res.sendFile(path.join(__dirname, 'sw.js')));
 app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s Us Adam D’H7"));
-app.get('/ok', (req, res) => res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Baileys-Companion-Reg-Refresh', baileysCompanionRegRefreshPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Retry-Deduplication', baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Own-LID-Retry-Addressing', baileysOwnLidRetryAddressingPatchStatus.applied ? 'applied' : 'not-applied').send('ok'));
+app.get('/ok', (req, res) => res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Baileys-Companion-Reg-Refresh', baileysCompanionRegRefreshPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-PN-Decryption', baileysLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Retry-Deduplication', baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Own-LID-Retry-Addressing', baileysOwnLidRetryAddressingPatchStatus.applied ? 'applied' : 'not-applied').send('ok'));
 
 
 const handleTFSlugRequest = (req, res) => {
@@ -9314,7 +9354,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         const getBotIdentityAliases = () => {
             const authenticatedPhone = getAuthenticatedPhoneNumber(sock.user || null, state.creds);
             const authenticatedLid = getAuthenticatedLid(sock.user || null, state.creds);
-            const storedNumber = normalizePhoneNumber(activeSessions.get(sessionId)?.number || '');
             return [...new Set([
                 sock.user?.id,
                 sock.user?.lid,
@@ -9322,8 +9361,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 state.creds?.me?.id,
                 state.creds?.me?.lid,
                 authenticatedPhone ? `${authenticatedPhone}@s.whatsapp.net` : '',
-                authenticatedLid,
-                storedNumber ? `${storedNumber}@s.whatsapp.net` : ''
+                authenticatedLid
             ].filter(Boolean).map(normalizeActionJid).filter(Boolean))];
         };
 
@@ -9341,13 +9379,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const ownLid = getAuthenticatedLid(sock.user || null, state.creds);
                 if (ownLid) {
                     try {
-                        const mappedPhone = normalizePhoneCacheJid(await sock.signalRepository?.lidMapping?.getPNForLID?.(ownLid));
+                        const mappedPhone = normalizePhoneCacheJid(await promiseWithTimeout(sock.signalRepository?.lidMapping?.getPNForLID?.(ownLid), 1500, 'Group bot PN lookup'));
                         if (mappedPhone && !botIdentities.includes(mappedPhone)) botIdentities = [...botIdentities, mappedPhone];
                     } catch (mappingError) {
                         console.warn('[del3-own-lid-phone-resolution-failed]', { sessionId, group: normalizedGroup, error: mappingError?.message || String(mappingError) });
                     }
-                    const rememberedPhone = normalizePhoneCacheJid(getRememberedPhoneForLid(sessionId, ownLid));
-                    if (rememberedPhone && !botIdentities.includes(rememberedPhone)) botIdentities = [...botIdentities, rememberedPhone];
                 }
                 const findBotParticipant = currentMetadata => Array.isArray(currentMetadata?.participants)
                     ? currentMetadata.participants.find(participant => participantMatchesIdentities(participant, botIdentities)) || null
@@ -9362,14 +9398,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         console.warn('[del3-bot-admin-refresh-failed]', { sessionId, group: normalizedGroup, error: refreshError?.message || String(refreshError) });
                     }
                 }
-                const ownerAliases = [metadata?.owner, metadata?.ownerPn].filter(Boolean).map(normalizeActionJid).filter(Boolean);
-                const botIsGroupOwner = ownerAliases.some(alias => botIdentities.includes(alias));
-                const allowed = botIsGroupOwner || (!!botParticipant && isAdminParticipantForPolicy(botParticipant));
+                const allowed = !!botParticipant && isAdminParticipantForPolicy(botParticipant);
                 console.info('[del3-bot-admin-check]', {
                     sessionId,
                     group: normalizedGroup,
                     foundBotParticipant: !!botParticipant,
-                    botIsGroupOwner,
                     isAdmin: allowed,
                     participantRole: botParticipant?.admin ?? botParticipant?.role ?? null,
                     metadataParticipants: Array.isArray(metadata?.participants) ? metadata.participants.length : 0,
@@ -11387,65 +11420,50 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, internalCommand === 'vv2' ? (t.cmd_vv2 || 'vv2') : t.cmd_vv, internalCommand === 'vv2' ? (t.vv2_usage || t.vv_usage) : t.vv_usage, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            let quotedMediaSourceVO = quotedMessage && typeof quotedMessage === 'object' ? quotedMessage : null;
-                                            let mediaInfoVO = quotedMediaSourceVO ? extractWhatsAppResendMedia(quotedMediaSourceVO) : null;
-                                            let quotedMediaRecordVO = null;
-                                            if (!mediaInfoVO && quoted?.stanzaId) {
-                                                quotedMediaRecordVO = await findQuotedMessageForCommand(sessionId, from, String(quoted.stanzaId), true);
-                                                if (quotedMediaRecordVO?.message) {
-                                                    quotedMediaSourceVO = fixBuffers(quotedMediaRecordVO.message);
-                                                    mediaInfoVO = extractWhatsAppResendMedia(quotedMediaSourceVO);
-                                                }
+                                            let quotedSourceVO = quotedMessage && typeof quotedMessage === 'object' ? quotedMessage : null;
+                                            let quotedRecordVO = null;
+                                            if (!quotedSourceVO && quoted?.stanzaId) {
+                                                quotedRecordVO = await findQuotedMessageForCommand(sessionId, from, String(quoted.stanzaId), true);
+                                                if (quotedRecordVO?.message) quotedSourceVO = fixBuffers(quotedRecordVO.message);
                                             }
-                                            if (!mediaInfoVO && quotedMediaRecordVO?.messageFormat === 'view_once_media') {
-                                                await safeSendFormatted(sock, from, internalCommand === 'vv2' ? (t.cmd_vv2 || 'vv2') : t.cmd_vv, t.vv_view_once_not_supported || t.vv_media_required, pushName, true, activeHostName);
-                                                break;
+                                            if (quotedSourceVO?.message && typeof quotedSourceVO.message === 'object') quotedSourceVO = quotedSourceVO.message;
+                                            const mediaKeysVO = new Set(['imageMessage', 'videoMessage', 'ptvMessage', 'audioMessage', 'voiceMessage', 'documentMessage', 'stickerMessage', 'lottieStickerMessage']);
+                                            const wrapperKeysVO = new Set(['viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'ephemeralMessage', 'documentWithCaptionMessage', 'deviceSentMessage', 'editedMessage', 'associatedChildMessage']);
+                                            let voMsg = quotedSourceVO;
+                                            let voType = voMsg && typeof voMsg === 'object' ? Object.keys(voMsg).find(key => mediaKeysVO.has(key) || wrapperKeysVO.has(key)) || '' : '';
+                                            let unwrapCountVO = 0;
+                                            while (voType && wrapperKeysVO.has(voType) && unwrapCountVO++ < 12) {
+                                                const wrappedVO = voMsg[voType];
+                                                voMsg = wrappedVO?.message && typeof wrappedVO.message === 'object' ? wrappedVO.message : wrappedVO?.content && typeof wrappedVO.content === 'object' ? wrappedVO.content : wrappedVO;
+                                                voType = voMsg && typeof voMsg === 'object' ? Object.keys(voMsg).find(key => mediaKeysVO.has(key) || wrapperKeysVO.has(key)) || '' : '';
                                             }
-                                            if (!mediaInfoVO) {
+                                            const mediaVO = voType && mediaKeysVO.has(voType) ? voMsg?.[voType] : null;
+                                            if (!mediaVO) {
                                                 await safeSendFormatted(sock, from, internalCommand === 'vv2' ? (t.cmd_vv2 || 'vv2') : t.cmd_vv, internalCommand === 'vv2' ? (t.vv2_media_required || t.vv_media_required) : t.vv_media_required, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            if (mediaInfoVO.viewOnce === true) {
-                                                await safeSendFormatted(sock, from, internalCommand === 'vv2' ? (t.cmd_vv2 || 'vv2') : t.cmd_vv, t.vv_view_once_not_supported || t.vv_media_required, pushName, true, activeHostName);
-                                                break;
-                                            }
-                                            const streamVO = await downloadContentFromMessage(mediaInfoVO.payload, mediaInfoVO.downloadType);
+                                            const dlTypeVO = voType === 'documentMessage' ? 'document' : voType === 'voiceMessage' ? 'audio' : voType === 'ptvMessage' ? 'video' : voType.replace('Message', '').replace(/^lottieSticker$/, 'sticker').toLowerCase();
+                                            const streamVO = await downloadContentFromMessage(mediaVO, dlTypeVO);
                                             const chunksVO = [];
                                             for await (const chunk of streamVO) chunksVO.push(Buffer.from(chunk));
                                             const bufferVO = Buffer.concat(chunksVO);
                                             if (!bufferVO.length) throw new Error('quoted_media_download_empty');
-                                            const payloadVO = mediaInfoVO.payload;
-                                            const sendOptsVO = {};
-                                            if (mediaInfoVO.sendType === 'image') {
-                                                sendOptsVO.image = bufferVO;
-                                                if (payloadVO.caption) sendOptsVO.caption = payloadVO.caption;
-                                            } else if (mediaInfoVO.sendType === 'video') {
-                                                sendOptsVO.video = bufferVO;
-                                                if (payloadVO.caption) sendOptsVO.caption = payloadVO.caption;
-                                                if (payloadVO.gifPlayback) sendOptsVO.gifPlayback = true;
-                                            } else if (mediaInfoVO.sendType === 'audio') {
-                                                sendOptsVO.audio = bufferVO;
-                                                sendOptsVO.mimetype = payloadVO.mimetype || 'audio/ogg; codecs=opus';
-                                                sendOptsVO.ptt = mediaInfoVO.ptt === true || payloadVO.ptt === true;
-                                            } else if (mediaInfoVO.sendType === 'document') {
-                                                sendOptsVO.document = bufferVO;
-                                                sendOptsVO.mimetype = payloadVO.mimetype || 'application/octet-stream';
-                                                sendOptsVO.fileName = payloadVO.fileName || 'media.bin';
-                                                if (payloadVO.caption) sendOptsVO.caption = payloadVO.caption;
-                                            } else if (mediaInfoVO.sendType === 'sticker') {
-                                                sendOptsVO.sticker = bufferVO;
-                                            }
+                                            const sendOptsVO = { [dlTypeVO]: bufferVO };
+                                            if (mediaVO.caption) sendOptsVO.caption = mediaVO.caption;
+                                            if (mediaVO.mimetype && ['audio', 'document'].includes(dlTypeVO)) sendOptsVO.mimetype = mediaVO.mimetype;
+                                            if (mediaVO.fileName && dlTypeVO === 'document') sendOptsVO.fileName = mediaVO.fileName;
+                                            if ((voType === 'voiceMessage' || mediaVO.ptt === true) && dlTypeVO === 'audio') sendOptsVO.ptt = true;
+                                            if (mediaVO.gifPlayback && dlTypeVO === 'video') sendOptsVO.gifPlayback = true;
                                             let resendTargetVO = from;
                                             if (internalCommand === 'vv2') {
                                                 const ownerCredentialsVO = activeSessions.get(sessionId)?.authState?.creds || state.creds || null;
-                                                resendTargetVO = getAuthenticatedSelfPhoneJid(sessionId, sock, ownerCredentialsVO);
+                                                resendTargetVO = await getAuthenticatedSelfPhoneJid(sessionId, sock, ownerCredentialsVO);
                                                 if (!resendTargetVO || !/@s\.whatsapp\.net$/i.test(resendTargetVO)) {
                                                     await safeSendFormatted(sock, from, t.cmd_vv2 || 'vv2', t.vv_self_unavailable || t.command_error, pushName, true, activeHostName);
                                                     break;
                                                 }
                                             }
-                                            const resendResultVO = await queuedSendMessage(sock, resendTargetVO, sendOptsVO, {}, 180);
-                                            console.info('[quoted-media-resent]', { sessionId, command: internalCommand, sourceChat: from, destinationChat: resendTargetVO, mediaType: mediaInfoVO.type, sourceType: mediaInfoVO.sourceType, viewOnce: mediaInfoVO.viewOnce, responseMessageId: resendResultVO?.key?.id || null, ownerOnly: internalCommand === 'vv2' });
+                                            await queuedSendMessage(sock, resendTargetVO, sendOptsVO, {}, 180);
                                             break;
                                         case 'url':
                                             let mediaTarget = null;
