@@ -12,7 +12,7 @@
   "orientation": "portrait",
   "theme_color": "#000000",
   "background_color": "#000000",
-  "categories": ["personal", "bot"],
+  "categories": ["personal", "tfbot"],
   "prefer_related_applications": false,
   "icons": [
     {
