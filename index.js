@@ -3,8 +3,8 @@ const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(pr
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 7000)));
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r97-outgoing-retry-durable-self-chat-logs-phone';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r97')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+const TFBOT_CLUSTER_CODE_REVISION = 'r98-self-chat-retry-diagnostics-session-cleanup';
+const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r98')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
@@ -72,6 +72,7 @@ const path = require('path');
 const EventEmitter = require('events');
 const { AsyncLocalStorage } = require('async_hooks');
 const TFBOT_DIAGNOSTIC_PHONE = String(process.env.TFBOT_DIAGNOSTIC_PHONE || '18298617960').replace(/\D/g, '');
+const TFBOT_DIAGNOSTIC_SESSION_ID = String(process.env.TFBOT_DIAGNOSTIC_SESSION_ID || 'session_1793548714115_7qh53e').trim();
 const TFBOT_DIAGNOSTIC_LOG_PATH = path.join(__dirname, 'logs.txt');
 const TFBOT_DIAGNOSTIC_LOG_MAX_BYTES = Math.max(1048576, Math.min(16777216, Number(process.env.TFBOT_DIAGNOSTIC_LOG_MAX_BYTES || 8388608)));
 const tfbotOriginalConsole = { log: console.log.bind(console), info: console.info.bind(console), warn: console.warn.bind(console), error: console.error.bind(console), debug: console.debug.bind(console) };
@@ -81,6 +82,8 @@ const tfbotDiagnosticSerialize = value => {
 };
 function getTfbotDiagnosticSession() {
     try {
+        const preferredRuntime = TFBOT_DIAGNOSTIC_SESSION_ID ? activeSessions.get(TFBOT_DIAGNOSTIC_SESSION_ID) : null;
+        if (preferredRuntime) return { sessionId: TFBOT_DIAGNOSTIC_SESSION_ID, name: String(preferredRuntime?.sock?.user?.name || preferredRuntime?.sock?.user?.notify || preferredRuntime?.ownerName || 'Adam').slice(0, 80), phone: TFBOT_DIAGNOSTIC_PHONE };
         const matches = [...activeSessions.entries()].filter(([sessionId, runtime]) => {
             const credentials = runtime?.authState?.creds || null;
             const phone = normalizePhoneNumber(getAuthenticatedPhoneNumber(runtime?.sock?.user || null, credentials) || runtime?.number || runtime?.sock?.user?.phoneNumber || '');
@@ -115,7 +118,7 @@ for (const level of Object.keys(tfbotOriginalConsole)) {
             const target = getTfbotDiagnosticSession();
             const targetLog = !!target && (serialized.includes(target.sessionId) || serialized.includes(TFBOT_DIAGNOSTIC_PHONE));
             if (targetLog) {
-                const record = { name: target.name, date: new Date().toISOString(), level: level.toUpperCase(), event: String(args.find(value => typeof value === 'string') || 'runtime').slice(0, 180), content: sanitizeTfbotDiagnosticLog(serialized, target.sessionId) };
+                const record = { name: target.name, sessionId: target.sessionId, date: new Date().toISOString(), level: level.toUpperCase(), event: String(args.find(value => typeof value === 'string') || 'runtime').slice(0, 180), content: sanitizeTfbotDiagnosticLog(serialized, target.sessionId) };
                 const line = `${JSON.stringify(record)}\n`;
                 fs.appendFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, line, 'utf8');
                 try {
@@ -130,7 +133,7 @@ for (const level of Object.keys(tfbotOriginalConsole)) {
         tfbotOriginalConsole[level](...args);
     };
 }
-try { fs.writeFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, '', 'utf8'); } catch (error) {}
+try { fs.appendFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, `${JSON.stringify({ name: 'Adam', sessionId: TFBOT_DIAGNOSTIC_SESSION_ID || null, date: new Date().toISOString(), level: 'INFO', event: 'diagnostic-log-start', content: 'Journal de diagnostic démarré; les entrées précédentes sont conservées jusqu’à la rotation par taille.' })}\n`, 'utf8'); } catch (error) {}
 
 
 function applyBaileysLidPnDecryptRetryPatch() {
@@ -707,7 +710,7 @@ const baileysRetryResendDoubleEncryptionPatchStatus = applyBaileysRetryResendDou
 const baileysOwnLidRetryAddressingPatchStatus = applyBaileysOwnLidRetryAddressingPatch();
 const baileysMessageRetryManagerDeviceJidPatchStatus = applyBaileysMessageRetryManagerDeviceJidPatch();
 const baileysCompanionRegRefreshPatchStatus = applyBaileysCompanionRegRefreshPatch();
-console.info('[tfbot-local-diagnostics-ready]', { phone: TFBOT_DIAGNOSTIC_PHONE ? `[phone:${TFBOT_DIAGNOSTIC_PHONE.slice(-2).padStart(TFBOT_DIAGNOSTIC_PHONE.length, '*')}]` : null, file: 'logs.txt', storage: 'local_filesystem_only', publicRead: true });
+console.info('[tfbot-local-diagnostics-ready]', { phone: TFBOT_DIAGNOSTIC_PHONE ? `[phone:${TFBOT_DIAGNOSTIC_PHONE.slice(-2).padStart(TFBOT_DIAGNOSTIC_PHONE.length, '*')}]` : null, sessionId: TFBOT_DIAGNOSTIC_SESSION_ID || null, file: 'logs.txt', storage: 'local_filesystem_only', publicRead: false, access: 'admin-token' });
 console.info('[baileys-lid-pn-decrypt-retry-patch]', baileysLidPnDecryptPatchStatus);
 console.info('[baileys-self-chat-placeholder-resend-patch]', baileysSelfChatPlaceholderResendPatchStatus);
 console.info('[baileys-outgoing-retry-preflight-patch]', { ...baileysOutgoingRetryPreflightPatchStatus, action: baileysOutgoingRetryPreflightPatchStatus.applied ? 'preload_internal_retry_manager_and_persist_generated_full_message_before_network_relay' : 'leave_installed_baileys_source_unchanged' });
@@ -945,7 +948,7 @@ function createRenderPinoLogger(options = {}) {
                         console.info('[baileys-runtime-diagnostic]', { sessionId: recoverySessionId, component: options?.base?.component || 'baileys', ...parsed });
                     }
                     if (!isSignalDecryptionFailure(diagnosticArgs)) continue;
-                    console.warn('[baileys-signal-decryption-failure]', { sessionId: recoverySessionId || null, message: String(parsed?.msg || parsed?.message || '').slice(0, 220), remoteJid: parsed?.key?.remoteJid || parsed?.remoteJid || null, remoteJidAlt: parsed?.key?.remoteJidAlt || null, participant: parsed?.key?.participant || parsed?.participant || null, messageId: parsed?.key?.id || parsed?.messageId || null });
+                    console.warn('[baileys-signal-decryption-failure]', { sessionId: recoverySessionId || null, failureClass: classifyWhatsAppFailure(parsed), message: String(parsed?.msg || parsed?.message || '').slice(0, 500), remoteJid: parsed?.key?.remoteJid || parsed?.remoteJid || null, remoteJidAlt: parsed?.key?.remoteJidAlt || null, participant: parsed?.key?.participant || parsed?.participant || null, messageId: parsed?.key?.id || parsed?.messageId || null, errorName: parsed?.err?.name || parsed?.error?.name || parsed?.name || null });
                     if (recoverySessionId) scheduleSignalRecoveryFromLog(recoverySessionId, parsed);
                 }
                 callback();
@@ -957,7 +960,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-01-r96';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-01-r98';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -2085,7 +2088,7 @@ async function persistOutgoingRetryMessage(sessionId, jid, message, jidAliases =
         console.info('[message-retry-store-write-completed]', { sessionId, messageId, remoteJid, aliasCount: remoteJidAliases.length, durableWriteConcern: 'majority' });
         return true;
     } catch (error) {
-        console.warn('[message-retry-store-write-failed]', { sessionId, messageId, error: error?.message || String(error) });
+        console.warn('[message-retry-store-write-failed]', { sessionId, messageId, destinationType: getWhatsAppDestinationType(remoteJid), messageType: Object.keys(message.message || {}).join(',') || 'unknown', failureClass: classifyWhatsAppFailure(error), errorName: error?.name || error?.constructor?.name || null, error: String(error?.message || error).slice(0, 700) });
         return false;
     }
 }
@@ -2481,6 +2484,61 @@ async function reportTfbotWorkerSendFailure(sessionId, error) {
     }
 }
 
+function getWhatsAppDestinationType(jid) {
+    const value = String(jid || '').trim();
+    if (value === 'status@broadcast') return 'status';
+    if (/@g\.us$/i.test(value)) return 'group';
+    if (/@newsletter$/i.test(value)) return 'channel';
+    if (/@(?:hosted\.)?lid$/i.test(value)) return 'private_lid';
+    if (/@s\.whatsapp\.net$/i.test(value)) return 'private_pn';
+    return value ? 'other' : 'unknown';
+}
+
+function getOutgoingDiagnosticText(content) {
+    const source = content?.message && typeof content.message === 'object' ? content.message : content || {};
+    const candidates = [
+        source?.text,
+        source?.caption,
+        source?.conversation,
+        source?.extendedTextMessage?.text,
+        source?.imageMessage?.caption,
+        source?.videoMessage?.caption,
+        source?.documentMessage?.caption,
+        source?.documentWithCaptionMessage?.message?.documentMessage?.caption,
+        source?.templateMessage?.hydratedTemplate?.hydratedContentText,
+        source?.buttonsMessage?.contentText,
+        source?.listMessage?.description
+    ];
+    const selected = candidates.find(value => typeof value === 'string' && value.trim());
+    return selected ? String(selected).replace(/\u0000/g, '').slice(0, 1500) : '';
+}
+
+function classifyWhatsAppFailure(error) {
+    const value = getSignalLogText([error]);
+    if (/Bad MAC|SignalErrorBadMac|SignalErrorInvalidMessage|calculateMAC/i.test(value)) return 'bad_mac';
+    if (/Chain closed|Decrypted message with closed session|closed session/i.test(value)) return 'chain_closed';
+    if (/MessageCounterError|Key used already or never filled/i.test(value)) return 'message_counter_error';
+    if (/SessionError:\s*No sessions|No sessions|No session found to decrypt message/i.test(value)) return 'signal_session_missing';
+    if (/pre.?key|identity.?key|signed.?pre.?key/i.test(value)) return 'signal_key_state';
+    if (/timeout|timed out|ETIMEDOUT/i.test(value)) return 'timeout';
+    if (/socket|connection|ECONN|EPIPE|closed/i.test(value)) return 'transport';
+    return 'other';
+}
+
+async function sendPresenceUpdateWithDiagnostics(sock, sessionId, presence, jid, messageId = null) {
+    const destination = String(jid || '').trim();
+    const startedAt = Date.now();
+    console.info('[whatsapp-presence-update-requested]', { sessionId, messageId: messageId || null, presence, chatType: getWhatsAppDestinationType(destination), destinationJid: destination || null });
+    try {
+        await sock.sendPresenceUpdate(presence, destination);
+        console.info('[whatsapp-presence-update-completed]', { sessionId, messageId: messageId || null, presence, chatType: getWhatsAppDestinationType(destination), durationMs: Date.now() - startedAt, requestCompleted: true, peerDisplayNotGuaranteed: true });
+        return true;
+    } catch (error) {
+        console.warn('[whatsapp-presence-update-failed]', { sessionId, messageId: messageId || null, presence, chatType: getWhatsAppDestinationType(destination), durationMs: Date.now() - startedAt, errorName: error?.name || error?.constructor?.name || null, errorMessage: String(error?.message || error).slice(0, 500) });
+        return false;
+    }
+}
+
 async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180) {
     let sessionId = null;
     let activeSession = null;
@@ -2521,6 +2579,8 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         sessionId = expectedSessionId;
         activeSession = currentSession;
         const outgoingContent = content;
+        const outgoingDiagnosticText = getOutgoingDiagnosticText(outgoingContent);
+        const outgoingDiagnosticType = Object.keys(outgoingContent || {}).join(',') || 'unknown';
         let ownLidJid = normalizeLidCacheKey(getAuthenticatedLid(sock.user || null, ownAuthCreds));
         const authenticatedPhone = getAuthenticatedPhoneNumber(sock.user || null, ownAuthCreds) || normalizePhoneNumber(sock.user?.phoneNumber || '');
         let ownPhoneJid = authenticatedPhone ? normalizePhoneCacheJid(`${authenticatedPhone}@s.whatsapp.net`) : '';
@@ -2612,18 +2672,24 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             alternateDestinationResolution: alternateDestinationResolution || null,
             destinationType: destinationJid.endsWith('@g.us') ? 'group' : destinationJid.endsWith('@newsletter') ? 'channel' : destinationJid.endsWith('@s.whatsapp.net') ? 'private_pn' : destinationJid.endsWith('@lid') ? 'private_lid' : 'other'
         });
+        let sendAttempt = 0;
         const sendTo = async targetJid => {
             const sendTargetJid = String(targetJid || '').trim();
+            const attemptNumber = ++sendAttempt;
             const platformDestination = /@g\.us$/i.test(sendTargetJid) || /@newsletter$/i.test(sendTargetJid) || /@broadcast$/i.test(sendTargetJid);
             if (!platformDestination && !/@s\.whatsapp\.net$/i.test(sendTargetJid)) throw new Error('private_phone_jid_required');
             if (sessionId && /@g\.us$/i.test(sendTargetJid)) {
                 await resetGroupSenderKeyMemoryBeforeSend(sessionId, sendTargetJid);
             }
             const echoToken = rememberOutgoingTextEcho(sessionId, sendTargetJid, outgoingContent);
+            console.info('[whatsapp-send-attempt-start]', { sessionId, attempt: attemptNumber, destinationType: getWhatsAppDestinationType(sendTargetJid), isSelfChatDestination, messageType: outgoingDiagnosticType, messageText: outgoingDiagnosticText || null, messageTextLength: outgoingDiagnosticText.length });
             try {
-                return await sock.sendMessage(sendTargetJid, outgoingContent, options);
+                const sentResult = await sock.sendMessage(sendTargetJid, outgoingContent, options);
+                console.info('[whatsapp-send-attempt-accepted]', { sessionId, attempt: attemptNumber, destinationType: getWhatsAppDestinationType(sendTargetJid), responseMessageId: sentResult?.key?.id || null, responseChatType: getWhatsAppDestinationType(sentResult?.key?.remoteJid || sendTargetJid), messageText: outgoingDiagnosticText || null, acceptedBySendMessage: true });
+                return sentResult;
             } catch (error) {
                 actualSendFailure = true;
+                console.error('[whatsapp-send-attempt-failed]', { sessionId, attempt: attemptNumber, destinationType: getWhatsAppDestinationType(sendTargetJid), isSelfChatDestination, messageType: outgoingDiagnosticType, messageText: outgoingDiagnosticText || null, failureClass: classifyWhatsAppFailure(error), errorName: error?.name || error?.constructor?.name || null, errorMessage: String(error?.message || error).slice(0, 1000) });
                 if (echoToken) {
                     for (const echoKey of echoToken.keys || []) {
                         if (outgoingTextEchoCache.get(echoKey) === echoToken.createdAt) outgoingTextEchoCache.delete(echoKey);
@@ -2633,7 +2699,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             }
         };
         const sendStartedAt = Date.now();
-        console.info('[whatsapp-send-start]', { sessionId, destinationType: isSelfChatDestination ? 'self_chat_pn' : /@g\.us$/i.test(destinationJid) ? 'group' : 'private', messageType: Object.keys(outgoingContent || {}).join(',') || 'unknown', mediaBytes: ['image', 'video', 'audio', 'document', 'sticker'].reduce((total, key) => total + (Buffer.isBuffer(outgoingContent?.[key]) ? outgoingContent[key].length : 0), 0), queuePartition: queuePartitionKey });
+        console.info('[whatsapp-send-start]', { sessionId, destinationType: isSelfChatDestination ? 'self_chat_pn' : getWhatsAppDestinationType(destinationJid), originalDestinationType: getWhatsAppDestinationType(originalDestinationJid), destinationResolution, messageType: outgoingDiagnosticType, messageText: outgoingDiagnosticText || null, messageTextLength: outgoingDiagnosticText.length, messageTextHash: outgoingDiagnosticText ? shortLogHash(outgoingDiagnosticText) : null, mediaBytes: ['image', 'video', 'audio', 'document', 'sticker'].reduce((total, key) => total + (Buffer.isBuffer(outgoingContent?.[key]) ? outgoingContent[key].length : 0), 0), queuePartition: queuePartitionKey });
         let result;
         let sentDestinationJid = destinationJid;
         try {
@@ -2683,7 +2749,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                     }
                 }
                 if (!retryTargetJid) {
-                    console.error('[whatsapp-send-failed]', { sessionId, jid: destinationJid, originalJid: originalDestinationJid, destinationResolution, alternateDestinationResolution, messageType: Object.keys(outgoingContent || {}).join(','), error: failureError?.message || String(failureError) });
+                    console.error('[whatsapp-send-failed]', { sessionId, jid: destinationJid, originalJid: originalDestinationJid, destinationResolution, alternateDestinationResolution, isSelfChatDestination, messageType: outgoingDiagnosticType, messageText: outgoingDiagnosticText || null, failureClass: classifyWhatsAppFailure(failureError), errorName: failureError?.name || failureError?.constructor?.name || null, error: String(failureError?.message || failureError).slice(0, 1000) });
                     throw failureError;
                 }
                 if (transientSignalFailure && !isSelfChatDestination && !retryTargetJid.endsWith('@g.us') && !retryTargetJid.endsWith('@newsletter')) {
@@ -2701,9 +2767,12 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             originalDestinationJid,
             destinationResolution,
             destinationType: sentDestinationJid.endsWith('@g.us') ? 'group' : sentDestinationJid.endsWith('@newsletter') ? 'channel' : sentDestinationJid.endsWith('@s.whatsapp.net') ? 'private_pn' : sentDestinationJid.endsWith('@lid') ? 'private_lid' : 'other',
-            messageType: Object.keys(outgoingContent || {}).join(',') || 'unknown',
+            messageType: outgoingDiagnosticType,
+            messageText: outgoingDiagnosticText || null,
+            responseMessageText: getOutgoingDiagnosticText(result?.message || {}) || null,
             responseMessageId: result?.key?.id || null,
             responseChatJid: result?.key?.remoteJid || null,
+            responseAccepted: !!result?.key?.id,
             durationMs: Date.now() - sendStartedAt
         });
         if (sessionId && result?.key?.id) {
@@ -4998,12 +5067,10 @@ process.on('uncaughtException', (error) => {
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 app.get('/logs.txt', (req, res) => {
-    res.set('Cache-Control', 'no-store').type('text/plain');
+    res.set('Cache-Control', 'no-store, private').type('text/plain');
+    if (!isAuthorizedAdmin(req)) return res.status(401).type('text/plain').send('NON AUTORISE.');
     try { return res.send(fs.existsSync(TFBOT_DIAGNOSTIC_LOG_PATH) ? fs.readFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, 'utf8') : ''); }
     catch (error) { return res.status(500).send(''); }
-});
-app.get('/logs', (req, res) => {
-    res.set('Cache-Control', 'no-store').type('html').send(`<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"><meta name="color-scheme" content="dark"><title>Logs</title><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:#000;color:#fff;overflow:hidden;overscroll-behavior:none;touch-action:pan-y;-webkit-text-size-adjust:100%;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}body{display:flex;flex-direction:column}header{height:42px;min-height:42px;display:flex;align-items:center;gap:18px;padding:0 10px}button{appearance:none;border:0;background:transparent;color:#fff;padding:4px;display:inline-flex;align-items:center;justify-content:center}svg{width:22px;height:22px;stroke:#fff;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}#entries{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;white-space:pre-wrap;overflow-wrap:anywhere;padding:0 8px 12px;scrollbar-width:none}#entries::-webkit-scrollbar{display:none}.entry{padding:0 0 8px}.head{display:flex;align-items:center;gap:8px;min-height:24px;font-size:12px;font-weight:700}.head button{margin-left:auto}.content{font-size:11px;line-height:1.25;white-space:pre-wrap;overflow-wrap:anywhere}.empty{font-size:12px}</style></head><body><header><button id="copyAll" aria-label="Copier tous les logs"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button><button id="bottom" aria-label="Aller en bas"><svg viewBox="0 0 24 24"><path d="M12 3v15m-6-6 6 6 6-6M5 21h14"/></svg></button></header><main id="entries"><div class="empty">Chargement…</div></main><script>const entries=document.getElementById('entries');let raw='';const esc=value=>String(value??'');const copyIcon='<svg viewBox="0 0 24 24"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>';async function load(){try{const response=await fetch('/logs.txt?t='+Date.now(),{cache:'no-store'});if(!response.ok)throw Error('logs unavailable');const next=await response.text();if(next===raw)return;const wasBottom=entries.scrollHeight-entries.scrollTop-entries.clientHeight<60;raw=next;entries.replaceChildren();const lines=raw.split('\n').filter(Boolean);if(!lines.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='Aucun log pour ce numéro.';entries.append(empty);return}for(const line of lines){let item;try{item=JSON.parse(line)}catch(error){item={name:'Adam',date:'',level:'LOG',event:'runtime',content:line}}const block=document.createElement('section');block.className='entry';const head=document.createElement('div');head.className='head';const label=document.createElement('span');label.textContent=esc(item.name)+' ; '+esc(item.date)+' ; '+esc(item.level);const copy=document.createElement('button');copy.innerHTML=copyIcon;copy.setAttribute('aria-label','Copier ce log');copy.addEventListener('click',()=>navigator.clipboard?.writeText(line));head.append(label,copy);const content=document.createElement('div');content.className='content';content.textContent=esc(item.content||item.event||line);block.append(head,content);entries.append(block)}if(wasBottom)entries.scrollTop=entries.scrollHeight}catch(error){if(!raw)entries.textContent='Logs indisponibles.'}}document.getElementById('copyAll').addEventListener('click',()=>navigator.clipboard?.writeText(raw));document.getElementById('bottom').addEventListener('click',()=>entries.scrollTop=entries.scrollHeight);load();setInterval(load,2000);for(const eventName of ['gesturestart','gesturechange','gestureend'])document.addEventListener(eventName,event=>event.preventDefault(),{passive:false});document.addEventListener('wheel',event=>{if(event.ctrlKey)event.preventDefault()},{passive:false});document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&['+','=','-','0'].includes(String(event.key).toLowerCase()))event.preventDefault()})</script></body></html>`);
 });
 app.get('/dh7adam', async (req, res) => {
     const instanceKey = String(TFBOT_CLUSTER_INSTANCE_HOST || process.env.RENDER_EXTERNAL_HOSTNAME || 'local');
@@ -9068,7 +9135,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 if (outgoingMessageCache.size > 5000) outgoingMessageCache.delete(outgoingMessageCache.values().next().value);
                 outgoingRetryPreflightIds.set(`${sessionId}:${messageId}`, Date.now());
                 while (outgoingRetryPreflightIds.size > 5000) outgoingRetryPreflightIds.delete(outgoingRetryPreflightIds.keys().next().value);
-                console.info('[message-retry-preflight-start]', { sessionId, messageId, destinationType: isSelfChatMessage ? 'self_chat_pn' : /@g\.us$/i.test(remoteJid) ? 'group' : /@newsletter$/i.test(remoteJid) ? 'channel' : 'private', aliasCount: aliases.length, memoryCached: true, ownLidCached: !!(isSelfChatMessage && accountLid) });
+                    const preflightText = getOutgoingDiagnosticText(messageToPersist?.message || {});
+                console.info('[message-retry-preflight-start]', { sessionId, messageId, destinationType: isSelfChatMessage ? 'self_chat_pn' : getWhatsAppDestinationType(remoteJid), messageType: Object.keys(messageToPersist?.message || {}).join(',') || 'unknown', messageText: preflightText || null, messageTextHash: preflightText ? shortLogHash(preflightText) : null, aliasCount: aliases.length, memoryCached: true, ownLidCached: !!(isSelfChatMessage && accountLid), writeBeforeRelay: true });
                 if (!db) {
                     console.error('[message-retry-preflight-database-unavailable]', { sessionId, messageId, destinationType: isSelfChatMessage ? 'self_chat_pn' : 'other', memoryFallbackAvailable: true });
                     return;
@@ -9106,7 +9174,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     console.info('[message-retry-cache-miss]', { sessionId, messageId: key?.id || null, requestedChatJid: requestedChatJid || null, requestedFromMe: typeof key?.fromMe === 'boolean' ? key.fromMe : null, fromMeFieldMissing: key?.fromMe === undefined || key?.fromMe === null, databaseAvailable, repeatedRetryLogSuppressedForMs: 30000 });
                 };
                 const outgoingIdKnown = !!key?.id && (key?.fromMe === true || outgoingMessageCache.has(`${sessionId}:id:${String(key.id)}`) || isRecentOutgoingMessageId(sessionId, key.id));
-                console.info('[message-retry-lookup-start]', { sessionId, messageId: key?.id || null, requestedChatType: /@lid$/i.test(requestedChatJid) ? 'lid' : /@s\.whatsapp\.net$/i.test(requestedChatJid) ? 'pn' : /@g\.us$/i.test(requestedChatJid) ? 'group' : 'other', requestedFromMe: typeof key?.fromMe === 'boolean' ? key.fromMe : null, outgoingIdKnown });
+                console.info('[message-retry-lookup-start]', { sessionId, messageId: key?.id || null, requestedChatType: getWhatsAppDestinationType(requestedChatJid), requestedRemoteJidAlt: key?.remoteJidAlt || null, requestedParticipant: key?.participant || key?.participantAlt || key?.participantPn || key?.senderPn || null, requestedFromMe: typeof key?.fromMe === 'boolean' ? key.fromMe : null, outgoingIdKnown, lookupScope: 'same_session_first_then_verified_same_account' });
                 let exactRecentMessage = null;
                 for (let i = recentMsgsCache.length - 1; i >= 0; i--) {
                     const found = recentMsgsCache[i];
@@ -9424,7 +9492,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         fromMe: !!item?.key?.fromMe,
                         status: status ?? null,
                         errorName: error?.name || error?.constructor?.name || null,
-                        errorMessage: String(error?.message || '').replace(/[\r\n\t]+/g, ' ').slice(0, 180) || null
+                        failureClass: error ? classifyWhatsAppFailure(error) : null,
+                        errorMessage: String(error?.message || error || '').replace(/[\r\n\t]+/g, ' ').slice(0, 500) || null
                     });
                 }
                 if (item?.key?.id && update.message && typeof update.message === 'object') {
@@ -10453,6 +10522,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     : receivedParsedCommand
                         ? 'recognized_command'
                         : 'text_not_recognized_as_command';
+                const receivedFormat = getWhatsAppMessageFormat(m) || receivedType;
+                const receivedReadableText = String(receivedBody || '').trim();
+                const receivedContentState = receivedReadableText ? 'readable_text_or_caption' : Object.keys(receivedContent || {}).length ? 'structured_payload_without_extractable_text' : 'empty_or_placeholder_payload';
+                console.info('[message-content-state]', { sessionId, messageId: receivedId, chatType: getWhatsAppDestinationType(receivedChat), upsertType, format: receivedFormat, messageType: receivedType, messageKeys: Object.keys(m?.message || {}), contentState: receivedContentState, readableTextExtracted: !!receivedReadableText, messageText: receivedReadableText.slice(0, 1200) || null, noTextDoesNotProveSignalFailure: !receivedReadableText });
                 const receivedDiagnostic = {
                     sessionId,
                     connectedAccountJid: sock.user?.id || null,
@@ -10477,6 +10550,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     fromMe: !!m?.key?.fromMe,
                     pushName: String(m?.pushName || 'Inconnu').slice(0, 80),
                     messageType: receivedType,
+                    format: receivedFormat,
                     messageKeys: Object.keys(m?.message || {}),
                     messageStubType: m?.messageStubType ?? null,
                     messageStubParameters: Array.isArray(m?.messageStubParameters) ? m.messageStubParameters.slice(0, 5) : null,
@@ -11350,11 +11424,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 let isTyping = true;
                                 const typingInterval = setInterval(async () => {
                                     if (isTyping) {
-                                        try { await sock.sendPresenceUpdate('composing', from); } catch (e) {}
+                                        await sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', from, msgId);
                                     }
                                 }, 8000);
 
-                                try { await sock.sendPresenceUpdate('composing', from); } catch (e) {}
+                                await sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', from, msgId);
 
                                 const messageContentForContext = unwrapMessageContent(m.message);
                                 const quoted = getMessageContextInfo(m.message);
@@ -12526,7 +12600,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     if (timeoutId) clearTimeout(timeoutId);
                                     isTyping = false;
                                     clearInterval(typingInterval);
-                                    try { await sock.sendPresenceUpdate('paused', from); } catch (e) {}
+                                    await sendPresenceUpdateWithDiagnostics(sock, sessionId, 'paused', from, msgId);
                                 }
                             } catch (cmdError) {
                                 console.error('[command-handler]', { command: internalCommand, error: cmdError?.message || String(cmdError) });
@@ -12685,7 +12759,8 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
             ? 'synchronisation'
             : statusCandidate || 'synchronisation';
         const pairingStatus = ['pairing_expired', 'pairing_error', 'qr_disponible', 'synchronisation', 'synchronizing', 'initialisation', 'connecting', 'opening', 'pending', 'paused', 'pairing_starting', 'pairing'].includes(status);
-        const isPendingPairingCandidate = owner.pairingPending === true || pairingStatus || !runtimeSocketLive;
+        const isExplicitlyDisconnected = ['deconnecte', 'disconnected'].includes(status);
+        const isPendingPairingCandidate = !isExplicitlyDisconnected && (owner.pairingPending === true || pairingStatus);
         if (!owner.unconnectedSinceAt && !['deconnecte', 'disconnected'].includes(status)) {
             const unconnectedSinceAt = new Date(cleanupNow);
             await db.collection('session_owners').updateOne(
@@ -12720,13 +12795,15 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
         const credentialsRegistered = credsDoc?.creds?.registered === true;
         const credentialsHaveIdentity = !!(credsDoc?.creds?.me?.id || credsDoc?.creds?.me?.lid);
         const ownerHasAccountIdentity = hasPersistedWhatsAppAccountIdentity(owner);
-        const isUnregisteredOrphan = !runtimeSocketLive && !credentialsRegistered && !credentialsHaveIdentity && !ownerHasAccountIdentity;
-        const isDeadReauthRecord = isReauthExpired && !runtimeSocketLive && ((!runtime?.sock || runtimeSocketDefinitelyClosed) || isUnregisteredOrphan);
-        const isDeadDuplicateRecord = status === 'duplicate_account' && isUnregisteredOrphan && (!runtime?.sock || runtimeSocketDefinitelyClosed || !runtimeSocketLive);
-        if (!isDeadReauthRecord && !isDeadDuplicateRecord && (!sessionTimestamp || sessionAgeMs < sessionExpiryMs)) continue;
+        const isUnregisteredOrphan = !runtimeSocketLive && !runtimeIdentity && !credentialsRegistered && !credentialsHaveIdentity && !ownerHasAccountIdentity;
+        const noLiveSocketCanOwnSession = !runtime?.sock || runtimeSocketDefinitelyClosed;
+        const isDeadReauthRecord = isReauthExpired && isUnregisteredOrphan && noLiveSocketCanOwnSession;
+        const isDeadDuplicateRecord = status === 'duplicate_account' && isUnregisteredOrphan && noLiveSocketCanOwnSession;
+        const isDeadDisconnectedOrphan = isExplicitlyDisconnected && isUnregisteredOrphan && noLiveSocketCanOwnSession;
+        if (!isDeadReauthRecord && !isDeadDuplicateRecord && !isDeadDisconnectedOrphan && (!sessionTimestamp || sessionAgeMs < sessionExpiryMs)) continue;
         const isPendingPairingExpired = isPendingPairingCandidate && sessionAgeMs >= PAIRING_SESSION_TTL_MS;
         try {
-            const hasRecoverableAccountCredentials = credentialsRegistered || credentialsHaveIdentity || ownerHasAccountIdentity;
+            const hasRecoverableAccountCredentials = credentialsRegistered || credentialsHaveIdentity || !!runtimeIdentity || ownerHasAccountIdentity;
             if (hasRecoverableAccountCredentials && !isDeadReauthRecord) {
                 if ((!runtime || !runtime.sock || runtimeSocketDefinitelyClosed) && !reconnectTimers.has(staleSessionId) && !isReauthExpired && status !== 'duplicate_account' && !owner.duplicateAccountOf) {
                     scheduleSessionReconnect(staleSessionId, false, owner.format || owner.Format || 'pair');
@@ -12748,8 +12825,7 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
             }
             const isPendingPairingStatus = ['pairing_expired', 'pairing_error', 'qr_disponible', 'synchronisation', 'initialisation', 'pairing_starting', 'pairing'].includes(status);
             const shouldRemoveExpiredPairing = isPendingPairingExpired || (isPendingPairingStatus && sessionAgeMs >= PAIRING_SESSION_TTL_MS);
-            const isUnregisteredDisconnectedExpired = !credentialsRegistered && ['deconnecte', 'disconnected'].includes(status);
-            const removeExpiredUnconnectedSession = isDeadReauthRecord || isDeadDuplicateRecord || sessionAgeMs >= SESSION_UNCONNECTED_TTL_MS && !hasRecoverableAccountCredentials;
+            const removeExpiredUnconnectedSession = isDeadReauthRecord || isDeadDuplicateRecord || isDeadDisconnectedOrphan || sessionAgeMs >= SESSION_UNCONNECTED_TTL_MS && !hasRecoverableAccountCredentials;
             if (!removeExpiredUnconnectedSession) continue;
             const pendingReconnect = reconnectTimers.get(staleSessionId);
             if (pendingReconnect) {
@@ -12758,7 +12834,7 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
             }
             await deleteMongoSession(staleSessionId);
             staleRemoved++;
-            console.info('[session-expired-unconnected-removed]', { sessionId: staleSessionId, status, ageMs: sessionAgeMs, expiryMs: sessionExpiryMs, pendingPairingExpired: shouldRemoveExpiredPairing, credentialsRegistered, credentialsHaveIdentity, ownerHasAccountIdentity, associatedDataRemoved: true, mergedIntoSession: duplicateTarget || null });
+            console.info('[session-expired-unconnected-removed]', { sessionId: staleSessionId, status, cleanupReason: isDeadDuplicateRecord ? 'unregistered_duplicate_orphan' : isDeadDisconnectedOrphan ? 'unregistered_disconnected_orphan' : isDeadReauthRecord ? 'dead_reauth_record' : 'expired_unconnected_orphan', ageMs: sessionAgeMs, expiryMs: sessionExpiryMs, pendingPairingExpired: shouldRemoveExpiredPairing, credentialsRegistered, credentialsHaveIdentity, runtimeIdentityAvailable: !!runtimeIdentity, ownerHasAccountIdentity, socketExists: !!runtime?.sock, socketDefinitelyClosed: runtimeSocketDefinitelyClosed, associatedDataRemoved: true, mergedIntoSession: duplicateTarget || null });
         } catch (error) {
             console.warn('[session-expired-unconnected-removal-failed]', { sessionId: staleSessionId, status, error: error?.message || String(error) });
         }
