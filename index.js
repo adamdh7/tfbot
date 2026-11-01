@@ -3,8 +3,8 @@ const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(pr
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 7000)));
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(250, Math.min(1800, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 900)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r95-self-chat-signal-logs-viewonce-vv2';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r95')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+const TFBOT_CLUSTER_CODE_REVISION = 'r96-vv-vv2-viewonce-resend';
+const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r96')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
@@ -918,7 +918,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-01-r95';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-01-r96';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1984,7 +1984,7 @@ function persistQuotedMessageForCommands(sessionId, message, aliases = []) {
             ? message.messageTimestamp.toNumber()
             : Number(message.messageTimestamp || 0);
         const messageFormat = getWhatsAppMessageFormat(message);
-        const retainMediaPayload = mediaMessage && mediaInfo.viewOnce !== true && key.fromMe !== true;
+        const retainMediaPayload = mediaMessage && (mediaInfo.viewOnce === true || key.fromMe !== true);
         const record = {
             _id: `quoted:${sessionId}:${messageId}`,
             sessionId,
@@ -11965,17 +11965,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             }
                                             break;
                                         case 'vv':
-                                        case 'vv2':
-                                            const vv2AuthenticatedPhone = normalizePhoneCacheJid(authenticatedAccountNumber ? `${authenticatedAccountNumber}@s.whatsapp.net` : '');
-                                            const vv2OwnerAuthorized = isOwnerReal || !!(globalOwnerMatch || configuredOwnerMatch.matched || senderMatchesAuthenticatedAccount || senderMatchesOwnLid || privateChatMatchesOwnLid || !isGroup && vv2AuthenticatedPhone && normalizePhoneCacheJid(from) === vv2AuthenticatedPhone);
-                                            if (internalCommand === 'vv2' && !vv2OwnerAuthorized) {
-                                                console.warn('[vv2-owner-check-denied]', { sessionId, messageId: msgId, chatType: isGroup ? 'group' : 'private', chatJidHash: shortLogHash(from), senderHash: shortLogHash(sender || rawFrom), fromMe: isFromMe, senderNumberCandidates: senderNumbers.map(value => shortLogHash(value)), configuredOwnerMatch: configuredOwnerMatch.matched, globalOwnerMatch });
-                                                await safeSendFormatted(sock, from, t.cmd_vv2 || 'vv2', t.owner_required, pushName, true, activeHostName);
+                                        case 'vv2': {
+                                            const commandTitleVO = internalCommand === 'vv2' ? (t.cmd_vv2 || 'vv2') : (t.cmd_vv || 'vv');
+                                            if (internalCommand === 'vv2' && !isOwnerReal) {
+                                                console.warn('[vv2-owner-check-denied]', { sessionId, messageId: msgId, chatType: isGroup ? 'group' : 'private', chatJidHash: shortLogHash(from), senderHash: shortLogHash(sender || rawFrom), fromMe: isFromMe, configuredOwnerMatch: configuredOwnerMatch.matched, globalOwnerMatch });
+                                                await safeSendFormatted(sock, from, commandTitleVO, t.owner_required, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            if (internalCommand === 'vv2') console.info('[vv2-owner-check-accepted]', { sessionId, messageId: msgId, chatType: isGroup ? 'group' : 'private', chatJidHash: shortLogHash(from), fromMe: isFromMe, senderMatchesAuthenticatedAccount, senderMatchesOwnLid, privateChatMatchesOwnLid, configuredOwnerMatch: configuredOwnerMatch.matched, globalOwnerMatch, authenticatedSelfChatPnMatch: !!(vv2AuthenticatedPhone && normalizePhoneCacheJid(from) === vv2AuthenticatedPhone) });
                                             if (!quotedMessage && !quoted?.stanzaId) {
-                                                await safeSendFormatted(sock, from, internalCommand === 'vv2' ? (t.cmd_vv2 || 'vv2') : t.cmd_vv, internalCommand === 'vv2' ? (t.vv2_usage || t.vv_usage) : t.vv_usage, pushName, true, activeHostName);
+                                                await safeSendFormatted(sock, from, commandTitleVO, internalCommand === 'vv2' ? (t.vv2_usage || t.vv_usage) : t.vv_usage, pushName, true, activeHostName);
                                                 break;
                                             }
                                             let quotedSourceVO = quotedMessage && typeof quotedMessage === 'object' ? quotedMessage : null;
@@ -11984,41 +11982,27 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 quotedRecordVO = await findQuotedMessageForCommand(sessionId, from, String(quoted.stanzaId), true).catch(() => null);
                                                 if (!quotedSourceVO && quotedRecordVO?.message) quotedSourceVO = fixBuffers(quotedRecordVO.message);
                                             }
-                                            const mediaKeysVO = new Set(['imageMessage', 'videoMessage', 'ptvMessage', 'audioMessage', 'voiceMessage', 'documentMessage', 'stickerMessage', 'lottieStickerMessage']);
-                                            const wrapperKeysVO = new Set(['viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'ephemeralMessage', 'documentWithCaptionMessage', 'deviceSentMessage', 'editedMessage', 'associatedChildMessage']);
-                                            const inspectQuotedMediaVO = source => {
-                                                let current = source && typeof source === 'object' ? source : null;
-                                                let viewOnce = false;
-                                                const visited = new Set();
-                                                for (let depth = 0; current && depth < 18 && !visited.has(current); depth++) {
-                                                    visited.add(current);
-                                                    if (current.message && typeof current.message === 'object' && !Object.keys(current).some(key => mediaKeysVO.has(key) || wrapperKeysVO.has(key))) {
-                                                        current = current.message;
-                                                        continue;
-                                                    }
-                                                    const keys = Object.keys(current);
-                                                    const mediaKey = keys.find(key => mediaKeysVO.has(key));
-                                                    if (mediaKey) return { viewOnce: viewOnce || current[mediaKey]?.viewOnce === true || current[mediaKey]?.isViewOnce === true, type: mediaKey, media: current[mediaKey] };
-                                                    const wrapperKey = keys.find(key => wrapperKeysVO.has(key));
-                                                    if (!wrapperKey) break;
-                                                    if (/^viewOnceMessage/i.test(wrapperKey)) viewOnce = true;
-                                                    const wrapperValue = current[wrapperKey];
-                                                    current = wrapperValue?.message && typeof wrapperValue.message === 'object' ? wrapperValue.message : wrapperValue?.content && typeof wrapperValue.content === 'object' ? wrapperValue.content : null;
-                                                }
-                                                return { viewOnce, type: '', media: null };
-                                            };
-                                            let extractedVO = inspectQuotedMediaVO(quotedSourceVO);
-                                            if (!extractedVO.type && quotedRecordVO?.message) extractedVO = inspectQuotedMediaVO(fixBuffers(quotedRecordVO.message));
-                                            if (extractedVO.viewOnce) console.info('[quoted-view-once-media-extracted]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, mediaType: extractedVO.type, action: 'download_and_resend_original_media_payload' });
-                                            const voType = extractedVO.type;
-                                            const mediaVO = extractedVO.media;
-                                            if (!mediaVO) {
-                                                console.warn('[quoted-media-not-found]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, quotedMessageAvailable: !!quotedSourceVO, storedQuoteAvailable: !!quotedRecordVO?.message });
-                                                await safeSendFormatted(sock, from, internalCommand === 'vv2' ? (t.cmd_vv2 || 'vv2') : t.cmd_vv, internalCommand === 'vv2' ? (t.vv2_media_required || t.vv_media_required) : t.vv_media_required, pushName, true, activeHostName);
+                                            const mediaCandidatesVO = [];
+                                            if (quotedSourceVO) mediaCandidatesVO.push(quotedSourceVO);
+                                            if (quotedRecordVO?.message) mediaCandidatesVO.push(fixBuffers(quotedRecordVO.message));
+                                            let mediaInfoVO = null;
+                                            for (const candidateVO of mediaCandidatesVO) {
+                                                mediaInfoVO = extractWhatsAppResendMedia(candidateVO);
+                                                if (mediaInfoVO?.payload) break;
+                                            }
+                                            if (!mediaInfoVO?.payload) {
+                                                console.warn('[quoted-media-not-found]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, quotedMessageAvailable: !!quotedSourceVO, storedQuoteAvailable: !!quotedRecordVO?.message, storedQuoteFormat: quotedRecordVO?.messageFormat || null });
+                                                await safeSendFormatted(sock, from, commandTitleVO, internalCommand === 'vv2' ? (t.vv2_media_required || t.vv_media_required) : t.vv_media_required, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            const dlTypeVO = voType === 'documentMessage' ? 'document' : voType === 'voiceMessage' ? 'audio' : voType === 'ptvMessage' ? 'video' : voType.replace('Message', '').replace(/^lottieSticker$/, 'sticker').toLowerCase();
-                                            console.info('[quoted-media-download-start]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, mediaType: voType, downloadType: dlTypeVO, source: quotedRecordVO?.source || 'quoted_context' });
+                                            const dlTypeVO = mediaInfoVO.downloadType;
+                                            const sendTypeVO = mediaInfoVO.sendType;
+                                            if (!['image', 'video', 'audio', 'document', 'sticker'].includes(dlTypeVO) || !['image', 'video', 'audio', 'document', 'sticker'].includes(sendTypeVO)) {
+                                                await safeSendFormatted(sock, from, commandTitleVO, internalCommand === 'vv2' ? (t.vv2_media_required || t.vv_media_required) : t.vv_media_required, pushName, true, activeHostName);
+                                                break;
+                                            }
+                                            const mediaVO = mediaInfoVO.payload;
+                                            console.info('[quoted-media-download-start]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, mediaType: mediaInfoVO.sourceType, downloadType: dlTypeVO, viewOnce: mediaInfoVO.viewOnce === true, source: quotedRecordVO?.source || 'quoted_context' });
                                             let bufferVO;
                                             try {
                                                 const streamVO = await downloadContentFromMessage(mediaVO, dlTypeVO);
@@ -12026,35 +12010,43 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 for await (const chunk of streamVO) chunksVO.push(Buffer.from(chunk));
                                                 bufferVO = Buffer.concat(chunksVO);
                                             } catch (downloadErrorVO) {
-                                                console.error('[quoted-media-download-failed]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, mediaType: voType, errorName: downloadErrorVO?.name || 'Error', error: String(downloadErrorVO?.message || downloadErrorVO).slice(0, 300) });
-                                                throw downloadErrorVO;
+                                                console.error('[quoted-media-download-failed]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, mediaType: mediaInfoVO.sourceType, viewOnce: mediaInfoVO.viewOnce === true, errorName: downloadErrorVO?.name || 'Error', error: String(downloadErrorVO?.message || downloadErrorVO).slice(0, 300) });
+                                                await safeSendActionError(sock, from, commandTitleVO, downloadErrorVO, messageLang, pushName, m.messageTimestamp);
+                                                break;
                                             }
-                                            if (!bufferVO?.length) throw new Error('quoted_media_download_empty');
-                                            const sendOptsVO = { [dlTypeVO]: bufferVO };
+                                            if (!Buffer.isBuffer(bufferVO) || !bufferVO.length) {
+                                                const emptyDownloadErrorVO = new Error('quoted_media_download_empty');
+                                                console.warn('[quoted-media-download-empty]', { sessionId, messageId: msgId, command: internalCommand, mediaType: mediaInfoVO.sourceType, viewOnce: mediaInfoVO.viewOnce === true });
+                                                await safeSendActionError(sock, from, commandTitleVO, emptyDownloadErrorVO, messageLang, pushName, m.messageTimestamp);
+                                                break;
+                                            }
+                                            const sendOptsVO = { [sendTypeVO]: bufferVO };
                                             if (mediaVO.caption) sendOptsVO.caption = mediaVO.caption;
-                                            if (mediaVO.mimetype && ['audio', 'document'].includes(dlTypeVO)) sendOptsVO.mimetype = mediaVO.mimetype;
-                                            if (mediaVO.fileName && dlTypeVO === 'document') sendOptsVO.fileName = mediaVO.fileName;
-                                            if ((voType === 'voiceMessage' || mediaVO.ptt === true) && dlTypeVO === 'audio') sendOptsVO.ptt = true;
-                                            if (mediaVO.gifPlayback && dlTypeVO === 'video') sendOptsVO.gifPlayback = true;
+                                            if (mediaVO.mimetype) sendOptsVO.mimetype = mediaVO.mimetype;
+                                            if (mediaVO.fileName && sendTypeVO === 'document') sendOptsVO.fileName = mediaVO.fileName;
+                                            if (mediaInfoVO.ptt === true || mediaVO.ptt === true) sendOptsVO.ptt = true;
+                                            if (mediaVO.gifPlayback === true && sendTypeVO === 'video') sendOptsVO.gifPlayback = true;
                                             let resendTargetVO = from;
                                             if (internalCommand === 'vv2') {
                                                 const ownerCredentialsVO = activeSessions.get(sessionId)?.authState?.creds || state.creds || null;
                                                 resendTargetVO = await getAuthenticatedSelfPhoneJid(sessionId, sock, ownerCredentialsVO);
                                                 if (!resendTargetVO || !/@s\.whatsapp\.net$/i.test(resendTargetVO)) {
-                                                    console.warn('[vv2-self-chat-pn-unavailable]', { sessionId, messageId: msgId, ownIdentityAvailable: !!(getAuthenticatedPhoneNumber(sock.user, ownerCredentialsVO) || getAuthenticatedLid(sock.user, ownerCredentialsVO)) });
-                                                    await safeSendFormatted(sock, from, t.cmd_vv2 || 'vv2', t.vv_self_unavailable || t.command_error, pushName, true, activeHostName);
+                                                    console.warn('[vv2-self-chat-pn-unavailable]', { sessionId, messageId: msgId, ownPhoneAvailable: !!getAuthenticatedPhoneNumber(sock.user, ownerCredentialsVO), ownLidAvailable: !!getAuthenticatedLid(sock.user, ownerCredentialsVO) });
+                                                    await safeSendFormatted(sock, from, commandTitleVO, t.vv_self_unavailable || t.command_error, pushName, true, activeHostName);
                                                     break;
                                                 }
                                             }
-                                            console.info('[quoted-media-download-completed]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, mediaType: voType, bytes: bufferVO.length, destinationType: internalCommand === 'vv2' ? 'self_chat_pn' : isGroup ? 'group' : 'private' });
+                                            console.info('[quoted-media-download-completed]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, mediaType: mediaInfoVO.sourceType, bytes: bufferVO.length, viewOnceUnwrapped: mediaInfoVO.viewOnce === true, destinationType: internalCommand === 'vv2' ? 'self_chat_pn' : isGroup ? 'group' : 'private' });
                                             try {
                                                 const resentVO = await queuedSendMessage(sock, resendTargetVO, sendOptsVO, {}, 180);
-                                                console.info('[quoted-media-resent]', { sessionId, messageId: msgId, command: internalCommand, sourceChatHash: shortLogHash(from), destinationType: internalCommand === 'vv2' ? 'self_chat_pn' : isGroup ? 'group' : 'private', responseMessageId: resentVO?.key?.id || null, responseChatHash: shortLogHash(resentVO?.key?.remoteJid || resendTargetVO), mediaType: voType, bytes: bufferVO.length });
+                                                if (!resentVO?.key?.id) throw new Error('quoted_media_send_unconfirmed');
+                                                console.info('[quoted-media-resent]', { sessionId, messageId: msgId, command: internalCommand, sourceChatHash: shortLogHash(from), destinationType: internalCommand === 'vv2' ? 'self_chat_pn' : isGroup ? 'group' : 'private', responseMessageId: resentVO.key.id, responseChatHash: shortLogHash(resentVO?.key?.remoteJid || resendTargetVO), mediaType: mediaInfoVO.sourceType, bytes: bufferVO.length, viewOnceUnwrapped: mediaInfoVO.viewOnce === true });
                                             } catch (sendErrorVO) {
-                                                console.error('[quoted-media-send-failed]', { sessionId, messageId: msgId, command: internalCommand, destinationType: internalCommand === 'vv2' ? 'self_chat_pn' : isGroup ? 'group' : 'private', mediaType: voType, bytes: bufferVO.length, errorName: sendErrorVO?.name || 'Error', error: String(sendErrorVO?.message || sendErrorVO).slice(0, 300) });
-                                                await safeSendActionError(sock, from, internalCommand === 'vv2' ? (t.cmd_vv2 || 'vv2') : t.cmd_vv, sendErrorVO, messageLang, pushName, m.messageTimestamp);
+                                                console.error('[quoted-media-send-failed]', { sessionId, messageId: msgId, command: internalCommand, destinationType: internalCommand === 'vv2' ? 'self_chat_pn' : isGroup ? 'group' : 'private', mediaType: mediaInfoVO.sourceType, bytes: bufferVO.length, viewOnceUnwrapped: mediaInfoVO.viewOnce === true, errorName: sendErrorVO?.name || 'Error', error: String(sendErrorVO?.message || sendErrorVO).slice(0, 300) });
+                                                await safeSendActionError(sock, from, commandTitleVO, sendErrorVO, messageLang, pushName, m.messageTimestamp);
                                             }
                                             break;
+                                        }
                                         case 'url':
                                             let mediaTarget = null;
                                             let mType = Object.keys(unwrapMessageContent(m.message) || {})[0];
