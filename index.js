@@ -1,17 +1,13 @@
 try { require('dotenv').config(); } catch (e) {}
-const originalConsoleLog = console.log.bind(console);
-const originalConsoleError = console.error.bind(console);
-const originalConsoleWarn = console.warn.bind(console);
-const originalConsoleInfo = console.info.bind(console);
-const originalConsoleDebug = console.debug.bind(console);
-const originalConsoleTrace = console.trace.bind(console);
-const originalConsoleDir = console.dir.bind(console);
-const originalConsoleTable = console.table.bind(console);
+const silenceTfbotConsole = () => {};
+for (const method of ['log', 'error', 'warn', 'info', 'debug', 'trace', 'dir', 'table']) {
+    try { console[method] = silenceTfbotConsole; } catch (error) {}
+}
 const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(process.env.MESSAGE_QUEUE_TASK_TIMEOUT_MS || 45000)));
 const MESSAGE_QUEUE_TIMEOUT_SETTLE_MS = Math.max(500, Math.min(15000, Number(process.env.MESSAGE_QUEUE_TIMEOUT_SETTLE_MS || 3000)));
-const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(500, Math.min(5000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 1800)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r68-local-render-log-ui-poller-hysteresis-retry-store';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-10-31-r68')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(250, Math.min(1800, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 900)));
+const TFBOT_CLUSTER_CODE_REVISION = 'r72-professional-command-help-and-usage-feedback';
+const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r72')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
@@ -40,116 +36,35 @@ function getTfbotReleaseCommit(value) {
     return match ? match[1].toLowerCase() : '';
 }
 
-let lastSignalDiagnosticAt = 0;
 function getSignalLogText(args) {
-    return args.map(value => {
+    return (Array.isArray(args) ? args : [args]).map(value => {
         if (typeof value === 'string') return value;
-        if (value instanceof Error) return `${value.name}: ${value.message} ${String(value.stack || '').slice(0, 1200)}`;
+        if (value instanceof Error) return `${value.name}: ${value.message} ${String(value.stack || '').slice(0, 800)}`;
         if (value && typeof value === 'object') {
-            const selected = [value.name, value.message, value.msg, value.err?.name, value.err?.message, value.err?.stack, value.error?.name, value.error?.message, value.key?.remoteJid, value.key?.remoteJidAlt, value.key?.participant, value.key?.participantAlt, value.key?.participantPn, value.key?.senderPn, value.fromJid, value.remoteJid, value.msgId, value.messageId, value.id, value.retryCount]
+            const selected = [value.name, value.message, value.msg, value.err?.name, value.err?.message, value.error?.name, value.error?.message, value.key?.remoteJid, value.key?.remoteJidAlt, value.key?.participant, value.key?.participantAlt, value.key?.participantPn, value.key?.senderPn, value.fromJid, value.remoteJid, value.msgId, value.messageId, value.id]
                 .filter(item => item !== undefined && item !== null && typeof item !== 'object');
             return selected.join(' ');
         }
         return '';
     }).join(' ');
 }
-function containsSignalKeyData(value, depth = 0, seen = new WeakSet()) {
-    if (!value || typeof value !== 'object' || depth > 5 || Buffer.isBuffer(value) || value instanceof Uint8Array || seen.has(value)) return false;
-    seen.add(value);
-    const keys = Object.keys(value);
-    if (keys.some(key => /^(?:ephemeralKeyPair|lastRemoteEphemeralKey|remoteIdentityKey|rootKey|pendingPreKey|previousCounter|registrationId|messageKeys|chainKey|baseKey|signedKeyId|preKeyId)$/i.test(key))) return true;
-    for (const key of keys) {
-        if (containsSignalKeyData(value[key], depth + 1, seen)) return true;
-    }
-    return false;
-}
-function isSensitiveSignalLog(args) {
-    const value = getSignalLogText(args);
-    return containsSignalKeyData(args) || /Closing open session in favor of incoming prekey bundle|Closing stale open session for new outgoing prekey bundle|Closing session:|Removing old closed session:|SessionEntry|ephemeralKeyPair|remoteIdentityKey|previousCounter|rootKey|pendingPreKey/i.test(value);
-}
-const signalDiagnosticTimes = new Map();
+
 const signalRecoveryCounters = new Map();
 const signalRecoveryCooldowns = new Map();
 const signalRecoveryTimers = new Map();
-const expectedSocketCloseLogTimes = new Map();
+const signalPrivatePeerRepairCooldowns = new Map();
+const signalPeerSendRepairCooldowns = new Map();
 const SIGNAL_RECOVERY_THRESHOLD = Math.max(3, Math.min(10, Number(process.env.SIGNAL_RECOVERY_THRESHOLD || 5)));
 const SIGNAL_RECOVERY_WINDOW_MS = Math.max(10000, Math.min(180000, Number(process.env.SIGNAL_RECOVERY_WINDOW_MS || 60000)));
 const SIGNAL_RECOVERY_COOLDOWN_MS = Math.max(60000, Math.min(3600000, Number(process.env.SIGNAL_RECOVERY_COOLDOWN_MS || 120000)));
 const SIGNAL_GROUP_SENDER_KEY_RECOVERY_COOLDOWN_MS = Math.max(30000, Math.min(1800000, Number(process.env.SIGNAL_GROUP_SENDER_KEY_RECOVERY_COOLDOWN_MS || 120000)));
+const SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD = Math.max(1, Math.min(3, Number(process.env.SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD || 2)));
+const SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS = Math.max(15000, Math.min(600000, Number(process.env.SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS || 45000)));
+
 function isSignalDecryptionFailure(args) {
-    return /Failed to decrypt message|failed to decrypt message|Session error:.*Bad MAC|Bad MAC|MessageCounterError|Key used already or never filled|SessionError:\s*No sessions|No session found to decrypt message|No sessions|Chain closed|Decrypted message with closed session|calculateMAC|Cannot read properties of null \(reading ['\"]constructor['\"]\)/i.test(getSignalLogText(args));
+    return /Failed to decrypt message|failed to decrypt message|Session error:.*Bad MAC|Bad MAC|SignalErrorBadMac|SignalErrorInvalidMessage|MessageCounterError|Key used already or never filled|SessionError:\s*No sessions|No session found to decrypt message|No sessions|Chain closed|Decrypted message with closed session|calculateMAC|Cannot read properties of null \(reading ['\"]constructor['\"]\)/i.test(getSignalLogText(args));
 }
-function logSignalDecryptionFailure(args, context = null) {
-    const raw = getSignalLogText(args);
-    const contextDetails = context && typeof context === 'object' ? getSignalRecoveryPeerDetails(context) : null;
-    const now = Date.now();
-    const kind = /MessageCounterError|Key used already or never filled/i.test(raw) ? 'message_counter_error'
-        : /Chain closed|Decrypted message with closed session/i.test(raw) ? 'signal_chain_closed'
-        : /calculateMAC|Cannot read properties of null \(reading ['\"]constructor['\"]\)/i.test(raw) ? 'signal_mac_buffer_invalid'
-        : /SessionError:\s*No sessions|No sessions|No session found to decrypt message/i.test(raw) ? 'signal_session_missing'
-        : /Bad MAC/i.test(raw) ? 'bad_mac'
-        : /Failed to decrypt message with any known session/i.test(raw) ? 'decrypt_failed'
-        : 'signal_decryption_error';
-    const peerMatch = raw.match(/\b[A-Za-z0-9._-]{1,100}(?::\d{1,4})?@(?:s\.whatsapp\.net|lid|g\.us)\b/i);
-    const messageMatch = raw.match(/(?:msgId|messageId|message id|["']?id["']?)\s*[:=]\s*["']?([A-F0-9]{8,40})\b/i);
-    const peerJid = peerMatch ? peerMatch[0] : contextDetails?.peerJid || null;
-    const messageId = messageMatch ? messageMatch[1] : contextDetails?.messageId || null;
-    const fromMeMatch = raw.match(/["']?fromMe["']?\s*[:=]\s*(true|false)/i);
-    const fromMe = fromMeMatch ? fromMeMatch[1].toLowerCase() === 'true' : null;
-    const diagnosticKey = `${kind}:${peerJid || 'unknown'}:${messageId || 'no-message-id'}`;
-    const last = Number(signalDiagnosticTimes.get(diagnosticKey) || 0);
-    if (!messageId && now - last < 10000) return;
-    signalDiagnosticTimes.set(diagnosticKey, now);
-    while (signalDiagnosticTimes.size > 500) signalDiagnosticTimes.delete(signalDiagnosticTimes.keys().next().value);
-    const safeDetail = kind === 'message_counter_error' ? 'Signal message counter was out of sequence'
-        : kind === 'signal_chain_closed' ? 'The Signal session chain is unavailable; stored account credentials are being preserved'
-        : kind === 'signal_mac_buffer_invalid' ? 'A Signal session record contained invalid or missing MAC key material'
-        : kind === 'signal_session_missing' ? 'No Signal session was available for this peer'
-        : kind === 'bad_mac' ? 'Signal authentication check failed'
-        : 'Baileys could not decrypt an incoming message';
-    const diagnostic = { kind, peerJid, messageId, fromMe, detail: safeDetail, messageBodyAvailable: false, explanation: 'The message could not be decrypted, so WhatsApp did not provide readable text to the message handler.', retryExpected: !!messageId, credentialsDeleted: false, accountCredentialsPreserved: true };
-    originalConsoleWarn('[whatsapp-signal-diagnostic]', diagnostic);
-}
-console.log = (...args) => {
-    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
-    if (isSensitiveSignalLog(args)) return;
-    originalConsoleLog(...args);
-};
-console.error = (...args) => {
-    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
-    if (isSensitiveSignalLog(args)) return;
-    originalConsoleError(...args);
-};
-console.warn = (...args) => {
-    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
-    if (isSensitiveSignalLog(args)) return;
-    originalConsoleWarn(...args);
-};
-console.info = (...args) => {
-    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
-    if (isSensitiveSignalLog(args)) return;
-    originalConsoleInfo(...args);
-};
-console.debug = (...args) => {
-    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
-    if (isSensitiveSignalLog(args)) return;
-    originalConsoleDebug(...args);
-};
-console.trace = (...args) => {
-    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
-    if (isSensitiveSignalLog(args)) return;
-    originalConsoleTrace(...args);
-};
-console.dir = (...args) => {
-    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
-    if (isSensitiveSignalLog(args)) return;
-    originalConsoleDir(...args);
-};
-console.table = (...args) => {
-    if (isSignalDecryptionFailure(args)) return logSignalDecryptionFailure(args);
-    if (isSensitiveSignalLog(args)) return;
-    originalConsoleTable(...args);
-};
+
 const crypto = require('crypto');
 const express = require('express');
 const app = express();
@@ -157,277 +72,6 @@ const pino = require('pino');
 const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
-const LOG_DASHBOARD_PATH = (() => {
-    const configured = String(process.env.LOG_DASHBOARD_PATH || '/adamdh7=modpas/adamdh7').trim();
-    const normalized = (configured.startsWith('/') ? configured : `/${configured}`).replace(/\/+$/, '');
-    return /^\/[A-Za-z0-9_./=-]{12,180}$/.test(normalized) ? normalized : '/adamdh7=modpas/adamdh7';
-})();
-const LOG_DASHBOARD_MAX_ENTRIES = Math.max(1000, Math.min(20000, Number(process.env.LOG_DASHBOARD_MAX_ENTRIES || 5000)));
-const LOG_DASHBOARD_PAGE_LIMIT = Math.max(80, Math.min(250, Number(process.env.LOG_DASHBOARD_PAGE_LIMIT || 120)));
-const LOG_DASHBOARD_FILE_MAX_BYTES = Math.max(1048576, Math.min(52428800, Number(process.env.TFBOT_LOG_FILE_MAX_BYTES || 10485760)));
-const TFBOT_LOG_INGEST_PATH = '/__tfbot/logs/ingest';
-const runtimeLogInstanceId = `${String(process.env.RENDER_INSTANCE_ID || process.env.HOSTNAME || 'render').slice(0, 120)}-${Date.now()}-${process.pid}`;
-const runtimeLogStartedAt = new Date();
-const runtimeLogDeploymentStartedAt = new Date(0);
-const runtimeLogSequence = { value: 0 };
-const runtimeLogBuffer = [];
-const runtimeLogSeenIds = new Set();
-const runtimeLogPendingDiskWrites = [];
-const runtimeLogPendingForwardWrites = [];
-let runtimeLogDiskReady = false;
-let runtimeLogDiskWriteRunning = false;
-let runtimeLogDiskTimer = null;
-let runtimeLogForwardTimer = null;
-let runtimeLogForwardRunning = false;
-let runtimeLogForwardTarget = '';
-let runtimeLogForwardToken = '';
-let runtimeLogStdoutRemainder = '';
-let runtimeLogStderrRemainder = '';
-const runtimeLogRenderServiceId = String(process.env.RENDER_SERVICE_ID || 'local').trim().slice(0, 120);
-const runtimeLogRenderServiceName = String(process.env.RENDER_SERVICE_NAME || process.env.RENDER_SERVICE_TYPE || 'local').trim().slice(0, 120);
-const runtimeLogRenderInstanceId = String(process.env.RENDER_INSTANCE_ID || runtimeLogInstanceId).trim().slice(0, 160);
-const runtimeLogRenderExternalHost = String(process.env.RENDER_EXTERNAL_HOSTNAME || (() => { try { return new URL(process.env.RENDER_EXTERNAL_URL || '').hostname; } catch (error) { return ''; } })()).trim().toLowerCase().slice(0, 180);
-const runtimeLogPort = String(process.env.PORT || '7000').trim().slice(0, 20);
-const runtimeLogServiceScope = [runtimeLogRenderExternalHost ? `host:${runtimeLogRenderExternalHost}` : '', runtimeLogRenderServiceName ? `name:${runtimeLogRenderServiceName}` : ''].filter(Boolean).join('|') || `local:${runtimeLogPort}`;
-const runtimeLogDeploymentId = `${runtimeLogRenderServiceId}:${runtimeLogRenderInstanceId}:${String(process.env.RENDER_GIT_COMMIT || 'no-commit').slice(0, 80)}`.slice(0, 240);
-const runtimeLogDeploymentGroupId = `r68-local-render-log-ui-poller-hysteresis-retry-store:${runtimeLogDeploymentId}`.slice(0, 240);
-const runtimeLogDirectory = path.resolve(String(process.env.TFBOT_LOG_DIR || (process.env.RENDER_DISK_PATH ? path.join(process.env.RENDER_DISK_PATH, 'tfbot-logs') : String(process.env.RENDER || '').toLowerCase() === 'true' ? '/var/data/tfbot-logs' : path.join(__dirname, '.tfbot-logs'))));
-const runtimeLogFilePath = path.join(runtimeLogDirectory, 'runtime.jsonl');
-const runtimeLogSecrets = Object.entries(process.env)
-    .filter(([key, value]) => /TOKEN|SECRET|PASSWORD|PASSWD|API.?KEY|MONGO_URI|URI$|CF_ACCOUNTS|TAVILY/i.test(key) && String(value || '').length >= 6)
-    .map(([, value]) => String(value));
-const originalStdoutWrite = process.stdout.write.bind(process.stdout);
-const originalStderrWrite = process.stderr.write.bind(process.stderr);
-const logDashboardRateLimits = new Map();
-
-function sanitizeRuntimeLogText(value) {
-    let output = String(value ?? '').slice(0, 6500);
-    for (const secret of runtimeLogSecrets) output = output.split(secret).join('[REDACTED]');
-    return output
-        .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [REDACTED]')
-        .replace(/([?&](?:token|key|secret|password|api_key)=)[^&\s]+/gi, '$1[REDACTED]')
-        .replace(/((?:mongo(?:db)?(?:\+srv)?:\/\/)[^\s"']+)/gi, '[MONGODB_URI_REDACTED]')
-        .replace(/((?:authorization|cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret)\s*[:=]\s*)['"]?[^\s,'"}]+/gi, '$1[REDACTED]')
-        .replace(/("(?:messageText|bodyPreview|textPreview|argumentPreview|messageBody|caption|rawBody)"\s*:\s*")[^"]*(")/gi, '$1[message content redacted]$2')
-        .replace(/((?:messageText|bodyPreview|textPreview|argumentPreview|messageBody|caption|rawBody)\s*:\s*)'[^']*'/gi, "$1'[message content redacted]'");
-}
-
-function normalizeCapturedLogLevel(line, fallback) {
-    try {
-        const parsed = JSON.parse(line);
-        const numeric = Number(parsed?.level);
-        return ({ 10: 'trace', 20: 'debug', 30: 'info', 40: 'warn', 50: 'error', 60: 'fatal' })[numeric] || fallback;
-    } catch (error) {
-        return fallback;
-    }
-}
-
-function addRuntimeLogEntry(entry, options = {}) {
-    const id = String(entry?.id || '').slice(0, 260);
-    const at = String(entry?.at || new Date().toISOString());
-    const parsedAt = Date.parse(at);
-    if (!id || !Number.isFinite(parsedAt) || runtimeLogSeenIds.has(id)) return false;
-    const host = String(entry?.host || runtimeLogRenderExternalHost || runtimeLogRenderServiceName).slice(0, 180);
-    const text = sanitizeRuntimeLogText(entry?.text || '');
-    const normalized = {
-        id,
-        at: new Date(parsedAt).toISOString(),
-        level: String(entry?.level || 'log').toLowerCase().slice(0, 16),
-        text: host && host !== runtimeLogRenderExternalHost && entry?.remote === true ? `[${host}] ${text}` : text,
-        host,
-        serviceName: String(entry?.serviceName || runtimeLogRenderServiceName).slice(0, 120),
-        instance: String(entry?.instance || runtimeLogRenderInstanceId).slice(0, 160)
-    };
-    runtimeLogSeenIds.add(id);
-    runtimeLogBuffer.push(normalized);
-    while (runtimeLogBuffer.length > LOG_DASHBOARD_MAX_ENTRIES) {
-        const removed = runtimeLogBuffer.shift();
-        if (removed?.id) runtimeLogSeenIds.delete(String(removed.id));
-    }
-    while (runtimeLogSeenIds.size > LOG_DASHBOARD_MAX_ENTRIES * 2) runtimeLogSeenIds.delete(runtimeLogSeenIds.values().next().value);
-    if (options.disk !== false) {
-        runtimeLogPendingDiskWrites.push(normalized);
-        if (runtimeLogPendingDiskWrites.length > LOG_DASHBOARD_MAX_ENTRIES * 2) runtimeLogPendingDiskWrites.splice(0, runtimeLogPendingDiskWrites.length - LOG_DASHBOARD_MAX_ENTRIES * 2);
-    }
-    if (options.forward !== false && runtimeLogForwardTarget) {
-        runtimeLogPendingForwardWrites.push({ ...normalized, text: text, remote: false });
-        if (runtimeLogPendingForwardWrites.length > 3000) runtimeLogPendingForwardWrites.shift();
-    }
-    return true;
-}
-
-function recordRuntimeLogChunk(level, chunk) {
-    const raw = Buffer.isBuffer(chunk) || chunk instanceof Uint8Array ? Buffer.from(chunk).toString('utf8') : String(chunk ?? '');
-    if (!raw) return;
-    const streamKey = level === 'error' ? 'stderr' : 'stdout';
-    const combined = (streamKey === 'stderr' ? runtimeLogStderrRemainder : runtimeLogStdoutRemainder) + raw;
-    const lines = combined.split(/\r?\n/);
-    const remainder = lines.pop() || '';
-    if (streamKey === 'stderr') runtimeLogStderrRemainder = remainder.slice(-6500);
-    else runtimeLogStdoutRemainder = remainder.slice(-6500);
-    for (const line of lines) {
-        if (!line) continue;
-        const at = new Date().toISOString();
-        const sequence = ++runtimeLogSequence.value;
-        const id = `${runtimeLogInstanceId}:${sequence}`;
-        addRuntimeLogEntry({ id, at, level: normalizeCapturedLogLevel(line, level), text: line, host: runtimeLogRenderExternalHost || runtimeLogRenderServiceName, serviceName: runtimeLogRenderServiceName, instance: runtimeLogRenderInstanceId });
-    }
-    const pending = streamKey === 'stderr' ? runtimeLogStderrRemainder : runtimeLogStdoutRemainder;
-    if (pending.length >= 6400) {
-        const at = new Date().toISOString();
-        const sequence = ++runtimeLogSequence.value;
-        addRuntimeLogEntry({ id: `${runtimeLogInstanceId}:${sequence}`, at, level, text: pending, host: runtimeLogRenderExternalHost || runtimeLogRenderServiceName, serviceName: runtimeLogRenderServiceName, instance: runtimeLogRenderInstanceId });
-        if (streamKey === 'stderr') runtimeLogStderrRemainder = '';
-        else runtimeLogStdoutRemainder = '';
-    }
-}
-
-process.stdout.write = function(chunk, encoding, callback) {
-    try { recordRuntimeLogChunk('info', chunk); } catch (error) {}
-    return originalStdoutWrite.apply(process.stdout, arguments);
-};
-process.stderr.write = function(chunk, encoding, callback) {
-    try { recordRuntimeLogChunk('error', chunk); } catch (error) {}
-    return originalStderrWrite.apply(process.stderr, arguments);
-};
-
-async function rotateRuntimeLogFile(requiredBytes) {
-    let size = 0;
-    try { size = (await fs.promises.stat(runtimeLogFilePath)).size; } catch (error) { if (error?.code !== 'ENOENT') throw error; }
-    if (size + requiredBytes <= LOG_DASHBOARD_FILE_MAX_BYTES) return;
-    for (let index = 2; index >= 1; index--) {
-        const current = index === 1 ? runtimeLogFilePath : `${runtimeLogFilePath}.${index - 1}`;
-        const next = `${runtimeLogFilePath}.${index}`;
-        try {
-            await fs.promises.rename(current, next);
-        } catch (error) {
-            if (error?.code !== 'ENOENT') throw error;
-        }
-    }
-}
-
-async function flushRuntimeLogDiskWrites() {
-    if (!runtimeLogDiskReady || runtimeLogDiskWriteRunning || !runtimeLogPendingDiskWrites.length) return false;
-    runtimeLogDiskWriteRunning = true;
-    try {
-        while (runtimeLogPendingDiskWrites.length) {
-            const batch = runtimeLogPendingDiskWrites.splice(0, 250);
-            const data = batch.map(item => JSON.stringify(item)).join('\n') + '\n';
-            try {
-                await rotateRuntimeLogFile(Buffer.byteLength(data));
-                await fs.promises.appendFile(runtimeLogFilePath, data, { encoding: 'utf8', mode: 0o600 });
-            } catch (writeError) {
-                runtimeLogPendingDiskWrites.unshift(...batch);
-                throw writeError;
-            }
-        }
-        return true;
-    } catch (error) {
-        originalStderrWrite(`[runtime-log-local-disk-write-failed] ${String(error?.message || error)}\n`);
-        return false;
-    } finally {
-        runtimeLogDiskWriteRunning = false;
-    }
-}
-
-async function initializeRuntimeLogStorage() {
-    let restored = [];
-    try {
-        await fs.promises.mkdir(runtimeLogDirectory, { recursive: true, mode: 0o700 });
-        for (const file of [`${runtimeLogFilePath}.2`, `${runtimeLogFilePath}.1`, runtimeLogFilePath]) {
-            try {
-                const contents = await fs.promises.readFile(file, 'utf8');
-                for (const line of contents.split(/\r?\n/)) {
-                    if (!line || line.length > 12000) continue;
-                    try {
-                        const item = JSON.parse(line);
-                        if (item?.id && Number.isFinite(Date.parse(String(item.at || ''))) && typeof item.text === 'string') restored.push(item);
-                    } catch (error) {}
-                }
-            } catch (error) {
-                if (error?.code !== 'ENOENT') throw error;
-            }
-        }
-        const liveEntries = [...runtimeLogBuffer];
-        const merged = new Map();
-        for (const item of [...restored, ...liveEntries]) merged.set(String(item.id), item);
-        const ordered = [...merged.values()].sort((a, b) => String(a.at).localeCompare(String(b.at)) || String(a.id).localeCompare(String(b.id))).slice(-LOG_DASHBOARD_MAX_ENTRIES);
-        runtimeLogBuffer.splice(0, runtimeLogBuffer.length);
-        runtimeLogSeenIds.clear();
-        for (const item of ordered) {
-            runtimeLogSeenIds.add(String(item.id));
-            runtimeLogBuffer.push(item);
-        }
-        runtimeLogDiskReady = true;
-        if (!runtimeLogDiskTimer) {
-            runtimeLogDiskTimer = setInterval(() => { void flushRuntimeLogDiskWrites(); }, 500);
-            if (typeof runtimeLogDiskTimer.unref === 'function') runtimeLogDiskTimer.unref();
-        }
-        await flushRuntimeLogDiskWrites();
-        console.info('[runtime-log-local-storage-ready]', {
-            directory: runtimeLogDirectory,
-            file: path.basename(runtimeLogFilePath),
-            restoredEntries: restored.length,
-            bufferedEntries: runtimeLogBuffer.length,
-            maxEntries: LOG_DASHBOARD_MAX_ENTRIES,
-            maxFileBytes: LOG_DASHBOARD_FILE_MAX_BYTES,
-            storage: 'local-render-jsonl-no-mongodb-log-collection',
-            diskMountConfigured: !!(process.env.TFBOT_LOG_DIR || process.env.RENDER_DISK_PATH)
-        });
-        return true;
-    } catch (error) {
-        runtimeLogDiskReady = false;
-        originalStderrWrite(`[runtime-log-local-storage-unavailable] directory=${runtimeLogDirectory} error=${String(error?.message || error)}; logs remain in memory and Render stdout/stderr\n`);
-        return false;
-    }
-}
-
-async function flushRuntimeLogForwardQueue() {
-    if (!runtimeLogForwardTarget || runtimeLogForwardRunning || !runtimeLogPendingForwardWrites.length) return false;
-    runtimeLogForwardRunning = true;
-    try {
-        const batch = runtimeLogPendingForwardWrites.slice(0, 100);
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 3500);
-        try {
-            const response = await fetch(runtimeLogForwardTarget, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-TFBOT-Cluster-Token': runtimeLogForwardToken, 'Accept': 'application/json' },
-                body: JSON.stringify({ logs: batch }),
-                cache: 'no-store',
-                redirect: 'manual',
-                signal: controller.signal
-            });
-            const payload = await response.json().catch(() => null);
-            if (!response.ok || payload?.ok !== true) throw new Error(`log_forward_http_${response.status}`);
-            runtimeLogPendingForwardWrites.splice(0, batch.length);
-            return true;
-        } finally {
-            clearTimeout(timer);
-        }
-    } catch (error) {
-        originalStderrWrite(`[runtime-log-forward-failed] ${String(error?.message || error)}; queued=${runtimeLogPendingForwardWrites.length}\n`);
-        return false;
-    } finally {
-        runtimeLogForwardRunning = false;
-    }
-}
-
-function startRuntimeLogForwarder() {
-    if (typeof TFBOT_CLUSTER_ENABLED === 'undefined' || !TFBOT_CLUSTER_ENABLED || TFBOT_CLUSTER_COORDINATOR_ONLY) return false;
-    runtimeLogForwardTarget = `${TFBOT_CLUSTER_COORDINATOR_URL}${TFBOT_LOG_INGEST_PATH}`;
-    runtimeLogForwardToken = TFBOT_CLUSTER_TOKEN;
-    for (const item of runtimeLogBuffer.slice(-3000)) {
-        runtimeLogPendingForwardWrites.push({ ...item, text: item.text, remote: false });
-    }
-    if (!runtimeLogForwardTimer) {
-        runtimeLogForwardTimer = setInterval(() => { void flushRuntimeLogForwardQueue(); }, 700);
-        if (typeof runtimeLogForwardTimer.unref === 'function') runtimeLogForwardTimer.unref();
-    }
-    console.info('[runtime-log-forwarder-ready]', { target: TFBOT_COORDINATOR_HOST, path: TFBOT_LOG_INGEST_PATH, queueLimit: 3000, batchLimit: 100, storage: 'local-disk-on-each-render-service-and-coordinator-aggregation' });
-    return true;
-}
-
 const EventEmitter = require('events');
 const { AsyncLocalStorage } = require('async_hooks');
 
@@ -578,14 +222,17 @@ function applyBaileysSignalTransactionPatch() {
 
 function applyBaileysOutgoingRetryPreflightPatch() {
     const marker = 'await config.persistOutgoingMessage(jid, fullMsg);';
+    const managerCall = 'messageRetryManager.addRecentMessage(jid, fullMsg.key.id, fullMsg.message);';
+    const retryManagerPreload = `if (typeof messageRetryManager !== 'undefined' && messageRetryManager && typeof messageRetryManager.addRecentMessage === 'function') {\n\t\t\t\tmessageRetryManager.addRecentMessage(jid, fullMsg.key.id, fullMsg.message);\n\t\t\t}\n\t\t\t`;
+    const legacyManagerBlockPattern = /if\s*\(\s*typeof\s+messageRetryManager\s*!==\s*['"]undefined['"][\s\S]{0,1200}?\n\s*\}/;
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
         const searchDirectories = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
-        const candidates = [...new Set(searchDirectories.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs', 'ts'].map(extension => path.join(directory, folder, `messages-send.${extension}`)))) )];
+        const candidates = [...new Set(searchDirectories.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs', 'ts'].map(extension => path.join(directory, folder, `messages-send.${extension}`)))))];
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
         if (!filePath) return { applied: false, reason: 'messages_send_module_not_found' };
-        const source = fs.readFileSync(filePath, 'utf8');
+        let source = fs.readFileSync(filePath, 'utf8');
         const sendMessageMatch = /\bsendMessage\s*:\s*async\s*\(/.exec(source) || /\basync\s+sendMessage\s*\(/.exec(source);
         if (!sendMessageMatch) return { applied: false, reason: 'send_message_method_anchor_not_found', file: path.basename(filePath) };
         const searchStart = sendMessageMatch.index;
@@ -595,36 +242,128 @@ function applyBaileysOutgoingRetryPreflightPatch() {
         const relayPattern = /\bawait\s+relayMessage\s*\(\s*jid\s*,\s*fullMsg\.message\s*!?\s*,/g;
         relayPattern.lastIndex = fullMessageStart + fullMessageMatch[0].length;
         const relayMatch = relayPattern.exec(source);
-        if (!relayMatch || relayMatch.index - fullMessageStart > 20000) {
-            return { applied: false, reason: 'relay_after_generated_full_message_not_found', file: path.basename(filePath) };
-        }
-        if (source.includes(marker)) {
-            const existingIndex = source.indexOf(marker, fullMessageStart);
-            if (existingIndex >= fullMessageStart && existingIndex < relayMatch.index) {
-                return { applied: true, alreadyApplied: true, file: path.basename(filePath), sourceFormat: 'generated-message-before-relay', persistedBeforeRelay: true };
+        if (!relayMatch || relayMatch.index - fullMessageStart > 20000) return { applied: false, reason: 'relay_after_generated_full_message_not_found', file: path.basename(filePath) };
+
+        const existingIndex = source.indexOf(marker, fullMessageStart);
+        if (existingIndex >= fullMessageStart && existingIndex < relayMatch.index) {
+            let managerIndex = source.indexOf(managerCall, fullMessageStart);
+            if (managerIndex < fullMessageStart || managerIndex >= existingIndex) {
+                let upgradedSource = source;
+                const beforeMarker = source.slice(fullMessageStart, existingIndex);
+                const legacyBlock = legacyManagerBlockPattern.exec(beforeMarker);
+                if (legacyBlock) {
+                    const legacyStart = fullMessageStart + legacyBlock.index;
+                    upgradedSource = source.slice(0, legacyStart) + retryManagerPreload + source.slice(legacyStart + legacyBlock[0].length);
+                } else {
+                    upgradedSource = source.slice(0, existingIndex) + retryManagerPreload + source.slice(existingIndex);
+                }
+                const upgradedManagerIndex = upgradedSource.indexOf(managerCall, fullMessageStart);
+                const upgradedMarkerIndex = upgradedSource.indexOf(marker, fullMessageStart);
+                const upgradedRelayPattern = /\bawait\s+relayMessage\s*\(\s*jid\s*,\s*fullMsg\.message\s*!?\s*,/g;
+                upgradedRelayPattern.lastIndex = upgradedMarkerIndex + marker.length;
+                const upgradedRelayMatch = upgradedRelayPattern.exec(upgradedSource);
+                if (upgradedManagerIndex < fullMessageStart || upgradedManagerIndex >= upgradedMarkerIndex || !upgradedRelayMatch || upgradedMarkerIndex >= upgradedRelayMatch.index) {
+                    return { applied: false, reason: 'existing_preflight_upgrade_order_verification_failed', file: path.basename(filePath) };
+                }
+                fs.writeFileSync(filePath, upgradedSource, 'utf8');
+                return { applied: true, alreadyApplied: false, upgradedExistingPreflight: true, file: path.basename(filePath), sourceFormat: 'generated-message-before-relay', persistedBeforeRelay: true, retryManagerPreloadedBeforeRelay: true, retryManagerCacheEntriesPerMessage: 1 };
             }
-            return { applied: false, reason: 'existing_preflight_marker_not_before_relay', file: path.basename(filePath) };
+            return { applied: true, alreadyApplied: true, file: path.basename(filePath), sourceFormat: 'generated-message-before-relay', persistedBeforeRelay: true, retryManagerPreloadedBeforeRelay: true, retryManagerCacheEntriesPerMessage: 1 };
         }
-        const insertion = `if (typeof config.persistOutgoingMessage === 'function') {\n\t\t\t\tawait config.persistOutgoingMessage(jid, fullMsg);\n\t\t\t}\n\t\t\t`;
+        if (source.includes(marker)) return { applied: false, reason: 'existing_preflight_marker_not_before_relay', file: path.basename(filePath) };
+        const insertion = `${retryManagerPreload}if (typeof config.persistOutgoingMessage === 'function') {\n\t\t\t\tawait config.persistOutgoingMessage(jid, fullMsg);\n\t\t\t}\n\t\t\t`;
         const patchedSource = source.slice(0, relayMatch.index) + insertion + source.slice(relayMatch.index);
         const persistedIndex = patchedSource.indexOf(marker, fullMessageStart);
+        const managerPreloadIndex = patchedSource.indexOf(managerCall, fullMessageStart);
         const patchedRelayPattern = /\bawait\s+relayMessage\s*\(\s*jid\s*,\s*fullMsg\.message\s*!?\s*,/g;
         patchedRelayPattern.lastIndex = relayMatch.index + insertion.length;
         const patchedRelayMatch = patchedRelayPattern.exec(patchedSource);
-        if (persistedIndex < fullMessageStart || !patchedRelayMatch || persistedIndex >= patchedRelayMatch.index) {
+        if (persistedIndex < fullMessageStart || !patchedRelayMatch || persistedIndex >= patchedRelayMatch.index || managerPreloadIndex < fullMessageStart || managerPreloadIndex >= persistedIndex) {
             return { applied: false, reason: 'preflight_patch_order_verification_failed', file: path.basename(filePath) };
         }
         fs.writeFileSync(filePath, patchedSource, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), sourceFormat: 'generated-message-before-relay', persistedBeforeRelay: true, supportsTypeScriptNonNullAssertion: true };
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), sourceFormat: 'generated-message-before-relay', persistedBeforeRelay: true, retryManagerPreloadedBeforeRelay: true, retryManagerCacheEntriesPerMessage: 1 };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
 }
+
+function applyBaileysRetryResendDoubleEncryptionPatch() {
+    const marker = 'if (isRetryResend && !participants.length) {';
+    try {
+        const entryPath = require.resolve('@whiskeysockets/baileys');
+        const entryDirectory = path.dirname(entryPath);
+        const searchDirectories = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
+        const candidates = [...new Set(searchDirectories.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs', 'ts'].map(extension => path.join(directory, folder, `messages-send.${extension}`)))))];
+        const filePath = candidates.find(candidate => fs.existsSync(candidate));
+        if (!filePath) return { applied: false, reason: 'messages_send_module_not_found' };
+        const source = fs.readFileSync(filePath, 'utf8');
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), issue: 'Baileys#2781' };
+        const retryBlock = /if\s*\(\s*isRetryResend\s*\)\s*\{\s*const\s+isParticipantLid\s*=\s*isLidUser\(participant(?:!\.)?\.jid\)\s*;\s*const\s+isMe\s*=\s*areJidsSameUser\(participant(?:!\.)?\.jid\s*,\s*isParticipantLid\s*\?\s*meLid\s*:\s*meId\s*\)\s*;/g;
+        const matches = [...source.matchAll(retryBlock)];
+        if (matches.length !== 1) return { applied: false, reason: `expected_one_known_retry_block_found_${matches.length}`, file: path.basename(filePath), issue: 'Baileys#2781' };
+        const match = matches[0];
+        const guarded = `if (isRetryResend && !participants.length) {\n\t\t\t\tconst isParticipantLid = isLidUser(participant.jid);\n\t\t\t\tconst isMe = areJidsSameUser(participant.jid, isParticipantLid ? meLid : meId);`;
+        const patched = source.slice(0, match.index) + guarded + source.slice(match.index + match[0].length);
+        if (!patched.includes(marker) || (patched.match(/if\s*\(\s*isRetryResend\s*&&\s*!participants\.length\s*\)/g) || []).length !== 1) {
+            return { applied: false, reason: 'retry_resend_guard_verification_failed', file: path.basename(filePath), issue: 'Baileys#2781' };
+        }
+        fs.writeFileSync(filePath, patched, 'utf8');
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), issue: 'Baileys#2781', action: 'skip_second_pairwise_encryption_when_retry_participant_node_already_exists' };
+    } catch (error) {
+        return { applied: false, reason: String(error?.message || error).slice(0, 180), issue: 'Baileys#2781' };
+    }
+}
+
+function applyBaileysMessageRetryManagerDeviceJidPatch() {
+    const marker = '__tfbotRetryManagerDeviceJidFallback';
+    try {
+        const entryPath = require.resolve('@whiskeysockets/baileys');
+        const entryDirectory = path.dirname(entryPath);
+        const searchDirectories = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
+        const candidates = [...new Set(searchDirectories.flatMap(directory => ['Utils', 'utils'].flatMap(folder => ['js', 'cjs', 'mjs', 'ts'].map(extension => path.join(directory, folder, `message-retry-manager.${extension}`)))) )];
+        const filePath = candidates.find(candidate => fs.existsSync(candidate));
+        if (!filePath) return { applied: false, reason: 'message_retry_manager_module_not_found' };
+        const source = fs.readFileSync(filePath, 'utf8');
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath) };
+        if (!source.includes('messageKeyIndex') || !source.includes('recentMessagesMap')) return { applied: false, reason: 'retry_manager_index_or_cache_not_found', file: path.basename(filePath) };
+        const methodPattern = /getRecentMessage\s*\(\s*to(?:\s*:\s*[^,]+)?\s*,\s*id(?:\s*:\s*[^)]+)?\s*\)\s*(?::\s*[^{}]+)?\s*\{/g;
+        const methodMatches = [...source.matchAll(methodPattern)];
+        if (methodMatches.length !== 1) return { applied: false, reason: `expected_one_get_recent_message_found_${methodMatches.length}`, file: path.basename(filePath) };
+        const method = methodMatches[0];
+        const openBrace = source.indexOf('{', method.index);
+        let depth = 0;
+        let closeBrace = -1;
+        for (let index = openBrace; index < source.length; index++) {
+            if (source[index] === '{') depth++;
+            else if (source[index] === '}') {
+                depth--;
+                if (depth === 0) { closeBrace = index; break; }
+            }
+        }
+        if (closeBrace < 0) return { applied: false, reason: 'get_recent_message_body_unbalanced', file: path.basename(filePath) };
+        const body = source.slice(openBrace + 1, closeBrace);
+        const exactLookup = /return\s+this\.recentMessagesMap\.get\(\s*keyStr\s*\)\s*;?/;
+        if (!exactLookup.test(body)) return { applied: false, reason: 'exact_retry_cache_lookup_not_found', file: path.basename(filePath) };
+        const replacement = `const ${marker} = true;\n\t\tconst exactRecentMessage = this.recentMessagesMap.get(keyStr);\n\t\tif (exactRecentMessage) return exactRecentMessage;\n\t\tconst indexedMessageKey = this.messageKeyIndex.get(id);\n\t\treturn indexedMessageKey ? this.recentMessagesMap.get(indexedMessageKey) : undefined;`;
+        const patchedBody = body.replace(exactLookup, replacement);
+        const patched = source.slice(0, openBrace + 1) + patchedBody + source.slice(closeBrace);
+        if (!patched.includes(marker) || !patched.includes('this.messageKeyIndex.get(id)')) return { applied: false, reason: 'retry_manager_fallback_verification_failed', file: path.basename(filePath) };
+        fs.writeFileSync(filePath, patched, 'utf8');
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), action: 'lookup_recent_retry_message_by_message_id_when_device_specific_jid_differs' };
+    } catch (error) {
+        return { applied: false, reason: String(error?.message || error).slice(0, 180) };
+    }
+}
+
 const baileysLidPnDecryptPatchStatus = applyBaileysLidPnDecryptRetryPatch();
 const baileysSignalTransactionPatchStatus = applyBaileysSignalTransactionPatch();
 const baileysOutgoingRetryPreflightPatchStatus = applyBaileysOutgoingRetryPreflightPatch();
+const baileysRetryResendDoubleEncryptionPatchStatus = applyBaileysRetryResendDoubleEncryptionPatch();
+const baileysMessageRetryManagerDeviceJidPatchStatus = applyBaileysMessageRetryManagerDeviceJidPatch();
 console.info('[baileys-lid-pn-decrypt-retry-patch]', { ...baileysLidPnDecryptPatchStatus, action: baileysLidPnDecryptPatchStatus.applied ? 'retry_with_whatsapp_paired_lid_or_phone_identity' : 'leave_installed_baileys_source_unchanged' });
-console.info('[baileys-outgoing-retry-preflight-patch]', { ...baileysOutgoingRetryPreflightPatchStatus, action: baileysOutgoingRetryPreflightPatchStatus.applied ? 'persist_generated_full_message_before_network_relay' : 'leave_installed_baileys_source_unchanged' });
+console.info('[baileys-outgoing-retry-preflight-patch]', { ...baileysOutgoingRetryPreflightPatchStatus, action: baileysOutgoingRetryPreflightPatchStatus.applied ? 'preload_internal_retry_manager_and_persist_generated_full_message_before_network_relay' : 'leave_installed_baileys_source_unchanged' });
+console.info('[baileys-retry-resend-double-encryption-patch]', { ...baileysRetryResendDoubleEncryptionPatchStatus, action: baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'avoid_duplicate_pairwise_encryption_on_retry_resend' : 'not_applicable_or_source_shape_not_matched' });
 console.info('[baileys-signal-transaction-patch]', { ...baileysSignalTransactionPatchStatus, action: baileysSignalTransactionPatchStatus.applied ? 'serialize_signal_crypto_methods_inside_session_store_transaction' : 'leave_installed_baileys_source_unchanged' });
 
 const {
@@ -689,10 +428,11 @@ function getSignalRecoveryPeerDetails(parsed) {
     for (const item of hints) {
         if (/@(?:s\.whatsapp\.net|lid)$/i.test(item.jid) && !/@g\.us$/i.test(item.jid)) privateCandidates.push(item.jid);
     }
-    const aliases = [...new Set((isGroup ? participantCandidates : privateCandidates).filter(Boolean))];
+    const aliases = [...new Set((isGroup ? participantCandidates : [...participantCandidates, ...privateCandidates]).filter(Boolean))];
     const peerJid = isGroup ? (aliases[0] || '') : (aliases.find(value => /@(?:s\.whatsapp\.net|lid)$/i.test(value)) || '');
+    const resolvedRemoteJid = remoteJid || (!isGroup ? (peerJid || '') : '');
     return {
-        remoteJid,
+        remoteJid: resolvedRemoteJid,
         isGroup,
         peerJid,
         aliases,
@@ -707,7 +447,7 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
     const failureText = getSignalLogText([parsed?.msg || parsed?.message || '', parsed]);
     const kind = /MessageCounterError|Key used already or never filled/i.test(failureText) ? 'message_counter_error'
         : /SessionError:\s*No sessions|No sessions|No session found to decrypt message/i.test(failureText) ? 'signal_session_missing'
-        : /Bad MAC/i.test(failureText) ? 'bad_mac'
+        : /Bad MAC|SignalErrorBadMac|SignalErrorInvalidMessage|retry.{0,20}(?:error|code).{0,8}(?:4|7)\b/i.test(failureText) ? 'bad_mac'
         : 'signal_decryption_error';
     if (!details.remoteJid || !details.peerJid) {
         const flushKey = `${sessionId}:unattributed-signal-auth-flush`;
@@ -737,6 +477,25 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
     while (signalRecoveryCounters.size > 2000) signalRecoveryCounters.delete(signalRecoveryCounters.keys().next().value);
     const selfPeer = !details.isGroup && areEquivalentWhatsAppChatJids(sessionId, details.peerJid, getAuthenticatedLid(activeSessions.get(sessionId)?.sock?.user || null, activeSessions.get(sessionId)?.authState?.creds || null))
         || !details.isGroup && areEquivalentWhatsAppChatJids(sessionId, details.peerJid, activeSessions.get(sessionId)?.sock?.user?.id || '');
+    const privateRepairRequired = !details.isGroup && ['signal_session_missing', 'bad_mac', 'message_counter_error'].includes(kind) || !details.isGroup && previous.count >= SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD && kind === 'signal_decryption_error';
+    if (privateRepairRequired) {
+        const repairKey = `${sessionId}:${details.peerJid}:private-pairwise-session`;
+        if (Number(signalPrivatePeerRepairCooldowns.get(repairKey) || 0) <= now && !signalRecoveryTimers.has(repairKey)) {
+            signalPrivatePeerRepairCooldowns.set(repairKey, now + SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS);
+            const repairTimer = setTimeout(async () => {
+                signalRecoveryTimers.delete(repairKey);
+                const current = activeSessions.get(sessionId);
+                const repository = current?.sock?.signalRepository;
+                if (!current || current.status === 'deconnecte' || typeof repository?.deleteSession !== 'function') return;
+                try {
+                    await repository.deleteSession([details.peerJid]);
+                    void flushAuthWritesForSession(sessionId).catch(() => {});
+                } catch (error) {}
+            }, 180);
+            signalRecoveryTimers.set(repairKey, repairTimer);
+            if (typeof repairTimer.unref === 'function') repairTimer.unref();
+        }
+    }
     if (details.isGroup && ['signal_session_missing', 'bad_mac', 'signal_decryption_error', 'message_counter_error'].includes(kind)) {
         const groupRecoveryKey = `${sessionId}:${details.remoteJid}:sender-key-recovery`;
         const recoveryUntil = Number(signalRecoveryCooldowns.get(groupRecoveryKey) || 0);
@@ -799,7 +558,6 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
 }
 
 function createRenderPinoLogger(options = {}) {
-    const component = String(options?.base?.component || 'baileys').slice(0, 60);
     const sink = new Writable({
         write(chunk, encoding, callback) {
             try {
@@ -808,38 +566,20 @@ function createRenderPinoLogger(options = {}) {
                     let parsed;
                     try { parsed = JSON.parse(line); } catch (error) { parsed = { msg: line }; }
                     const diagnosticArgs = [parsed?.msg || parsed?.message || '', parsed];
-                    const parsedSessionId = String(parsed?.sessionId || options?.base?.sessionId || '').trim();
-                    const closedSocketText = getSignalLogText(diagnosticArgs);
-                    const expectedSocketClose = /Connection Closed|WebSocket is not open|socket.*closed/i.test(closedSocketText) && (tfbotWorkerStopping || serverShuttingDown || workerDrainingSessionIds.has(parsedSessionId) || Date.now() < workerDrainExpectedClosedUntil);
-                    if (expectedSocketClose) {
-                        const closeKey = `${parsedSessionId || 'unknown'}:${component}`;
-                        const previousAt = Number(expectedSocketCloseLogTimes.get(closeKey) || 0);
-                        if (Date.now() - previousAt >= 10000) {
-                            expectedSocketCloseLogTimes.set(closeKey, Date.now());
-                            originalConsoleWarn('[baileys-socket-close-during-handoff]', { sessionId: parsedSessionId || null, component, action: 'expected_socket_close_while_worker_handoff_and_auth_drain_continue' });
-                        }
-                        continue;
-                    }
-                    if (isSignalDecryptionFailure(diagnosticArgs)) {
-                        const recoverySessionId = String(parsed?.sessionId || options?.base?.sessionId || '').trim();
-                        if (recoverySessionId) scheduleSignalRecoveryFromLog(recoverySessionId, parsed);
-                        logSignalDecryptionFailure(diagnosticArgs, parsed);
-                        continue;
-                    }
-                    if (isSensitiveSignalLog(diagnosticArgs)) continue;
-                    const level = ({ 10: 'trace', 20: 'debug', 30: 'info', 40: 'warn', 50: 'error', 60: 'fatal' })[Number(parsed?.level)] || 'log';
-                    process.stdout.write(`${line}\n`);
+                    if (!isSignalDecryptionFailure(diagnosticArgs)) continue;
+                    const recoverySessionId = String(parsed?.sessionId || options?.base?.sessionId || '').trim();
+                    if (recoverySessionId) scheduleSignalRecoveryFromLog(recoverySessionId, parsed);
                 }
                 callback();
             } catch (error) {
-                callback(error);
+                callback();
             }
         }
     });
-    return pino(options, sink);
+    return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-10-31-r68';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-01-r72';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -847,8 +587,10 @@ const TFBOT_ROUTER_RESOLVE_PATH = '/__tfbot/router/resolve';
 const TFBOT_ROUTER_OK_PATH = '/__tfbot/router/ok';
 const TFBOT_WORKER_CONTROL_PATH = '/__tfbot/worker/control';
 const TFBOT_WORKER_POLL_PATH = '/__tfbot/worker/poll';
+const TFBOT_WORKER_FAILURE_PATH = '/__tfbot/worker/send-failure';
 const TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD = Math.max(2, Math.min(4, Number(process.env.TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD || 2)));
 const tfbotCoordinatorActiveProbeFailures = new Map();
+const tfbotCoordinatorForcedSendFailures = new Map();
 const TFBOT_ROUTER_STATE_ID = 'active-domain';
 const TFBOT_PRIMARY_DOMAIN = Object.freeze({ host: 'tf.bot.adamdh7.org', url: 'https://tf.bot.adamdh7.org', priority: 0 });
 const TFBOT_COORDINATOR_HOST = 'tfbot7.onrender.com';
@@ -1669,7 +1411,7 @@ async function finishMessageProcessingClaim(sessionId, messageId, accountIdentit
     }
 }
 
-function cacheRecentMessage(sessionId, message) {
+function cacheRecentMessage(sessionId, message, extraAliases = []) {
     const id = message?.key?.id;
     if (!sessionId || !id || !message?.message) return;
     const entry = {
@@ -1677,7 +1419,7 @@ function cacheRecentMessage(sessionId, message) {
         id,
         key: message.key ? { ...message.key } : null,
         from: message.key.remoteJid || '',
-        chatAliases: [...new Set([message.key.remoteJid, message.key.remoteJidAlt, message.key.participant, message.key.participantAlt, message.key.participantPn, message.key.senderPn].map(value => String(value || '').trim()).filter(Boolean))],
+        chatAliases: [...new Set([message.key.remoteJid, message.key.remoteJidAlt, message.key.participant, message.key.participantAlt, message.key.participantPn, message.key.senderPn, ...(Array.isArray(extraAliases) ? extraAliases : [])].map(value => String(value || '').trim()).filter(Boolean))],
         sender: message.key.participant || message.key.remoteJid || '',
         fromMe: !!message.key.fromMe,
         participantAlt: message.key.participantAlt || message.key.participantPn || '',
@@ -2042,6 +1784,47 @@ function getMessageQueuePartitionKey(sessionId, jid, session) {
     return `chat:${normalizeOutgoingEchoJid(destination)}`;
 }
 
+async function resetSignalPeerSessionForSendRetry(sock, sessionId, jid) {
+    const peerJid = String(jid || '').trim();
+    if (!peerJid || /@(?:g\.us|newsletter|broadcast)$/i.test(peerJid)) return false;
+    const repository = sock?.signalRepository;
+    if (typeof repository?.deleteSession !== 'function') return false;
+    const key = `${sessionId}:send:${peerJid}`;
+    const now = Date.now();
+    if (Number(signalPeerSendRepairCooldowns.get(key) || 0) > now) return false;
+    signalPeerSendRepairCooldowns.set(key, now + 30000);
+    while (signalPeerSendRepairCooldowns.size > 4000) signalPeerSendRepairCooldowns.delete(signalPeerSendRepairCooldowns.keys().next().value);
+    await repository.deleteSession([peerJid]);
+    void flushAuthWritesForSession(sessionId).catch(() => {});
+    return true;
+}
+
+async function reportTfbotWorkerSendFailure(sessionId, error) {
+    if (!TFBOT_CLUSTER_ENABLED || TFBOT_CLUSTER_COORDINATOR_ONLY || !TFBOT_CLUSTER_TOKEN || !TFBOT_CLUSTER_COORDINATOR_URL) return false;
+    const message = String(error?.message || error || 'send_failed');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    try {
+        const response = await fetch(`${TFBOT_CLUSTER_COORDINATOR_URL}${TFBOT_WORKER_FAILURE_PATH}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-TFBOT-Cluster-Token': TFBOT_CLUSTER_TOKEN },
+            body: JSON.stringify({
+                host: tfbotWorkerSelectedHost || TFBOT_CLUSTER_INSTANCE_HOST,
+                generation: tfbotWorkerSelectionGeneration,
+                sessionIdHash: shortLogHash(sessionId),
+                failureKind: /Bad MAC/i.test(message) ? 'bad_mac' : /MessageCounterError/i.test(message) ? 'message_counter_error' : /No sessions|SessionError/i.test(message) ? 'missing_signal_session' : /encrypt|decrypt|pre.?key/i.test(message) ? 'signal_crypto_failure' : 'send_or_transport_failure'
+            }),
+            cache: 'no-store',
+            signal: controller.signal
+        });
+        return response.ok;
+    } catch (reportError) {
+        return false;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180) {
     let sessionId = null;
     let activeSession = null;
@@ -2055,6 +1838,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
     if (!sessionId || !activeSession) throw new Error('whatsapp_socket_session_replaced');
     const expectedSessionId = sessionId;
     const expectedSession = activeSession;
+    let actualSendFailure = false;
     const originalDestinationJid = String(jid || '').trim();
     const queuePartitionKey = getMessageQueuePartitionKey(expectedSessionId, originalDestinationJid, expectedSession);
     return queueMessage(async () => {
@@ -2098,10 +1882,10 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         const originalDestinationIsLid = /@lid$/i.test(originalDestinationJid);
         const originalDestinationIsPhone = /@s\.whatsapp\.net$/i.test(originalDestinationJid);
         const selfPrimaryJid = isSelfChatDestination
-            ? (ownPhoneJid || (originalDestinationIsLid || originalDestinationIsPhone ? originalDestinationJid : ownLidJid))
+            ? ((originalDestinationIsLid || originalDestinationIsPhone) ? originalDestinationJid : (ownLidJid || ownPhoneJid))
             : '';
         const selfFallbackJid = isSelfChatDestination
-            ? (originalDestinationIsLid ? originalDestinationJid : originalDestinationIsPhone && /@lid$/i.test(ownLidJid) ? ownLidJid : '')
+            ? (originalDestinationIsLid ? ownPhoneJid : originalDestinationIsPhone ? ownLidJid : '')
             : '';
         if (isSelfChatDestination) {
             console.info('[self-chat-original-address-preserved]', {
@@ -2109,12 +1893,12 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 originalDestinationType: originalDestinationIsLid ? 'lid' : originalDestinationIsPhone ? 'phone' : 'unknown',
                 primaryDestinationType: /@lid$/i.test(selfPrimaryJid) ? 'lid' : /@s\.whatsapp\.net$/i.test(selfPrimaryJid) ? 'phone' : 'unknown',
                 fallbackDestinationType: /@lid$/i.test(selfFallbackJid) ? 'lid' : /@s\.whatsapp\.net$/i.test(selfFallbackJid) ? 'phone' : null,
-                action: 'send_self_chat_to_authenticated_phone_first_and_keep_original_lid_as_fallback'
+                action: 'preserve_exact_self_chat_address_then_try_other_authenticated_identity_only_after_send_failure'
             });
         }
         let destinationJid = isSelfChatDestination ? selfPrimaryJid : originalDestinationJid;
         let destinationResolution = isSelfChatDestination
-            ? (ownPhoneJid ? 'self_chat_authenticated_phone_primary' : originalDestinationIsLid ? 'self_chat_original_lid_preserved' : originalDestinationIsPhone ? 'self_chat_original_phone_preserved' : 'self_chat_original_address_preserved')
+            ? (ownPhoneJid ? 'self_chat_original_address_primary' : originalDestinationIsLid ? 'self_chat_original_lid_preserved' : originalDestinationIsPhone ? 'self_chat_original_phone_preserved' : 'self_chat_original_address_preserved')
             : /@lid$/i.test(originalDestinationJid) ? 'original_lid_pending_phone_resolution' : 'original_phone_preserved';
         let alternateDestinationJid = isSelfChatDestination ? selfFallbackJid : '';
         let alternateDestinationResolution = isSelfChatDestination && selfFallbackJid ? (/\@lid$/i.test(selfFallbackJid) ? 'self_chat_lid_fallback' : 'self_chat_phone_fallback') : '';
@@ -2178,6 +1962,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             try {
                 return await sock.sendMessage(targetJid, outgoingContent, options);
             } catch (error) {
+                actualSendFailure = true;
                 if (echoToken) {
                     for (const echoKey of echoToken.keys || []) {
                         if (outgoingTextEchoCache.get(echoKey) === echoToken.createdAt) outgoingTextEchoCache.delete(echoKey);
@@ -2194,14 +1979,13 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         } catch (initialError) {
             let failureError = initialError;
             const errorText = String(initialError?.message || initialError || '');
-            const transientSignalFailure = /No sessions|SessionError|MessageCounterError|Bad MAC|pre.?key|failed to decrypt/i.test(errorText);
+            const transientSignalFailure = /No sessions|SessionError|MessageCounterError|Bad MAC|pre.?key|failed to decrypt|Chain closed/i.test(errorText);
             if (transientSignalFailure && !destinationJid.endsWith('@g.us') && !destinationJid.endsWith('@newsletter')) {
-                await new Promise(resolve => setTimeout(resolve, 450));
                 try {
-                    console.warn('[private-send-same-target-retry]', { sessionId, destinationJid, messageType: Object.keys(outgoingContent || {}).join(','), firstError: errorText.slice(0, 180) });
+                    await resetSignalPeerSessionForSendRetry(sock, sessionId, destinationJid).catch(() => false);
                     result = await sendTo(destinationJid);
                     sentDestinationJid = destinationJid;
-                    destinationResolution = `${destinationResolution}_same_target_retry`;
+                    destinationResolution = `${destinationResolution}_pairwise_session_repaired_retry`;
                 } catch (sameTargetError) {
                     failureError = sameTargetError;
                     result = null;
@@ -2244,7 +2028,9 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                     console.error('[whatsapp-send-failed]', { sessionId, jid: destinationJid, originalJid: originalDestinationJid, destinationResolution, alternateDestinationResolution, messageType: Object.keys(outgoingContent || {}).join(','), error: failureError?.message || String(failureError) });
                     throw failureError;
                 }
-                console.warn('[private-send-retry]', { sessionId, originalDestinationJid, failedDestinationJid: destinationJid, retryTargetJid, alternateDestinationResolution, messageType: Object.keys(outgoingContent || {}).join(','), firstError: failureError?.message || String(failureError) });
+                if (transientSignalFailure && !retryTargetJid.endsWith('@g.us') && !retryTargetJid.endsWith('@newsletter')) {
+                    await resetSignalPeerSessionForSendRetry(sock, sessionId, retryTargetJid).catch(() => false);
+                }
                 result = await sendTo(retryTargetJid);
                 sentDestinationJid = retryTargetJid;
                 destinationResolution = retryTargetJid.endsWith('@s.whatsapp.net') ? 'pn_fallback_after_lid_failure' : 'lid_fallback_after_pn_failure';
@@ -2292,14 +2078,18 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
     }, delayMs, sock, queuePartitionKey, async timeoutError => {
         const latestSession = activeSessions.get(expectedSessionId);
         if (latestSession === expectedSession && latestSession.sock === sock) {
-            console.error('[outbound-chat-queue-session-fenced]', { sessionId: expectedSessionId, destinationType: originalDestinationJid.endsWith('@g.us') ? 'group' : originalDestinationJid.endsWith('@lid') ? 'private_lid' : 'private_or_other', reason: timeoutError?.message || String(timeoutError), action: 'close_only_the_timed_out_session_socket_and_stop_late_messages_from_this_session' });
             await closeSessionSocketWithoutAuthFlush(expectedSessionId, 'outbound_chat_queue_timeout', { status: 'synchronisation', scheduleRetry: true });
             const unconnectedAt = new Date();
             await db.collection('session_owners').updateOne(
                 { sessionId: expectedSessionId },
                 { $set: { connectionStatus: 'synchronisation', socketAuthenticated: false, socketReady: false, pairingPending: true, unconnectedSinceAt: unconnectedAt, statusUpdatedAt: unconnectedAt, updatedAt: unconnectedAt } }
-            ).catch(error => console.warn('[outbound-chat-timeout-status-save-failed]', { sessionId: expectedSessionId, error: error?.message || String(error) }));
+            ).catch(() => {});
         }
+    }).catch(sendError => {
+        if (actualSendFailure || /timed out|timeout/i.test(String(sendError?.message || sendError))) {
+            void reportTfbotWorkerSendFailure(expectedSessionId, sendError).catch(() => false);
+        }
+        throw sendError;
     });
 }
 
@@ -2761,23 +2551,7 @@ async function connectMongo(options = {}) {
             }
         }
         if (!skipStorageInitialization) await migrateTfbotStorage(targetDb);
-        if (!skipStorageInitialization) {
-            try {
-                const retiredPhysicalLogs = await targetDb.listCollections({ name: 'server_runtime_logs' }, { nameOnly: true }).toArray();
-                let physicalLogCollectionDropped = false;
-                if (retiredPhysicalLogs.length) {
-                    await targetDb.collection('server_runtime_logs').drop();
-                    physicalLogCollectionDropped = true;
-                }
-                const retiredLogicalLogDelete = await targetDb.collection(TFBOT_APP_DATA_COLLECTION).deleteMany({ $or: [{ __tfbotBucket: 'server_runtime_logs' }, { _id: { $regex: '^server_runtime_logs::' } }] });
-                const removedLegacyLogDocuments = Number(retiredLogicalLogDelete?.deletedCount || 0);
-                if (physicalLogCollectionDropped || removedLegacyLogDocuments) console.info('[runtime-log-mongodb-legacy-cleanup]', { physicalLogCollectionDropped, removedLegacyLogDocuments, activeStorage: 'local-render-jsonl', mongoLogReads: false, mongoLogWrites: false });
-            } catch (legacyLogCleanupError) {
-                console.error('[runtime-log-mongodb-legacy-cleanup-failed]', { error: legacyLogCleanupError?.message || String(legacyLogCleanupError), activeStorage: 'local-render-jsonl', action: 'startup_must_stop_until_legacy_mongodb_logs_are_removed' });
-                throw new Error(`tfbot_legacy_mongodb_log_cleanup_failed:${legacyLogCleanupError?.message || String(legacyLogCleanupError)}`);
-            }
-        }
-        const listedPhysicalCollections = (await targetDb.listCollections({}, { nameOnly: true }).toArray()).map(item => String(item.name || '')).filter(name => !name.startsWith('system.'));
+        const listedPhysicalCollections = (await targetDb.listCollections({}, { nameOnly: true }).toArray()).map(item => String(item.name || '')).filter(name => !name.startsWith('system.') && name !== 'server_runtime_logs');
         const actualPhysicalCollections = listedPhysicalCollections.sort();
         const expectedPhysicalCollections = [TFBOT_APP_DATA_COLLECTION, TFBOT_WHATSAPP_COLLECTION].sort();
         const unexpectedPhysicalCollections = actualPhysicalCollections.filter(name => !expectedPhysicalCollections.includes(name));
@@ -4258,8 +4032,8 @@ function getWhatsAppMessageFormat(value) {
     const groups = {
         text: ['conversation', 'extendedTextMessage', 'buttonsResponseMessage', 'listResponseMessage', 'templateButtonReplyMessage', 'interactiveResponseMessage', 'groupMentionMessage', 'buttonsMessage', 'listMessage', 'templateMessage', 'interactiveMessage'],
         image: ['imageMessage'],
-        video: ['videoMessage'],
-        audio: ['audioMessage', 'ptvMessage', 'voiceMessage'],
+        video: ['videoMessage', 'ptvMessage'],
+        audio: ['audioMessage', 'voiceMessage'],
         document: ['documentMessage', 'documentWithCaptionMessage'],
         sticker: ['stickerMessage', 'lottieStickerMessage'],
         album: ['albumMessage'],
@@ -4268,7 +4042,7 @@ function getWhatsAppMessageFormat(value) {
         poll: ['pollCreationMessage', 'pollCreationMessageV2', 'pollCreationMessageV3', 'pollUpdateMessage'],
         reaction: ['reactionMessage'],
         event: ['eventMessage', 'scheduledCallCreationMessage', 'scheduledCallEditMessage'],
-        status: ['groupStatusMessage', 'statusMentionMessage', 'statusMentionMessageV2'],
+        status: ['groupStatusMessage', 'statusMentionMessage', 'statusMentionMessageV2', 'statusMentionMessageV2Extension', 'statusMentionMessageExtension'],
         group: ['groupInviteMessage', 'newsletterAdminInviteMessage'],
         commerce: ['productMessage', 'orderMessage', 'catalogMessage'],
         payment: ['paymentInviteMessage', 'requestPaymentMessage', 'sendPaymentMessage', 'declinePaymentRequestMessage', 'cancelPaymentRequestMessage'],
@@ -4276,30 +4050,72 @@ function getWhatsAppMessageFormat(value) {
     };
     const keyToFormat = new Map();
     for (const [format, keys] of Object.entries(groups)) for (const key of keys) keyToFormat.set(key, format);
+    const mediaFormats = new Set(['image', 'video', 'audio', 'document', 'sticker', 'album']);
     const ignored = new Set(['messageContextInfo', 'senderKeyDistributionMessage', 'protocolMessage', 'keepInChatMessage', 'messageHistoryBundle', 'contextInfo', 'quotedMessage', 'deviceListMetadata', 'deviceListMetadataVersion']);
     const wrapperKeys = new Set(['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'documentWithCaptionMessage', 'deviceSentMessage', 'editedMessage']);
-    const scan = (node, depth, seen) => {
-        if (!node || typeof node !== 'object' || depth > 12 || seen.has(node)) return '';
+    const viewOnceWrapperKeys = new Set(['viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension']);
+    const scan = (node, depth, seen, insideViewOnce = false) => {
+        if (!node || typeof node !== 'object' || depth > 14 || seen.has(node)) return '';
         seen.add(node);
         const entries = Object.entries(node);
         for (const [key, payload] of entries) {
             if (!wrapperKeys.has(key) || !payload || typeof payload !== 'object') continue;
             const nested = payload.message && typeof payload.message === 'object' ? payload.message : payload;
-            const found = scan(nested, depth + 1, seen);
-            if (found) return found;
+            const found = scan(nested, depth + 1, seen, insideViewOnce || viewOnceWrapperKeys.has(key));
+            if (found) return insideViewOnce || viewOnceWrapperKeys.has(key) ? (mediaFormats.has(found) ? 'view_once_media' : found) : found;
         }
-        for (const [key, payload] of entries) {
+        for (const [key] of entries) {
             if (ignored.has(key) || wrapperKeys.has(key)) continue;
             const known = keyToFormat.get(key);
-            if (known) return known;
+            if (known) return insideViewOnce && mediaFormats.has(known) ? 'view_once_media' : known;
         }
         for (const [key, payload] of entries) {
             if (ignored.has(key) || wrapperKeys.has(key) || !payload || typeof payload !== 'object') continue;
+            const nested = scan(payload, depth + 1, seen, insideViewOnce);
+            if (nested) return nested;
             return `other:${String(key).slice(0, 80)}`;
         }
         return '';
     };
     return scan(source, 0, new WeakSet());
+}
+
+function extractWhatsAppResendMedia(value) {
+    const source = value?.message && typeof value.message === 'object' ? value.message : value;
+    const wrapperKeys = new Set(['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'documentWithCaptionMessage', 'deviceSentMessage', 'editedMessage']);
+    const viewOnceWrapperKeys = new Set(['viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension']);
+    const mediaTypes = {
+        imageMessage: { type: 'image', downloadType: 'image', sendType: 'image' },
+        videoMessage: { type: 'video', downloadType: 'video', sendType: 'video' },
+        ptvMessage: { type: 'video', downloadType: 'video', sendType: 'video' },
+        audioMessage: { type: 'audio', downloadType: 'audio', sendType: 'audio' },
+        voiceMessage: { type: 'audio', downloadType: 'audio', sendType: 'audio', ptt: true },
+        documentMessage: { type: 'document', downloadType: 'document', sendType: 'document' },
+        stickerMessage: { type: 'sticker', downloadType: 'sticker', sendType: 'sticker' },
+        lottieStickerMessage: { type: 'sticker', downloadType: 'sticker', sendType: 'sticker' }
+    };
+    const visit = (node, viewOnce, depth, seen) => {
+        if (!node || typeof node !== 'object' || depth > 14 || seen.has(node)) return null;
+        seen.add(node);
+        const entries = Object.entries(node);
+        for (const [key, payload] of entries) {
+            if (!wrapperKeys.has(key) || !payload || typeof payload !== 'object') continue;
+            const nested = payload.message && typeof payload.message === 'object' ? payload.message : payload;
+            const result = visit(nested, viewOnce || viewOnceWrapperKeys.has(key), depth + 1, seen);
+            if (result) return result;
+        }
+        for (const [key, payload] of entries) {
+            const descriptor = mediaTypes[key];
+            if (descriptor && payload && typeof payload === 'object') return { ...descriptor, payload, viewOnce: !!viewOnce, sourceType: key };
+        }
+        for (const [key, payload] of entries) {
+            if (wrapperKeys.has(key) || !payload || typeof payload !== 'object' || key === 'messageContextInfo' || key === 'contextInfo') continue;
+            const result = visit(payload, viewOnce, depth + 1, seen);
+            if (result) return result;
+        }
+        return null;
+    };
+    return visit(source, false, 0, new WeakSet());
 }
 
 async function getDel3Rules(sessionId, gjid) {
@@ -4339,6 +4155,10 @@ async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, se
     if (!format) return false;
     const rules = await getDel3Rules(sessionId, chat);
     if (!rules.some(rule => rule.format === format)) return false;
+    if (typeof canBotModerateGroupFn === 'function' && !await canBotModerateGroupFn(chat)) {
+        console.warn('[del3-skip-bot-permission-unavailable]', { sessionId, group: chat, messageId, format });
+        return false;
+    }
     const ownerIdentityAvailable = !!(ownerRecord && typeof ownerRecord === 'object' && [ownerRecord.Number, ownerRecord.number, ownerRecord.OwnerNumber, ownerRecord.ownerNumber, ownerRecord.PairingNumber, ownerRecord.AccountJid, ownerRecord.accountJid, ownerRecord.OwnerLid, ownerRecord.ownerLid].some(value => String(value || '').trim()));
     if (!ownerIdentityAvailable) {
         console.warn('[del3-message-protected]', { sessionId, group: chat, messageId, format, reason: 'owner_identity_record_unavailable_fail_closed' });
@@ -4466,7 +4286,7 @@ function isSameOriginFrontendApiRequest(req) {
 app.use((req, res, next) => {
     const originalSend = res.send.bind(res);
     const originalSendFile = res.sendFile.bind(res);
-    const skipEmbeddedBotPage = () => isBotIframeDocumentRequest(req) || normalizeTfbotRequestPath(req.path) === LOG_DASHBOARD_PATH;
+    const skipEmbeddedBotPage = () => isBotIframeDocumentRequest(req);
     res.send = function(body) {
         let outgoing = body;
         let contentType = String(res.getHeader('Content-Type') || '');
@@ -4537,12 +4357,7 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
     if (!TFBOT_CLUSTER_ENABLED || req.method === 'OPTIONS' || isValidClusterHop(req)) return next();
     const requestPath = normalizeTfbotRequestPath(req.path || '/');
-    if (requestPath === LOG_DASHBOARD_PATH) {
-        if (TFBOT_CLUSTER_ENABLED && !TFBOT_CLUSTER_COORDINATOR_ONLY) return res.redirect(307, `${TFBOT_CLUSTER_COORDINATOR_URL}${normalizeTfbotRequestUrl(req.originalUrl || LOG_DASHBOARD_PATH)}`);
-        return next();
-    }
-    if (requestPath === TFBOT_LOG_INGEST_PATH) return next();
-    if (requestPath === '/ok' || requestPath === TFBOT_CLUSTER_HEALTH_PATH || requestPath === TFBOT_ROUTER_OK_PATH || requestPath === TFBOT_ROUTER_RESOLVE_PATH || requestPath === TFBOT_WORKER_CONTROL_PATH || requestPath === TFBOT_WORKER_POLL_PATH || requestPath.startsWith('/__tfbot/router/')) return next();
+    if (requestPath === '/ok' || requestPath === TFBOT_CLUSTER_HEALTH_PATH || requestPath === TFBOT_ROUTER_OK_PATH || requestPath === TFBOT_ROUTER_RESOLVE_PATH || requestPath === TFBOT_WORKER_CONTROL_PATH || requestPath === TFBOT_WORKER_POLL_PATH || requestPath === TFBOT_WORKER_FAILURE_PATH || requestPath.startsWith('/__tfbot/router/')) return next();
     const requestHost = normalizeTfbotHost(req.get('host') || req.hostname || '');
     const active = TFBOT_CLUSTER_COORDINATOR_ONLY ? tfbotCoordinatorSelectionCache : tfbotActiveDomainCache;
     const activeHost = normalizeTfbotHost(active?.host || '');
@@ -4574,9 +4389,8 @@ app.use((req, res, next) => {
 });
 
 app.use((req, res, next) => {
-    if (!TFBOT_CLUSTER_ENABLED || !db || req.method === 'OPTIONS' || isValidClusterHop(req) || normalizeTfbotRequestPath(req.path || '') === '/ok' || normalizeTfbotRequestPath(req.path || '') === LOG_DASHBOARD_PATH || normalizeTfbotRequestPath(req.path || '') === TFBOT_LOG_INGEST_PATH || normalizeTfbotRequestPath(req.path || '') === TFBOT_CLUSTER_HEALTH_PATH || String(req.path || '') === TFBOT_WORKER_CONTROL_PATH || normalizeTfbotRequestPath(req.path || '') === TFBOT_WORKER_POLL_PATH || normalizeTfbotRequestPath(req.path || '').startsWith('/__tfbot/router/')) return next();
+    if (!TFBOT_CLUSTER_ENABLED || !db || req.method === 'OPTIONS' || isValidClusterHop(req) || normalizeTfbotRequestPath(req.path || '') === '/ok' || normalizeTfbotRequestPath(req.path || '') === TFBOT_CLUSTER_HEALTH_PATH || String(req.path || '') === TFBOT_WORKER_CONTROL_PATH || normalizeTfbotRequestPath(req.path || '') === TFBOT_WORKER_POLL_PATH || normalizeTfbotRequestPath(req.path || '') === TFBOT_WORKER_FAILURE_PATH || normalizeTfbotRequestPath(req.path || '').startsWith('/__tfbot/router/')) return next();
     const requestPath = normalizeTfbotRequestPath(req.path || '/');
-    if (requestPath === LOG_DASHBOARD_PATH || requestPath === TFBOT_LOG_INGEST_PATH) return next();
     if (/\.(?:css|js|mjs|map|png|jpe?g|webp|gif|svg|ico|woff2?|ttf|otf|mp4|webm|pdf)$/i.test(requestPath)) return next();
     void registerCurrentClusterInstance(false).catch(error => console.warn('[cluster-instance-page-touch-failed]', { path: requestPath, error: error?.message || String(error) }));
     clusterInFlightRequests++;
@@ -4593,8 +4407,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     const requestPath = normalizeTfbotRequestPath(req.path || '/').replace(/\/+$/, '') || '/';
-    if (requestPath === LOG_DASHBOARD_PATH || requestPath === TFBOT_LOG_INGEST_PATH) return next();
-    if (requestPath === '/ok' || requestPath === TFBOT_CLUSTER_HEALTH_PATH || requestPath === TFBOT_ROUTER_OK_PATH || requestPath === TFBOT_ROUTER_RESOLVE_PATH || requestPath === TFBOT_WORKER_CONTROL_PATH || requestPath === TFBOT_WORKER_POLL_PATH || isValidClusterHop(req)) return next();
+    if (requestPath === '/ok' || requestPath === TFBOT_CLUSTER_HEALTH_PATH || requestPath === TFBOT_ROUTER_OK_PATH || requestPath === TFBOT_ROUTER_RESOLVE_PATH || requestPath === TFBOT_WORKER_CONTROL_PATH || requestPath === TFBOT_WORKER_POLL_PATH || requestPath === TFBOT_WORKER_FAILURE_PATH || isValidClusterHop(req)) return next();
     if (requestPath === '/list') return next();
     if (requestPath === '/') {
         if (isAllowedEmbeddedHomeRequest(req)) return next();
@@ -4847,8 +4660,12 @@ async function refreshTfbotActiveDomain(force = false) {
             const fallbackIndex = previousIndex >= 0
                 ? (previousIndex + 1) % TFBOT_ROUTER_SERVING_DOMAINS.length
                 : ((tfbotCoordinatorFallbackCursor % TFBOT_ROUTER_SERVING_DOMAINS.length) + TFBOT_ROUTER_SERVING_DOMAINS.length) % TFBOT_ROUTER_SERVING_DOMAINS.length;
+            const activeForcedFailure = previousHost ? tfbotCoordinatorForcedSendFailures.get(previousHost) : null;
+            const activeWasForcedFailed = !!(activeForcedFailure && Number(activeForcedFailure.expiresAt || 0) > Date.now());
             const probeOrder = previousIndex >= 0
-                ? [TFBOT_ROUTER_SERVING_DOMAINS[previousIndex], TFBOT_ROUTER_SERVING_DOMAINS[fallbackIndex]]
+                ? activeWasForcedFailed
+                    ? Array.from({ length: TFBOT_ROUTER_SERVING_DOMAINS.length - 1 }, (_, index) => TFBOT_ROUTER_SERVING_DOMAINS[(previousIndex + index + 1) % TFBOT_ROUTER_SERVING_DOMAINS.length])
+                    : [TFBOT_ROUTER_SERVING_DOMAINS[previousIndex], TFBOT_ROUTER_SERVING_DOMAINS[fallbackIndex]]
                 : [TFBOT_ROUTER_SERVING_DOMAINS[fallbackIndex]];
             const checked = [];
             let selectedItem = null;
@@ -4856,15 +4673,18 @@ async function refreshTfbotActiveDomain(force = false) {
                 selectionPhase = `probe-active-or-fallback:${domain.host}`;
                 const domainHealth = await probeTfbotServingDomain(domain);
                 checked.push({ domain, health: domainHealth });
+                const forcedFailure = tfbotCoordinatorForcedSendFailures.get(domain.host);
+                const forcedSendFailureActive = !!(forcedFailure && Number(forcedFailure.expiresAt || 0) > Date.now());
+                if (forcedFailure && !forcedSendFailureActive) tfbotCoordinatorForcedSendFailures.delete(domain.host);
                 if (domain.host === previousHost) {
-                    if (domainHealth?.ok === true && !domainHealth.suspended) {
+                    if (domainHealth?.ok === true && !domainHealth.suspended && !forcedSendFailureActive) {
                         tfbotCoordinatorActiveProbeFailures.delete(domain.host);
-                    } else if (!domainHealth?.suspended && previousSelection?.generation) {
+                    } else if ((!domainHealth?.suspended || forcedSendFailureActive) && previousSelection?.generation) {
                         const previousFailure = tfbotCoordinatorActiveProbeFailures.get(domain.host) || { count: 0, firstFailureAt: Date.now() };
-                        previousFailure.count++;
+                        previousFailure.count = forcedSendFailureActive ? TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD : Number(previousFailure.count || 0) + 1;
                         previousFailure.lastFailureAt = Date.now();
                         tfbotCoordinatorActiveProbeFailures.set(domain.host, previousFailure);
-                        if (previousFailure.count < TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD) {
+                        if (!forcedSendFailureActive && previousFailure.count < TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD) {
                             const heldSelection = {
                                 ...previousSelection,
                                 checkedAt: new Date(),
@@ -4887,7 +4707,7 @@ async function refreshTfbotActiveDomain(force = false) {
                         }
                     }
                 }
-                if (domainHealth?.ok === true && !domainHealth.suspended) {
+                if (domainHealth?.ok === true && !domainHealth.suspended && !forcedSendFailureActive) {
                     selectedItem = { domain, health: domainHealth };
                     break;
                 }
@@ -4967,11 +4787,11 @@ async function refreshTfbotActiveDomain(force = false) {
                 generation,
                 pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS,
                 activeProbeIntervalMs: TFBOT_ROUTER_ACTIVE_PROBE_MS,
-                maxHostsPerCycle: 2,
+                maxHostsPerCycle: activeWasForcedFailed ? TFBOT_ROUTER_SERVING_DOMAINS.length - 1 : 2,
                 activeFailureThreshold: TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD,
                 fallbackContacted: checked.length > 1,
                 fallbackOnlyAfterActiveHostFailure: true,
-                selectionMode: previousIndex >= 0 ? 'probe-current-active-host-first-then-one-fallback-only-if-active-fails' : 'probe-one-persisted-fallback-candidate-per-cycle-until-healthy',
+                selectionMode: activeWasForcedFailed ? 'send-error-circular-failover-through-priority-hosts' : previousIndex >= 0 ? 'probe-current-active-host-first-then-one-fallback-only-if-active-fails' : 'probe-one-persisted-fallback-candidate-per-cycle-until-healthy',
                 nextFallbackHost: TFBOT_ROUTER_SERVING_DOMAINS[nextFallbackCursor].host,
                 controls: [control]
             });
@@ -5390,6 +5210,29 @@ app.get(TFBOT_WORKER_POLL_PATH, async (req, res) => {
     } catch (error) {
         console.error('[tfbot-worker-poll-response-failed]', { errorName: error?.name || 'Error', error: error?.message || String(error), stack: String(error?.stack || '').slice(0, 900), releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION });
         return res.status(503).json({ ok: false, error: 'tfbot_worker_poll_unavailable', retryAfterMs: TFBOT_WORKER_COORDINATOR_POLL_MS, releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION });
+    }
+});
+
+app.post(TFBOT_WORKER_FAILURE_PATH, async (req, res) => {
+    if (!TFBOT_CLUSTER_ENABLED || !TFBOT_CLUSTER_COORDINATOR_ONLY || !isValidClusterToken(req)) return res.status(404).type('text/plain').send('Not found');
+    const reportedHost = normalizeTfbotHost(req.body?.host || '');
+    const reportedGeneration = String(req.body?.generation || '').slice(0, 180);
+    const selected = tfbotCoordinatorSelectionCache || tfbotActiveDomainCache;
+    const selectedHost = normalizeTfbotHost(selected?.host || '');
+    if (!reportedHost || reportedHost !== selectedHost || !reportedGeneration || reportedGeneration !== String(selected?.generation || '')) {
+        return res.status(409).json({ ok: false, error: 'worker_failure_report_not_for_current_selection' });
+    }
+    tfbotCoordinatorForcedSendFailures.set(reportedHost, { expiresAt: Date.now() + 300000, failureKind: String(req.body?.failureKind || 'send_failure').slice(0, 48) });
+    try {
+        let next = await refreshTfbotActiveDomain(true);
+        if (!next || next.host === reportedHost) {
+            await new Promise(resolve => setTimeout(resolve, 250));
+            next = await refreshTfbotActiveDomain(true);
+        }
+        if (!next || next.host === reportedHost) return res.status(503).json({ ok: false, error: 'no_fallback_worker_ready' });
+        return res.status(200).json({ ok: true, failedHost: reportedHost, activeHost: next.host, generation: next.generation });
+    } catch (error) {
+        return res.status(503).json({ ok: false, error: 'worker_failover_failed' });
     }
 });
 
@@ -6083,12 +5926,13 @@ const translations = {
     cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "lien", cmd_tagall: "tagtout",
     cmd_hidetag: "hidetag", cmd_kick: "expulse", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "expulsetout", cmd_kickall2: "expulsetout2", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
-    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
+    cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_vv2: "vv2", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Connecté depuis", days: "jour(s)", hours: "heure(s)", minutes: "minute(s)", seconds: "seconde(s)",
     enabled: "activé", disabled: "désactivé", welcome_on: "Bienvenue activée", welcome_off: "Bienvenue désactivée", nolien_on: "Nolien activé", nolien_off: "Nolien désactivé", nolien2_on: "Nolien2 activé", nolien2_off: "Nolien2 désactivé",
+    mode_title: 'Mode',
     welcome_title: "Bienvenue", welcome_to: "Bienvenue dans",
     menu_title: "Menu", lang_changed: "La langue du bot est maintenant {lang}.", languages_available: "Langues disponibles : fr en es ht",
-    imaj_prompt: "Envoie un prompt après image pour générer une image.", imaj_generated: "*{prompt}*", imaj_error: "Erreur génération image - Réessaye.", search_title: "Recherche", search_error: "Erreur recherche",
+    imaj_prompt: "Utilisation : image <description>.", imaj_generated: "*{prompt}*", imaj_error: "La génération de l’image n’a pas abouti. Réessaie dans quelques instants.", search_title: "Recherche", search_error: "La recherche n’a pas pu aboutir. Réessaie dans quelques instants.",
     lang_title: "Langue", lang_current: "Langue actuelle du bot : {lang}.", ai_title: "Message", imaj_title: "Image", image_generated_title: "Image Générée",
     ai_click_to_receive: "Cliquez ici pour recevoir la réponse de l'IA :\n{link}",
     imaj_click_to_receive: "Cliquez ici pour recevoir votre image :\n{link}",
@@ -6104,43 +5948,53 @@ const translations = {
     already_private: "Le bot est déjà configuré en mode PRIVE.",
     already_public: "Le bot est déjà configuré en mode PUBLIC.",
     disconnect_sys_title: "Déconnexion Système",
-    disconnect_sys_msg: "Vous avez été déconnecté. Une suppression totale des données et sessions a été initiée via le système.",
-    del2_activated: "La modération stricte a été activée pour @{user}. Tous les messages de cet utilisateur seront supprimés de manière instantanée.",
-    del2_deactivated: "La modération stricte a été désactivée pour @{user}.",
-    del3_activated: "La suppression automatique est activée pour ce type de message. Les messages de l’hôte, du propriétaire et du bot restent protégés.",
-    del3_deactivated: "La suppression automatique est désactivée pour ce type de message.",
-    del3_delete_failed: "Impossible de supprimer ce message. Vérifie les droits du bot et réessaie.",
-    del3_deleted_unclassified: "Le message a été supprimé. Son type n’a pas pu être identifié, donc la suppression automatique n’a pas été modifiée.",
-    del3_usage: "Réponds à un message du groupe avec del3 pour le supprimer et activer ou désactiver la suppression automatique des prochains messages du même type.",
-    del3_bot_admin_required: "Le bot doit être administrateur du groupe pour activer del3 et supprimer les messages. Ajoute-le comme administrateur, puis réessaie.",
-    pending_msg: "En attente de chargement",
-    msg_unloaded: "Message non chargé",
-    take_time: "Ceci pourrait prendre un peu de temps",
-    quota_error: "Erreur de quota ou limite atteinte. Veuillez réessayer plus tard.",
-    ai_error: "Erreur lors de la communication avec l'IA.",
-    ai_usage: "Utilise : ia ta question",
-    url_usage: "Réponds à une image, une vidéo, un audio, un document ou un sticker avec la commande url.",
-    url_error: "Impossible de créer le lien. Vérifie le média et réessaie.",
-    qr_usage: "Utilise : qr ton texte ou ton lien", qr_too_long: "Le texte est trop long pour un QR code. Utilise un texte plus court ou un lien.", qr_generated: "QR code généré.",
-    search_usage: "Utilise : chercher ta question",
-    code_usage: "Utilise : code suivi du numéro avec indicatif international.",
-    owner_required: "Cette commande est réservée au propriétaire du bot.",
-    group_required: "Cette commande doit être utilisée dans un groupe WhatsApp.",
-    admin_required: "Cette commande nécessite les droits d’administrateur du groupe.",
-    command_error: "La commande a échoué. Réessaie et vérifie les droits du bot.",
-    info_text: "*● ASSISTANT & RECHERCHE*\n*○ ia* : Poser une question à l’assistant.\n*○ image* : Générer une image à partir d’une description.\n*○ chercher* : Rechercher des informations sur le Web.\n*○ lang fr|en|es|ht* : Choisir la langue du bot.\n\n*● CONNEXION & INFORMATIONS*\n*○ menu* : Afficher la liste des commandes.\n*○ info* : Afficher l’aide des commandes.\n*○ qrbot* : Créer une nouvelle connexion par QR code.\n*○ code numéro* : Obtenir un code de connexion pour un numéro international (hôte uniquement).\n*○ qr texte ou lien* : Créer un QR code.\n*○ lien* : Afficher les liens officiels.\n*○ sit* : Afficher les sites officiels.\n*○ alive* : Voir depuis combien de temps le bot est connecté.\n*○ ping* : Mesurer le délai de réponse.\n*○ url* : Répondre à un média pour obtenir son lien.\n*○ vv* : Renvoyer un média à vue unique auquel tu réponds.\n\n*● GROUPE & MODÉRATION*\n*○ tagtout* : Mentionner tous les membres.\n*○ hidetag* : Envoyer une mention collective sans afficher la liste.\n*○ expulse* : Retirer le membre mentionné ou ciblé.\n*○ add numéro* : Ajouter un numéro au groupe.\n*○ promote / demote* : Donner ou retirer les droits d’administration.\n*○ expulsetout* : Retirer les membres non administrateurs en une opération.\n*○ expulsetout2* : Retirer les membres non administrateurs par petits groupes.\n*○ ferme / ouvert* : Limiter l’envoi aux administrateurs ou le réautoriser à tous.\n*○ bienvenue* : Activer ou désactiver le message d’accueil.\n*○ nolien* : Bloquer les liens selon le réglage simple.\n*○ nolien2* : Appliquer le blocage strict des liens.\n*○ del* : Répondre à un message pour le supprimer.\n*○ del2* : Activer ou désactiver la suppression des messages d’un membre ciblé.\n*○ del3* : Répondre à un message pour le supprimer et activer ou désactiver la suppression des prochains messages du même type.\n\n*● RÉGLAGES DU BOT*\n*○ prive / public* : Changer le mode privé ou public (hôte uniquement)."
+    disconnect_sys_msg: "La session a été déconnectée. La procédure de suppression des données et des sessions associées a été lancée.",
+    del2_activated: "La suppression automatique des messages de @{user} est activée.",
+    del2_deactivated: "La suppression automatique des messages de @{user} est désactivée.",
+    del3_activated: "La suppression automatique des futurs messages de même format est activée dans ce groupe.",
+    del3_deactivated: "La suppression automatique des futurs messages de même format est désactivée dans ce groupe.",
+    del3_delete_failed: "La suppression du message sélectionné n’a pas abouti. Vérifie les autorisations du bot dans le groupe, puis réessaie.",
+    del3_deleted_unclassified: "Le message a été supprimé, mais son format n’a pas pu être identifié. Aucune règle automatique n’a été modifiée.",
+    del3_usage: "Dans un groupe, réponds à n’importe quel message avec del3 pour activer ou désactiver la suppression automatique des futurs messages de même format. Le bot doit être administrateur du groupe.",
+    vv_usage: "Réponds à une image, une vidéo, un audio, un document ou un sticker pris en charge avec vv pour le renvoyer dans cette conversation.", vv_media_required: "Le message sélectionné ne contient pas de média pris en charge.", vv_self_unavailable: "Le chat personnel de ce compte n’a pas pu être identifié.",
+    del3_bot_admin_required: "Le bot doit être administrateur du groupe pour appliquer cette règle.",
+    del_usage: "Réponds au message à supprimer avec del.",
+    del2_usage: "Utilisation : del2 suivi d’une mention ou d’un numéro international. Tu peux également répondre au message du membre.",
+    target_usage: "Utilisation : {command} suivi d’une mention ou d’un numéro international. Tu peux également répondre au message du membre.",
+    no_eligible_target: "Aucun membre correspondant et éligible n’a été trouvé dans ce groupe.",
+    delete_failed: "La suppression n’a pas pu être effectuée. Vérifie les autorisations applicables et réessaie.",
+    del_completed: "La demande de suppression a été traitée.",
+    vv2_usage: "Réponds à un média à vue unique avec vv2 pour le recevoir dans le chat personnel du compte connecté. Commande réservée au propriétaire du compte.",
+    vv2_media_required: "Le message sélectionné ne contient pas de média à vue unique pris en charge.",
+    pending_msg: "Message en cours de chargement.",
+    msg_unloaded: "Contenu du message indisponible.",
+    take_time: "Le chargement peut prendre quelques instants.",
+    quota_error: "La limite d’utilisation du service a été atteinte. Réessaie plus tard.",
+    ai_error: "L’assistant n’a pas pu traiter la demande. Réessaie dans quelques instants.",
+    ai_usage: "Utilisation : ia <question>.",
+    url_usage: "Réponds à une image, une vidéo, un audio, un document ou un sticker avec url pour obtenir son lien.",
+    url_error: "Le média n’a pas pu être traité. Vérifie qu’il est toujours accessible, puis réessaie.",
+    qr_usage: "Utilisation : qr <texte ou lien>.", qr_too_long: "Le texte est trop long pour un QR code. Utilise un texte plus court ou un lien.", qr_generated: "QR code généré.",
+    search_usage: "Utilisation : chercher <question>.",
+    code_usage: "Utilisation : code suivi d’un numéro au format international (8 à 15 chiffres).",
+    owner_required: "Cette commande est réservée au propriétaire du compte connecté.",
+    group_required: "Cette commande est disponible uniquement dans un groupe WhatsApp.",
+    admin_required: "Cette action est réservée aux administrateurs du groupe ou au propriétaire du compte connecté.",
+    command_error: "L’action n’a pas pu être terminée. Vérifie les informations et autorisations requises, puis réessaie.",
+info_text: "*● ASSISTANT & RECHERCHE*\n*○ ia / ai / asistan <question>* : Envoyer une demande à l’assistant.\n*○ image <description>* : Générer une image à partir d’une description.\n*○ chercher <question>* : Effectuer une recherche sur le Web.\n*○ lang <fr|en|es|ht>* : Définir la langue des réponses.\n\n*● CONNEXION & INFORMATIONS*\n*○ menu* : Afficher les commandes disponibles.\n*○ info* : Afficher cette aide.\n*○ qrbot* : Créer une nouvelle session WhatsApp avec un QR code.\n*○ code <numéro international>* : Demander un code d’association (propriétaire uniquement).\n*○ qr <texte ou lien>* : Créer un QR code.\n*○ lien* : Afficher le lien d’invitation du groupe.\n*○ sit* : Afficher les plateformes officielles.\n*○ alive* : Afficher la durée de fonctionnement de la session.\n*○ ping* : Mesurer le temps de réponse.\n*○ url* : Répondre à un média pris en charge pour obtenir son lien.\n*○ vv* : Répondre à un média pris en charge pour le renvoyer dans la conversation actuelle.\n*○ vv2 / viewonce2 / view-once2* : Répondre à un média à vue unique pour le recevoir dans le chat personnel du compte connecté (propriétaire uniquement).\n\n*● GROUPE & MODÉRATION*\n*○ tagtout* : Mentionner les membres du groupe.\n*○ hidetag* : Mentionner les membres sans afficher la liste dans le texte.\n*○ expulse <mention/numéro>* : Retirer un membre du groupe.\n*○ add <numéro>* : Ajouter un numéro au groupe.\n*○ promote / demote <mention/numéro>* : Modifier les droits d’administration d’un membre.\n*○ expulsetout* : Retirer les membres non administrateurs éligibles en une opération.\n*○ expulsetout2* : Effectuer le retrait par lots.\n*○ ferme / ouvert* : Restreindre ou autoriser l’envoi de messages dans le groupe.\n*○ bienvenue* : Activer ou désactiver les messages d’accueil.\n*○ nolien* : Activer le filtrage standard des liens.\n*○ nolien2* : Activer le filtrage strict des liens.\n*○ del* : Répondre à un message pour demander sa suppression.\n*○ del2 <mention/numéro>* : Activer ou désactiver la suppression automatique des messages d’un membre.\n*○ del3* : Répondre à n’importe quel message du groupe pour activer ou désactiver la suppression automatique des futurs messages de même format. Le bot doit être administrateur du groupe.\n\n*● RÉGLAGES DU BOT*\n*○ prive / public* : Modifier le mode de fonctionnement de la session (propriétaire uniquement)."
   },
   en: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "search",
     cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "link", cmd_tagall: "tagall",
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "kickall", cmd_kickall2: "kickall2", cmd_ferme: "close", cmd_ouvert: "open", cmd_bienvenue: "welcome",
-    cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
+    cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_vv2: "vv2", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Connected for", days: "day(s)", hours: "hour(s)", minutes: "minute(s)", seconds: "second(s)",
     enabled: "enabled", disabled: "disabled", welcome_on: "Welcome enabled", welcome_off: "Welcome disabled", nolien_on: "No link enabled", nolien_off: "No link disabled", nolien2_on: "Strict no link enabled", nolien2_off: "Strict no link disabled",
+    mode_title: 'Mode',
     welcome_title: "Welcome", welcome_to: "Welcome to",
     menu_title: "Menu", lang_changed: "Bot language is now {lang}.", languages_available: "Available languages: fr en es ht",
-    imaj_prompt: "Send a prompt after image to generate an image.", imaj_generated: "*{prompt}*", imaj_error: "Image generation error - Try again.", search_title: "Search", search_error: "Search error",
+    imaj_prompt: "Usage: image <description>.", imaj_generated: "*{prompt}*", imaj_error: "Image generation could not be completed. Please try again shortly.", search_title: "Search", search_error: "The search could not be completed. Please try again shortly.",
     lang_title: "Language", lang_current: "Current bot language: {lang}.", ai_title: "Message", imaj_title: "Image", image_generated_title: "Generated Image",
     ai_click_to_receive: "Click here to receive the AI response:\n{link}",
     imaj_click_to_receive: "Click here to receive your image:\n{link}",
@@ -6156,43 +6010,53 @@ const translations = {
     already_private: "The bot is already in PRIVATE mode.",
     already_public: "The bot is already in PUBLIC mode.",
     disconnect_sys_title: "System Disconnection",
-    disconnect_sys_msg: "You have been disconnected. A total deletion of data and sessions has been initiated via the system.",
-    del2_activated: "Strict moderation has been activated for @{user}. All incoming messages from this user will be deleted immediately.",
-    del2_deactivated: "Strict moderation has been deactivated for @{user}.",
-    del3_activated: "Automatic deletion is enabled for this message type. The host, owner and bot messages remain protected.",
-    del3_deactivated: "Automatic deletion is disabled for this message type.",
-    del3_delete_failed: "This message could not be deleted. Check the bot permissions and try again.",
-    del3_deleted_unclassified: "The message was deleted. Its type could not be identified, so automatic deletion was not changed.",
-    del3_usage: "Reply to a group message with del3 to delete it and toggle automatic deletion of future messages of the same type.",
-    del3_bot_admin_required: "The bot must be a group administrator to enable del3 and delete messages. Make it an admin, then try again.",
-    pending_msg: "Waiting for this message",
-    msg_unloaded: "Message not loaded",
-    take_time: "This may take a while",
-    quota_error: "Quota error or limit reached. Please try again later.",
-    ai_error: "Error communicating with the AI.",
-    ai_usage: "Use: ai your question",
-    url_usage: "Reply to an image, video, audio, document, or sticker with the url command.",
-    url_error: "Could not create the link. Check the media and try again.",
-    qr_usage: "Use: qr your text or link", qr_too_long: "This text is too long for a QR code. Use shorter text or a URL.", qr_generated: "QR code generated.",
-    search_usage: "Use: search your question",
-    code_usage: "Use: code followed by the number with its international country code.",
-    owner_required: "This command is restricted to the bot owner.",
-    group_required: "This command must be used in a WhatsApp group.",
-    admin_required: "This command requires group administrator permissions.",
-    command_error: "The command failed. Try again and check the bot permissions.",
-    info_text: "*● ASSISTANT & SEARCH*\n*○ ai* : Ask the assistant a question.\n*○ image* : Generate an image from a description.\n*○ search* : Search the Web for information.\n*○ lang fr|en|es|ht* : Choose the bot language.\n\n*● CONNECTION & INFORMATION*\n*○ menu* : Show the command list.\n*○ info* : Show command help.\n*○ qrbot* : Create a new connection using a QR code.\n*○ code number* : Get a connection code for an international number (owner only).\n*○ qr text or link* : Create a QR code.\n*○ link* : Show official links.\n*○ sit* : Show official websites.\n*○ alive* : Show how long the bot has been connected.\n*○ ping* : Measure response time.\n*○ url* : Reply to media to get its link.\n*○ vv* : Resend a view-once media item you replied to.\n\n*● GROUP & MODERATION*\n*○ tagall* : Mention every group member.\n*○ hidetag* : Mention everyone without displaying the member list.\n*○ kick* : Remove the mentioned or selected member.\n*○ add number* : Add a number to the group.\n*○ promote / demote* : Grant or remove administrator rights.\n*○ kickall* : Remove non-admin members in one operation.\n*○ kickall2* : Remove non-admin members in small batches.\n*○ close / open* : Restrict messages to admins or allow everyone to send.\n*○ welcome* : Enable or disable welcome messages.\n*○ nolink* : Apply basic link filtering.\n*○ nolink2* : Apply strict link filtering.\n*○ del* : Reply to a message to delete it.\n*○ del2* : Enable or disable deletion of messages from a selected member.\n*○ del3* : Reply to a message to delete it and enable or disable deletion of future messages of the same type.\n\n*● BOT SETTINGS*\n*○ private / public* : Change private or public mode (owner only)."
+    disconnect_sys_msg: "The session has been disconnected. The removal process for the associated data and sessions has been started.",
+    del2_activated: "Automatic deletion for messages from @{user} is enabled.",
+    del2_deactivated: "Automatic deletion for messages from @{user} is disabled.",
+    del3_activated: "Automatic deletion of future messages in the same format is enabled for this group.",
+    del3_deactivated: "Automatic deletion of future messages in the same format is disabled for this group.",
+    del3_delete_failed: "The selected message could not be deleted. Check the bot’s group permissions and try again.",
+    del3_deleted_unclassified: "The message was deleted, but its format could not be identified. No automatic rule was changed.",
+    del3_usage: "In a group, reply to any message with del3 to enable or disable automatic deletion of future messages in the same format. The bot must be a group administrator.",
+    vv_usage: "Reply to a supported image, video, audio, document, or sticker with vv to resend it in the current conversation.", vv_media_required: "The selected message does not contain supported media.", vv_self_unavailable: "The connected account’s personal chat could not be identified.",
+    del3_bot_admin_required: "The bot must be a group administrator to apply this rule.",
+    del_usage: "Reply to the message you want to delete with del.",
+    del2_usage: "Usage: del2 followed by a mention or international number. You can also reply to the member’s message.",
+    target_usage: "Usage: {command} followed by a mention or international number. You can also reply to the member’s message.",
+    no_eligible_target: "No eligible group member matched the supplied target.",
+    delete_failed: "The deletion could not be completed. Check the applicable permissions and try again.",
+    del_completed: "The deletion request has been processed.",
+    vv2_usage: "Reply to view-once media with vv2 to receive it in the connected account’s personal chat. This command is restricted to the account owner.",
+    vv2_media_required: "The selected message does not contain supported view-once media.",
+    pending_msg: "Message is loading.",
+    msg_unloaded: "Message content is unavailable.",
+    take_time: "Loading may take a few moments.",
+    quota_error: "The service usage limit has been reached. Please try again later.",
+    ai_error: "The assistant could not process the request. Please try again shortly.",
+    ai_usage: "Usage: ai <question>.",
+    url_usage: "Reply to an image, video, audio, document, or sticker with url to obtain its link.",
+    url_error: "The media could not be processed. Check that it is still available and try again.",
+    qr_usage: "Usage: qr <text or link>.", qr_too_long: "This text is too long for a QR code. Use shorter text or a URL.", qr_generated: "QR code generated.",
+    search_usage: "Usage: search <question>.",
+    code_usage: "Usage: code followed by a number in international format (8 to 15 digits).",
+    owner_required: "This command is available only to the owner of the connected account.",
+    group_required: "This command is available only in a WhatsApp group.",
+    admin_required: "This action is available to group administrators or the connected-account owner.",
+    command_error: "The action could not be completed. Check the supplied information and required permissions, then try again.",
+info_text: "*● ASSISTANT & SEARCH*\n*○ ai / ia / asistan <question>* : Send a request to the assistant.\n*○ image <description>* : Generate an image from a description.\n*○ search <question>* : Search the Web.\n*○ lang <fr|en|es|ht>* : Set the response language.\n\n*● CONNECTION & INFORMATION*\n*○ menu* : Display available commands.\n*○ info* : Display this help.\n*○ qrbot* : Create a new WhatsApp session using a QR code.\n*○ code <international number>* : Request a pairing code (owner only).\n*○ qr <text or link>* : Create a QR code.\n*○ link* : Display the group invitation link.\n*○ sit* : Display official platforms.\n*○ alive* : Display the session uptime.\n*○ ping* : Measure response time.\n*○ url* : Reply to supported media to obtain its link.\n*○ vv* : Reply to supported media to resend it in the current conversation.\n*○ vv2 / viewonce2 / view-once2* : Reply to view-once media to receive it in the connected account’s personal chat (owner only).\n\n*● GROUP & MODERATION*\n*○ tagall* : Mention group members.\n*○ hidetag* : Mention group members without displaying the list in the message.\n*○ kick <mention/number>* : Remove a group member.\n*○ add <number>* : Add a number to the group.\n*○ promote / demote <mention/number>* : Change a member’s administrator role.\n*○ kickall* : Remove eligible non-administrator members in one operation.\n*○ kickall2* : Remove eligible members in batches.\n*○ close / open* : Restrict or allow messages in the group.\n*○ welcome* : Enable or disable welcome messages.\n*○ nolink* : Enable standard link filtering.\n*○ nolink2* : Enable strict link filtering.\n*○ del* : Reply to a message to request its deletion.\n*○ del2 <mention/number>* : Enable or disable automatic deletion for a selected member’s messages.\n*○ del3* : Reply to any group message to enable or disable automatic deletion of future messages in the same format. The bot must be a group administrator.\n\n*● BOT SETTINGS*\n*○ private / public* : Change the session mode (owner only)."
   },
   es: {
     cmd_ai: "ia", cmd_lang: "lang", cmd_imaj: "imagen", cmd_cheche: "buscar",
     cmd_menu: "menú", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "código", cmd_lien: "enlace", cmd_tagall: "etiquetartodo",
     cmd_hidetag: "hidetag", cmd_kick: "expulsar", cmd_add: "añadir", cmd_promote: "promover", cmd_demote: "degradar",
     cmd_kickall: "borrartodo", cmd_kickall2: "borrartodo2", cmd_ferme: "cerrar", cmd_ouvert: "abrir", cmd_bienvenue: "bienvenida",
-    cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
+    cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_vv2: "vv2", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Conectado por", days: "día(s)", hours: "hora(s)", minutes: "minuto(s)", seconds: "segundo(s)",
     enabled: "activado", disabled: "desactivado", welcome_on: "Bienvenida activada", welcome_off: "Bienvenida desactivada", nolien_on: "Sin enlaces activado", nolien_off: "Sin enlaces desactivado", nolien2_on: "Sin enlaces estricto activado", nolien2_off: "Sin enlaces estricto desactivado",
+    mode_title: 'Modo',
     welcome_title: "Bienvenida", welcome_to: "Bienvenida a",
     menu_title: "Menú", lang_changed: "El idioma del bot es ahora {lang}.", languages_available: "Idiomas disponibles: fr en es ht",
-    imaj_prompt: "Envía un prompt después de imagen para generar una imagen.", imaj_generated: "*{prompt}*", imaj_error: "Error al generar imagen - Inténtalo de nuevo.", search_title: "Búsqueda", search_error: "Error de búsqueda",
+    imaj_prompt: "Uso: imagen <descripción>.", imaj_generated: "*{prompt}*", imaj_error: "No se pudo completar la generación de la imagen. Inténtalo de nuevo en unos momentos.", search_title: "Búsqueda", search_error: "No se pudo completar la búsqueda. Inténtalo de nuevo en unos momentos.",
     lang_title: "Idioma", lang_current: "Idioma actual del bot: {lang}.", ai_title: "Mensaje", imaj_title: "Imagen", image_generated_title: "Imagen Generada",
     ai_click_to_receive: "Haz clic aquí para recibir la respuesta de la IA:\n{link}",
     imaj_click_to_receive: "Haz clic aquí para recibir tu imagen:\n{link}",
@@ -6208,43 +6072,53 @@ const translations = {
     already_private: "El bot ya está configurado en modo PRIVADO.",
     already_public: "El bot ya está configurado en modo PÚBLICO.",
     disconnect_sys_title: "Desconexión del Sistema",
-    disconnect_sys_msg: "Ha sido desconectado. Se ha iniciado una eliminación total de datos y sesiones a través del sistema.",
-    del2_activated: "Se ha activado la moderación estricta para @{user}. Todos los mensajes entrantes de este usuario serán eliminados de inmediato.",
-    del2_deactivated: "Se ha desactivado la moderación estricta para @{user}.",
-    del3_activated: "La eliminación automática está activada para este tipo de mensaje. Los mensajes del anfitrión, del propietario y del bot permanecen protegidos.",
-    del3_deactivated: "La eliminación automática está desactivada para este tipo de mensaje.",
-    del3_delete_failed: "No se pudo eliminar este mensaje. Comprueba los permisos del bot e inténtalo de nuevo.",
-    del3_deleted_unclassified: "El mensaje se eliminó. No se pudo identificar su tipo, por lo que no se modificó la eliminación automática.",
-    del3_usage: "Responde a un mensaje del grupo con del3 para eliminarlo y activar o desactivar la eliminación automática de los próximos mensajes del mismo tipo.",
-    del3_bot_admin_required: "El bot debe ser administrador del grupo para activar del3 y eliminar mensajes. Hazlo administrador y vuelve a intentarlo.",
-    pending_msg: "Esperando este mensaje",
-    msg_unloaded: "Mensaje no cargado",
-    take_time: "Esto puede tomar un tiempo",
-    quota_error: "Error de cuota o límite alcanzado. Por favor, inténtelo de nuevo más tarde.",
-    ai_error: "Error al comunicarse con la IA.",
-    ai_usage: "Usa: ia tu pregunta",
-    url_usage: "Responde a una imagen, vídeo, audio, documento o sticker con el comando url.",
-    url_error: "No se pudo crear el enlace. Comprueba el archivo e inténtalo de nuevo.",
-    qr_usage: "Usa: qr tu texto o enlace", qr_too_long: "El texto es demasiado largo para un código QR. Usa un texto más corto o un enlace.", qr_generated: "Código QR generado.",
-    search_usage: "Usa: buscar tu pregunta",
-    code_usage: "Usa: código seguido del número con el prefijo internacional.",
-    owner_required: "Este comando está reservado al propietario del bot.",
-    group_required: "Este comando debe usarse en un grupo de WhatsApp.",
-    admin_required: "Este comando requiere permisos de administrador del grupo.",
-    command_error: "El comando falló. Inténtalo de nuevo y comprueba los permisos del bot.",
-    info_text: "*● ASISTENTE Y BÚSQUEDA*\n*○ ia* : Hacer una pregunta al asistente.\n*○ imagen* : Generar una imagen a partir de una descripción.\n*○ buscar* : Buscar información en la Web.\n*○ lang fr|en|es|ht* : Elegir el idioma del bot.\n\n*● CONEXIÓN E INFORMACIÓN*\n*○ menú* : Mostrar la lista de comandos.\n*○ info* : Mostrar la ayuda de los comandos.\n*○ qrbot* : Crear una nueva conexión mediante QR.\n*○ código número* : Obtener un código de conexión para un número internacional (solo propietario).\n*○ qr texto o enlace* : Crear un código QR.\n*○ enlace* : Mostrar los enlaces oficiales.\n*○ sit* : Mostrar los sitios oficiales.\n*○ alive* : Ver cuánto tiempo lleva conectado el bot.\n*○ ping* : Medir el tiempo de respuesta.\n*○ url* : Responder a un archivo multimedia para obtener su enlace.\n*○ vv* : Volver a enviar un archivo de vista única al que respondiste.\n\n*● GRUPO Y MODERACIÓN*\n*○ etiquetartodo* : Mencionar a todos los miembros.\n*○ hidetag* : Mencionar a todos sin mostrar la lista.\n*○ expulsar* : Retirar al miembro mencionado o seleccionado.\n*○ añadir número* : Añadir un número al grupo.\n*○ promover / degradar* : Dar o quitar permisos de administrador.\n*○ borrartodo* : Retirar a los miembros que no son administradores en una operación.\n*○ borrartodo2* : Retirar a los miembros que no son administradores por grupos pequeños.\n*○ cerrar / abrir* : Limitar los mensajes a administradores o permitir que todos escriban.\n*○ bienvenida* : Activar o desactivar los mensajes de bienvenida.\n*○ sinenlace* : Aplicar un filtro básico de enlaces.\n*○ sinenlace2* : Aplicar un filtro estricto de enlaces.\n*○ del* : Responder a un mensaje para eliminarlo.\n*○ del2* : Activar o desactivar la eliminación de mensajes de un miembro seleccionado.\n*○ del3* : Responder a un mensaje para eliminarlo y activar o desactivar la eliminación de futuros mensajes del mismo tipo.\n\n*● AJUSTES DEL BOT*\n*○ privado / publico* : Cambiar el modo privado o público (solo propietario)."
+    disconnect_sys_msg: "La sesión se ha desconectado. Se ha iniciado el proceso de eliminación de los datos y las sesiones asociados.",
+    del2_activated: "La eliminación automática de los mensajes de @{user} está activada.",
+    del2_deactivated: "La eliminación automática de los mensajes de @{user} está desactivada.",
+    del3_activated: "La eliminación automática de futuros mensajes del mismo formato está activada en este grupo.",
+    del3_deactivated: "La eliminación automática de futuros mensajes del mismo formato está desactivada en este grupo.",
+    del3_delete_failed: "No se pudo eliminar el mensaje seleccionado. Comprueba los permisos del bot en el grupo e inténtalo de nuevo.",
+    del3_deleted_unclassified: "El mensaje se eliminó, pero no se pudo identificar su formato. No se modificó ninguna regla automática.",
+    del3_usage: "En un grupo, responde a cualquier mensaje con del3 para activar o desactivar la eliminación automática de futuros mensajes del mismo formato. El bot debe ser administrador del grupo.",
+    vv_usage: "Responde a una imagen, vídeo, audio, documento o sticker compatible con vv para reenviarlo en esta conversación.", vv_media_required: "El mensaje seleccionado no contiene contenido multimedia compatible.", vv_self_unavailable: "No se pudo identificar el chat personal de la cuenta conectada.",
+    del3_bot_admin_required: "El bot debe ser administrador del grupo para aplicar esta regla.",
+    del_usage: "Responde al mensaje que deseas eliminar con del.",
+    del2_usage: "Uso: del2 seguido de una mención o un número internacional. También puedes responder al mensaje del miembro.",
+    target_usage: "Uso: {command} seguido de una mención o un número internacional. También puedes responder al mensaje del miembro.",
+    no_eligible_target: "No se encontró ningún miembro que cumpla los requisitos para esta acción.",
+    delete_failed: "No se pudo completar la eliminación. Comprueba los permisos correspondientes e inténtalo de nuevo.",
+    del_completed: "La solicitud de eliminación se ha procesado.",
+    vv2_usage: "Responde a un archivo multimedia de vista única con vv2 para recibirlo en el chat personal de la cuenta conectada. Este comando está reservado al propietario de la cuenta.",
+    vv2_media_required: "El mensaje seleccionado no contiene contenido compatible de vista única.",
+    pending_msg: "El mensaje se está cargando.",
+    msg_unloaded: "El contenido del mensaje no está disponible.",
+    take_time: "La carga puede tardar unos momentos.",
+    quota_error: "Se ha alcanzado el límite de uso del servicio. Inténtalo de nuevo más tarde.",
+    ai_error: "El asistente no pudo procesar la solicitud. Inténtalo de nuevo en unos momentos.",
+    ai_usage: "Uso: ia <pregunta>.",
+    url_usage: "Responde a una imagen, vídeo, audio, documento o sticker con url para obtener su enlace.",
+    url_error: "No se pudo procesar el archivo multimedia. Comprueba que siga disponible e inténtalo de nuevo.",
+    qr_usage: "Uso: qr <texto o enlace>.", qr_too_long: "El texto es demasiado largo para un código QR. Usa un texto más corto o un enlace.", qr_generated: "Código QR generado.",
+    search_usage: "Uso: buscar <pregunta>.",
+    code_usage: "Uso: código seguido de un número en formato internacional (de 8 a 15 dígitos).",
+    owner_required: "Este comando está disponible únicamente para el propietario de la cuenta conectada.",
+    group_required: "Este comando solo está disponible en grupos de WhatsApp.",
+    admin_required: "Esta acción está disponible para los administradores del grupo o el propietario de la cuenta conectada.",
+    command_error: "No se pudo completar la acción. Comprueba la información y los permisos necesarios e inténtalo de nuevo.",
+info_text: "*● ASISTENTE Y BÚSQUEDA*\n*○ ia / ai / asistan <pregunta>* : Enviar una consulta al asistente.\n*○ imagen <descripción>* : Generar una imagen a partir de una descripción.\n*○ buscar <pregunta>* : Buscar información en la Web.\n*○ lang <fr|en|es|ht>* : Establecer el idioma de las respuestas.\n\n*● CONEXIÓN E INFORMACIÓN*\n*○ menú* : Mostrar los comandos disponibles.\n*○ info* : Mostrar esta ayuda.\n*○ qrbot* : Crear una nueva sesión de WhatsApp mediante un código QR.\n*○ código <número internacional>* : Solicitar un código de vinculación (solo propietario).\n*○ qr <texto o enlace>* : Crear un código QR.\n*○ enlace* : Mostrar el enlace de invitación del grupo.\n*○ sit* : Mostrar las plataformas oficiales.\n*○ alive* : Mostrar el tiempo de actividad de la sesión.\n*○ ping* : Medir el tiempo de respuesta.\n*○ url* : Responder a un archivo multimedia compatible para obtener su enlace.\n*○ vv* : Responder a un archivo multimedia compatible para reenviarlo en esta conversación.\n*○ vv2 / viewonce2 / view-once2* : Responder a contenido de vista única para recibirlo en el chat personal de la cuenta conectada (solo propietario).\n\n*● GRUPO Y MODERACIÓN*\n*○ etiquetartodo* : Mencionar a los miembros del grupo.\n*○ hidetag* : Mencionar a los miembros sin mostrar la lista en el mensaje.\n*○ expulsar <mención/número>* : Retirar a un miembro del grupo.\n*○ añadir <número>* : Añadir un número al grupo.\n*○ promover / degradar <mención/número>* : Cambiar los permisos de administración de un miembro.\n*○ borrartodo* : Retirar a los miembros no administradores que cumplan los requisitos en una operación.\n*○ borrartodo2* : Realizar la retirada por lotes.\n*○ cerrar / abrir* : Restringir o permitir el envío de mensajes en el grupo.\n*○ bienvenida* : Activar o desactivar los mensajes de bienvenida.\n*○ sinenlace* : Activar el filtrado estándar de enlaces.\n*○ sinenlace2* : Activar el filtrado estricto de enlaces.\n*○ del* : Responder a un mensaje para solicitar su eliminación.\n*○ del2 <mención/número>* : Activar o desactivar la eliminación automática de los mensajes de un miembro.\n*○ del3* : Responde a cualquier mensaje del grupo para activar o desactivar la eliminación automática de futuros mensajes del mismo formato. El bot debe ser administrador del grupo.\n\n*● AJUSTES DEL BOT*\n*○ privado / público* : Cambiar el modo de la sesión (solo propietario)."
   },
   ht: {
     cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "imaj", cmd_cheche: "cheche",
     cmd_menu: "meni", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "kòd", cmd_lien: "lyen", cmd_tagall: "tout",
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "siptout", cmd_kickall2: "siptout2", cmd_ferme: "fèmen", cmd_ouvri: "ouvri", cmd_bienvenue: "byenveni",
-    cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
+    cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_vv2: "vv2", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", alive_title: "Alive", connected_since: "Konekte depi", days: "jou", hours: "èdtan", minutes: "minit", seconds: "segonn",
     enabled: "aktive", disabled: "dezaktive", welcome_on: "Byenveni aktive", welcome_off: "Byenveni dezaktive", nolien_on: "Nolyen aktive", nolien_off: "Nolyen dezaktive", nolien2_on: "Nolyen2 aktive", nolien2_off: "Nolyen2 dezaktive",
+    mode_title: 'Mòd',
     welcome_title: "Byenveni", welcome_to: "Byenveni nan",
     menu_title: "Meni", lang_changed: "Lang bot la se kounye a {lang}.", languages_available: "Lang disponib : fr en es ht",
-    imaj_prompt: "Voye yon prompt apre imaj pou jenere yon imaj.", imaj_generated: "*{prompt}*", imaj_error: "Erè jenere imaj - Eseye ankò.", search_title: "Rechèch", search_error: "Erè rechèch",
+    imaj_prompt: "Itilizasyon : imaj <deskripsyon>.", imaj_generated: "*{prompt}*", imaj_error: "Jenerasyon imaj la pa t kapab fini. Eseye ankò nan kèk moman.", search_title: "Rechèch", search_error: "Rechèch la pa t kapab fini. Eseye ankò nan kèk moman.",
     lang_title: "Lang", lang_current: "Lang bot la kounye a: {lang}.", ai_title: "Mesaj", imaj_title: "Imaj", image_generated_title: "Imaj Jenere",
     ai_click_to_receive: "Klike isit pou resevwa repons IA a :\n{link}",
     imaj_click_to_receive: "Klike isit la pou w resevwa imaj ou a :\n{link}",
@@ -6260,31 +6134,40 @@ const translations = {
     already_private: "Bot la deja konfigire an mòd PRIVE.",
     already_public: "Bot la deja konfigire an mòd PIBLIK.",
     disconnect_sys_title: "Dekoneksyon Sistèm",
-    disconnect_sys_msg: "Ou dekonekte. Yon efasman total done ak sesyon yo te inisye atravè sistèm nan.",
-    del2_activated: "Modération estrik aktive pou @{user}. Tout mesaj moun sa a voye ap siprime touswit.",
-    del2_deactivated: "Modération estrik dezaktive pou @{user}.",
-    del3_activated: "Sipresyon otomatik aktive pou kalite mesaj sa a. Mesaj lame, pwopriyetè a ak bot la rete pwoteje.",
-    del3_deactivated: "Sipresyon otomatik dezaktive pou kalite mesaj sa a.",
-    del3_delete_failed: "Mesaj sa a pa t kapab efase. Verifye pèmisyon bot la epi eseye ankò.",
-    del3_deleted_unclassified: "Mesaj la efase. Nou pa t kapab idantifye kalite li, kidonk efasman otomatik la pa chanje.",
-    del3_usage: "Reponn sou yon mesaj nan gwoup la ak del3 pou efase li epi aktive oswa dezaktive efasman otomatik pwochen mesaj ki gen menm kalite a.",
-    del3_bot_admin_required: "Bot la dwe administratè gwoup la pou aktive del3 epi efase mesaj yo. Mete li kòm administratè, epi eseye ankò.",
-    pending_msg: "Ap tann mesaj sa a",
-    msg_unloaded: "Mesaj pa chaje",
-    take_time: "Sa ka pran yon ti tan",
-    quota_error: "Erè kouta oswa limit atenn. Tanpri eseye ankò pita.",
-    ai_error: "Erè pandan kominikasyon avèk IA.",
-    ai_usage: "Sèvi ak: ai kesyon ou an",
-    url_usage: "Reponn sou yon imaj, videyo, odyo, dokiman oswa sticker avèk kòmand url la.",
-    url_error: "Li pa t posib pou kreye lyen an. Verifye fichye a epi eseye ankò.",
-    qr_usage: "Sèvi ak: qr tèks oswa lyen ou", qr_too_long: "Tèks la twò long pou yon kòd QR. Sèvi ak yon tèks ki pi kout oswa yon lyen.", qr_generated: "Kòd QR la kreye.",
-    search_usage: "Sèvi ak: cheche kesyon ou",
-    code_usage: "Sèvi ak: kòd apre sa mete nimewo a ak kòd peyi a.",
-    owner_required: "Kòmand sa a se pou pwopriyetè bot la sèlman.",
-    group_required: "Ou dwe itilize kòmand sa a nan yon gwoup WhatsApp.",
-    admin_required: "Kòmand sa a mande dwa administratè gwoup la.",
-    command_error: "Kòmand lan echwe. Eseye ankò epi verifye dwa bot la.",
-    info_text: "*● ASISTAN AK RECHÈCH*\n*○ ai* : Poze asistan an yon kesyon.\n*○ imaj* : Jenere yon imaj apati yon deskripsyon.\n*○ cheche* : Chèche enfòmasyon sou entènèt.\n*○ lang fr|en|es|ht* : Chwazi lang bot la.\n\n*● KONEKSYON AK ENFÒMASYON*\n*○ meni* : Montre lis kòmand yo.\n*○ info* : Montre eksplikasyon kòmand yo.\n*○ qrbot* : Kreye yon nouvo koneksyon ak QR code.\n*○ kòd nimewo* : Jwenn yon kòd koneksyon pou yon nimewo entènasyonal (pwopriyetè sèlman).\n*○ qr tèks oswa lyen* : Kreye yon QR code.\n*○ lyen* : Montre lyen ofisyèl yo.\n*○ sit* : Montre sit ofisyèl yo.\n*○ alive* : Montre depi konbyen tan bot la konekte.\n*○ ping* : Mezire tan repons lan.\n*○ url* : Reponn sou yon medya pou jwenn lyen li.\n*○ vv* : Voye ankò yon medya yon sèl fwa ou te reponn.\n\n*● GWOUP AK MODERASYON*\n*○ tout* : Mansyone tout manm yo.\n*○ hidetag* : Mansyone tout moun san montre lis la.\n*○ kick* : Retire manm ou mansyone oswa chwazi a.\n*○ add nimewo* : Ajoute yon nimewo nan gwoup la.\n*○ promote / demote* : Bay oswa retire dwa administratè.\n*○ siptout* : Retire manm ki pa administratè yo nan yon sèl operasyon.\n*○ siptout2* : Retire manm ki pa administratè yo pa ti gwoup.\n*○ fèmen / ouvri* : Kite administratè yo sèlman ekri oswa pèmèt tout moun ekri.\n*○ byenveni* : Aktive oswa dezaktive mesaj akeyi yo.\n*○ nolyen* : Mete yon filtè lyen senp.\n*○ nolyen2* : Mete yon filtè lyen sevè.\n*○ del* : Reponn sou yon mesaj pou efase li.\n*○ del2* : Aktive oswa dezaktive efasman mesaj yon manm chwazi.\n*○ del3* : Reponn sou yon mesaj pou efase li epi aktive oswa dezaktive efasman pwochen mesaj ki gen menm kalite a.\n\n*● PARAMÈT BOT LA*\n*○ prive / piblik* : Chanje mòd prive oswa piblik (pwopriyetè sèlman)."
+    disconnect_sys_msg: "Sesyon an dekonekte. Pwosesis pou efase done ak sesyon ki asosye yo kòmanse.",
+    del2_activated: "Efasman otomatik mesaj @{user} aktive.",
+    del2_deactivated: "Efasman otomatik mesaj @{user} dezaktive.",
+    del3_activated: "Efasman otomatik pwochen mesaj ki gen menm fòma a aktive nan gwoup sa a.",
+    del3_deactivated: "Efasman otomatik pwochen mesaj ki gen menm fòma a dezaktive nan gwoup sa a.",
+    del3_delete_failed: "Mesaj chwazi a pa t kapab efase. Verifye otorizasyon bot la nan gwoup la epi eseye ankò.",
+    del3_deleted_unclassified: "Mesaj la efase, men fòma li pa t kapab idantifye. Okenn règ otomatik pa chanje.",
+    del3_usage: "Nan yon gwoup, reponn sou nenpòt mesaj ak del3 pou aktive oswa dezaktive efasman otomatik pwochen mesaj ki gen menm fòma a. Bot la dwe administratè gwoup la.",
+    vv_usage: "Reponn sou yon imaj, videyo, odyo, dokiman oswa sticker ki sipòte ak vv pou voye li ankò nan konvèsasyon sa a.", vv_media_required: "Mesaj ou chwazi a pa gen yon medya ki sipòte.", vv_self_unavailable: "Li pa posib idantifye chat pèsonèl kont ki konekte a.",
+    del3_bot_admin_required: "Bot la dwe administratè gwoup la pou aplike règ sa a.",
+    del_usage: "Reponn sou mesaj ou vle efase a ak del.",
+    del2_usage: "Itilizasyon : del2 epi mete yon mansyon oswa yon nimewo entènasyonal. Ou kapab reponn tou sou mesaj manm nan.",
+    target_usage: "Itilizasyon : {command} epi mete yon mansyon oswa yon nimewo entènasyonal. Ou kapab reponn tou sou mesaj manm nan.",
+    no_eligible_target: "Pa gen manm ki kalifye pou aksyon sa a nan gwoup la.",
+    delete_failed: "Efasman an pa t kapab fini. Verifye otorizasyon ki aplikab yo epi eseye ankò.",
+    del_completed: "Demann efasman an trete.",
+    vv2_usage: "Reponn sou yon medya yon sèl vizyalizasyon ak vv2 pou resevwa li nan chat pèsonèl kont ki konekte a. Se pwopriyetè kont lan sèlman ki ka itilize kòmand sa a.",
+    vv2_media_required: "Mesaj ou chwazi a pa gen yon medya yon sèl vizyalizasyon ki sipòte.",
+    pending_msg: "Mesaj la ap chaje.",
+    msg_unloaded: "Kontni mesaj la pa disponib.",
+    take_time: "Chajman an ka pran kèk moman.",
+    quota_error: "Limit itilizasyon sèvis la rive. Eseye ankò pita.",
+    ai_error: "Asistan an pa t kapab trete demann lan. Eseye ankò nan kèk moman.",
+    ai_usage: "Itilizasyon : ai <kesyon>.",
+    url_usage: "Reponn sou yon imaj, videyo, odyo, dokiman oswa sticker ak url pou jwenn lyen li.",
+    url_error: "Medya a pa t kapab trete. Verifye si li toujou disponib epi eseye ankò.",
+    qr_usage: "Itilizasyon : qr <tèks oswa lyen>.", qr_too_long: "Tèks la twò long pou yon kòd QR. Sèvi ak yon tèks ki pi kout oswa yon lyen.", qr_generated: "Kòd QR la kreye.",
+    search_usage: "Itilizasyon : cheche <kesyon>.",
+    code_usage: "Itilizasyon : code epi mete yon nimewo nan fòma entènasyonal (8 a 15 chif).",
+    owner_required: "Kòmand sa a disponib sèlman pou pwopriyetè kont ki konekte a.",
+    group_required: "Kòmand sa a disponib sèlman nan yon gwoup WhatsApp.",
+    admin_required: "Aksyon sa a disponib pou administratè gwoup la oswa pwopriyetè kont ki konekte a.",
+    command_error: "Aksyon an pa t kapab fini. Verifye enfòmasyon yo ak otorizasyon ki nesesè yo, epi eseye ankò.",
+info_text: "*● ASISTAN AK RECHÈCH*\n*○ ai / ia / asistan <kesyon>* : Voye yon demann bay asistan an.\n*○ imaj <deskripsyon>* : Jenere yon imaj apati yon deskripsyon.\n*○ cheche <kesyon>* : Chèche enfòmasyon sou entènèt.\n*○ lang <fr|en|es|ht>* : Chwazi lang repons yo.\n\n*● KONEKSYON AK ENFÒMASYON*\n*○ meni* : Montre kòmand ki disponib yo.\n*○ info* : Montre èd sa a.\n*○ qrbot* : Kreye yon nouvo sesyon WhatsApp avèk yon QR code.\n*○ kòd <nimewo entènasyonal>* : Mande yon kòd koneksyon (pwopriyetè sèlman).\n*○ qr <tèks oswa lyen>* : Kreye yon QR code.\n*○ lyen* : Montre lyen envitasyon gwoup la.\n*○ sit* : Montre platfòm ofisyèl yo.\n*○ alive* : Montre dire sesyon an depi li konekte.\n*○ ping* : Mezire tan repons lan.\n*○ url* : Reponn sou yon medya ki sipòte pou jwenn lyen li.\n*○ vv* : Reponn sou yon medya ki sipòte pou voye li ankò nan konvèsasyon sa a.\n*○ vv2 / viewonce2 / view-once2* : Reponn sou yon medya yon sèl vizyalizasyon pou resevwa li nan chat pèsonèl kont ki konekte a (pwopriyetè sèlman).\n\n*● GWOUP AK MODERASYON*\n*○ tout* : Mansyone manm gwoup la.\n*○ hidetag* : Mansyone manm yo san montre lis la nan mesaj la.\n*○ kick <mansyon/nimewo>* : Retire yon manm nan gwoup la.\n*○ add <nimewo>* : Ajoute yon nimewo nan gwoup la.\n*○ promote / demote <mansyon/nimewo>* : Chanje dwa administratè yon manm.\n*○ siptout* : Retire manm ki pa administratè epi ki kalifye yo nan yon sèl operasyon.\n*○ siptout2* : Fè retrè a pa ti gwoup.\n*○ fèmen / ouvri* : Limite oswa pèmèt voye mesaj nan gwoup la.\n*○ byenveni* : Aktive oswa dezaktive mesaj akeyi yo.\n*○ nolyen* : Aktive filtè estanda pou lyen.\n*○ nolyen2* : Aktive filtè sevè pou lyen.\n*○ del* : Reponn sou yon mesaj pou mande efasman li.\n*○ del2 <mansyon/nimewo>* : Aktive oswa dezaktive efasman otomatik mesaj yon manm.\n*○ del3* : Reponn sou nenpòt mesaj nan gwoup la pou aktive oswa dezaktive efasman otomatik pwochen mesaj ki gen menm fòma a. Bot la dwe administratè gwoup la.\n\n*● PARAMÈT BOT LA*\n*○ prive / piblik* : Chanje mòd sesyon an (pwopriyetè sèlman)."
   }
 };
 
@@ -6384,318 +6267,6 @@ app.get('/sw.js', (req, res) => res.sendFile(path.join(__dirname, 'sw.js')));
 app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s Us Adam D’H7"));
 app.get('/ok', (req, res) => res.send('ok'));
 
-
-async function collectRuntimeLogSnapshot(requestedLimit = LOG_DASHBOARD_PAGE_LIMIT, sinceValue = 0, olderCursorValue = null) {
-    const limit = Math.max(20, Math.min(250, Number(requestedLimit) || LOG_DASHBOARD_PAGE_LIMIT));
-    const since = Math.max(0, Number(sinceValue) || 0);
-    const all = runtimeLogBuffer.slice().sort((a, b) => String(a.at).localeCompare(String(b.at)) || String(a.id).localeCompare(String(b.id)));
-    const beforeAt = olderCursorValue && typeof olderCursorValue === 'object' ? new Date(olderCursorValue.beforeAt || 0) : null;
-    const beforeId = String(olderCursorValue?.beforeId || '').trim();
-    const older = !!(beforeAt && Number.isFinite(beforeAt.getTime()) && beforeAt.getTime() >= 0 && beforeId);
-    const incremental = !older && since > 0;
-    let logs = [];
-    let hasOlder = false;
-    let nextOlderCursor = null;
-    if (older) {
-        const olderEntries = all.filter(item => {
-            const at = Date.parse(String(item.at || '')) || 0;
-            return at < beforeAt.getTime() || at === beforeAt.getTime() && String(item.id) < beforeId;
-        });
-        logs = olderEntries.slice(-limit);
-        hasOlder = olderEntries.length > logs.length;
-        if (logs.length) nextOlderCursor = { beforeAt: logs[0].at, beforeId: String(logs[0].id) };
-    } else if (incremental) {
-        logs = all.filter(item => (Date.parse(String(item.at || '')) || 0) >= Math.max(0, since - 2000)).slice(0, limit);
-    } else {
-        logs = all.slice(-limit);
-        hasOlder = all.length > logs.length;
-        if (logs.length) nextOlderCursor = { beforeAt: logs[0].at, beforeId: String(logs[0].id) };
-    }
-    const nextSince = logs.reduce((latest, item) => Math.max(latest, Date.parse(String(item.at || '')) || 0), since);
-    return { logs, nextSince, hasOlder: older || !incremental ? hasOlder : null, olderCursor: older || !incremental ? nextOlderCursor : null };
-}
-
-app.post(TFBOT_LOG_INGEST_PATH, (req, res) => {
-    if (!TFBOT_CLUSTER_ENABLED || !TFBOT_CLUSTER_COORDINATOR_ONLY || !isValidClusterToken(req)) return res.status(404).type('text/plain').send('Not found');
-    const incoming = Array.isArray(req.body?.logs) ? req.body.logs.slice(0, 100) : [];
-    if (!incoming.length) return res.status(400).json({ ok: false, error: 'logs_array_required' });
-    let accepted = 0;
-    for (const item of incoming) {
-        if (!item || typeof item !== 'object') continue;
-        const id = String(item.id || '').slice(0, 260);
-        const at = String(item.at || '');
-        const host = String(item.host || '').trim().slice(0, 180);
-        const text = String(item.text || '').slice(0, 6500);
-        if (!id || !Number.isFinite(Date.parse(at)) || !host || !text) continue;
-        if (addRuntimeLogEntry({ id: `remote:${host}:${id}`, at, level: item.level || 'log', text, host, serviceName: item.serviceName || host, instance: item.instance || host, remote: true }, { disk: true, forward: false })) accepted++;
-    }
-    return res.status(200).json({ ok: true, accepted, received: incoming.length, storage: 'local-render-jsonl' });
-});
-
-app.get(LOG_DASHBOARD_PATH, async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
-    res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'");
-    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
-    res.removeHeader('Access-Control-Allow-Origin');
-
-    const now = Date.now();
-    const clientKey = String(req.ip || req.socket?.remoteAddress || 'unknown').slice(0, 100);
-    const rate = logDashboardRateLimits.get(clientKey) || { startedAt: now, count: 0 };
-    if (now - rate.startedAt > 60000) { rate.startedAt = now; rate.count = 0; }
-    rate.count++;
-    logDashboardRateLimits.set(clientKey, rate);
-    if (logDashboardRateLimits.size > 2000) {
-        for (const [key, value] of logDashboardRateLimits.entries()) {
-            if (now - value.startedAt > 120000 || logDashboardRateLimits.size > 1800) logDashboardRateLimits.delete(key);
-            if (logDashboardRateLimits.size <= 1800) break;
-        }
-    }
-    if (rate.count > 900) return res.status(429).type('text/plain').send('Trop de requêtes.');
-
-    if (String(req.query?.format || '').toLowerCase() === 'json') {
-        const requestedLimit = Math.max(20, Math.min(250, Number(req.query?.limit) || LOG_DASHBOARD_PAGE_LIMIT));
-        const since = Math.max(0, Number(req.query?.since) || 0);
-        const olderRequested = String(req.query?.older || '') === '1';
-        const olderCursor = olderRequested ? { beforeAt: String(req.query?.beforeAt || ''), beforeId: String(req.query?.beforeId || '') } : null;
-        if (olderRequested && (!Number.isFinite(new Date(olderCursor.beforeAt).getTime()) || !olderCursor.beforeId)) return res.status(400).json({ ok: false, error: 'invalid_older_log_cursor' });
-        const snapshot = await collectRuntimeLogSnapshot(requestedLimit, since, olderCursor);
-        return res.status(200).json({ ok: true, count: snapshot.logs.length, logs: snapshot.logs, nextSince: snapshot.nextSince, hasOlder: snapshot.hasOlder, olderCursor: snapshot.olderCursor, deploymentStartedAt: runtimeLogDeploymentStartedAt.toISOString(), deploymentId: runtimeLogDeploymentId, deploymentGroupId: runtimeLogDeploymentGroupId, serviceId: runtimeLogRenderServiceId, serviceName: runtimeLogRenderServiceName, serviceScope: runtimeLogServiceScope, port: runtimeLogPort, instanceId: runtimeLogInstanceId, storage: 'local-render-jsonl', serverTime: new Date().toISOString() });
-    }
-
-    const initialLogs = runtimeLogBuffer.filter(item => (Date.parse(String(item.at || '')) || 0) >= runtimeLogDeploymentStartedAt.getTime()).slice(-Math.min(30, LOG_DASHBOARD_PAGE_LIMIT));
-    const firstPaintLogs = initialLogs.length ? initialLogs : [{
-        id: `dashboard-loading:${runtimeLogInstanceId}`,
-        at: new Date().toISOString(),
-        level: 'info',
-        text: '[runtime-log-dashboard] chargement des logs locaux Render…'
-    }];
-    const escapeLogHtml = value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    const initialRowsHtml = firstPaintLogs.map(item => {
-        const id = escapeLogHtml(item.id || '');
-        const date = escapeLogHtml(String(item.at || '').replace('T', ' ').replace('Z', ''));
-        const level = escapeLogHtml(String(item.level || 'log').toUpperCase());
-        const text = escapeLogHtml(item.text || '');
-        return `<article class="log" data-id="${id}"><header class="meta"><em class="level ${escapeLogHtml(item.level || 'log')}">${level}</em><span class="separator">;</span><time class="date">${date}</time><button class="copy-log" type="button" aria-label="Copier ce log"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg></button></header><pre class="message">${text}</pre></article>`;
-    }).join('');
-    const initialLogsJson = JSON.stringify(firstPaintLogs).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
-    const html = `<!doctype html>
-<html lang="fr">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<meta name="color-scheme" content="dark">
-<title></title>
-<style>
-:root{color-scheme:dark;background:#000;color:#fff;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{margin:0;padding:0;width:100%;min-height:100%;background:#000;color:#fff;overscroll-behavior:none;overscroll-behavior-x:none}
-body{min-height:100vh;min-height:100svh;overflow-x:hidden;touch-action:pan-y}
-#load-older{position:sticky;top:0;z-index:9;display:none;margin:8px auto 0;padding:9px 14px;border:1px solid #555;border-radius:8px;background:#111;color:#fff;font:600 12px/1.35 system-ui,-apple-system,sans-serif;cursor:pointer}
-#load-older.visible{display:block}#load-older:disabled{opacity:.6;cursor:wait}
-#logs{width:100%;padding:14px 8px max(22px,env(safe-area-inset-bottom));overscroll-behavior:none}
-.log{position:relative;width:100%;padding:8px 2px 10px;color:#fff;white-space:normal;overflow-wrap:anywhere}
-.meta{display:flex;align-items:center;gap:6px;min-height:19px;padding-right:34px;font-size:11px;line-height:1.45}
-.level{font-weight:800;font-style:italic;white-space:nowrap;color:#fff}
-.level.error,.level.fatal,.level.warn,.level.info,.level.debug,.level.trace{color:#fff}
-.separator{font-style:normal;color:#fff}
-.date{font-style:italic;color:#fff;white-space:nowrap}
-.message{display:block;margin:4px 32px 0 0;padding:0;color:#fff;font-size:11px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-family:inherit;user-select:text}
-.copy-log,#copy-all{position:absolute;top:5px;right:0;width:27px;height:27px;display:grid;place-items:center;border:0;padding:0;margin:0;background:transparent;color:#fff;opacity:.9;cursor:pointer}
-.copy-log:active,#copy-all:active{opacity:1}.copy-log svg,#copy-all svg{display:block;width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
-#copy-all{position:fixed;z-index:10;top:max(10px,env(safe-area-inset-top));right:max(12px,env(safe-area-inset-right));width:34px;height:34px;opacity:1}
-#jump{position:fixed;z-index:8;right:max(12px,env(safe-area-inset-right));bottom:max(14px,env(safe-area-inset-bottom));width:42px;height:42px;display:none;place-items:center;padding:0;border:0;border-radius:0;background:transparent;color:#fff;cursor:pointer;opacity:1}
-#jump.visible{display:grid}#jump svg{width:27px;height:27px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-#unseen-count{position:absolute;right:0;top:-15px;min-width:16px;max-width:80px;overflow:hidden;color:#fff;background:#000;font:800 12px/1 system-ui,-apple-system,sans-serif;text-align:right;white-space:nowrap}
-@media(max-width:560px){#logs{padding-left:6px;padding-right:6px}.meta{font-size:10px}.message{font-size:10px}.log{padding-top:7px;padding-bottom:9px}}
-</style>
-</head>
-<body>
-<button id="copy-all" type="button" aria-label="Copier tous les logs"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg></button>
-<button id="load-older" type="button">Charger les anciens logs</button>
-<main id="logs" aria-live="off">${initialRowsHtml}</main>
-<button id="jump" type="button" aria-label="Aller aux nouveaux logs ou en bas"><span id="unseen-count" aria-live="off"></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v15M6 13l6 6 6-6"/></svg></button>
-<script>
-window.__SERVER_LOG_SNAPSHOT__ = ${initialLogsJson};
-(() => {
- const endpoint = location.pathname;
-     const deploymentStartedAtMs = ${runtimeLogDeploymentStartedAt.getTime()};
- const logsNode = document.getElementById('logs');
- const jumpButton = document.getElementById('jump');
- const copyAllButton = document.getElementById('copy-all');
- const loadOlderButton = document.getElementById('load-older');
- const unseenCountNode = document.getElementById('unseen-count');
- let allLogs = Array.isArray(window.__SERVER_LOG_SNAPSHOT__) ? window.__SERVER_LOG_SNAPSHOT__ : [];
- let lastFetchError = '';
- let requestRunning = false;
- let pollTimer = null;
- let firstUnseenId = '';
- let unseenCount = 0;
- let jumpAction = 'unseen';
- let hasRendered = false;
- let logCursor = 0;
- let initialLoadDone = false;
- let olderCursor = null;
- let hasOlder = false;
- let olderRequestRunning = false;
- const maxRows = ${LOG_DASHBOARD_PAGE_LIMIT};
- const textOf = value => String(value == null ? '' : value);
- const levelClass = value => textOf(value).toLowerCase().replace(/[^a-z0-9_-]/g,'');
- function atBottom(){return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 8;}
- function rowFor(id){return [...logsNode.querySelectorAll('.log')].find(row => row.dataset.id === id) || null;}
- function visibleAnchor(){
-   const rows = logsNode.querySelectorAll('.log');
-   for(const row of rows){const box=row.getBoundingClientRect();if(box.bottom>0)return {id:row.dataset.id,top:box.top};}
-   return null;
- }
- function updateJump(){
-   jumpButton.classList.toggle('visible',!atBottom() || unseenCount>0);
-   unseenCountNode.textContent=unseenCount>0?(unseenCount>99?'99+':String(unseenCount)):'';
- }
- function copyText(item){
-   return textOf(item.level).toUpperCase() + ' ; ' + textOf(item.at).replace('T',' ').replace('Z','') + '\\n' + textOf(item.text);
- }
- async function writeClipboard(value){
-   if(navigator.clipboard&&navigator.clipboard.writeText){await navigator.clipboard.writeText(value);return true;}
-   const area=document.createElement('textarea');area.value=value;area.setAttribute('readonly','');area.style.position='fixed';area.style.left='-9999px';area.style.top='0';document.body.appendChild(area);area.select();const copied=document.execCommand('copy');area.remove();if(!copied)throw new Error('clipboard_unavailable');return true;
- }
- async function copyAll(){
-   try{
-     while(hasOlder&&olderCursor){const loaded=await loadOlder(true);if(!loaded)throw new Error('older_log_page_unavailable');}
-     await writeClipboard(allLogs.map(copyText).join('\\n\\n'));
-     copyAllButton.style.opacity='.5';window.setTimeout(()=>{copyAllButton.style.opacity='1';},500);
-   }catch(error){copyAllButton.style.opacity='1';}
- }
- copyAllButton.addEventListener('click',copyAll);
- loadOlderButton.addEventListener('click',()=>{void loadOlder(false);});
- function updateOlderButton(){loadOlderButton.classList.toggle('visible',hasOlder&&!!olderCursor);loadOlderButton.disabled=olderRequestRunning;loadOlderButton.textContent=olderRequestRunning?'Chargement des anciens logs…':hasOlder?'Charger les anciens logs':'Tous les logs sont chargés';}
- function makeRow(item){
-   const row=document.createElement('article');row.className='log';row.dataset.id=textOf(item.id);
-   const meta=document.createElement('header');meta.className='meta';
-   const level=document.createElement('em');level.className='level '+levelClass(item.level);level.textContent=textOf(item.level).toUpperCase();
-   const separator=document.createElement('span');separator.className='separator';separator.textContent=';';
-   const date=document.createElement('time');date.className='date';date.textContent=(textOf(item.host)?'['+textOf(item.host)+'] ':'')+textOf(item.at).replace('T',' ').replace('Z','');
-   const copy=document.createElement('button');copy.className='copy-log';copy.type='button';copy.setAttribute('aria-label','Copier ce log');
-   copy.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h3"/></svg>';
-   copy.addEventListener('click',()=>copyOne(item,copy));
-   meta.append(level,separator,date,copy);
-   const content=document.createElement('pre');content.className='message';content.textContent=textOf(item.text);
-   row.append(meta,content);
-   return row;
- }
- async function copyOne(item,button){
-   try{await writeClipboard(copyText(item));button.style.opacity='.45';window.setTimeout(()=>{button.style.opacity='.9';},550);}catch(error){}
- }
- function render(nextLogs, options={}){
-   const oldIds=new Set(allLogs.map(item=>textOf(item.id)));
-   const incoming=(Array.isArray(nextLogs)?nextLogs:[]).filter(item=>!textOf(item.id).startsWith('dashboard-loading:')&&(Date.parse(textOf(item.at))||0)>=deploymentStartedAtMs);
-   const merged=new Map(allLogs.map(item=>[textOf(item.id),item]));
-   for(const item of incoming)merged.set(textOf(item.id),item);
-   const next=Array.from(merged.values()).sort((a,b)=>textOf(a.at).localeCompare(textOf(b.at))||textOf(a.id).localeCompare(textOf(b.id)));
-   const added=next.filter(item=>!oldIds.has(textOf(item.id))&&!textOf(item.id).startsWith('dashboard-loading:'));
-   const wasAtBottom=options.older?false:(!hasRendered||atBottom());
-   const anchor=wasAtBottom?null:visibleAnchor();
-   if(!options.older&&!wasAtBottom&&added.length){if(!firstUnseenId)firstUnseenId=textOf(added[0].id);unseenCount+=added.length;}
-   allLogs=next;
-   const fragment=document.createDocumentFragment();
-   for(const item of allLogs)fragment.appendChild(makeRow(item));
-   logsNode.replaceChildren(fragment);
-   hasRendered=true;
-   if(wasAtBottom){
-     firstUnseenId='';unseenCount=0;jumpAction='unseen';
-     window.scrollTo(0,document.documentElement.scrollHeight);
-   }else if(anchor){
-     const restored=rowFor(anchor.id);
-     if(restored){const nextTop=restored.getBoundingClientRect().top;window.scrollBy(0,nextTop-anchor.top);}
-   }
-   updateJump();
-   updateOlderButton();
- }
- async function loadOlder(fromCopy=false){
-   if(!hasOlder||!olderCursor||olderRequestRunning)return false;
-   olderRequestRunning=true;updateOlderButton();
-   try{
-     const query='?format=json&limit='+maxRows+'&older=1&beforeAt='+encodeURIComponent(olderCursor.beforeAt)+'&beforeId='+encodeURIComponent(olderCursor.beforeId);
-     const response=await fetch(endpoint+query,{cache:'no-store',credentials:'same-origin',headers:{'Accept':'application/json'}});
-     if(!response.ok)throw new Error('HTTP '+response.status);
-     const payload=await response.json();
-     if(!payload||payload.ok!==true||!Array.isArray(payload.logs))throw new Error('invalid_older_log_response');
-     if((Date.parse(textOf(payload.deploymentStartedAt))||0)!==deploymentStartedAtMs)throw new Error('deployment_timestamp_mismatch');
-     render(payload.logs,{older:true});
-     olderCursor=payload.olderCursor||null;
-     hasOlder=payload.hasOlder===true;
-     updateOlderButton();
-     return true;
-   }catch(error){
-     loadOlderButton.textContent='Erreur : réessayer';
-     if(fromCopy)throw error;
-     return false;
-   }finally{olderRequestRunning=false;updateOlderButton();}
- }
- async function load(){
-   if(requestRunning)return;
-   requestRunning=true;
-   try{
-     const query=initialLoadDone?('?format=json&limit=160&since='+Math.max(0,logCursor-2000)):('?format=json&limit='+maxRows);
-     const response=await fetch(endpoint+query,{cache:'no-store',credentials:'same-origin',headers:{'Accept':'application/json'}});
-     if(!response.ok)throw new Error('HTTP '+response.status);
-     const payload=await response.json();
-     if(!payload||payload.ok!==true||!Array.isArray(payload.logs))throw new Error('invalid_log_response');
-     if((Date.parse(textOf(payload.deploymentStartedAt))||0)!==deploymentStartedAtMs)throw new Error('deployment_timestamp_mismatch');
-     lastFetchError='';
-     if(Number.isFinite(Number(payload.nextSince)))logCursor=Math.max(logCursor,Number(payload.nextSince));
-     if(!initialLoadDone){hasOlder=payload.hasOlder===true;olderCursor=payload.olderCursor||null;}
-     initialLoadDone=true;
-     if(payload.logs.length)render(payload.logs);
-     updateOlderButton();
-   }catch(error){
-     const detail='dashboard_fetch_failed: '+textOf(error&&error.message?error.message:error).slice(0,180);
-     if(detail!==lastFetchError){
-       lastFetchError=detail;
-       const existing=allLogs.filter(item=>!textOf(item.id).startsWith('dashboard-client-error:'));
-       existing.push({id:'dashboard-client-error:'+Date.now(),at:new Date().toISOString(),level:'error',text:'[runtime-log-dashboard] '+detail});
-       render(existing,false);
-     }
-   }finally{requestRunning=false;}
- }
- jumpButton.addEventListener('click',()=>{
-   if(jumpAction==='unseen'&&firstUnseenId){
-     const target=rowFor(firstUnseenId);
-     if(target){target.scrollIntoView({block:'start',behavior:'smooth'});jumpAction='bottom';updateJump();return;}
-   }
-   window.scrollTo({top:document.documentElement.scrollHeight,behavior:'smooth'});
-   jumpAction='unseen';firstUnseenId='';
-   window.setTimeout(updateJump,450);
- });
- let scrollFrame=0;
- window.addEventListener('scroll',()=>{
-   if(scrollFrame)return;
-   scrollFrame=window.requestAnimationFrame(()=>{
-     scrollFrame=0;
-     if(atBottom()){firstUnseenId='';unseenCount=0;jumpAction='unseen';}
-     updateJump();
-   });
- },{passive:true});
- document.addEventListener('gesturestart',event=>event.preventDefault(),{passive:false});
- document.addEventListener('touchmove',event=>{if(event.touches&&event.touches.length>1)event.preventDefault();},{passive:false});
- document.addEventListener('wheel',event=>{if(event.ctrlKey||event.metaKey)event.preventDefault();},{passive:false});
- document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&['+','=','-','0'].includes(String(event.key).toLowerCase()))event.preventDefault();});
- document.addEventListener('visibilitychange',()=>{if(!document.hidden)void load();});
- void load();
- updateOlderButton();
- pollTimer=window.setInterval(load,5000);
- window.addEventListener('pagehide',()=>{if(pollTimer)window.clearInterval(pollTimer);});
-})();
-</script>
-</body>
-</html>`;
-    return res.status(200).type('html').send(html);
-});
 
 const handleTFSlugRequest = (req, res) => {
     const match = String(req.path || '').match(/(?:^|\/)TF-([A-Za-z0-9_-]{1,80})(?:\/.*)?$/i);
@@ -7716,16 +7287,16 @@ function waitForSessionQr(sessionId, timeoutMs = 60000, initialQr = '') {
 
 const commandMaps = {
   fr: {
-    "ia": "ai", "lang": "lang", "image": "imaj", "chercher": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "lien": "lien", "tagtout": "tagall", "hidetag": "hidetag", "expulse": "kick", "add": "add", "promote": "promote", "demote": "demote", "expulsetout": "kickall", "expulsetout2": "kickall2", "ferme": "ferme", "ouvert": "ouvert", "bienvenue": "bienvenue", "nolien": "nolien", "nolien2": "nolien2", "del": "del", "del2": "del2", "del3": "del3", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "prive": "prive", "public": "public"
+    "ia": "ai", "lang": "lang", "image": "imaj", "chercher": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "lien": "lien", "tagtout": "tagall", "hidetag": "hidetag", "expulse": "kick", "add": "add", "promote": "promote", "demote": "demote", "expulsetout": "kickall", "expulsetout2": "kickall2", "ferme": "ferme", "ouvert": "ouvert", "bienvenue": "bienvenue", "nolien": "nolien", "nolien2": "nolien2", "del": "del", "del2": "del2", "del3": "del3", "vv": "vv", "vv2": "vv2", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "prive": "prive", "public": "public"
   },
   en: {
-    "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "kickall2": "kickall2", "close": "ferme", "open": "ouvert", "welcome": "bienvenue",     "nolink": "nolien", "nolink2": "nolien2", "del": "del", "del2": "del2", "del3": "del3", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "private": "prive", "public": "public"
+    "ai": "ai", "lang": "lang", "image": "imaj", "search": "cheche", "menu": "menu", "qrbot": "qrbot", "qr": "qr", "code": "code", "link": "lien", "tagall": "tagall", "hidetag": "hidetag", "kick": "kick", "add": "add", "promote": "promote", "demote": "demote", "kickall": "kickall", "kickall2": "kickall2", "close": "ferme", "open": "ouvert", "welcome": "bienvenue",     "nolink": "nolien", "nolink2": "nolien2", "del": "del", "del2": "del2", "del3": "del3", "vv": "vv", "vv2": "vv2", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "private": "prive", "public": "public"
   },
   es: {
-    "ia": "ai", "lang": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promover": "promote", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "borrartodo2": "kickall2", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "del": "del", "del2": "del2", "del3": "del3", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "privado": "prive", "publico": "public"
+    "ia": "ai", "lang": "lang", "imagen": "imaj", "buscar": "cheche", "menú": "menu", "qrbot": "qrbot", "qr": "qr", "código": "code", "enlace": "lien", "etiquetartodo": "tagall", "hidetag": "hidetag", "expulsar": "kick", "añadir": "add", "promover": "promote", "promouvoir": "promote", "degradar": "demote", "borrartodo": "kickall", "borrartodo2": "kickall2", "cerrar": "ferme", "abrir": "ouvert", "bienvenida": "bienvenue", "sinenlace": "nolien", "sinenlace2": "nolien2", "del": "del", "del2": "del2", "del3": "del3", "vv": "vv", "vv2": "vv2", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "privado": "prive", "publico": "public"
   },
   ht: {
-    "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "siptout2": "kickall2", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "del": "del", "del2": "del2", "del3": "del3", "vv": "vv", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "prive": "prive", "piblik": "public"
+    "ai": "ai", "lang": "lang", "imaj": "imaj", "cheche": "cheche", "meni": "menu", "qrbot": "qrbot", "qr": "qr", "kòd": "code", "lyen": "lien", "tout": "tagall", "hidetag": "hidetag", "sipli": "kick", "add": "add", "promote": "promote", "demote": "demote", "siptout": "kickall", "siptout2": "kickall2", "fèmen": "ferme", "ouvri": "ouvert", "byenveni": "bienvenue", "nolyen": "nolien", "nolyen2": "nolien2", "del": "del", "del2": "del2", "del3": "del3", "vv": "vv", "vv2": "vv2", "sit": "sites", "info": "info", "alive": "alive", "ping": "ping", "pings": "ping", "url": "url", "urls": "url", "prive": "prive", "piblik": "public"
   }
 };
 
@@ -7846,10 +7417,12 @@ function redactActionError(error) {
 function getCommandActionTitle(translationsForLanguage, command) {
     const keys = {
         ai: 'ai_title', cheche: 'search_title', imaj: 'imaj_title', lang: 'lang_title',
-        nolien: 'cmd_nolien', nolien2: 'cmd_nolien2', kickall: 'cmd_kickall', kickall2: 'cmd_kickall2', del3: 'cmd_del3',
-        tagall: 'cmd_tagall', hidetag: 'cmd_hidetag', qrbot: 'cmd_qrbot', qr: 'cmd_qr', code: 'cmd_code',
-        lien: 'cmd_lien', sites: 'cmd_sites', url: 'cmd_url', bienvenue: 'cmd_bienvenue',
-        ferme: 'cmd_ferme', ouvert: 'cmd_ouvert', kick: 'cmd_kick', add: 'cmd_add', promote: 'cmd_promote', demote: 'cmd_demote'
+        prive: 'mode_title', public: 'mode_title', menu: 'menu_title', qrbot: 'cmd_qrbot', qr: 'cmd_qr', code: 'cmd_code',
+        del: 'cmd_del', del2: 'cmd_del2', del3: 'cmd_del3', vv: 'cmd_vv', vv2: 'cmd_vv2', url: 'cmd_url',
+        add: 'cmd_add', kick: 'cmd_kick', promote: 'cmd_promote', demote: 'cmd_demote',
+        kickall: 'cmd_kickall', kickall2: 'cmd_kickall2', tagall: 'cmd_tagall', hidetag: 'cmd_hidetag',
+        nolien: 'cmd_nolien', nolien2: 'cmd_nolien2', bienvenue: 'cmd_bienvenue', ferme: 'cmd_ferme',
+        ouvert: 'cmd_ouvert', lien: 'cmd_lien', sites: 'cmd_sites'
     };
     return translationsForLanguage?.[keys[command]] || String(command || 'Action');
 }
@@ -7859,26 +7432,53 @@ function fitErrorExplanation(value) {
     return text.length >= 300 && text.length <= 400 ? text : '';
 }
 
-function errorFallbackText(actionName, language) {
+function errorFallbackText(actionName, language, errorClass = 'action_failure') {
     const action = String(actionName || 'Action').replace(/\s+/g, ' ').slice(0, 40);
-    if (/^(?:code|cmd[_ -]?code|kòd|kod)$/i.test(normalizeText(actionName))) {
-        const codeFallbacks = { fr: 'L’action « code » n’a pas abouti.', en: 'The “code” action did not complete.', es: 'La acción «code» no se completó.', ht: 'Aksyon «code» la pa reyisi.' };
-        return codeFallbacks[['fr', 'en', 'es', 'ht'].includes(language) ? language : 'ht'];
-    }
-    const fallbacks = {
-        fr: `L’action « ${action} » n’a pas abouti. Vérifie les droits nécessaires et réessaie.`,
-        en: `The “${action}” action did not complete. Check the required permissions and try again.`,
-        es: `La acción «${action}» no se completó. Comprueba los permisos necesarios e inténtalo de nuevo.`,
-        ht: `Aksyon «${action}» la pa fini. Verifye otorizasyon ki nesesè yo epi eseye ankò.`
+    const lang = ['fr', 'en', 'es', 'ht'].includes(language) ? language : 'ht';
+    const messages = {
+        fr: {
+            permission_or_admin: `L’action « ${action} » nécessite des autorisations supplémentaires. Vérifie les droits applicables, puis réessaie.`,
+            timeout: `L’action « ${action} » n’a pas pu se terminer dans le délai prévu. Réessaie dans quelques instants.`,
+            connection_or_encryption: `La connexion nécessaire à l’action « ${action} » n’est pas disponible. Réessaie lorsque la connexion est rétablie.`,
+            action_failure: `L’action « ${action} » n’a pas pu être terminée. Vérifie les informations fournies et réessaie.`
+        },
+        en: {
+            permission_or_admin: `The “${action}” action requires additional permissions. Check the applicable access rights and try again.`,
+            timeout: `The “${action}” action did not complete within the expected time. Please try again shortly.`,
+            connection_or_encryption: `The connection required for “${action}” is unavailable. Please try again when the connection is restored.`,
+            action_failure: `The “${action}” action could not be completed. Check the supplied information and try again.`
+        },
+        es: {
+            permission_or_admin: `La acción «${action}» requiere permisos adicionales. Comprueba los permisos correspondientes e inténtalo de nuevo.`,
+            timeout: `La acción «${action}» no se completó dentro del plazo previsto. Inténtalo de nuevo en unos momentos.`,
+            connection_or_encryption: `La conexión necesaria para «${action}» no está disponible. Inténtalo de nuevo cuando se restablezca.`,
+            action_failure: `No se pudo completar la acción «${action}». Comprueba la información proporcionada e inténtalo de nuevo.`
+        },
+        ht: {
+            permission_or_admin: `Aksyon «${action}» la bezwen plis otorizasyon. Verifye dwa ki aplikab yo epi eseye ankò.`,
+            timeout: `Aksyon «${action}» la pa t fini nan tan ki te prevwa a. Eseye ankò nan kèk moman.`,
+            connection_or_encryption: `Koneksyon ki nesesè pou aksyon «${action}» la pa disponib. Eseye ankò lè koneksyon an retabli.`,
+            action_failure: `Aksyon «${action}» la pa t kapab fini. Verifye enfòmasyon ou bay yo epi eseye ankò.`
+        }
     };
-    return String(fallbacks[['fr', 'en', 'es', 'ht'].includes(language) ? language : 'ht'] || fallbacks.ht).replace(/\s+/g, ' ').trim();
+    const category = Object.prototype.hasOwnProperty.call(messages[lang], errorClass) ? errorClass : 'action_failure';
+    if (/^(?:code|cmd[_ -]?code|kòd|kod)$/i.test(normalizeText(actionName)) && category === 'action_failure') {
+        const codeFallbacks = {
+            fr: 'La demande de code d’association n’a pas pu être finalisée. Vérifie le numéro et l’état de la session, puis réessaie.',
+            en: 'The pairing-code request could not be completed. Check the number and session status, then try again.',
+            es: 'No se pudo completar la solicitud del código de vinculación. Comprueba el número y el estado de la sesión e inténtalo de nuevo.',
+            ht: 'Demann kòd koneksyon an pa t kapab fini. Verifye nimewo a ak eta sesyon an, epi eseye ankò.'
+        };
+        return codeFallbacks[lang];
+    }
+    return String(messages[lang][category] || messages.ht[category]).replace(/\s+/g, ' ').trim();
 }
 
 async function explainActionError(error, language, actionName, userName, messageTimestamp) {
     const lang = ['fr', 'en', 'es', 'ht'].includes(language) ? language : 'ht';
     const rawError = redactActionError(error);
-    const fallback = errorFallbackText(actionName, lang);
     const errorClass = /(?:not-authorized|forbidden|permission|admin|403)/i.test(rawError) ? 'permission_or_admin' : /(?:timeout|timed out|abort)/i.test(rawError) ? 'timeout' : /(?:signal|decrypt|bad mac|websocket)/i.test(rawError) ? 'connection_or_encryption' : 'action_failure';
+    const fallback = errorFallbackText(actionName, lang, errorClass);
     console.warn('[action-error-static-explanation]', { actionName: String(actionName || 'Action'), errorClass, aiDispatch: false, action: 'use_localized_fallback_without_calling_ai' });
     return fallback;
 }
@@ -7910,7 +7510,7 @@ const canonicalCommandAliases = {
     welcome: 'bienvenue', bienvenue: 'bienvenue', bienvenida: 'bienvenue', byenveni: 'bienvenue',
     nolink: 'nolien', nolien: 'nolien', nolyen: 'nolien', sinenlace: 'nolien',
     nolink2: 'nolien2', nolien2: 'nolien2', nolyen2: 'nolien2', sinenlace2: 'nolien2',
-    del: 'del', del2: 'del2', del3: 'del3', vv: 'vv', info: 'info', alive: 'alive', ping: 'ping', pings: 'ping', url: 'url', urls: 'url',
+    del: 'del', del2: 'del2', del3: 'del3', vv: 'vv', vv2: 'vv2', 'vv-2': 'vv2', viewonce2: 'vv2', 'view-once2': 'vv2', 'view_once2': 'vv2', 'view-once-v2': 'vv2', info: 'info', alive: 'alive', ping: 'ping', pings: 'ping', url: 'url', urls: 'url',
     private: 'prive', prive: 'prive', privado: 'prive', piblik: 'public', public: 'public', publico: 'public'
 };
 
@@ -7946,26 +7546,8 @@ function getCommandParsingContext(message) {
 const commandsWithoutArguments = new Set([
     'prive', 'public', 'menu', 'info', 'alive', 'ping', 'qrbot', 'lien', 'tagall',
     'kickall', 'kickall2', 'ferme', 'ouvert', 'bienvenue', 'nolien', 'nolien2',
-    'del', 'del3', 'vv', 'url', 'sites'
+    'del', 'del3', 'vv', 'vv2', 'url', 'sites'
 ]);
-const commandsRequiringText = new Set(['ai', 'qr', 'imaj', 'cheche']);
-const commandsRequiringTarget = new Set(['add', 'kick', 'promote', 'demote', 'del2']);
-const commandsRequiringQuotedMessage = new Set(['del', 'del3', 'vv']);
-
-function isValidTargetCommandArgument(value, context = {}) {
-    const args = String(value || '').trim();
-    if (!args) return !!context.hasQuotedMessage;
-    const mentionedJids = Array.isArray(context.mentionedJid) ? context.mentionedJid.filter(Boolean) : [];
-    const mentionSyntax = /^@[\p{L}\p{N}_.-]+(?:[\s,]+@[\p{L}\p{N}_.-]+)*$/u;
-    if (mentionSyntax.test(args)) {
-        const mentionCount = (args.match(/@/g) || []).length;
-        if (!mentionedJids.length || mentionedJids.length === mentionCount) return true;
-    }
-    if (/^@\+?\d{6,20}$/u.test(args)) return true;
-    if (!/^\+?[0-9][0-9\s().-]*$/.test(args)) return false;
-    const phoneNumber = normalizePhoneNumber(args);
-    return phoneNumber.length >= 6 && phoneNumber.length <= 20;
-}
 
 function hasExplicitAiCommandPrefix(body) {
     let source = String(body || '').trim();
@@ -7985,18 +7567,8 @@ function parseIncomingCommand(body, language, context = {}) {
     const internalCommand = resolveCommand(command, language);
     if (!internalCommand) return null;
     if (internalCommand === 'ai' && !hasExplicitAiCommandPrefix(body)) return null;
-    const hasQuotedMessage = !!context?.hasQuotedMessage;
     if (commandsWithoutArguments.has(internalCommand) && args) return null;
-    if (commandsRequiringText.has(internalCommand) && !args) return null;
-    if (commandsRequiringTarget.has(internalCommand) && !isValidTargetCommandArgument(args, context)) return null;
-    if (commandsRequiringQuotedMessage.has(internalCommand) && !hasQuotedMessage) return null;
     
-    if (internalCommand === 'lang' && args && !/^(?:fr|en|es|ht)$/i.test(args)) return null;
-    if (internalCommand === 'code') {
-        if (!/^\+?[0-9][0-9\s().-]*$/.test(args)) return null;
-        const phoneNumber = normalizePhoneNumber(args);
-        if (phoneNumber.length < 8 || phoneNumber.length > 15) return null;
-    }
     let parsedArgs = args;
     if (internalCommand === 'ai') {
         const aiPrefixes = new Set(['ai', 'ia', 'asistan', 'iu', 'tfasistan']);
@@ -8161,49 +7733,32 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 if (!fullMessage?.key?.id || !fullMessage?.message) throw new Error('outgoing_retry_preflight_message_incomplete');
                 const messageId = String(fullMessage.key.id);
                 const remoteJid = String(fullMessage.key.remoteJid || destinationJid || '');
-                const messageToPersist = {
-                    ...fullMessage,
-                    key: { ...fullMessage.key, fromMe: true, remoteJid }
-                };
+                const messageToPersist = { ...fullMessage, key: { ...fullMessage.key, fromMe: true, remoteJid } };
                 const activeRuntime = activeSessions.get(sessionId);
                 const authCreds = activeRuntime?.authState?.creds || state.creds;
                 const accountPhone = getAuthenticatedPhoneNumber(sock.user, authCreds) || normalizedJidNumber(sock.user?.id || sock.user?.phoneNumber || '');
                 const accountJid = String(sock.user?.id || sock.user?.phoneNumber || authCreds?.me?.id || '');
                 const accountLid = getAuthenticatedLid(sock.user, authCreds);
-                const aliases = [destinationJid, remoteJid, fullMessage.key?.remoteJidAlt, fullMessage.key?.participant, fullMessage.key?.participantAlt, fullMessage.key?.participantPn, fullMessage.key?.senderPn].filter(Boolean);
-                cacheRecentMessage(sessionId, messageToPersist);
+                const aliases = [...new Set([destinationJid, remoteJid, fullMessage.key?.remoteJidAlt, fullMessage.key?.participant, fullMessage.key?.participantAlt, fullMessage.key?.participantPn, fullMessage.key?.senderPn].map(value => String(value || '').trim()).filter(Boolean))].slice(0, 16);
+                cacheRecentMessage(sessionId, messageToPersist, aliases);
                 rememberOutgoingMessageId(sessionId, messageId);
                 outgoingMessageCache.add(`${sessionId}:id:${messageId}`);
                 outgoingMessageCache.add(`${sessionId}:${remoteJid}:${messageId}`);
                 if (outgoingMessageCache.size > 5000) outgoingMessageCache.delete(outgoingMessageCache.values().next().value);
-                const saved = await persistOutgoingRetryMessage(sessionId, remoteJid, messageToPersist, aliases, accountPhone, accountJid, accountLid);
-                if (!saved) {
-                    outgoingRetryPreflightIds.delete(`${sessionId}:${messageId}`);
-                    const retryTimer = setTimeout(() => {
-                        const latestRuntime = activeSessions.get(sessionId);
-                        if (serverShuttingDown || latestRuntime?.sock !== sock || !db) return;
-                        void persistOutgoingRetryMessage(sessionId, remoteJid, messageToPersist, aliases, accountPhone, accountJid, accountLid).then(retrySaved => {
-                            if (!retrySaved) return;
-                            outgoingRetryPreflightIds.set(`${sessionId}:${messageId}`, Date.now());
-                            while (outgoingRetryPreflightIds.size > 5000) outgoingRetryPreflightIds.delete(outgoingRetryPreflightIds.keys().next().value);
-                            console.info('[message-retry-preflight-background-save-completed]', { sessionId, messageId, remoteJid, action: 'durable_retry_copy_saved_without_blocking_message_relay' });
-                        }).catch(retryError => console.warn('[message-retry-preflight-background-save-failed]', { sessionId, messageId, error: retryError?.message || String(retryError) }));
-                    }, Math.max(250, Math.min(1500, BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS)));
-                    if (typeof retryTimer.unref === 'function') retryTimer.unref();
-                    console.error('[message-retry-preflight-memory-fallback]', {
-                        sessionId,
-                        messageId,
-                        remoteJid,
-                        timeoutMs: BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS,
-                        memoryCopyAvailable: true,
-                        backgroundDurableRetryScheduled: true,
-                        action: 'allow_delivery_using_session_scoped_memory_copy_and_retry_durable_save_without_blocking_relay'
-                    });
-                    return;
-                }
                 outgoingRetryPreflightIds.set(`${sessionId}:${messageId}`, Date.now());
                 while (outgoingRetryPreflightIds.size > 5000) outgoingRetryPreflightIds.delete(outgoingRetryPreflightIds.keys().next().value);
-                console.info('[message-retry-preflight-saved-before-send]', { sessionId, messageId, remoteJid, accountIdentityKnown: !!(accountPhone || accountLid || accountJid) });
+                if (db) {
+                    void (async () => {
+                        for (let attempt = 0; attempt < 4; attempt++) {
+                            const latestRuntime = activeSessions.get(sessionId);
+                            if (serverShuttingDown || latestRuntime?.sock !== sock || !db) return;
+                            try {
+                                if (await persistOutgoingRetryMessage(sessionId, remoteJid, messageToPersist, aliases, accountPhone, accountJid, accountLid)) return;
+                            } catch (error) {}
+                            if (attempt < 3) await new Promise(resolve => setTimeout(resolve, [250, 600, 1200][attempt]));
+                        }
+                    })().catch(() => {});
+                }
             },
             getMessage: async (key) => {
                 const requestedChatJid = String(key?.remoteJid || '').trim();
@@ -10454,7 +10009,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             break;
                                         case 'menu':
                                             if (args.length > 0) break;
-                                            let menuBodyText = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n*○ ${t.cmd_info}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*● ${t.cmd_kickall2}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_del2}*\n*● ${t.cmd_del3}*\n*● ${t.cmd_vv}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_url}*\n*○ ${t.cmd_ping}*`;
+                                            let menuBodyText = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n*○ ${t.cmd_info}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*● ${t.cmd_kickall2}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_del2}*\n*● ${t.cmd_del3}*\n*● ${t.cmd_vv}*\n*● ${t.cmd_vv2}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_url}*\n*○ ${t.cmd_ping}*`;
                                             await safeSendFormatted(sock, from, t.menu_title, menuBodyText, pushName, false, activeHostName);
                                             break;
                                         case 'info':
@@ -10608,9 +10163,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             }
                                             const metadataAdd = await getMeta();
                                             const targetsAdd = await resolveTargets(args, m, metadataAdd, sOwnerTop, botId);
-                                            if (targetsAdd.length === 0) break;
+                                            if (targetsAdd.length === 0) {
+                                                await safeSendFormatted(sock, from, t.cmd_add, t.target_usage.replace('{command}', t.cmd_add), pushName, true, activeHostName);
+                                                break;
+                                            }
                                             const filteredTargetsAdd = targetsAdd.filter(tr => tr !== botId);
-                                            if (filteredTargetsAdd.length === 0) break;
+                                            if (filteredTargetsAdd.length === 0) {
+                                                await safeSendFormatted(sock, from, t.cmd_add, t.no_eligible_target, pushName, true, activeHostName);
+                                                break;
+                                            }
                                             for (const target of filteredTargetsAdd) {
                                                 try {
                                                     const added = await safeGroupUpdate(from, [target], 'add');
@@ -10632,13 +10193,20 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             }
                                             const metadataTargets = await getMeta();
                                             const targets = await resolveTargets(args, m, metadataTargets, sOwnerTop, botId);
-                                            if (targets.length === 0) break;
+                                            if (targets.length === 0) {
+                                                const targetCommandLabel = internalCommand === 'kick' ? t.cmd_kick : internalCommand === 'promote' ? t.cmd_promote : t.cmd_demote;
+                                                await safeSendFormatted(sock, from, targetCommandLabel, t.target_usage.replace('{command}', targetCommandLabel), pushName, true, activeHostName);
+                                                break;
+                                            }
                                             const filteredTargets = targets.filter(target => {
                                                 const targetParticipant = findActionParticipant(target, metadataTargets);
                                                 const alternates = participantAliases(targetParticipant).filter(value => value !== target).find(value => /@s\.whatsapp\.net$/i.test(value)) || participantAliases(targetParticipant).filter(value => value !== target).find(value => /^\+?\d{6,}$/.test(value)) || '';
                                                 return !isProtectedWhatsAppTarget(target, sOwnerTop, botId, alternates);
                                             });
-                                            if (filteredTargets.length === 0) break;
+                                            if (filteredTargets.length === 0) {
+                                                await safeSendFormatted(sock, from, getCommandActionTitle(t, internalCommand), t.no_eligible_target, pushName, true, activeHostName);
+                                                break;
+                                            }
                                             const actionMap = { kick: 'remove', promote: 'promote', demote: 'demote' };
                                             if (!await safeGroupUpdate(from, filteredTargets, actionMap[internalCommand], metadataTargets)) throw new Error(`group_${actionMap[internalCommand]}_failed`);
                                             break;
@@ -10770,28 +10338,43 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             await safeSendFormatted(sock, from, t.cmd_nolien2, `*${nl2Stat}*`, pushName, false, activeHostName);
                                             break;
                                         case 'del':
-                                            if (!quoted?.stanzaId) break;
+                                            if (!quoted?.stanzaId) {
+                                                await safeSendFormatted(sock, from, t.cmd_del, t.del_usage, pushName, true, activeHostName);
+                                                break;
+                                            }
                                             const cachedQuotedMessage = recentMsgsCache.find(entry => entry.sessionId === sessionId && entry.id === quoted.stanzaId && entry.from === from);
                                             const quotedOriginalKey = cachedQuotedMessage?.key || {};
                                             const quotedParticipant = quotedOriginalKey.participant || quoted.participant || (isGroup ? cachedQuotedMessage?.sender : null) || null;
                                             const quotedFromMe = !!cachedQuotedMessage?.fromMe || !!quotedOriginalKey.fromMe;
                                             if (isGroup) {
-                                                if (quotedFromMe ? !isOwnerReal : !await checkAdmin()) break;
+                                                if (quotedFromMe && !isOwnerReal) {
+                                                    await safeSendFormatted(sock, from, t.cmd_del, t.owner_required, pushName, true, activeHostName);
+                                                    break;
+                                                }
+                                                if (!quotedFromMe && !await checkAdmin()) {
+                                                    await safeSendFormatted(sock, from, t.cmd_del, t.admin_required, pushName, true, activeHostName);
+                                                    break;
+                                                }
                                             } else if (!isOwnerReal) {
+                                                await safeSendFormatted(sock, from, t.cmd_del, t.owner_required, pushName, true, activeHostName);
                                                 break;
                                             }
                                             const delKey = { remoteJid: quotedOriginalKey.remoteJid || from, id: quoted.stanzaId, fromMe: quotedFromMe };
                                             if (isGroup && quotedParticipant && !quotedFromMe) delKey.participant = quotedParticipant;
                                             const quotedTimestamp = Number(cachedQuotedMessage?.ts || m.messageTimestamp || Math.floor(Date.now() / 1000));
+                                            let deletionCompleted = false;
                                             try {
                                                 await queuedSendMessage(sock, from, { delete: delKey }, {}, 180);
+                                                deletionCompleted = true;
                                             } catch (deleteEveryoneError) {
                                                 try {
                                                     await sock.chatModify({ deleteForMe: { deleteMedia: true, key: delKey, timestamp: quotedTimestamp } }, from);
+                                                    deletionCompleted = true;
                                                 } catch (deleteForMeError) {
                                                     console.error('[message-delete-failed]', { sessionId, chat: from, messageId: quoted.stanzaId, deleteEveryone: deleteEveryoneError?.message || String(deleteEveryoneError), deleteForMe: deleteForMeError?.message || String(deleteForMeError) });
                                                 }
                                             }
+                                            await safeSendFormatted(sock, from, t.cmd_del, deletionCompleted ? t.del_completed : t.delete_failed, pushName, false, activeHostName);
                                             break;
                                         case 'del2':
                                             const isAdminDel2 = await checkAdmin();
@@ -10801,10 +10384,16 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             }
                                             const metadataDel2 = await getMeta();
                                             const targetsDel2 = await resolveTargets(args, m, metadataDel2, sOwnerTop, botId);
-                                            if (targetsDel2.length === 0) break;
+                                            if (targetsDel2.length === 0) {
+                                                await safeSendFormatted(sock, from, t.cmd_del2, t.del2_usage, pushName, true, activeHostName);
+                                                break;
+                                            }
                                             const targetJid = targetsDel2[0];
                                             const targetParticipantDel2 = findActionParticipant(targetJid, metadataDel2);
-                                            if (isProtectedWhatsAppTarget(targetJid, sOwnerTop, botId, targetParticipantDel2?.phoneNumber || targetParticipantDel2?.phone || targetParticipantDel2?.idAlt || '')) break;
+                                            if (isProtectedWhatsAppTarget(targetJid, sOwnerTop, botId, targetParticipantDel2?.phoneNumber || targetParticipantDel2?.phone || targetParticipantDel2?.idAlt || '')) {
+                                                await safeSendFormatted(sock, from, t.cmd_del2, t.no_eligible_target, pushName, true, activeHostName);
+                                                break;
+                                            }
                                             const currentDel2Targets = await getDel2Targets(sessionId, from);
                                             const requestedParticipantDel2 = findActionParticipant(targetJid, metadataDel2);
                                             const existingDel2Target = currentDel2Targets.find(storedTarget => {
@@ -10848,8 +10437,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             let storedDel3Quote = null;
                                             if (!cachedDel3Quote && db) {
                                                 storedDel3Quote = await db.collection('baileys_outgoing_messages').findOne(
-                                                    { _id: `${sessionId}:${quotedDel3Id}`, sessionId, messageId: quotedDel3Id, fromMe: true },
-                                                    { projection: { message: 1, remoteJid: 1, remoteJidAlt: 1, remoteJidAliases: 1, fromMe: 1 } }
+                                                    { _id: `${sessionId}:${quotedDel3Id}`, sessionId, messageId: quotedDel3Id },
+                                                    { projection: { message: 1, remoteJid: 1, remoteJidAlt: 1, remoteJidAliases: 1, fromMe: 1, participant: 1, participantAlt: 1, participantPn: 1, senderPn: 1 } }
                                                 ).catch(error => {
                                                     console.warn('[del3-quoted-message-lookup-failed]', { sessionId, group: from, messageId: quotedDel3Id, error: error?.message || String(error) });
                                                     return null;
@@ -10859,14 +10448,25 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                     if (aliases.length && !aliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, from))) storedDel3Quote = null;
                                                 }
                                             }
-                                            const quotedDel3Message = quotedMessage || cachedDel3Quote?.message || (storedDel3Quote?.message ? fixBuffers(storedDel3Quote.message) : null);
+                                            const quotedPayloadAvailable = quotedMessage && typeof quotedMessage === 'object' && Object.keys(quotedMessage).length > 0;
+                                            const quotedDel3Message = quotedPayloadAvailable ? quotedMessage : cachedDel3Quote?.message || (storedDel3Quote?.message ? fixBuffers(storedDel3Quote.message) : null);
                                             const del3Format = quotedDel3Message ? getWhatsAppMessageFormat({ message: quotedDel3Message }) : '';
-                                            const quotedDel3KeySource = cachedDel3Quote?.key || (storedDel3Quote ? { remoteJid: storedDel3Quote.remoteJid || from, remoteJidAlt: storedDel3Quote.remoteJidAlt || '', id: quotedDel3Id, fromMe: true } : {});
+                                            const quotedDel3KeySource = cachedDel3Quote?.key || (storedDel3Quote ? {
+                                                remoteJid: storedDel3Quote.remoteJid || from,
+                                                remoteJidAlt: storedDel3Quote.remoteJidAlt || '',
+                                                id: quotedDel3Id,
+                                                fromMe: storedDel3Quote.fromMe === true,
+                                                participant: storedDel3Quote.participant || '',
+                                                participantAlt: storedDel3Quote.participantAlt || '',
+                                                participantPn: storedDel3Quote.participantPn || '',
+                                                senderPn: storedDel3Quote.senderPn || ''
+                                            } : {});
                                             const quotedDel3FromMe = cachedDel3Quote ? cachedDel3Quote.fromMe === true || quotedDel3KeySource.fromMe === true : storedDel3Quote ? storedDel3Quote.fromMe === true : quoted.fromMe === true || quotedDel3KeySource.fromMe === true;
                                             const quotedDel3Participant = quotedDel3KeySource.participant || quoted.participant || quoted.participantPn || quoted.participantAlt || quoted.senderPn || '';
                                             const quotedDel3Key = {
                                                 ...quotedDel3KeySource,
                                                 remoteJid: quotedDel3KeySource.remoteJid || quoted.remoteJid || from,
+                                                remoteJidAlt: quotedDel3KeySource.remoteJidAlt || quoted.remoteJidAlt || '',
                                                 id: quotedDel3Id,
                                                 fromMe: quotedDel3FromMe
                                             };
@@ -10874,8 +10474,16 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             if (quoted.participantAlt) quotedDel3Key.participantAlt = quoted.participantAlt;
                                             if (quoted.participantPn) quotedDel3Key.participantPn = quoted.participantPn;
                                             if (quoted.senderPn) quotedDel3Key.senderPn = quoted.senderPn;
-                                            const quotedDel3Protected = quotedDel3FromMe || !sOwnerTop || isProtectedWhatsAppTarget(quotedDel3Participant, sOwnerTop, sock.user?.id || '', [quotedDel3Key.remoteJid, quotedDel3Key.remoteJidAlt, quotedDel3Key.participant, quotedDel3Key.participantAlt, quotedDel3Key.participantPn].filter(Boolean).join(' '));
-                                            if (!quotedDel3Protected) {
+                                            const quotedDel3OwnerProtected = !!(sOwnerTop && isProtectedWhatsAppTarget(quotedDel3Participant, sOwnerTop, sock.user?.id || '', [quotedDel3Key.remoteJid, quotedDel3Key.remoteJidAlt, quotedDel3Key.participant, quotedDel3Key.participantAlt, quotedDel3Key.participantPn, quotedDel3Key.senderPn].filter(Boolean).join(' ')));
+                                            const quotedDel3Protected = quotedDel3FromMe || !sOwnerTop || quotedDel3OwnerProtected;
+                                            const currentDel3Rules = await getDel3Rules(sessionId, from);
+                                            const del3AlreadyEnabled = !!del3Format && currentDel3Rules.some(rule => rule.format === del3Format);
+                                            const botCanModerateDel3 = await canBotModerateGroup(from);
+                                            if (!botCanModerateDel3 && !del3AlreadyEnabled) {
+                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_bot_admin_required, pushName, true, activeHostName);
+                                                break;
+                                            }
+                                            if (!quotedDel3Protected && botCanModerateDel3) {
                                                 try {
                                                     await queuedDeleteMessageWithAck(sock, from, quotedDel3Key, 180, 6500);
                                                 } catch (del3SelectedDeleteError) {
@@ -10884,15 +10492,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                     break;
                                                 }
                                             } else {
-                                                console.info('[del3-selected-message-protected]', { sessionId, group: from, messageId: quotedDel3Id, reason: quotedDel3FromMe ? 'bot_own_message' : 'session_owner_or_deployer' });
+                                                console.info('[del3-selected-message-protected]', { sessionId, group: from, messageId: quotedDel3Id, reason: quotedDel3FromMe ? 'same_account_or_bot_message' : 'session_owner_or_deployer', ownerProtected: quotedDel3OwnerProtected, ruleActivationContinues: true });
                                             }
                                             if (!del3Format) {
                                                 console.info('[del3-selected-message-deleted-format-unknown]', { sessionId, group: from, messageId: quotedDel3Id, messageContentAvailable: !!quotedDel3Message, automaticRuleChanged: false });
                                                 await safeSendFormatted(sock, from, t.cmd_del3, t.del3_deleted_unclassified || t.del3_delete_failed, pushName, false, activeHostName);
                                                 break;
                                             }
-                                            const currentDel3Rules = await getDel3Rules(sessionId, from);
-                                            const del3AlreadyEnabled = currentDel3Rules.some(rule => rule.format === del3Format);
                                             if (del3AlreadyEnabled) {
                                                 await removeDel3Rule(sessionId, from, del3Format);
                                                 await safeSendFormatted(sock, from, t.cmd_del3, t.del3_deactivated, pushName, false, activeHostName);
@@ -10904,22 +10510,59 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             await safeSendFormatted(sock, from, t.cmd_del3, t.del3_activated, pushName, false, activeHostName);
                                             break;
                                         case 'vv':
-                                            if (!quotedMessage) break;
-                                            let voType = Object.keys(quotedMessage)[0];
-                                            let voMsg = quotedMessage;
-                                            if (voType.includes('viewOnce')) {
-                                                voMsg = quotedMessage[voType].message || quotedMessage[voType];
-                                                voType = Object.keys(voMsg)[0];
+                                        case 'vv2':
+                                            if (internalCommand === 'vv2' && !isOwnerReal) {
+                                                await safeSendFormatted(sock, from, t.cmd_vv2 || 'vv2', t.owner_required, pushName, true, activeHostName);
+                                                break;
                                             }
-                                            const mediaVO = voMsg[voType];
-                                            if (!mediaVO) break;
-                                            const dlTypeVO = voType === 'documentMessage' ? 'document' : voType.replace('Message', '').toLowerCase();
-                                            const streamVO = await downloadContentFromMessage(mediaVO, dlTypeVO);
-                                            let bufferVO = Buffer.from([]);
-                                            for await (const chunk of streamVO) bufferVO = Buffer.concat([bufferVO, chunk]);
-                                            const sendOptsVO = { [dlTypeVO]: bufferVO };
-                                            if (mediaVO.caption) sendOptsVO.caption = mediaVO.caption;
-                                            await queuedSendMessage(sock, from, sendOptsVO);
+                                            if (!quotedMessage) {
+                                                await safeSendFormatted(sock, from, internalCommand === 'vv2' ? (t.cmd_vv2 || 'vv2') : t.cmd_vv, internalCommand === 'vv2' ? (t.vv2_usage || t.vv_usage) : t.vv_usage, pushName, true, activeHostName);
+                                                break;
+                                            }
+                                            const mediaInfoVO = extractWhatsAppResendMedia(quotedMessage);
+                                            if (!mediaInfoVO || (internalCommand === 'vv2' && !mediaInfoVO.viewOnce)) {
+                                                await safeSendFormatted(sock, from, internalCommand === 'vv2' ? (t.cmd_vv2 || 'vv2') : t.cmd_vv, internalCommand === 'vv2' ? (t.vv2_media_required || t.vv_media_required) : t.vv_media_required, pushName, true, activeHostName);
+                                                break;
+                                            }
+                                            const streamVO = await downloadContentFromMessage(mediaInfoVO.payload, mediaInfoVO.downloadType);
+                                            const chunksVO = [];
+                                            for await (const chunk of streamVO) chunksVO.push(Buffer.from(chunk));
+                                            const bufferVO = Buffer.concat(chunksVO);
+                                            if (!bufferVO.length) throw new Error('view_once_media_download_empty');
+                                            const payloadVO = mediaInfoVO.payload;
+                                            const sendOptsVO = {};
+                                            if (mediaInfoVO.sendType === 'image') {
+                                                sendOptsVO.image = bufferVO;
+                                                if (payloadVO.caption) sendOptsVO.caption = payloadVO.caption;
+                                            } else if (mediaInfoVO.sendType === 'video') {
+                                                sendOptsVO.video = bufferVO;
+                                                if (payloadVO.caption) sendOptsVO.caption = payloadVO.caption;
+                                                if (payloadVO.gifPlayback) sendOptsVO.gifPlayback = true;
+                                            } else if (mediaInfoVO.sendType === 'audio') {
+                                                sendOptsVO.audio = bufferVO;
+                                                sendOptsVO.mimetype = payloadVO.mimetype || 'audio/ogg; codecs=opus';
+                                                sendOptsVO.ptt = mediaInfoVO.ptt === true || payloadVO.ptt === true;
+                                            } else if (mediaInfoVO.sendType === 'document') {
+                                                sendOptsVO.document = bufferVO;
+                                                sendOptsVO.mimetype = payloadVO.mimetype || 'application/octet-stream';
+                                                sendOptsVO.fileName = payloadVO.fileName || 'media.bin';
+                                                if (payloadVO.caption) sendOptsVO.caption = payloadVO.caption;
+                                            } else if (mediaInfoVO.sendType === 'sticker') {
+                                                sendOptsVO.sticker = bufferVO;
+                                            }
+                                            let resendTargetVO = from;
+                                            if (internalCommand === 'vv2') {
+                                                const ownerCredentialsVO = activeSessions.get(sessionId)?.authState?.creds || state.creds || null;
+                                                const selfPhoneVO = normalizePhoneNumber(getAuthenticatedPhoneNumber(sock.user || null, ownerCredentialsVO) || sOwnerTop?.Number || sOwnerTop?.number || sOwnerTop?.OwnerNumber || normalizedJidNumber(sock.user?.id || sock.user?.phoneNumber || ''));
+                                                const selfLidVO = getAuthenticatedLid(sock.user || null, ownerCredentialsVO);
+                                                resendTargetVO = selfPhoneVO ? `${selfPhoneVO}@s.whatsapp.net` : selfLidVO;
+                                                if (!resendTargetVO) {
+                                                    await safeSendFormatted(sock, from, t.cmd_vv2 || 'vv2', t.vv_self_unavailable || t.command_error, pushName, true, activeHostName);
+                                                    break;
+                                                }
+                                            }
+                                            const resendResultVO = await queuedSendMessage(sock, resendTargetVO, sendOptsVO, {}, 180);
+                                            console.info('[view-once-media-resent]', { sessionId, command: internalCommand, sourceChat: from, destinationChat: resendTargetVO, mediaType: mediaInfoVO.type, sourceType: mediaInfoVO.sourceType, viewOnce: mediaInfoVO.viewOnce, responseMessageId: resendResultVO?.key?.id || null, ownerOnly: internalCommand === 'vv2' });
                                             break;
                                         case 'url':
                                             let mediaTarget = null;
@@ -11050,7 +10693,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, t.cmd_code, t.owner_required, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            if (!args) {
+                                            const pairingNumber = normalizePhoneNumber(args);
+                                            if (!/^\+?[0-9][0-9\s().-]*$/.test(args) || pairingNumber.length < 8 || pairingNumber.length > 15) {
                                                 await safeSendFormatted(sock, from, t.cmd_code, t.code_usage, pushName, true, activeHostName);
                                                 break;
                                             }
@@ -11881,13 +11525,7 @@ async function shutdownServer(signal) {
     if (httpServer) await new Promise(resolve => {
         try { httpServer.close(() => resolve()); } catch (e) { resolve(); }
     });
-    if (runtimeLogDiskTimer) { clearInterval(runtimeLogDiskTimer); runtimeLogDiskTimer = null; }
     console.info('[server-shutdown-completed]', { signal, processInstanceId });
-    try {
-        const logDrainDeadline = Date.now() + 5000;
-        while (runtimeLogDiskWriteRunning && Date.now() < logDrainDeadline) await new Promise(resolve => setTimeout(resolve, 40));
-        if (runtimeLogPendingDiskWrites.length) await flushRuntimeLogDiskWrites();
-    } catch (logFlushError) { originalStderrWrite(`[runtime-log-final-flush-failed] ${String(logFlushError?.message || logFlushError)}\n`); }
     try { if (mongoClient) await mongoClient.close(); } catch (error) { console.warn('[server-shutdown-mongo-close-failed]', error?.message || String(error)); }
 }
 
@@ -11898,8 +11536,6 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
 }
 
 async function main() {
-    await initializeRuntimeLogStorage();
-    startRuntimeLogForwarder();
     console.info('[runtime-build]', {
         build: RUNTIME_FIX_BUILD,
         database: TFBOT_DATABASE_NAME,
@@ -11923,9 +11559,6 @@ async function main() {
         clusterNonActiveDomainsRedirectStatus: 307,
         clusterPollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS,
         clusterActiveFailureThreshold: TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD,
-        runtimeLogStorage: 'local-render-jsonl',
-        runtimeLogDashboardPath: LOG_DASHBOARD_PATH,
-        runtimeLogsForwardedToCoordinator: TFBOT_CLUSTER_ENABLED && !TFBOT_CLUSTER_COORDINATOR_ONLY,
         clusterInactiveWorkersConnectMongo: false,
         clusterCoordinatorConnectMongo: TFBOT_CLUSTER_COORDINATOR_ONLY,
         clusterInactiveWorkersRestoreSessions: false,
@@ -11946,7 +11579,7 @@ async function main() {
         aiDispatchPolicy: 'ai-ia-asistan-iu-tfasistan-prefix-required-at-parser-and-handler',
         actionErrorExplanation: 'localized-static-fallback-no-ai-request',
         signalKeyCacheIsolation: 'deep-copy-on-cache-read-and-write-no-shared-mutable-session-object',
-        routerProbePolicy: 'current-active-only-fallback-after-active-failure',
+        routerProbePolicy: 'keep_current_active_host_and_fail_over_only_after_a_final_send_failure; order_primary_then_tfbot2_through_tfbot6',
         companionDeviceMessages: 'dispatch-readable-own-device-commands-and-ignore-only-known-bot-echoes',
         pairingPendingSessionTtlMs: PAIRING_SESSION_TTL_MS,
         pairingConnectedSocketStates: [1, 'OPEN'],
@@ -11988,12 +11621,12 @@ async function main() {
         authWritesFencedByRuntimeLock: true,
         retryStoreExactSessionIdFallback: true,
         retryStoreSameAuthenticatedAccountFallback: true,
-        outgoingRetryMessagePersistedBeforeRelay: true,
+        outgoingRetryMessagePreloadedInMemoryBeforeRelay: true,
         privateQueueAliasesCanonicalizedWithinSession: true,
         timedOutQueueAbandonAfterSessionFenceMs: MESSAGE_QUEUE_TIMEOUT_SETTLE_MS,
         authenticatedSessionAuthDeletionOnOfflineTimeout: false,
         targetedSignalPeerRecovery: true,
-        selfChatPhonePreferred: true,
+        selfChatOriginalJidPreferred: true,
         lidPhoneMappingFreshMs: LID_PHONE_MAPPING_FRESH_MS,
         sessionScopedLidMappings: true,
         senderKeyIdentityInvalidation: true,
@@ -12005,7 +11638,7 @@ async function main() {
             tfbotWorkerActive = false;
             tfbotWorkerState = 'coordinator';
             await connectMongo({ coordinatorOnly: true });
-            console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, baileysSignalTransactionPatch: baileysSignalTransactionPatchStatus, baileysOutgoingRetryPreflightPatch: baileysOutgoingRetryPreflightPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, port: PORT });
+            console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, baileysSignalTransactionPatch: baileysSignalTransactionPatchStatus, baileysOutgoingRetryPreflightPatch: baileysOutgoingRetryPreflightPatchStatus, baileysRetryResendDoubleEncryptionPatch: baileysRetryResendDoubleEncryptionPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, port: PORT });
             httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
             const savedSelection = await db.collection('cluster_router').findOne({ _id: TFBOT_ROUTER_STATE_ID }).catch(() => null);
             const savedDomain = TFBOT_ROUTER_DOMAIN_BY_HOST.get(normalizeTfbotHost(savedSelection?.activeHost || ''));
