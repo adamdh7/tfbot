@@ -208,17 +208,18 @@ for (const level of Object.keys(tfbotOriginalConsole)) {
     console[level] = (...args) => {
         try {
             const serialized = args.map(value => typeof value === 'string' ? value : tfbotDiagnosticSerialize(value)).join(' ');
-            const target = getTfbotDiagnosticSession();
-            const targetLog = !!target && (serialized.includes(target.sessionId) || !!target.phone && serialized.includes(target.phone));
-            if (targetLog) {
-                const record = { name: target.name, sessionId: shortLogHash(target.sessionId), date: new Date().toISOString(), level: level.toUpperCase(), event: sanitizeTfbotDiagnosticLog(String(args.find(value => typeof value === 'string') || 'runtime'), target.sessionId).slice(0, 180), content: sanitizeTfbotDiagnosticLog(serialized, target.sessionId) };
+            const operationalLog = /tfbot-router|tfbot-worker|cluster-|session-(?:restore|orphan|expired|duplicate|runtime-lock|account-runtime-lock|reconnect|open|health)|signal-auth-store|pairing-challenge|worker-handoff|send-failure|mongo-(?:connect|close)|storage-layout/i.test(serialized);
+            if (operationalLog) {
+                const sessionMatch = serialized.match(/session(?:Id|_id)?["'=:\s]+([A-Za-z0-9_-]{8,120})/i);
+                const sessionHash = sessionMatch ? shortLogHash(sessionMatch[1]) : null;
+                const record = { name: 'TFBot', sessionId: sessionHash, date: new Date().toISOString(), level: level.toUpperCase(), event: sanitizeTfbotDiagnosticLog(String(args.find(value => typeof value === 'string') || 'runtime'), '').slice(0, 180), content: sanitizeTfbotDiagnosticLog(serialized, '') };
                 enqueueTfbotDiagnosticRecord(record);
             }
         } catch (error) {}
         tfbotOriginalConsole[level](...args);
     };
 }
-enqueueTfbotDiagnosticRecord({ name: 'Adam', sessionId: TFBOT_DIAGNOSTIC_SESSION_ID ? shortLogHash(TFBOT_DIAGNOSTIC_SESSION_ID) : null, date: new Date().toISOString(), level: 'INFO', event: 'diagnostic-log-start', content: 'Journal public de diagnostic démarré; les identifiants, codes et contenus privés sont masqués. Écriture asynchrone pour ne pas ralentir les envois ni les connexions.' });
+enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'diagnostic-log-start', content: 'Journal opérationnel du cluster démarré; les identifiants, codes, numéros et contenus privés sont masqués.' });
 
 function applyBaileysLidPnDecryptRetryPatch() {
     const marker = '__tfbotSelfChatPnDecryptFallbackV107';
@@ -1047,8 +1048,12 @@ const TFBOT_WORKER_CONTROL_PATH = '/__tfbot/worker/control';
 const TFBOT_WORKER_POLL_PATH = '/__tfbot/worker/poll';
 const TFBOT_WORKER_FAILURE_PATH = '/__tfbot/worker/send-failure';
 const TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD = Math.max(2, Math.min(4, Number(process.env.TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD || 2)));
+const TFBOT_ROUTER_PREPARE_TIMEOUT_MS = Math.max(9000, Math.min(20000, Number(process.env.TFBOT_ROUTER_PREPARE_TIMEOUT_MS || 14000)));
+const TFBOT_ROUTER_ACTIVATE_TIMEOUT_MS = Math.max(45000, Math.min(120000, Number(process.env.TFBOT_ROUTER_ACTIVATE_TIMEOUT_MS || 90000)));
+const TFBOT_ROUTER_DRAIN_TIMEOUT_MS = Math.max(3000, Math.min(12000, Number(process.env.TFBOT_ROUTER_DRAIN_TIMEOUT_MS || 7000)));
+const TFBOT_ROUTER_CANDIDATE_FAILURE_COOLDOWN_MS = Math.max(30000, Math.min(600000, Number(process.env.TFBOT_ROUTER_CANDIDATE_FAILURE_COOLDOWN_MS || 120000)));
 const tfbotCoordinatorActiveProbeFailures = new Map();
-const tfbotCoordinatorForcedSendFailures = new Map();
+const tfbotCoordinatorCandidateFailures = new Map();
 const TFBOT_ROUTER_STATE_ID = 'active-domain';
 const TFBOT_PRIMARY_DOMAIN = Object.freeze({ host: 'tf.bot.adamdh7.org', url: 'https://tf.bot.adamdh7.org', priority: 0 });
 const TFBOT_COORDINATOR_HOST = 'tfbot7.onrender.com';
@@ -1126,6 +1131,9 @@ let tfbotWorkerLeaseTimer = null;
 let tfbotWorkerLeaseUntil = 0;
 let tfbotWorkerSelectionGeneration = '';
 let tfbotWorkerSelectedHost = '';
+let tfbotWorkerControlOverrideGeneration = '';
+let tfbotWorkerControlOverrideUntil = 0;
+let tfbotWorkerLastRestoreSummary = null;
 let clusterRouteCache = new Map();
 const clusterHealthCache = new Map();
 let tfbotActiveDomainCache = null;
@@ -1294,18 +1302,22 @@ function isSocketDefinitelyClosed(sock) {
     const readyState = sock?.ws?.readyState ?? sock?.ws?._socket?.readyState ?? sock?.socket?.readyState;
     return Number(readyState) === 3 || String(readyState).toUpperCase() === 'CLOSED';
 }
+function isWhatsAppSocketReady(session, sock) {
+    if (!session || !sock || session.sock !== sock || session.openEventSeen !== true || isSocketDefinitelyClosed(sock)) return false;
+    if (sock?.ws?.isOpen === true) return true;
+    const readyState = sock?.ws?.readyState ?? sock?.ws?._socket?.readyState ?? sock?.socket?.readyState;
+    if (readyState === undefined || readyState === null) return true;
+    return Number(readyState) === 1 || String(readyState).toUpperCase() === 'OPEN';
+}
 function hasAuthenticatedWhatsAppCredentials(credentials, user = null) {
     return credentials?.registered === true || !!(credentials?.me?.id || credentials?.me?.lid || getAuthenticatedPhoneNumber(user, credentials) || getAuthenticatedLid(user, credentials));
 }
 function isAuthenticatedSocketOperational(session, sock) {
-    if (!session || !sock || session.sock !== sock || session.openEventSeen !== true || isSocketDefinitelyClosed(sock)) return false;
+    if (!isWhatsAppSocketReady(session, sock)) return false;
     const credentials = session.authState?.creds || sock.authState?.creds || null;
     if (!hasAuthenticatedWhatsAppCredentials(credentials, sock.user || null)) return false;
     const identity = getAuthenticatedPhoneNumber(sock.user || null, credentials) || getAuthenticatedLid(sock.user || null, credentials);
-    if (!identity) return false;
-    const readyState = sock.ws?.readyState ?? sock.ws?._socket?.readyState ?? sock.socket?.readyState;
-    if (Number(readyState) === 2 || String(readyState).toUpperCase() === 'CLOSING') return false;
-    return true;
+    return !!identity;
 }
 async function restoreAuthenticatedSessionRuntimeStatus(sessionId, session, sock, reason = 'authenticated_socket_still_open') {
     if (!isAuthenticatedSocketOperational(session, sock)) return false;
@@ -2721,29 +2733,31 @@ async function resetSignalPeerSessionForSendRetry(sock, sessionId, jid, allowOwn
     return true;
 }
 async function reportTfbotWorkerSendFailure(sessionId, error) {
-    if (!TFBOT_CLUSTER_ENABLED || TFBOT_CLUSTER_COORDINATOR_ONLY || !TFBOT_CLUSTER_TOKEN || !TFBOT_CLUSTER_COORDINATOR_URL) return false;
-    const message = String(error?.message || error || 'send_failed');
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3000);
-    try {
-        const response = await fetch(`${TFBOT_CLUSTER_COORDINATOR_URL}${TFBOT_WORKER_FAILURE_PATH}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-TFBOT-Cluster-Token': TFBOT_CLUSTER_TOKEN },
-            body: JSON.stringify({
-                host: tfbotWorkerSelectedHost || TFBOT_CLUSTER_INSTANCE_HOST,
-                generation: tfbotWorkerSelectionGeneration,
-                sessionIdHash: shortLogHash(sessionId),
-                failureKind: /Bad MAC/i.test(message) ? 'bad_mac' : /MessageCounterError/i.test(message) ? 'message_counter_error' : /No sessions|SessionError/i.test(message) ? 'missing_signal_session' : /encrypt|decrypt|pre.?key/i.test(message) ? 'signal_crypto_failure' : 'send_or_transport_failure'
-            }),
-            cache: 'no-store',
-            signal: controller.signal
-        });
-        return response.ok;
-    } catch (reportError) {
-        return false;
-    } finally {
-        clearTimeout(timer);
+    const message = String(error?.message || error || 'send_failed').slice(0, 1200);
+    const failureKind = /Bad MAC|MessageCounterError|No sessions|SessionError|decrypt|encrypt|pre.?key|signal/i.test(message)
+        ? 'session_signal_failure'
+        : /invalid.*jid|not.*found|recipient|user.*not.*found|404|400/i.test(message)
+            ? 'recipient_or_message_failure'
+            : /timeout|timed out|socket|closed|connection|network|econn|enotfound|etimedout/i.test(message)
+                ? 'session_transport_failure'
+                : 'session_send_failure';
+    const now = new Date();
+    if (db && sessionId) {
+        await db.collection('session_owners').updateOne(
+            { sessionId, ownerInstanceId: TFBOT_CLUSTER_INSTANCE_ID },
+            { $set: { lastSendFailureAt: now, lastSendFailureKind: failureKind, lastSendFailureHash: shortLogHash(message), updatedAt: now } }
+        ).catch(databaseError => console.warn('[session-send-failure-record-failed]', { sessionId, error: databaseError?.message || String(databaseError) }));
     }
+    console.warn('[whatsapp-session-send-failure]', {
+        sessionId,
+        host: TFBOT_CLUSTER_INSTANCE_HOST,
+        generation: tfbotWorkerSelectionGeneration || null,
+        failureKind,
+        errorHash: shortLogHash(message),
+        infrastructureFailover: false,
+        action: 'keep_current_worker_and_handle_failure_for_this_session_only'
+    });
+    return false;
 }
 
 function getWhatsAppDestinationType(jid) {
@@ -4507,21 +4521,22 @@ async function releaseSessionRuntimeLock(sessionId) {
 }
 
 function scheduleSessionLockRetry(sessionId, autoExpire, format) {
-    if (serverShuttingDown || tfbotWorkerStopping || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive) || sessionLockRetryTimers.has(sessionId)) return;
-    const retryAttempt = Math.min(6, Number(sessionLockRetryAttempts.get(sessionId) || 0) + 1);
+    if (serverShuttingDown || tfbotWorkerStopping || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive) || sessionLockRetryTimers.has(sessionId)) return 0;
+    const retryAttempt = Math.min(10, Number(sessionLockRetryAttempts.get(sessionId) || 0) + 1);
     sessionLockRetryAttempts.set(sessionId, retryAttempt);
-    const delay = Math.min(15000, 900 * (2 ** (retryAttempt - 1))) + Math.floor(Math.random() * 400);
+    const delay = Math.min(120000, 1000 * (2 ** (retryAttempt - 1))) + Math.floor(Math.random() * 1000);
     const timer = setTimeout(async () => {
         sessionLockRetryTimers.delete(sessionId);
         try {
             await startAdamBot(sessionId, autoExpire, format, true);
         } catch (error) {
-            console.warn('[session-lock-retry]', { sessionId, attempt: retryAttempt, retryInMs: delay, error: error?.message || String(error) });
+            console.warn('[session-restore-retry-failed]', { sessionId, attempt: retryAttempt, retryInMs: delay, error: error?.message || String(error) });
             scheduleSessionLockRetry(sessionId, autoExpire, format);
         }
     }, delay);
     if (typeof timer.unref === 'function') timer.unref();
     sessionLockRetryTimers.set(sessionId, timer);
+    return delay;
 }
 
 async function useMongoAuthState(sessionId, expectExisting = false) {
@@ -5869,14 +5884,16 @@ async function probeTfbotServingDomain(domain) {
         }
         let payload = null;
         try { payload = JSON.parse(healthText); } catch (error) { payload = null; }
-        const validHealthPayload = !!(payload && payload.ok === true && payload.service === 'tfbot-router-node' && normalizeTfbotHost(payload.host) === domain.host && payload.database === TFBOT_DATABASE_NAME);
+        const releaseId = normalizeTfbotReleaseId(payload?.releaseId || '');
+        const releaseCompatible = !!releaseId && areTfbotReleasesCompatible(releaseId, TFBOT_CODE_RELEASE_ID);
+        const validHealthPayload = !!(payload && payload.ok === true && payload.service === 'tfbot-router-node' && normalizeTfbotHost(payload.host) === domain.host && payload.database === TFBOT_DATABASE_NAME && releaseCompatible);
         if (!validHealthPayload) {
-            console.warn('[tfbot-router-health-unverified]', { host: domain.host, healthStatus: healthResponse.status, healthPayload: payload ? 'invalid-payload' : 'invalid-json', action: 'try_next_domain_in_priority_order' });
+            console.warn('[tfbot-router-health-unverified]', { host: domain.host, healthStatus: healthResponse.status, healthPayload: payload ? 'invalid-payload-or-release-mismatch' : 'invalid-json', releaseCompatible, workerReleaseHash: shortLogHash(releaseId), coordinatorReleaseHash: shortLogHash(TFBOT_CODE_RELEASE_ID), action: 'reject_candidate_until_host_identity_database_and_release_are_verified' });
             return null;
         }
         const reportedWorkerState = String(payload.workerState || 'standby').toLowerCase();
-        if (reportedWorkerState === 'error' || reportedWorkerState === 'drain_failed' || reportedWorkerState === 'stopping' || payload.draining === true) {
-            console.warn('[tfbot-router-worker-unavailable]', { host: domain.host, workerState: reportedWorkerState, draining: payload.draining === true, action: 'try_next_domain_in_priority_order' });
+        if (!['active', 'standby'].includes(reportedWorkerState) || payload.draining === true || payload.workerActive === true && (reportedWorkerState !== 'active' || payload.databasePing !== true)) {
+            console.warn('[tfbot-router-worker-unavailable]', { host: domain.host, workerState: reportedWorkerState, workerActive: payload.workerActive === true, databasePing: payload.databasePing === true, draining: payload.draining === true, action: 'reject_worker_until_active_database_verified_or_standby_preflighted' });
             return null;
         }
         return {
@@ -5884,14 +5901,19 @@ async function probeTfbotServingDomain(domain) {
             host: domain.host,
             url: domain.url,
             workerActive: payload.workerActive === true,
-            workerState: String(payload.workerState || 'standby'),
+            workerState: reportedWorkerState,
             activeHost: normalizeTfbotHost(payload.activeHost || ''),
             generation: String(payload.generation || ''),
+            releaseId,
+            releaseCompatible,
+            databaseConnected: payload.databaseConnected === true,
+            databasePing: payload.databasePing === true,
             activeSessionCount: Number(payload.activeSessionCount || 0),
+            restoreSummary: payload.restoreSummary || null,
             healthVerified: true,
             healthStatus: healthResponse.status,
             rootStatus: healthResponse.status,
-            probe: 'authenticated_internal_health',
+            probe: 'authenticated_internal_health_with_release_and_database_validation',
             checkedAt: new Date()
         };
     } catch (error) {
@@ -5901,10 +5923,34 @@ async function probeTfbotServingDomain(domain) {
         clearTimeout(timer);
     }
 }
-async function sendTfbotWorkerControl(domain, selection) {
+async function verifyTfbotWorkerMongoPreflight() {
+    if (!mongoUri) return { ok: false, reason: 'mongo_uri_missing' };
+    const client = new MongoClient(mongoUri, { maxPoolSize: 1, minPoolSize: 0, serverSelectionTimeoutMS: 9000, connectTimeoutMS: 9000, retryWrites: true, appName: 'TFBotWorkerPreflight' });
+    try {
+        await client.connect();
+        const targetDb = client.db(TFBOT_DATABASE_NAME);
+        const ping = await targetDb.command({ ping: 1 });
+        if (Number(ping?.ok) !== 1) return { ok: false, reason: 'mongo_ping_failed' };
+        const physicalCollections = (await targetDb.listCollections({}, { nameOnly: true }).toArray())
+            .map(item => String(item.name || ''))
+            .filter(name => !name.startsWith('system.') && name !== 'server_runtime_logs')
+            .sort();
+        const expectedCollections = [TFBOT_APP_DATA_COLLECTION, TFBOT_WHATSAPP_COLLECTION].sort();
+        if (physicalCollections.length !== expectedCollections.length || expectedCollections.some(name => !physicalCollections.includes(name))) {
+            return { ok: false, reason: 'mongo_storage_layout_mismatch', physicalCollections };
+        }
+        return { ok: true, databasePing: true, physicalCollections };
+    } catch (error) {
+        return { ok: false, reason: String(error?.message || error).slice(0, 220) };
+    } finally {
+        await client.close().catch(() => {});
+    }
+}
+async function sendTfbotWorkerControl(domain, selection, phase = 'activate', timeoutMs = null) {
     if (!TFBOT_CLUSTER_TOKEN || !domain?.host || !domain?.url) return null;
+    const phaseTimeout = timeoutMs || (phase === 'prepare' ? TFBOT_ROUTER_PREPARE_TIMEOUT_MS : phase === 'drain' ? TFBOT_ROUTER_DRAIN_TIMEOUT_MS : TFBOT_ROUTER_ACTIVATE_TIMEOUT_MS);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), Math.max(1800, Math.min(5000, TFBOT_ROUTER_COORDINATOR_TIMEOUT_MS)));
+    const timer = setTimeout(() => controller.abort(), phaseTimeout);
     try {
         const response = await fetch(`${domain.url}${TFBOT_WORKER_CONTROL_PATH}`, {
             method: 'GET',
@@ -5913,6 +5959,8 @@ async function sendTfbotWorkerControl(domain, selection) {
                 'X-TFBOT-Expected-Host': domain.host,
                 'X-TFBOT-Selected-Host': String(selection?.host || ''),
                 'X-TFBOT-Selection-Generation': String(selection?.generation || ''),
+                'X-TFBOT-Selection-Release': String(selection?.releaseId || TFBOT_CODE_RELEASE_ID),
+                'X-TFBOT-Control-Phase': phase,
                 'Accept': 'application/json'
             },
             cache: 'no-store',
@@ -5920,13 +5968,14 @@ async function sendTfbotWorkerControl(domain, selection) {
             signal: controller.signal
         });
         const payload = await response.json().catch(() => null);
-        if (!response.ok || !payload || payload.ok !== true) {
+        if (!response.ok || !payload || payload.ok !== true || normalizeTfbotHost(payload.host) !== domain.host || String(payload.generation || '') !== String(selection?.generation || '')) {
             await response.body?.cancel().catch(() => {});
+            console.warn('[tfbot-worker-control-unconfirmed]', { host: domain.host, phase, status: response.status, responseState: payload?.state || null, responseError: payload?.error || null, generationMatched: String(payload?.generation || '') === String(selection?.generation || '') });
             return null;
         }
         return payload;
     } catch (error) {
-        console.warn('[tfbot-worker-control-failed]', { host: domain.host, error: error?.name === 'AbortError' ? 'timeout' : String(error?.message || error).slice(0, 140) });
+        console.warn('[tfbot-worker-control-failed]', { host: domain.host, phase, error: error?.name === 'AbortError' ? 'timeout' : String(error?.message || error).slice(0, 140) });
         return null;
     } finally {
         clearTimeout(timer);
@@ -5964,8 +6013,9 @@ async function refreshTfbotActiveDomain(force = false) {
     if (tfbotCoordinatorSelectionPromise) return tfbotCoordinatorSelectionPromise;
     tfbotCoordinatorSelectionPromise = (async () => {
         let selectionPhase = 'load-current-selection';
+        const previousCache = tfbotCoordinatorSelectionCache || tfbotActiveDomainCache || null;
+        let previousSelection = previousCache;
         try {
-            let previousSelection = tfbotCoordinatorSelectionCache || tfbotActiveDomainCache || null;
             let storedRouterState = null;
             if (!previousSelection && db) {
                 storedRouterState = await db.collection('cluster_router').findOne({ _id: TFBOT_ROUTER_STATE_ID }).catch(() => null);
@@ -5973,73 +6023,91 @@ async function refreshTfbotActiveDomain(force = false) {
                 const storedFallbackCursor = Number(storedRouterState?.fallbackCursor);
                 if (Number.isInteger(storedFallbackCursor)) tfbotCoordinatorFallbackCursor = ((storedFallbackCursor % TFBOT_ROUTER_SERVING_DOMAINS.length) + TFBOT_ROUTER_SERVING_DOMAINS.length) % TFBOT_ROUTER_SERVING_DOMAINS.length;
                 tfbotCoordinatorLastProbeHost = normalizeTfbotHost(storedRouterState?.lastProbeHost || tfbotCoordinatorLastProbeHost);
-                if (previousSelection) {
-                    tfbotCoordinatorSelectionCache = previousSelection;
-                    tfbotActiveDomainCache = previousSelection;
-                }
             }
             const previousHost = normalizeTfbotHost(previousSelection?.host || '');
             const previousIndex = TFBOT_ROUTER_SERVING_DOMAINS.findIndex(item => item.host === previousHost);
             const fallbackIndex = previousIndex >= 0
                 ? (previousIndex + 1) % TFBOT_ROUTER_SERVING_DOMAINS.length
                 : ((tfbotCoordinatorFallbackCursor % TFBOT_ROUTER_SERVING_DOMAINS.length) + TFBOT_ROUTER_SERVING_DOMAINS.length) % TFBOT_ROUTER_SERVING_DOMAINS.length;
-            const activeForcedFailure = previousHost ? tfbotCoordinatorForcedSendFailures.get(previousHost) : null;
-            const activeWasForcedFailed = !!(activeForcedFailure && Number(activeForcedFailure.expiresAt || 0) > Date.now());
-            const probeOrder = previousIndex >= 0
-                ? activeWasForcedFailed
-                    ? Array.from({ length: TFBOT_ROUTER_SERVING_DOMAINS.length - 1 }, (_, index) => TFBOT_ROUTER_SERVING_DOMAINS[(previousIndex + index + 1) % TFBOT_ROUTER_SERVING_DOMAINS.length])
-                    : [TFBOT_ROUTER_SERVING_DOMAINS[previousIndex], TFBOT_ROUTER_SERVING_DOMAINS[fallbackIndex]]
-                : [TFBOT_ROUTER_SERVING_DOMAINS[fallbackIndex]];
-            const checked = [];
+            const fallbackCursor = fallbackIndex;
+            const checked = await Promise.all(TFBOT_ROUTER_SERVING_DOMAINS.map(async domain => ({ domain, health: await probeTfbotServingDomain(domain), preparation: null })));
+            const activeCheckedItem = checked.find(item => item.domain.host === previousHost) || null;
+            const activeDomainHealth = activeCheckedItem?.health || null;
+            let activeFailureCount = 0;
+            if (previousIndex >= 0 && previousSelection?.generation) {
+                if (activeDomainHealth?.ok === true && !activeDomainHealth.suspended) {
+                    tfbotCoordinatorActiveProbeFailures.delete(previousHost);
+                } else {
+                    const previousFailure = tfbotCoordinatorActiveProbeFailures.get(previousHost) || { count: 0, firstFailureAt: Date.now() };
+                    previousFailure.count = activeDomainHealth?.suspended === true ? TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD : Number(previousFailure.count || 0) + 1;
+                    previousFailure.lastFailureAt = Date.now();
+                    tfbotCoordinatorActiveProbeFailures.set(previousHost, previousFailure);
+                    activeFailureCount = previousFailure.count;
+                }
+            }
             let selectedItem = null;
-            for (const domain of probeOrder) {
-                selectionPhase = `probe-active-or-fallback:${domain.host}`;
-                const domainHealth = await probeTfbotServingDomain(domain);
-                checked.push({ domain, health: domainHealth });
-                const forcedFailure = tfbotCoordinatorForcedSendFailures.get(domain.host);
-                const forcedSendFailureActive = !!(forcedFailure && Number(forcedFailure.expiresAt || 0) > Date.now());
-                if (forcedFailure && !forcedSendFailureActive) tfbotCoordinatorForcedSendFailures.delete(domain.host);
-                if (domain.host === previousHost) {
-                    if (domainHealth?.ok === true && !domainHealth.suspended && !forcedSendFailureActive) {
-                        tfbotCoordinatorActiveProbeFailures.delete(domain.host);
-                    } else if ((!domainHealth?.suspended || forcedSendFailureActive) && previousSelection?.generation) {
-                        const previousFailure = tfbotCoordinatorActiveProbeFailures.get(domain.host) || { count: 0, firstFailureAt: Date.now() };
-                        previousFailure.count = forcedSendFailureActive ? TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD : Number(previousFailure.count || 0) + 1;
-                        previousFailure.lastFailureAt = Date.now();
-                        tfbotCoordinatorActiveProbeFailures.set(domain.host, previousFailure);
-                        if (!forcedSendFailureActive && previousFailure.count < TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD) {
-                            const heldSelection = {
-                                ...previousSelection,
-                                checkedAt: new Date(),
-                                healthy: true,
-                                source: 'tfbot7-active-host-temporarily-held-after-transient-probe-failure',
-                                activeProbeFailureCount: previousFailure.count
-                            };
-                            tfbotCoordinatorSelectionCache = heldSelection;
-                            tfbotActiveDomainCache = heldSelection;
-                            tfbotCoordinatorSelectionAt = Date.now();
-                            tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
-                            console.warn('[tfbot-router-active-host-failure-held]', {
-                                activeHost: domain.host,
-                                consecutiveProbeFailures: previousFailure.count,
-                                requiredFailuresBeforeFallback: TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD,
-                                probeResult: domainHealth?.suspended ? 'suspended' : 'no-response-or-invalid-health',
-                                action: 'keep_current_host_and_session_owner_on_first_transient_failure_then_probe_again'
-                            });
-                            return heldSelection;
-                        }
+            for (const checkedItem of checked) {
+                const domain = checkedItem.domain;
+                const domainHealth = checkedItem.health;
+                const domainIndex = TFBOT_ROUTER_SERVING_DOMAINS.findIndex(item => item.host === domain.host);
+                const candidateFailure = tfbotCoordinatorCandidateFailures.get(domain.host);
+                if (candidateFailure && Number(candidateFailure.expiresAt || 0) > Date.now() && domain.host !== previousHost) {
+                    console.warn('[tfbot-router-candidate-cooldown-active]', { host: domain.host, failureKind: candidateFailure.failureKind || 'activation_or_preparation_failure', retryAt: new Date(candidateFailure.expiresAt).toISOString() });
+                    continue;
+                }
+                if (candidateFailure && Number(candidateFailure.expiresAt || 0) <= Date.now()) tfbotCoordinatorCandidateFailures.delete(domain.host);
+                if (domainHealth?.ok !== true || domainHealth.suspended) continue;
+                if (previousIndex >= 0 && domainIndex > previousIndex && activeFailureCount < TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD) break;
+                const alreadyOperational = domainHealth.workerActive === true
+                    && domainHealth.workerState === 'active'
+                    && domainHealth.databasePing === true
+                    && domainHealth.activeHost === domain.host
+                    && !!domainHealth.generation;
+                if (!alreadyOperational) {
+                    selectionPhase = `prepare-worker:${domain.host}`;
+                    const preparationGeneration = previousHost === domain.host && previousSelection?.generation ? String(previousSelection.generation) : crypto.randomUUID();
+                    const preparation = await sendTfbotWorkerControl(domain, {
+                        host: domain.host,
+                        generation: preparationGeneration,
+                        releaseId: TFBOT_CODE_RELEASE_ID
+                    }, 'prepare', TFBOT_ROUTER_PREPARE_TIMEOUT_MS);
+                    checkedItem.preparation = preparation ? { ok: preparation.databaseReady === true && preparation.databasePing === true, state: preparation.state || null, releaseId: preparation.releaseId || null } : { ok: false, state: 'unconfirmed' };
+                    if (!preparation || preparation.state !== 'prepared' || preparation.databaseReady !== true || preparation.databasePing !== true || !areTfbotReleasesCompatible(preparation.releaseId, TFBOT_CODE_RELEASE_ID)) {
+                        tfbotCoordinatorCandidateFailures.set(domain.host, { expiresAt: Date.now() + TFBOT_ROUTER_CANDIDATE_FAILURE_COOLDOWN_MS, failureKind: 'preparation_failed' });
+                        console.warn('[tfbot-router-candidate-preparation-rejected]', { host: domain.host, healthState: domainHealth.workerState, preparation: checkedItem.preparation, cooldownMs: TFBOT_ROUTER_CANDIDATE_FAILURE_COOLDOWN_MS, action: 'skip_candidate_without_closing_current_worker' });
+                        continue;
                     }
                 }
-                if (domainHealth?.ok === true && !domainHealth.suspended && !forcedSendFailureActive) {
-                    selectedItem = { domain, health: domainHealth };
-                    break;
-                }
+                selectedItem = { domain, health: domainHealth, alreadyOperational };
+                break;
+            }
+            if (!selectedItem && previousIndex >= 0 && previousSelection?.generation && activeFailureCount > 0 && activeFailureCount < TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD) {
+                const heldSelection = {
+                    ...previousSelection,
+                    checkedAt: new Date(),
+                    healthy: true,
+                    workerActive: activeDomainHealth?.workerActive === true,
+                    workerState: activeDomainHealth?.workerState || 'probe_retry_pending',
+                    source: 'tfbot7-active-host-held-after-infrastructure-probe-failure',
+                    activeProbeFailureCount: activeFailureCount
+                };
+                tfbotCoordinatorSelectionCache = heldSelection;
+                tfbotActiveDomainCache = heldSelection;
+                tfbotCoordinatorSelectionAt = Date.now();
+                tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
+                console.warn('[tfbot-router-active-host-failure-held]', {
+                    activeHost: previousHost,
+                    consecutiveProbeFailures: activeFailureCount,
+                    requiredFailuresBeforeFallback: TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD,
+                    checkedHosts: checked.map(item => item.domain.host),
+                    action: 'keep_current_host_after_first_infrastructure_failure_and_recheck_all_priority_hosts'
+                });
+                return heldSelection;
             }
             if (!selectedItem) {
                 const checkedAt = new Date();
-                const failedFallbackIndex = fallbackIndex;
-                const nextFallbackCursor = (failedFallbackIndex + 1) % TFBOT_ROUTER_SERVING_DOMAINS.length;
-                const lastProbeHost = checked.length ? checked[checked.length - 1].domain.host : TFBOT_ROUTER_SERVING_DOMAINS[failedFallbackIndex].host;
+                const nextFallbackCursor = (fallbackIndex + 1) % TFBOT_ROUTER_SERVING_DOMAINS.length;
+                const lastProbeHost = checked.length ? checked[checked.length - 1].domain.host : TFBOT_ROUTER_SERVING_DOMAINS[fallbackIndex].host;
                 tfbotCoordinatorFallbackCursor = nextFallbackCursor;
                 tfbotCoordinatorLastProbeHost = lastProbeHost;
                 tfbotCoordinatorSelectionCache = null;
@@ -6053,70 +6121,162 @@ async function refreshTfbotActiveDomain(force = false) {
                     checkedHosts: checked.map(item => item.domain.host),
                     nextFallbackHost: TFBOT_ROUTER_SERVING_DOMAINS[nextFallbackCursor].host,
                     fallbackCursor: nextFallbackCursor,
-                    probeResults: checked.map(item => ({ host: item.domain.host, ok: item.health?.ok === true, status: item.health?.healthStatus || item.health?.rootStatus || null, healthStatus: item.health?.healthStatus || null, workerState: item.health?.workerState || (item.health?.suspended ? 'suspended' : 'no-response'), suspended: item.health?.suspended === true })),
+                    probeResults: checked.map(item => ({ host: item.domain.host, ok: item.health?.ok === true, status: item.health?.healthStatus || item.health?.rootStatus || null, workerState: item.health?.workerState || (item.health?.suspended ? 'suspended' : 'no-response'), workerActive: item.health?.workerActive === true, databasePing: item.health?.databasePing === true, releaseCompatible: item.health?.releaseCompatible === true, preparation: item.preparation || null })),
                     checkedAt,
-                    action: previousHost ? 'active_host_failed_then_one_fallback_checked_next_candidate_queued' : 'one_fallback_candidate_checked_next_candidate_queued'
+                    action: 'no_candidate_passed_host_release_and_mongodb_preparation_checks'
                 });
                 return null;
             }
             const checkedAt = new Date();
             const selected = selectedItem.domain;
-            if (selected.host !== previousHost) tfbotCoordinatorActiveProbeFailures.delete(previousHost);
-            tfbotCoordinatorActiveProbeFailures.delete(selected.host);
-            const selectedIndex = TFBOT_ROUTER_SERVING_DOMAINS.findIndex(item => item.host === selected.host);
-            const nextFallbackCursor = (selectedIndex + 1) % TFBOT_ROUTER_SERVING_DOMAINS.length;
-            tfbotCoordinatorFallbackCursor = nextFallbackCursor;
-            tfbotCoordinatorLastProbeHost = selected.host;
             const sameSelection = previousHost === selected.host && !!previousSelection?.generation;
             const generation = sameSelection ? String(previousSelection.generation) : crypto.randomUUID();
+            const nextFallbackCursor = (TFBOT_ROUTER_SERVING_DOMAINS.findIndex(item => item.host === selected.host) + 1) % TFBOT_ROUTER_SERVING_DOMAINS.length;
             const selectedProbeResult = selectedItem.health;
             const result = {
                 ...selected,
                 checkedAt,
                 generation,
+                releaseId: TFBOT_CODE_RELEASE_ID,
+                releaseCompatible: true,
                 healthy: true,
-                workerActive: selectedProbeResult.workerActive === true,
-                workerState: String(selectedProbeResult.workerState || 'starting'),
-                source: 'tfbot7-active-host-health-with-fallback-on-failure',
+                workerActive: false,
+                workerState: selectedProbeResult.workerActive === true ? 'active-verification-pending' : 'prepared',
+                source: 'tfbot7-verified-worker-handoff',
                 selectedBy: TFBOT_COORDINATOR_HOST,
                 healthyHosts: [selected.host],
-                probeResults: checked.map(item => ({ host: item.domain.host, ok: item.health?.ok === true, healthStatus: item.health?.healthStatus || null, suspended: item.health?.suspended === true, workerState: item.health?.workerState || (item.health?.suspended ? 'suspended' : 'no-response'), checkedAt }))
+                activeSessionCount: selectedProbeResult.activeSessionCount || 0,
+                probeResults: checked.map(item => ({ host: item.domain.host, ok: item.health?.ok === true, healthStatus: item.health?.healthStatus || null, suspended: item.health?.suspended === true, workerState: item.health?.workerState || (item.health?.suspended ? 'suspended' : 'no-response'), workerActive: item.health?.workerActive === true, databasePing: item.health?.databasePing === true, releaseCompatible: item.health?.releaseCompatible === true, preparation: item.preparation || null, checkedAt }))
             };
+            const oldSelection = previousSelection ? { ...previousSelection } : null;
+            const oldDomain = previousHost ? TFBOT_ROUTER_DOMAIN_BY_HOST.get(previousHost) : null;
+            let handoffCompleted = !previousHost || previousHost === selected.host;
+            let previousWorkerState = String(checked.find(item => item.domain.host === previousHost)?.health?.workerState || (previousHost ? 'unverified' : 'none'));
+            if (previousHost !== selected.host && oldDomain) {
+                selectionPhase = `drain-previous-worker:${previousHost}`;
+                const drained = await sendTfbotWorkerControl(oldDomain, result, 'drain', TFBOT_ROUTER_DRAIN_TIMEOUT_MS);
+                handoffCompleted = !!(drained && drained.state === 'standby' && drained.drained === true);
+                if (!handoffCompleted) {
+                    console.warn('[tfbot-worker-handoff-drain-unconfirmed]', { previousHost, newHost: selected.host, previousWorkerState, action: 'continue_only_with_mongodb_runtime_lock_exclusivity_on_new_worker' });
+                } else {
+                    console.info('[tfbot-worker-handoff-drained]', { previousHost, newHost: selected.host, previousGeneration: oldSelection?.generation || null, newGeneration: generation, activeSessionCount: Number(drained.activeSessionCount || 0), authStoreDrainConfirmed: true });
+                }
+            }
+            let activated = null;
+            const alreadyActiveForGeneration = selectedProbeResult.workerActive === true
+                && selectedProbeResult.workerState === 'active'
+                && selectedProbeResult.activeHost === selected.host
+                && selectedProbeResult.generation === generation
+                && selectedProbeResult.databasePing === true;
+            if (alreadyActiveForGeneration) {
+                activated = { ok: true, host: selected.host, state: 'active', generation, releaseId: selectedProbeResult.releaseId, databaseReady: true, databasePing: true, activeSessionCount: selectedProbeResult.activeSessionCount, restoreSummary: selectedProbeResult.restoreSummary || null };
+            } else {
+                selectionPhase = `activate-worker:${selected.host}`;
+                activated = await sendTfbotWorkerControl(selected, result, 'activate', TFBOT_ROUTER_ACTIVATE_TIMEOUT_MS);
+            }
+            const activationConfirmed = !!(activated
+                && activated.state === 'active'
+                && activated.databaseReady === true
+                && activated.databasePing === true
+                && String(activated.generation || '') === generation
+                && areTfbotReleasesCompatible(activated.releaseId, TFBOT_CODE_RELEASE_ID));
+            if (!activationConfirmed) {
+                tfbotCoordinatorCandidateFailures.set(selected.host, { expiresAt: Date.now() + TFBOT_ROUTER_CANDIDATE_FAILURE_COOLDOWN_MS, failureKind: 'activation_unconfirmed' });
+                console.error('[tfbot-router-activation-unconfirmed]', {
+                    previousHost: previousHost || null,
+                    newHost: selected.host,
+                    previousGeneration: oldSelection?.generation || null,
+                    newGeneration: generation,
+                    preparationPassed: true,
+                    handoffCompleted,
+                    candidateCooldownMs: TFBOT_ROUTER_CANDIDATE_FAILURE_COOLDOWN_MS,
+                    activationState: activated?.state || 'unconfirmed',
+                    activationError: activated?.error || null,
+                    action: 'rollback_previous_worker_when_drain_was_confirmed_and_do_not_commit_new_selection'
+                });
+                if (handoffCompleted && oldDomain && oldSelection?.generation) {
+                    tfbotCoordinatorSelectionCache = oldSelection;
+                    tfbotActiveDomainCache = oldSelection;
+                    tfbotCoordinatorSelectionAt = Date.now();
+                    tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
+                    const restoredOld = await sendTfbotWorkerControl(oldDomain, { ...oldSelection, releaseId: TFBOT_CODE_RELEASE_ID }, 'activate', TFBOT_ROUTER_ACTIVATE_TIMEOUT_MS);
+                    if (restoredOld?.state === 'active' && restoredOld.databasePing === true) {
+                        await persistTfbotCoordinatorSelection({ ...oldSelection, fallbackCursor: tfbotCoordinatorFallbackCursor, lastProbeHost: previousHost }, 'selected');
+                        console.warn('[tfbot-router-handoff-rolled-back]', { previousHost, failedNewHost: selected.host, previousGeneration: oldSelection.generation, rollbackConfirmed: true });
+                        return { ...oldSelection, workerActive: true, workerState: 'active', rollbackFrom: selected.host };
+                    }
+                    console.error('[tfbot-router-handoff-rollback-failed]', { previousHost, failedNewHost: selected.host, rollbackConfirmed: false, action: 'leave_selection_uncommitted_and_retry_infrastructure_probe' });
+                }
+                tfbotCoordinatorSelectionCache = oldSelection;
+                tfbotActiveDomainCache = oldSelection;
+                tfbotCoordinatorSelectionAt = Date.now();
+                tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
+                if (oldSelection) return oldSelection;
+                await persistTfbotCoordinatorSelection({ host: '', generation: crypto.randomUUID(), fallbackCursor, lastProbeHost: selected.host }, 'unavailable');
+                return null;
+            }
+            const finalHealth = await probeTfbotServingDomain(selected);
+            if (!finalHealth?.ok || finalHealth.workerActive !== true || finalHealth.workerState !== 'active' || finalHealth.activeHost !== selected.host || finalHealth.generation !== generation || finalHealth.databasePing !== true || !finalHealth.releaseCompatible) {
+                console.error('[tfbot-router-final-readiness-failed]', { previousHost: previousHost || null, newHost: selected.host, generation, workerState: finalHealth?.workerState || 'no-response', workerActive: finalHealth?.workerActive === true, databasePing: finalHealth?.databasePing === true, generationMatched: finalHealth?.generation === generation, releaseCompatible: finalHealth?.releaseCompatible === true });
+                tfbotCoordinatorSelectionCache = oldSelection;
+                tfbotActiveDomainCache = oldSelection;
+                tfbotCoordinatorSelectionAt = Date.now();
+                tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
+                if (handoffCompleted && oldDomain && oldSelection?.generation) {
+                    const restoredOld = await sendTfbotWorkerControl(oldDomain, { ...oldSelection, releaseId: TFBOT_CODE_RELEASE_ID }, 'activate', TFBOT_ROUTER_ACTIVATE_TIMEOUT_MS);
+                    if (restoredOld?.state === 'active' && restoredOld.databasePing === true) {
+                        await persistTfbotCoordinatorSelection({ ...oldSelection, fallbackCursor: tfbotCoordinatorFallbackCursor, lastProbeHost: previousHost }, 'selected');
+                        return { ...oldSelection, workerActive: true, workerState: 'active', rollbackFrom: selected.host };
+                    }
+                }
+                if (oldSelection) return oldSelection;
+                return null;
+            }
+            result.workerActive = true;
+            result.workerState = 'active';
+            result.databaseReady = true;
+            result.databasePing = true;
+            result.activeSessionCount = finalHealth.activeSessionCount;
+            result.restoreSummary = activated.restoreSummary || null;
+            result.handoffCompleted = handoffCompleted;
+            result.previousWorkerState = previousWorkerState;
+            result.checkedAt = finalHealth.checkedAt || checkedAt;
+            result.fallbackCursor = nextFallbackCursor;
+            result.lastProbeHost = selected.host;
+            tfbotCoordinatorFallbackCursor = nextFallbackCursor;
+            tfbotCoordinatorLastProbeHost = selected.host;
+            tfbotCoordinatorActiveProbeFailures.delete(selected.host);
+            tfbotCoordinatorCandidateFailures.delete(selected.host);
             tfbotCoordinatorSelectionCache = result;
             tfbotActiveDomainCache = result;
             tfbotCoordinatorSelectionAt = Date.now();
-            tfbotActiveDomainCacheAt = Date.now();
-            tfbotCoordinatorActiveProbeAt = tfbotCoordinatorSelectionAt;
-            selectionPhase = 'persist-selected';
-            result.fallbackCursor = nextFallbackCursor;
-            result.lastProbeHost = selected.host;
-            await persistTfbotCoordinatorSelection(result, 'selected');
-            const alreadyActive = sameSelection && selectedProbeResult.workerActive === true && selectedProbeResult.activeHost === selected.host && selectedProbeResult.generation === generation;
-            let control = { host: selected.host, unchanged: alreadyActive, state: selectedProbeResult.workerState || 'unknown' };
-            if (!alreadyActive) {
-                selectionPhase = `activate-worker:${selected.host}`;
-                const applied = await sendTfbotWorkerControl(selected, result);
-                control = { host: selected.host, applied: !!applied, state: applied?.state || 'unconfirmed' };
-                if (applied?.state) {
-                    result.workerState = String(applied.state);
-                    result.workerActive = applied.state === 'active';
-                }
-            }
+            tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
+            selectionPhase = 'persist-verified-selection';
+            const persisted = await persistTfbotCoordinatorSelection(result, 'selected');
+            if (!persisted) console.error('[tfbot-router-selection-persistence-unconfirmed]', { previousHost: previousHost || null, newHost: selected.host, generation, activeConfirmed: true, action: 'keep_verified_in_memory_selection_and_retry_persistence_on_next_cycle' });
             console.info('[tfbot-router-selection-updated]', {
-                activeHost: selected.host,
-                previousActiveHost: previousHost || null,
+                previousHost: previousHost || null,
+                newHost: selected.host,
+                failoverReason: previousHost && previousHost !== selected.host
+                    ? TFBOT_ROUTER_SERVING_DOMAINS.findIndex(item => item.host === selected.host) < previousIndex ? 'preferred_higher_priority_worker_recovered' : 'previous_worker_infrastructure_health_failed'
+                    : sameSelection ? 'same_worker_revalidated' : 'initial_worker_selection',
+                failureKind: previousHost && previousHost !== selected.host && TFBOT_ROUTER_SERVING_DOMAINS.findIndex(item => item.host === selected.host) > previousIndex ? 'repeated_infrastructure_probe_failure' : null,
+                previousGeneration: oldSelection?.generation || null,
+                newGeneration: generation,
+                previousWorkerState,
+                newWorkerState: finalHealth.workerState,
+                releaseCompatibility: finalHealth.releaseCompatible,
+                activeSessionCount: finalHealth.activeSessionCount,
+                restoreSuccessCount: Number(result.restoreSummary?.restoreSuccessCount || 0),
+                restoreFailureCount: Number(result.restoreSummary?.restoreFailureCount || 0),
+                handoffCompleted,
+                priorityFailbackEnabled: true,
+                checkedHostCount: checked.length,
+                databasePing: finalHealth.databasePing,
+                persisted,
                 checkedHosts: checked.map(item => item.domain.host),
-                coordinator: TFBOT_COORDINATOR_HOST,
-                generation,
-                pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS,
-                activeProbeIntervalMs: TFBOT_ROUTER_ACTIVE_PROBE_MS,
-                maxHostsPerCycle: activeWasForcedFailed ? TFBOT_ROUTER_SERVING_DOMAINS.length - 1 : 2,
-                activeFailureThreshold: TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD,
-                fallbackContacted: checked.length > 1,
-                fallbackOnlyAfterActiveHostFailure: true,
-                selectionMode: activeWasForcedFailed ? 'send-error-circular-failover-through-priority-hosts' : previousIndex >= 0 ? 'probe-current-active-host-first-then-one-fallback-only-if-active-fails' : 'probe-one-persisted-fallback-candidate-per-cycle-until-healthy',
                 nextFallbackHost: TFBOT_ROUTER_SERVING_DOMAINS[nextFallbackCursor].host,
-                controls: [control]
+                coordinator: TFBOT_COORDINATOR_HOST
             });
             selectionPhase = 'complete';
             return result;
@@ -6457,27 +6617,41 @@ app.get(TFBOT_CLUSTER_HEALTH_PATH, (req, res) => {
     });
 });
 
-app.get(TFBOT_ROUTER_OK_PATH, (req, res) => {
+app.get(TFBOT_ROUTER_OK_PATH, async (req, res) => {
     if (!isValidClusterToken(req)) return res.status(404).type('text/plain').send('Not found');
     const expectedHost = normalizeTfbotHost(req.get('X-TFBOT-Expected-Host') || '');
     const requestHost = normalizeTfbotHost(req.get('host') || req.hostname || '');
     const knownHost = TFBOT_ROUTER_DOMAIN_BY_HOST.get(TFBOT_CLUSTER_INSTANCE_HOST);
-    const ready = !serverShuttingDown && !TFBOT_CLUSTER_COORDINATOR_ONLY && !!knownHost && expectedHost === TFBOT_CLUSTER_INSTANCE_HOST && requestHost === expectedHost && tfbotWorkerState !== 'error' && tfbotWorkerState !== 'stopping';
+    let databasePing = false;
+    if (db && mongoClient) {
+        try {
+            const ping = await mongoClient.db(TFBOT_DATABASE_NAME).command({ ping: 1 });
+            databasePing = Number(ping?.ok) === 1;
+        } catch (error) {
+            databasePing = false;
+        }
+    }
+    const workerState = String(tfbotWorkerState || 'standby').toLowerCase();
+    const workerActive = tfbotWorkerActive && !!db && !tfbotWorkerStopping && workerState === 'active';
+    const ready = !serverShuttingDown && !TFBOT_CLUSTER_COORDINATOR_ONLY && !!knownHost && expectedHost === TFBOT_CLUSTER_INSTANCE_HOST && requestHost === expectedHost && !['error', 'drain_failed', 'stopping', 'restoring'].includes(workerState) && (!workerActive || databasePing);
     if (ready && tfbotWorkerSelectedHost === TFBOT_CLUSTER_INSTANCE_HOST && !tfbotWorkerStopping) renewTfbotWorkerLease();
     return res.status(ready ? 200 : 503).json({
         ok: ready,
         service: 'tfbot-router-node',
         database: TFBOT_DATABASE_NAME,
+        databaseConnected: !!db && !!mongoClient,
+        databasePing,
         host: TFBOT_CLUSTER_INSTANCE_HOST,
         releaseId: TFBOT_CODE_RELEASE_ID,
         instanceId: TFBOT_CLUSTER_INSTANCE_ID,
-        workerActive: tfbotWorkerActive && !!db && !tfbotWorkerStopping,
-        workerState: tfbotWorkerState,
+        workerActive,
+        workerState,
         leaseUntil: tfbotWorkerLeaseUntil ? new Date(tfbotWorkerLeaseUntil).toISOString() : null,
         activeHost: tfbotWorkerSelectedHost || '',
         generation: tfbotWorkerSelectionGeneration,
         activeSessionCount: activeSessions.size,
         inFlightCount: clusterInFlightRequests,
+        restoreSummary: tfbotWorkerLastRestoreSummary,
         at: new Date().toISOString()
     });
 });
@@ -6546,18 +6720,15 @@ app.post(TFBOT_WORKER_FAILURE_PATH, async (req, res) => {
     if (!reportedHost || reportedHost !== selectedHost || !reportedGeneration || reportedGeneration !== String(selected?.generation || '')) {
         return res.status(409).json({ ok: false, error: 'worker_failure_report_not_for_current_selection' });
     }
-    tfbotCoordinatorForcedSendFailures.set(reportedHost, { expiresAt: Date.now() + 300000, failureKind: String(req.body?.failureKind || 'send_failure').slice(0, 48) });
-    try {
-        let next = await refreshTfbotActiveDomain(true);
-        if (!next || next.host === reportedHost) {
-            await new Promise(resolve => setTimeout(resolve, 250));
-            next = await refreshTfbotActiveDomain(true);
-        }
-        if (!next || next.host === reportedHost) return res.status(503).json({ ok: false, error: 'no_fallback_worker_ready' });
-        return res.status(200).json({ ok: true, failedHost: reportedHost, activeHost: next.host, generation: next.generation });
-    } catch (error) {
-        return res.status(503).json({ ok: false, error: 'worker_failover_failed' });
-    }
+    console.warn('[tfbot-worker-session-send-failure-ignored-for-routing]', {
+        host: reportedHost,
+        generation: reportedGeneration,
+        sessionIdHash: String(req.body?.sessionIdHash || '').slice(0, 24),
+        failureKind: String(req.body?.failureKind || 'session_send_failure').slice(0, 48),
+        infrastructureFailover: false,
+        action: 'session_failures_do_not_change_cluster_selection'
+    });
+    return res.status(202).json({ ok: true, host: reportedHost, generation: reportedGeneration, failover: false, reason: 'session_scoped_failure' });
 });
 
 app.get(TFBOT_WORKER_CONTROL_PATH, async (req, res) => {
@@ -6566,42 +6737,62 @@ app.get(TFBOT_WORKER_CONTROL_PATH, async (req, res) => {
     const requestHost = normalizeTfbotHost(req.get('host') || req.hostname || '');
     const selectedHost = normalizeTfbotHost(req.get('X-TFBOT-Selected-Host') || '');
     const generation = String(req.get('X-TFBOT-Selection-Generation') || '').slice(0, 180);
+    const selectionRelease = normalizeTfbotReleaseId(req.get('X-TFBOT-Selection-Release') || '');
+    const phase = String(req.get('X-TFBOT-Control-Phase') || 'activate').trim().toLowerCase();
     if (expectedHost !== TFBOT_CLUSTER_INSTANCE_HOST || requestHost !== expectedHost) return res.status(404).type('text/plain').send('Not found');
+    if (!['prepare', 'drain', 'activate'].includes(phase) || !generation || !selectionRelease || !areTfbotReleasesCompatible(selectionRelease, TFBOT_CODE_RELEASE_ID)) {
+        return res.status(409).json({ ok: false, host: TFBOT_CLUSTER_INSTANCE_HOST, state: tfbotWorkerState, generation, error: 'invalid_control_phase_or_release_mismatch' });
+    }
     if (selectedHost && !TFBOT_ROUTER_DOMAIN_BY_HOST.has(selectedHost)) return res.status(400).json({ ok: false, error: 'invalid_selected_host' });
+    if (phase === 'prepare') {
+        if (selectedHost !== TFBOT_CLUSTER_INSTANCE_HOST) return res.status(409).json({ ok: false, host: TFBOT_CLUSTER_INSTANCE_HOST, state: tfbotWorkerState, generation, error: 'prepare_target_mismatch' });
+        const preflight = await verifyTfbotWorkerMongoPreflight();
+        if (!preflight.ok) {
+            console.error('[tfbot-worker-preparation-failed]', { host: TFBOT_CLUSTER_INSTANCE_HOST, generation, releaseId: TFBOT_CODE_RELEASE_ID, reason: preflight.reason, physicalCollections: preflight.physicalCollections || null });
+            return res.status(503).json({ ok: false, host: TFBOT_CLUSTER_INSTANCE_HOST, state: tfbotWorkerState, generation, error: 'worker_preparation_failed', reason: preflight.reason });
+        }
+        console.info('[tfbot-worker-prepared]', { host: TFBOT_CLUSTER_INSTANCE_HOST, generation, releaseId: TFBOT_CODE_RELEASE_ID, databasePing: true, physicalCollections: preflight.physicalCollections, whatsappSocketsOpened: false });
+        return res.status(200).json({ ok: true, host: TFBOT_CLUSTER_INSTANCE_HOST, state: 'prepared', generation, releaseId: TFBOT_CODE_RELEASE_ID, databaseReady: true, databasePing: true, whatsappSocketsOpened: false });
+    }
     const selectedDomain = selectedHost ? TFBOT_ROUTER_DOMAIN_BY_HOST.get(selectedHost) : null;
-    tfbotActiveDomainCache = selectedDomain ? { ...selectedDomain, checkedAt: new Date(), generation, healthy: true, source: 'tfbot7-control-get' } : null;
+    tfbotActiveDomainCache = selectedDomain ? { ...selectedDomain, checkedAt: new Date(), generation, healthy: true, source: `tfbot7-control-${phase}` } : null;
     tfbotActiveDomainCacheAt = Date.now();
     tfbotWorkerSelectedHost = selectedHost;
     tfbotWorkerSelectionGeneration = generation;
+    tfbotWorkerControlOverrideGeneration = generation;
+    tfbotWorkerControlOverrideUntil = Date.now() + 120000;
     const shouldBeActive = selectedHost === TFBOT_CLUSTER_INSTANCE_HOST;
+    if (phase === 'drain' && shouldBeActive) return res.status(409).json({ ok: false, host: TFBOT_CLUSTER_INSTANCE_HOST, state: tfbotWorkerState, generation, error: 'drain_target_must_be_another_worker' });
     if (shouldBeActive) {
         renewTfbotWorkerLease();
-        if (tfbotWorkerActive && db && !tfbotWorkerStopping) {
-            tfbotWorkerState = 'active';
-            return res.status(200).json({ ok: true, host: TFBOT_CLUSTER_INSTANCE_HOST, state: 'active', generation });
+        try {
+            const activated = await activateTfbotWorker();
+            if (!activated || !tfbotWorkerActive || tfbotWorkerStopping || tfbotWorkerState !== 'active' || tfbotWorkerSelectedHost !== TFBOT_CLUSTER_INSTANCE_HOST || tfbotWorkerSelectionGeneration !== generation || !db || !mongoClient) {
+                return res.status(503).json({ ok: false, host: TFBOT_CLUSTER_INSTANCE_HOST, state: tfbotWorkerState, generation, error: 'worker_activation_not_confirmed' });
+            }
+            const ping = await mongoClient.db(TFBOT_DATABASE_NAME).command({ ping: 1 });
+            if (Number(ping?.ok) !== 1) return res.status(503).json({ ok: false, host: TFBOT_CLUSTER_INSTANCE_HOST, state: tfbotWorkerState, generation, error: 'worker_database_ping_failed' });
+            return res.status(200).json({ ok: true, host: TFBOT_CLUSTER_INSTANCE_HOST, state: 'active', generation, releaseId: TFBOT_CODE_RELEASE_ID, databaseReady: true, databasePing: true, activeSessionCount: activeSessions.size, restoreSummary: tfbotWorkerLastRestoreSummary });
+        } catch (error) {
+            console.error('[tfbot-worker-control-activation-failed]', { host: TFBOT_CLUSTER_INSTANCE_HOST, generation, phase, error: error?.message || String(error) });
+            return res.status(503).json({ ok: false, host: TFBOT_CLUSTER_INSTANCE_HOST, state: tfbotWorkerState, generation, error: String(error?.message || error).slice(0, 220) });
         }
-        if (!tfbotWorkerActivationPromise) {
-            tfbotWorkerStarting = true;
-            tfbotWorkerState = 'starting';
-            void activateTfbotWorker().catch(error => console.error('[tfbot-worker-activation-failed]', { host: TFBOT_CLUSTER_INSTANCE_HOST, error: error?.message || String(error) }));
-        }
-        return res.status(202).json({ ok: true, host: TFBOT_CLUSTER_INSTANCE_HOST, state: 'starting', generation });
     }
     if (tfbotWorkerLeaseTimer) clearTimeout(tfbotWorkerLeaseTimer);
     tfbotWorkerLeaseTimer = null;
     tfbotWorkerLeaseUntil = 0;
     if (tfbotWorkerActive || db || mongoClient || tfbotWorkerActivationPromise || tfbotWorkerDeactivationPromise) {
         try {
-            await deactivateTfbotWorker('not_selected');
+            await deactivateTfbotWorker(phase === 'drain' ? `handoff_to_${selectedHost || 'none'}` : 'not_selected');
         } catch (error) {
             console.error('[tfbot-worker-deactivation-failed]', { host: TFBOT_CLUSTER_INSTANCE_HOST, error: error?.message || String(error) });
-            return res.status(503).json({ ok: false, host: TFBOT_CLUSTER_INSTANCE_HOST, state: 'drain_failed', generation });
+            return res.status(503).json({ ok: false, host: TFBOT_CLUSTER_INSTANCE_HOST, state: 'drain_failed', generation, error: String(error?.message || error).slice(0, 180) });
         }
-        return res.status(200).json({ ok: true, host: TFBOT_CLUSTER_INSTANCE_HOST, state: 'standby', generation, drained: true });
+        return res.status(200).json({ ok: true, host: TFBOT_CLUSTER_INSTANCE_HOST, state: 'standby', generation, drained: true, activeSessionCount: activeSessions.size });
     }
     tfbotWorkerState = 'standby';
     tfbotWorkerStarting = false;
-    return res.status(200).json({ ok: true, host: TFBOT_CLUSTER_INSTANCE_HOST, state: 'standby', generation });
+    return res.status(200).json({ ok: true, host: TFBOT_CLUSTER_INSTANCE_HOST, state: 'standby', generation, drained: true, activeSessionCount: activeSessions.size });
 });
 
 async function startClusterHeartbeat() {
@@ -6620,33 +6811,36 @@ async function startClusterHeartbeat() {
 async function activateTfbotWorker() {
     if (!TFBOT_CLUSTER_ENABLED || TFBOT_CLUSTER_COORDINATOR_ONLY || serverShuttingDown) return false;
     if (tfbotWorkerDeactivationPromise) await tfbotWorkerDeactivationPromise.catch(() => {});
-    if (tfbotWorkerActive && db && !tfbotWorkerStopping) return true;
     if (tfbotWorkerActivationPromise) return tfbotWorkerActivationPromise;
+    if (tfbotWorkerActive && db && !tfbotWorkerStopping && tfbotWorkerState === 'active') return true;
     tfbotWorkerActivationPromise = (async () => {
         tfbotWorkerStarting = true;
         tfbotWorkerStopping = false;
         tfbotWorkerState = 'starting';
         try {
-            await connectMongo({ skipStorageInitialization: true });
+            if (!db || !mongoClient) await connectMongo({ skipStorageInitialization: true });
+            else {
+                const ping = await mongoClient.db(TFBOT_DATABASE_NAME).command({ ping: 1 });
+                if (Number(ping?.ok) !== 1) throw new Error('tfbot_worker_mongo_ping_failed');
+            }
             if (tfbotWorkerStopping || tfbotWorkerSelectedHost !== TFBOT_CLUSTER_INSTANCE_HOST) {
-                const unusedClient = mongoClient;
-                mongoClient = null;
-                db = null;
-                if (unusedClient) await unusedClient.close().catch(() => {});
                 tfbotWorkerState = 'standby';
                 return false;
             }
             tfbotWorkerActive = true;
+            tfbotWorkerStarting = true;
+            tfbotWorkerState = 'restoring';
+            void inspectAdamLogo().catch(error => console.warn('[logo-bandwidth-background-optimization-failed]', error?.message || String(error)));
+            tfbotWorkerLastRestoreSummary = await loadExistingSessions();
+            if (tfbotWorkerStopping || tfbotWorkerSelectedHost !== TFBOT_CLUSTER_INSTANCE_HOST) {
+                tfbotWorkerActive = false;
+                tfbotWorkerState = 'stopping';
+                return false;
+            }
             tfbotWorkerStarting = false;
             tfbotWorkerState = 'active';
-            void inspectAdamLogo().catch(error => console.warn('[logo-bandwidth-background-optimization-failed]', error?.message || String(error)));
             await startClusterHeartbeat();
-            try {
-                await loadExistingSessions();
-            } catch (restoreError) {
-                console.error('[session-restore]', restoreError?.message || restoreError);
-            }
-            console.info('[tfbot-worker-activated]', { host: TFBOT_CLUSTER_INSTANCE_HOST, activeSessionCount: activeSessions.size, generation: tfbotWorkerSelectionGeneration });
+            console.info('[tfbot-worker-activated]', { host: TFBOT_CLUSTER_INSTANCE_HOST, activeSessionCount: activeSessions.size, generation: tfbotWorkerSelectionGeneration, releaseId: TFBOT_CODE_RELEASE_ID, restoreSummary: tfbotWorkerLastRestoreSummary, databasePing: true });
             return true;
         } catch (error) {
             tfbotWorkerActive = false;
@@ -6697,7 +6891,8 @@ async function deactivateTfbotWorker(reason = 'not_selected') {
         const drainFailures = [];
         for (const [sessionId, session] of sessionsToDrain) {
             try {
-                await cleanupSocket(sessionId);
+                const authFlushed = await cleanupSocket(sessionId);
+                if (authFlushed !== true) throw new Error('session_auth_flush_unconfirmed');
                 if (session) {
                     session.status = 'deconnecte';
                     session.disconnectTime = Date.now();
@@ -6799,24 +6994,25 @@ async function pollTfbotCoordinatorSelection() {
             const workerReleaseId = normalizeTfbotReleaseId(TFBOT_CODE_RELEASE_ID);
             const coordinatorCompatibilityKey = getTfbotReleaseCompatibilityKey(coordinatorReleaseId);
             const workerCompatibilityKey = getTfbotReleaseCompatibilityKey(workerReleaseId);
-            if (coordinatorReleaseId && workerReleaseId && coordinatorCompatibilityKey !== workerCompatibilityKey) {
-                console.warn('[tfbot-worker-coordinator-release-mismatch]', { host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorCodeRelease: coordinatorCompatibilityKey, workerCodeRelease: workerCompatibilityKey, coordinatorReleaseHash: shortLogHash(coordinatorCompatibilityKey), workerReleaseHash: shortLogHash(workerCompatibilityKey), action: 'honor_explicit_active_host_and_generation_without_forcing_shutdown' });
+            if (!coordinatorReleaseId || !workerReleaseId || coordinatorCompatibilityKey !== workerCompatibilityKey) {
+                console.error('[tfbot-worker-coordinator-release-mismatch]', { host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorCodeRelease: coordinatorCompatibilityKey || null, workerCodeRelease: workerCompatibilityKey || null, coordinatorReleaseHash: shortLogHash(coordinatorCompatibilityKey), workerReleaseHash: shortLogHash(workerCompatibilityKey), action: 'reject_selection_until_worker_and_coordinator_releases_are_compatible' });
+                return false;
             }
             const selectedHost = normalizeTfbotHost(payload.activeHost || payload.host || '');
             const selectedDomain = TFBOT_ROUTER_DOMAIN_BY_HOST.get(selectedHost);
             const generation = String(payload.generation || '').slice(0, 180);
             if (!selectedDomain || !generation) return false;
+            if (tfbotWorkerControlOverrideUntil > Date.now() && generation !== tfbotWorkerControlOverrideGeneration) {
+                console.warn('[tfbot-worker-stale-poll-ignored]', { host: TFBOT_CLUSTER_INSTANCE_HOST, polledGeneration: generation, controlGeneration: tfbotWorkerControlOverrideGeneration, overrideUntil: new Date(tfbotWorkerControlOverrideUntil).toISOString() });
+                return true;
+            }
+            if (generation === tfbotWorkerControlOverrideGeneration) tfbotWorkerControlOverrideUntil = 0;
             tfbotActiveDomainCache = { ...selectedDomain, checkedAt: new Date(), generation, healthy: true, source: 'tfbot7-worker-poll' };
             tfbotActiveDomainCacheAt = Date.now();
             tfbotWorkerSelectedHost = selectedHost;
             tfbotWorkerSelectionGeneration = generation;
             if (selectedHost === TFBOT_CLUSTER_INSTANCE_HOST) {
-                renewTfbotWorkerLease();
-                if (!tfbotWorkerActive && !tfbotWorkerActivationPromise && tfbotWorkerState !== 'starting') {
-                    tfbotWorkerStarting = true;
-                    tfbotWorkerState = 'starting';
-                    void activateTfbotWorker().catch(error => console.error('[tfbot-worker-activation-failed]', { host: TFBOT_CLUSTER_INSTANCE_HOST, error: error?.message || String(error) }));
-                }
+                if (tfbotWorkerActive && !tfbotWorkerStopping) renewTfbotWorkerLease();
                 return true;
             }
             if (tfbotWorkerActive || db || mongoClient || tfbotWorkerActivationPromise) {
@@ -7955,6 +8151,17 @@ app.get('/list', async (req, res) => {
           }
       }
       const ownerIds = new Set();
+      const credentialDocsBySession = new Map();
+      if (db?.collection) {
+          const authDocs = await db.collection('baileys_auth').find({ _id: { $regex: /^auth-.*-creds$/ } }, { projection: { 'creds.registered': 1, 'creds.me.id': 1, 'creds.me.lid': 1 } }).limit(5000).toArray().catch(error => {
+              console.error('[sessions-list-credential-read-failed]', error?.message || String(error));
+              return [];
+          });
+          for (const authDoc of authDocs) {
+              const match = String(authDoc?._id || '').match(/^auth-(.*)-creds$/);
+              if (match && !match[1].startsWith('temp_')) credentialDocsBySession.set(match[1], authDoc);
+          }
+      }
       for (const ownerDoc of ownerDocs) {
         const sessionId = String(ownerDoc.sessionId || '');
         if (!sessionId) continue;
@@ -7966,6 +8173,10 @@ app.get('/list', async (req, res) => {
         const ownerLease = new Date(ownerDoc.ownerLeaseUntil || 0).getTime();
         const remoteOwner = !!(ownerDoc.ownerInstanceId && ownerDoc.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID);
         const remoteOwnerLive = remoteOwner && ownerLease > now && ownerDoc.socketAuthenticated === true && ownerDoc.socketReady === true;
+        const storedCredentials = credentialDocsBySession.get(sessionId)?.creds || null;
+        const credentialsPresent = !!credentialDocsBySession.has(sessionId);
+        const credentialsValid = !!(storedCredentials?.me?.id || storedCredentials?.me?.lid || localSession?.authState?.creds?.me?.id || localSession?.authState?.creds?.me?.lid);
+        const duplicateSession = String(ownerDoc.connectionStatus || '').toLowerCase() === 'duplicate_account' || !!ownerDoc.duplicateAccountOf || !!ownerDoc.duplicateOfSessionId;
         let status = localSession?.status || ownerDoc.connectionStatus || 'deconnecte';
         if (localSession) {
             const localAuthenticated = isAuthenticatedSocketOperational(localSession, localSession.sock);
@@ -7992,9 +8203,18 @@ app.get('/list', async (req, res) => {
             status = remoteOwnerLive ? 'connecte' : ownerLease > now ? 'synchronisation' : 'reconnexion';
         }
         if (remoteOwner && ownerLease <= now && ['connected', 'connecte'].includes(String(status).toLowerCase())) status = 'reconnexion';
+        const category = duplicateSession ? 'doublon' : localSession && isAuthenticatedSocketOperational(localSession, localSession.sock) || remoteOwnerLive ? 'active' : !credentialsPresent && !localSession ? 'orpheline' : credentialsValid ? 'reconnexion' : 'authentification_incomplete';
         sessionsList.push({
           ID: sessionId,
           Sessions: status,
+          Categorie: category,
+          Credentials: credentialsValid ? 'recuperables' : credentialsPresent ? 'incomplets' : 'absents',
+          Owner: ownerDoc.ownerInstanceUrl || ownerDoc.ownerInstanceId || null,
+          OwnerLeaseUntil: ownerDoc.ownerLeaseUntil || null,
+          SocketAuthenticated: localSession ? isAuthenticatedSocketOperational(localSession, localSession.sock) : ownerDoc.socketAuthenticated === true,
+          SocketReady: localSession ? isWhatsAppSocketReady(localSession, localSession.sock) : ownerDoc.socketReady === true,
+          RestoreError: ownerDoc.lastRestoreError || null,
+          NextRetryAt: ownerDoc.nextRestoreRetryAt || null,
           Numero: localSession?.number || ownerDoc.Number || ownerDoc.number || 'N/A',
           Name: ownerDoc.Name || "Adam D'H7",
           Format: normalizeConnectionFormat(localSession?.format || ownerDoc.format || ownerDoc.Format || 'pair'),
@@ -8006,14 +8226,48 @@ app.get('/list', async (req, res) => {
           Alive: aliveStr
         });
       }
+      for (const [sessionId, authDoc] of credentialDocsBySession.entries()) {
+        if (ownerIds.has(sessionId)) continue;
+        const localSession = activeSessions.get(sessionId);
+        const storedCredentials = authDoc?.creds || null;
+        const credentialsValid = !!(storedCredentials?.me?.id || storedCredentials?.me?.lid);
+        const socketAuthenticated = !!(localSession && isAuthenticatedSocketOperational(localSession, localSession.sock));
+        const socketReady = isWhatsAppSocketReady(localSession, localSession?.sock);
+        const localStatus = String(localSession?.status || '').toLowerCase();
+        const status = socketAuthenticated ? 'connecte' : reconnectTimers.has(sessionId) || ['connecte', 'connected'].includes(localStatus) ? 'reconnexion' : localSession?.status || (credentialsValid ? 'reconnexion' : 'authentification_incomplete');
+        sessionsList.push({
+            ID: sessionId,
+            Sessions: status,
+            Categorie: socketAuthenticated ? 'active' : credentialsValid ? localSession ? 'reconnexion' : 'orpheline' : 'authentification_incomplete',
+            Credentials: credentialsValid ? 'recuperables' : 'incomplets',
+            Owner: localSession ? TFBOT_CLUSTER_INSTANCE_HOST : null,
+            OwnerLeaseUntil: localSession && tfbotWorkerLeaseUntil ? new Date(tfbotWorkerLeaseUntil).toISOString() : null,
+            SocketAuthenticated: socketAuthenticated,
+            SocketReady: socketReady,
+            RestoreError: localSession?.lastRestoreError || null,
+            NextRetryAt: null,
+            OrphanedOwnerRecord: true,
+            Numero: localSession?.number || getAuthenticatedPhoneNumber(null, storedCredentials) || 'N/A',
+            Name: "Adam D'H7",
+            Format: normalizeConnectionFormat(localSession?.format || 'pair'),
+            Mode: 'prive',
+            WhatsAppEvent: localSession?.lastWhatsAppEvent || null,
+            WhatsAppStateAt: localSession?.lastWhatsAppEventAt || null,
+            DisconnectCode: localSession?.lastDisconnectCode || null,
+            DisconnectReason: localSession?.lastDisconnectReason || null,
+            Alive: localSession?.connectedAt ? getUptimeString(now - localSession.connectedAt) : localSession?.createdAt ? getUptimeString(now - localSession.createdAt) : '0s'
+        });
+      }
       for (const localSession of activeSessions.values()) {
         if (ownerIds.has(localSession.id)) continue;
+        if (credentialDocsBySession.has(localSession.id)) continue;
         const isAuthenticated = isAuthenticatedSocketOperational(localSession, localSession.sock);
         if (isAuthenticated && !['connecte', 'connected'].includes(String(localSession.status || '').toLowerCase())) {
             await restoreAuthenticatedSessionRuntimeStatus(localSession.id, localSession, localSession.sock, 'sessions_list_verified_open_socket');
         }
         const localDisplayStatus = isAuthenticated ? 'connecte' : reconnectTimers.has(localSession.id) ? 'reconnexion' : localSession.qrString && localSession.pairingAttemptPending === true && localSession.openEventSeen !== true ? 'qr_disponible' : String(localSession.status || (localSession.sock ? 'synchronisation' : 'deconnecte'));
-        sessionsList.push({ ID: localSession.id, Sessions: localDisplayStatus, Numero: localSession.number || 'N/A', Name: "Adam D'H7", Format: normalizeConnectionFormat(localSession.format || 'pair'), Mode: 'prive', WhatsAppEvent: localSession.lastWhatsAppEvent || null, WhatsAppStateAt: localSession.lastWhatsAppEventAt || null, DisconnectCode: localSession.lastDisconnectCode || null, DisconnectReason: localSession.lastDisconnectReason || null, Alive: localSession.connectedAt ? getUptimeString(now - localSession.connectedAt) : localSession.createdAt ? getUptimeString(now - localSession.createdAt) : '0s' });
+        const localCredentialsValid = !!(localSession.authState?.creds?.me?.id || localSession.authState?.creds?.me?.lid);
+        sessionsList.push({ ID: localSession.id, Sessions: localDisplayStatus, Categorie: isAuthenticated ? 'active' : localCredentialsValid ? 'reconnexion' : 'authentification_incomplete', Credentials: localCredentialsValid ? 'recuperables' : 'incomplets', Owner: TFBOT_CLUSTER_INSTANCE_HOST, OwnerLeaseUntil: tfbotWorkerLeaseUntil ? new Date(tfbotWorkerLeaseUntil).toISOString() : null, SocketAuthenticated: isAuthenticated, SocketReady: isWhatsAppSocketReady(localSession, localSession.sock), RestoreError: localSession.lastRestoreError || null, NextRetryAt: reconnectTimers.has(localSession.id) ? null : null, Numero: localSession.number || 'N/A', Name: "Adam D'H7", Format: normalizeConnectionFormat(localSession.format || 'pair'), Mode: 'prive', WhatsAppEvent: localSession.lastWhatsAppEvent || null, WhatsAppStateAt: localSession.lastWhatsAppEventAt || null, DisconnectCode: localSession.lastDisconnectCode || null, DisconnectReason: localSession.lastDisconnectReason || null, Alive: localSession.connectedAt ? getUptimeString(now - localSession.connectedAt) : localSession.createdAt ? getUptimeString(now - localSession.createdAt) : '0s' });
       }
       const html = `<!DOCTYPE html>
 <html lang="fr">
@@ -13374,8 +13628,8 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
         const isDeadReauthRecord = isReauthExpired && isUnregisteredOrphan && noLiveSocketCanOwnSession;
         const isDeadDuplicateRecord = status === 'duplicate_account' && isUnregisteredOrphan && noLiveSocketCanOwnSession;
         const isDeadDisconnectedOrphan = isExplicitlyDisconnected && isUnregisteredOrphan && noLiveSocketCanOwnSession;
-        if (!isDeadReauthRecord && !isDeadDuplicateRecord && !isDeadDisconnectedOrphan && (!sessionTimestamp || sessionAgeMs < sessionExpiryMs)) continue;
         const isPendingPairingExpired = isPendingPairingCandidate && sessionAgeMs >= PAIRING_SESSION_TTL_MS;
+        if (!isDeadReauthRecord && !isDeadDuplicateRecord && !isDeadDisconnectedOrphan && !isPendingPairingExpired && (!sessionTimestamp || sessionAgeMs < sessionExpiryMs)) continue;
         try {
             const hasRecoverableAccountCredentials = credentialsRegistered || credentialsHaveIdentity || !!runtimeIdentity || ownerHasAccountIdentity;
             if (hasRecoverableAccountCredentials && !isDeadReauthRecord) {
@@ -13399,7 +13653,7 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
             }
             const isPendingPairingStatus = ['pairing_expired', 'pairing_error', 'qr_disponible', 'synchronisation', 'initialisation', 'pairing_starting', 'pairing'].includes(status);
             const shouldRemoveExpiredPairing = isPendingPairingExpired || (isPendingPairingStatus && sessionAgeMs >= PAIRING_SESSION_TTL_MS);
-            const removeExpiredUnconnectedSession = isDeadReauthRecord || isDeadDuplicateRecord || isDeadDisconnectedOrphan || sessionAgeMs >= SESSION_UNCONNECTED_TTL_MS && !hasRecoverableAccountCredentials;
+            const removeExpiredUnconnectedSession = isDeadReauthRecord || isDeadDuplicateRecord || isDeadDisconnectedOrphan || shouldRemoveExpiredPairing && !hasRecoverableAccountCredentials || sessionAgeMs >= SESSION_UNCONNECTED_TTL_MS && !hasRecoverableAccountCredentials;
             if (!removeExpiredUnconnectedSession) continue;
             const pendingReconnect = reconnectTimers.get(staleSessionId);
             if (pendingReconnect) {
@@ -13418,37 +13672,49 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
 }
 
 async function loadExistingSessions() {
-    if (!db) return;
+    if (!db) return { restoreStartedCount: 0, restoreSuccessCount: 0, restorePendingCount: 0, restoreFailureCount: 0, restoreSkippedCount: 0, activeSessionCount: activeSessions.size };
     const collection = db.collection('baileys_auth');
     await cleanupExpiredUnconnectedSessions();
     const credsDocs = await collection.find({ _id: { $regex: /^auth-.*-creds$/ } }).toArray();
     const candidates = [];
+    let restoreSkippedCount = 0;
     for (const doc of credsDocs) {
-        const match = doc._id.match(/^auth-(.*)-creds$/);
+        const match = String(doc?._id || '').match(/^auth-(.*)-creds$/);
         if (!match || match[1].startsWith('temp_')) continue;
         const sessionId = match[1];
         const credentials = fixBuffers(doc.creds);
-        if (!credentials || !credentials.me || !credentials.me.id) {
-            console.error('[session-restore-invalid-creds-preserved]', { sessionId, action: 'stored auth data was not deleted' });
+        const hasIdentityCredential = !!(credentials?.me?.id || credentials?.me?.lid);
+        if (!credentials || !hasIdentityCredential) {
+            restoreSkippedCount++;
+            console.error('[session-restore-invalid-creds-preserved]', { sessionId, credentialsPresent: !!credentials, registered: credentials?.registered === true, idPresent: !!credentials?.me?.id, lidPresent: !!credentials?.me?.lid, action: 'preserve_auth_data_and_skip_only_until_a_valid_whatsapp_id_or_lid_exists' });
             continue;
         }
         const number = getAuthenticatedPhoneNumber(null, credentials);
         const lid = getAuthenticatedLid(null, credentials);
-        candidates.push({ sessionId, number, lid, credentials, timestampFromId: Number(sessionId.match(/^session_(\d+)/)?.[1] || 0) });
+        candidates.push({ sessionId, number, lid, credentials, credentialsValid: true, timestampFromId: Number(sessionId.match(/^session_(\d+)/)?.[1] || 0) });
     }
     const ownerDocs = candidates.length
         ? await db.collection('session_owners').find({ sessionId: { $in: candidates.map(item => item.sessionId) } }).toArray()
         : [];
     const owners = new Map(ownerDocs.map(owner => [owner.sessionId, owner]));
     const now = Date.now();
-    const identityCandidates = candidates.filter(candidate => candidate.number || candidate.lid);
+    const identityCandidates = candidates.filter(candidate => candidate.credentialsValid && (candidate.number || candidate.lid));
+    const deferredLivePeerCandidates = [];
     const restorableCandidates = identityCandidates.filter(candidate => {
         const owner = owners.get(candidate.sessionId) || {};
         const ownerLeaseUntil = new Date(owner.ownerLeaseUntil || 0).getTime();
         const isOwnedByLivePeer = TFBOT_CLUSTER_ENABLED && owner.ownerInstanceId && owner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && ownerLeaseUntil > now && !isPreviousDeploymentOwnerOnCurrentHost(owner) && owner.connectionStatus !== 'duplicate_account' && !owner.duplicateAccountOf && owner.reauthRequired !== true;
         const status = String(owner.connectionStatus || '').toLowerCase();
-        return !isOwnedByLivePeer && !owner.reauthRequired && !owner.duplicateAccountOf && status !== 'duplicate_account' && status !== 'reauth_required' && status !== 'pairing_expired';
+        if (isOwnedByLivePeer) {
+            deferredLivePeerCandidates.push({ candidate, owner });
+            return false;
+        }
+        return !owner.reauthRequired && !owner.duplicateAccountOf && status !== 'duplicate_account' && status !== 'reauth_required' && status !== 'pairing_expired';
     });
+    for (const deferred of deferredLivePeerCandidates) {
+        const retryDelay = scheduleSessionLockRetry(deferred.candidate.sessionId, false, normalizeConnectionFormat(deferred.owner.format || deferred.owner.Format || 'pair'));
+        console.info('[session-restore-deferred-live-owner]', { sessionId: deferred.candidate.sessionId, previousOwner: deferred.owner.ownerInstanceUrl || deferred.owner.ownerInstanceId || null, currentOwner: TFBOT_CLUSTER_INSTANCE_HOST, ownerLeaseUntil: deferred.owner.ownerLeaseUntil || null, retryInMs: retryDelay || null, action: 'retry_after_previous_worker_releases_runtime_and_account_locks' });
+    }
     const parent = identityCandidates.map((_, index) => index);
     const findRoot = index => {
         let root = index;
@@ -13503,7 +13769,7 @@ async function loadExistingSessions() {
         eligible.sort((a, b) => Number(b.credentials?.registered === true) - Number(a.credentials?.registered === true) || b.timestampFromId - a.timestampFromId || Number(owners.get(b.sessionId)?.connectedSince || 0) - Number(owners.get(a.sessionId)?.connectedSince || 0));
         const selectedSession = eligible[0];
         const selectedOwner = owners.get(selectedSession.sessionId) || {};
-        sessionsToRestore.push({ sessionId: selectedSession.sessionId, format: normalizeConnectionFormat(selectedOwner.format || selectedOwner.Format || 'pair') });
+        sessionsToRestore.push({ sessionId: selectedSession.sessionId, format: normalizeConnectionFormat(selectedOwner.format || selectedOwner.Format || 'pair'), previousOwner: selectedOwner.ownerInstanceUrl || selectedOwner.ownerInstanceId || null });
         for (const duplicate of group.filter(item => item.sessionId !== selectedSession.sessionId)) {
             const duplicateOwner = owners.get(duplicate.sessionId) || {};
             const leaseUntil = new Date(duplicateOwner.ownerLeaseUntil || 0).getTime();
@@ -13523,19 +13789,52 @@ async function loadExistingSessions() {
             }
         }
     }
-    for (const candidate of restorableCandidates) {
-        if (identityCandidates.length && sessionsToRestore.some(item => item.sessionId === candidate.sessionId)) continue;
-    }
+    let restoreStartedCount = 0;
+    let restoreSuccessCount = 0;
+    let restorePendingCount = 0;
+    let restoreFailureCount = 0;
     await Promise.all(sessionsToRestore.map(async restoredSession => {
-        const { sessionId, format: restoredFormat } = restoredSession;
+        const { sessionId, format: restoredFormat, previousOwner } = restoredSession;
+        const restoreAttempt = Number(sessionLockRetryAttempts.get(sessionId) || 0) + 1;
         try {
-            console.info('[session-restore-format]', { sessionId, format: restoredFormat, startupMode: 'parallel' });
+            console.info('[session-restore-start]', { sessionId, previousOwner, currentOwner: TFBOT_CLUSTER_INSTANCE_HOST, credentialsValid: true, socketAuthenticated: false, socketReady: false, restoreAttempt, format: restoredFormat });
             await startAdamBot(sessionId, false, restoredFormat, true);
+            restoreStartedCount++;
+            const runtime = activeSessions.get(sessionId);
+            const socketAuthenticated = isAuthenticatedSocketOperational(runtime, runtime?.sock);
+            const socketReady = isWhatsAppSocketReady(runtime, runtime?.sock);
+            if (socketAuthenticated) restoreSuccessCount++;
+            else restorePendingCount++;
+            console.info('[session-restore-result]', { sessionId, previousOwner, currentOwner: TFBOT_CLUSTER_INSTANCE_HOST, credentialsValid: !!(runtime?.authState?.creds?.me?.id || runtime?.authState?.creds?.me?.lid), socketAuthenticated, socketReady, restoreAttempt, restoreError: null, nextRetryAt: null, startAccepted: true, socketOpenPending: !socketReady });
         } catch (error) {
-            console.error('[session-restore-start-failed]', { sessionId, format: restoredFormat, error: error?.message || String(error) });
-            if (/session_runtime_lock_owned_elsewhere|account_runtime_lock_owned_elsewhere/.test(String(error?.message || ''))) scheduleSessionLockRetry(sessionId, false, restoredFormat);
+            restoreFailureCount++;
+            const errorText = String(error?.message || error).slice(0, 220);
+            const retryDelay = /SessionNotExists|session_credentials_invalid|session_identity_missing/i.test(errorText) ? 0 : scheduleSessionLockRetry(sessionId, false, restoredFormat);
+            const nowAt = new Date();
+            const nextRetryAt = retryDelay ? new Date(nowAt.getTime() + retryDelay) : null;
+            if (!/session_runtime_lock_owned_elsewhere|account_runtime_lock_owned_elsewhere/.test(errorText)) {
+                await db.collection('session_owners').updateOne(
+                    { sessionId, $or: [{ ownerInstanceId: TFBOT_CLUSTER_INSTANCE_ID }, { ownerLeaseUntil: { $lte: nowAt } }, { ownerInstanceId: { $exists: false } }] },
+                    { $set: { connectionStatus: 'reconnexion', socketAuthenticated: false, socketReady: false, lastRestoreAt: nowAt, lastRestoreError: errorText, lastRestoreErrorHash: shortLogHash(errorText), restoreAttemptCount: restoreAttempt, nextRestoreRetryAt: nextRetryAt, statusUpdatedAt: nowAt, updatedAt: nowAt } }
+                ).catch(databaseError => console.warn('[session-restore-status-write-failed]', { sessionId, error: databaseError?.message || String(databaseError) }));
+            }
+            console.error('[session-restore-start-failed]', { sessionId, previousOwner, currentOwner: TFBOT_CLUSTER_INSTANCE_HOST, credentialsValid: true, socketAuthenticated: false, socketReady: false, restoreAttempt, restoreError: errorText, errorHash: shortLogHash(errorText), nextRetryAt: nextRetryAt?.toISOString() || null, retryInMs: retryDelay || null });
         }
     }));
+    const summary = {
+        scannedCredentialDocuments: credsDocs.length,
+        authenticatedCandidates: candidates.length,
+        eligibleCandidates: restorableCandidates.length,
+        restoreStartedCount,
+        restoreSuccessCount,
+        restorePendingCount,
+        restoreFailureCount,
+        restoreSkippedCount,
+        activeSessionCount: activeSessions.size,
+        completedAt: new Date().toISOString()
+    };
+    console.info('[session-restore-summary]', summary);
+    return summary;
 }
 
 setInterval(async () => {
