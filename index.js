@@ -4,7 +4,7 @@ const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(proces
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r112-private-lid-decrypt-recovery';
+const TFBOT_CLUSTER_CODE_REVISION = 'r113-session-scoped-lid-mapping-adapter';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
@@ -223,8 +223,8 @@ for (const level of Object.keys(tfbotOriginalConsole)) {
 enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'diagnostic-log-start', content: 'Journal opérationnel du cluster démarré; les identifiants, codes, numéros et contenus privés sont masqués.' });
 
 function applyBaileysLidPnDecryptRetryPatch() {
-    const marker = '__tfbotPrivateLidPnDecryptFallbackV112';
-    const previousMarker = '__tfbotSelfChatPnDecryptFallbackV107';
+    const marker = '__tfbotPrivateLidPnDecryptFallbackV113';
+    const previousMarkers = ['__tfbotPrivateLidPnDecryptFallbackV112', '__tfbotSelfChatPnDecryptFallbackV107'];
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
@@ -243,6 +243,7 @@ function applyBaileysLidPnDecryptRetryPatch() {
     const __tfbotIsPrivateLidChat = !__tfbotIsExcludedChat && __tfbotLidCandidates.length > 0;
     const __tfbotIsSelfLidChat = fullMessage?.key?.fromMe === true && __tfbotIsPrivateLidChat;
     const __tfbotPnCandidates = [];
+    let __tfbotExplicitPnCandidateCount = 0;
     if (__tfbotIsPrivateLidChat) {
         const __tfbotExplicitPnCandidates = [
             fullMessage?.key?.remoteJidAlt,
@@ -256,7 +257,10 @@ function applyBaileysLidPnDecryptRetryPatch() {
         ];
         for (const __tfbotRawPn of __tfbotExplicitPnCandidates) {
             const __tfbotPn = __tfbotNormalizeJid(__tfbotRawPn);
-            if (/^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotPn) && !__tfbotPnCandidates.includes(__tfbotPn)) __tfbotPnCandidates.push(__tfbotPn);
+            if (/^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotPn) && !__tfbotPnCandidates.includes(__tfbotPn)) {
+                __tfbotPnCandidates.push(__tfbotPn);
+                __tfbotExplicitPnCandidateCount++;
+            }
         }
         if (!__tfbotPnCandidates.length && typeof repository?.lidMapping?.getPNForLID === 'function') {
             for (const __tfbotLid of __tfbotLidCandidates) {
@@ -277,10 +281,9 @@ function applyBaileysLidPnDecryptRetryPatch() {
             }
         }
     }
-    const __tfbotPrimaryIsLid = /@(?:hosted\\.)?lid$/i.test(__tfbotPrimaryJid);
     const __tfbotOriginalCandidateJid = __tfbotPrimaryJid || __tfbotLidCandidates[0] || __tfbotRemoteJid;
-    const __tfbotPreferPnForPrivateLid = __tfbotIsPrivateLidChat && (__tfbotPrimaryIsLid || /@(?:hosted\.)?lid$/i.test(__tfbotRemoteJid)) && (/@(?:hosted\.)?lid$/i.test(__tfbotRemoteJid) || fullMessage?.key?.fromMe === true);
-    const __tfbotCandidates = [...new Set(__tfbotPreferPnForPrivateLid ? [...__tfbotPnCandidates, __tfbotPrimaryJid, __tfbotRemoteJid] : [__tfbotPrimaryJid, ...__tfbotPnCandidates, __tfbotRemoteJid])].filter(Boolean);
+    const __tfbotCandidates = [...new Set([__tfbotPrimaryJid, ...__tfbotPnCandidates, __tfbotRemoteJid])].filter(Boolean);
+    const __tfbotDecryptAttempts = [];
     let __tfbotOriginalDecryptError;
     let __tfbotLastDecryptError;
     for (const __tfbotCandidateJid of __tfbotCandidates) {
@@ -300,15 +303,17 @@ function applyBaileysLidPnDecryptRetryPatch() {
             return __tfbotDecrypted;
         } catch (decryptError) {
             __tfbotLastDecryptError = decryptError;
+            __tfbotDecryptAttempts.push({ addressType: /@(?:hosted\.)?lid$/i.test(__tfbotCandidateJid) ? 'lid' : 'phone_number', errorName: decryptError?.name || 'Error', errorMessage: String(decryptError?.message || '').slice(0, 180) });
             if (__tfbotNormalizeJid(__tfbotCandidateJid) === __tfbotNormalizeJid(__tfbotOriginalCandidateJid) || !__tfbotOriginalDecryptError && !__tfbotPrimaryJid) __tfbotOriginalDecryptError = decryptError;
         }
     }
     if (__tfbotIsPrivateLidChat) {
-        logger?.warn?.({ remoteJid: __tfbotRemoteJid, fromMe: fullMessage?.key?.fromMe === true, selfChat: __tfbotIsSelfLidChat, mappingAvailable: __tfbotPnCandidates.length > 0, candidateCount: __tfbotCandidates.length, errorName: (__tfbotOriginalDecryptError || __tfbotLastDecryptError)?.name || 'Error' }, 'private LID message could not be decrypted with trusted PN or original LID address');
+        logger?.warn?.({ remoteJid: __tfbotRemoteJid, fromMe: fullMessage?.key?.fromMe === true, selfChat: __tfbotIsSelfLidChat, mappingProviderAvailable: typeof repository?.lidMapping?.getPNForLID === 'function', mappingAvailable: __tfbotPnCandidates.length > 0, explicitPnCandidateCount: __tfbotExplicitPnCandidateCount, candidateCount: __tfbotCandidates.length, attemptedAddresses: __tfbotDecryptAttempts, errorName: (__tfbotOriginalDecryptError || __tfbotLastDecryptError)?.name || 'Error' }, 'private LID message could not be decrypted with original or mapped PN address');
     }
     throw __tfbotOriginalDecryptError || __tfbotLastDecryptError || new Error('Signal decryption failed without a usable JID candidate');`;
         const buildInjectedBody = originalJidExpression => injectedBody.replace('__TFBOT_ORIGINAL_JID__', originalJidExpression);
-        const oldMarkerIndex = source.indexOf(`const ${previousMarker} = true;`);
+        const previousMarker = previousMarkers.find(value => source.includes(`const ${value} = true;`)) || '';
+        const oldMarkerIndex = previousMarker ? source.indexOf(`const ${previousMarker} = true;`) : -1;
         if (oldMarkerIndex >= 0) {
             const oldIifeEnd = source.indexOf('})();', oldMarkerIndex);
             if (oldIifeEnd < 0) return { applied: false, reason: 'previous_private_lid_patch_wrapper_not_found', file: path.basename(filePath) };
@@ -1154,7 +1159,7 @@ function createRenderPinoLogger(options = {}) {
                         console.info('[baileys-runtime-diagnostic]', { sessionId: recoverySessionId, component: options?.base?.component || 'baileys', ...parsed });
                     }
                     if (!isSignalDecryptionFailure(diagnosticArgs)) continue;
-                    console.warn('[baileys-signal-decryption-failure]', { sessionId: recoverySessionId || null, failureClass: classifyWhatsAppFailure(parsed), message: String(parsed?.msg || parsed?.message || '').slice(0, 500), remoteJid: parsed?.key?.remoteJid || parsed?.remoteJid || null, remoteJidAlt: parsed?.key?.remoteJidAlt || null, participant: parsed?.key?.participant || parsed?.participant || null, messageId: parsed?.key?.id || parsed?.messageId || null, errorName: parsed?.err?.name || parsed?.error?.name || parsed?.name || null });
+                    console.warn('[baileys-signal-decryption-failure]', { sessionId: recoverySessionId || null, failureClass: classifyWhatsAppFailure(parsed), message: String(parsed?.msg || parsed?.message || '').slice(0, 500), remoteJid: parsed?.key?.remoteJid || parsed?.remoteJid || null, remoteJidAlt: parsed?.key?.remoteJidAlt || null, participant: parsed?.key?.participant || parsed?.participant || null, hasSenderPn: !!(parsed?.key?.senderPn || parsed?.senderPn), hasParticipantPn: !!(parsed?.key?.participantPn || parsed?.participantPn), hasSenderLid: !!(parsed?.key?.senderLid || parsed?.senderLid), messageId: parsed?.key?.id || parsed?.messageId || null, errorName: parsed?.err?.name || parsed?.error?.name || parsed?.name || null, errorMessage: String(parsed?.err?.message || parsed?.error?.message || '').slice(0, 220) });
                     if (recoverySessionId) scheduleSignalRecoveryFromLog(recoverySessionId, parsed);
                 }
                 callback();
@@ -1166,7 +1171,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-02-r112';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-02-r113';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1923,6 +1928,144 @@ async function waitForAuthStoreQuiescence(sessionId, timeoutMs = 45000, quietMs 
     }
     if (lastError) throw lastError;
     throw new Error('signal_auth_store_drain_timeout');
+}
+
+function attachTfbotSignalLidMappingAdapter(sessionId, sock) {
+    const repository = sock?.signalRepository;
+    const scopedSessionId = String(sessionId || '').trim();
+    if (!repository || typeof repository !== 'object' || !scopedSessionId) {
+        console.warn('[signal-lid-mapping-adapter-unavailable]', { sessionId: scopedSessionId || null, repositoryAvailable: !!repository });
+        return false;
+    }
+    const existingAdapter = repository.lidMapping;
+    if (existingAdapter?.__tfbotSessionScopedAdapter === true && existingAdapter.__tfbotSessionId === scopedSessionId) return true;
+    const nativeMapping = existingAdapter && existingAdapter.__tfbotSessionScopedAdapter !== true ? existingAdapter : null;
+    const validPhone = value => normalizePhoneCacheJid(value);
+    const validLid = value => {
+        const normalized = normalizeLidCacheKey(value);
+        return /@lid$/i.test(normalized) ? normalized : '';
+    };
+    const readNative = async (method, value) => {
+        if (typeof nativeMapping?.[method] !== 'function') return '';
+        try {
+            return await nativeMapping[method].call(nativeMapping, value);
+        } catch (error) {
+            console.warn('[signal-lid-native-mapping-read-failed]', { sessionId: scopedSessionId, method, errorName: error?.name || 'Error' });
+            return '';
+        }
+    };
+    const readDatabasePhone = async lid => {
+        if (!db) return '';
+        try {
+            const record = await promiseWithTimeout(db.collection('lid_phone_mappings').findOne({ _id: `${scopedSessionId}:${lid}`, sessionId: scopedSessionId }, { projection: { phone: 1, source: 1 } }), 1000, 'session-scoped LID-to-PN adapter lookup');
+            const phone = validPhone(record?.phone || '');
+            if (phone) rememberLidPhonePair(scopedSessionId, lid, phone, record?.source || 'mongo_session_lid_phone_mapping');
+            return phone;
+        } catch (error) {
+            console.warn('[signal-lid-mapping-database-read-failed]', { sessionId: scopedSessionId, direction: 'lid_to_pn', errorName: error?.name || 'Error', errorMessage: String(error?.message || error).slice(0, 180) });
+            return '';
+        }
+    };
+    const readDatabaseLid = async phone => {
+        if (!db) return '';
+        try {
+            const record = await promiseWithTimeout(db.collection('lid_phone_mappings').findOne({ sessionId: scopedSessionId, phone }, { projection: { _id: 1, phone: 1 }, sort: { updatedAt: -1 } }), 1000, 'session-scoped PN-to-LID adapter lookup');
+            const prefix = `${scopedSessionId}:`;
+            const id = String(record?._id || '');
+            return id.startsWith(prefix) ? validLid(id.slice(prefix.length)) : '';
+        } catch (error) {
+            console.warn('[signal-lid-mapping-database-read-failed]', { sessionId: scopedSessionId, direction: 'pn_to_lid', errorName: error?.name || 'Error', errorMessage: String(error?.message || error).slice(0, 180) });
+            return '';
+        }
+    };
+    const adapter = Object.create(nativeMapping && typeof nativeMapping === 'object' ? nativeMapping : null);
+    Object.defineProperties(adapter, {
+        __tfbotSessionScopedAdapter: { value: true, enumerable: false },
+        __tfbotSessionId: { value: scopedSessionId, enumerable: false }
+    });
+    adapter.getPNForLID = async rawLid => {
+        const lid = validLid(rawLid);
+        if (!lid) return '';
+        const nativePhone = validPhone(await readNative('getPNForLID', lid));
+        if (nativePhone) {
+            rememberLidPhonePair(scopedSessionId, lid, nativePhone, 'signal_lid_mapping');
+            return nativePhone;
+        }
+        const runtime = activeSessions.get(scopedSessionId);
+        const credentials = runtime?.authState?.creds || {};
+        const ownLid = validLid(getAuthenticatedLid(sock.user || null, credentials) || runtime?.ownLidJid || '');
+        const ownPhoneNumber = getAuthenticatedPhoneNumber(sock.user || null, credentials) || normalizedJidNumber(runtime?.ownPhoneJid || '');
+        const ownPhone = validPhone(ownPhoneNumber ? `${ownPhoneNumber}@s.whatsapp.net` : runtime?.ownPhoneJid || '');
+        if (ownLid && ownLid === lid && ownPhone) {
+            rememberLidPhonePair(scopedSessionId, lid, ownPhone, 'authenticated_own_identity');
+            return ownPhone;
+        }
+        const cached = validPhone(getRememberedPhoneForLid(scopedSessionId, lid));
+        if (cached) return cached;
+        const groupMapping = phoneFromCachedGroupMetadata(scopedSessionId, lid);
+        if (groupMapping?.phone) return validPhone(groupMapping.phone);
+        return await readDatabasePhone(lid);
+    };
+    adapter.getLIDForPN = async rawPhone => {
+        const phone = validPhone(rawPhone);
+        if (!phone) return '';
+        const nativeLid = validLid(await readNative('getLIDForPN', phone));
+        if (nativeLid) {
+            rememberLidPhonePair(scopedSessionId, nativeLid, phone, 'signal_pn_lid_mapping');
+            return nativeLid;
+        }
+        const cached = validLid(getRememberedLidForPhone(scopedSessionId, phone));
+        if (cached) return cached;
+        return await readDatabaseLid(phone);
+    };
+    adapter.storeLIDPNMappings = async entries => {
+        const rows = entries instanceof Map
+            ? [...entries.entries()].map(([lid, pn]) => ({ lid, pn }))
+            : Array.isArray(entries)
+                ? entries
+                : entries && typeof entries === 'object'
+                    ? Object.entries(entries).map(([lid, pn]) => ({ lid, pn }))
+                    : [];
+        let saved = 0;
+        for (const row of rows) {
+            const lid = validLid(row?.lid || row?.LID || row?.lidJid || row?.lidJID || row?.from || '');
+            const phone = validPhone(row?.pn || row?.PN || row?.phoneNumber || row?.phone || row?.pnJid || row?.to || '');
+            if (!lid || !phone) continue;
+            rememberLidPhonePair(scopedSessionId, lid, phone, 'signal_lid_mapping');
+            if (db) {
+                await promiseWithTimeout(db.collection('lid_phone_mappings').updateOne(
+                    { _id: `${scopedSessionId}:${lid}` },
+                    { $set: { phone, lastSessionId: scopedSessionId, sessionId: scopedSessionId, source: 'signal_lid_mapping', updatedAt: new Date(), expireAt: new Date(Date.now() + LID_PHONE_MAPPING_RETENTION_MS) }, $setOnInsert: { createdAt: new Date(), scoped: true } },
+                    { upsert: true }
+                ), 1500, 'persist session-scoped LID/PN mapping');
+                lidPhonePersistedKeys.set(`${scopedSessionId}:${lid}`, Date.now());
+            }
+            saved++;
+        }
+        if (typeof nativeMapping?.storeLIDPNMappings === 'function') {
+            try { await nativeMapping.storeLIDPNMappings.call(nativeMapping, rows); }
+            catch (error) { console.warn('[signal-lid-native-mapping-write-failed]', { sessionId: scopedSessionId, errorName: error?.name || 'Error' }); }
+        }
+        return saved;
+    };
+    try {
+        repository.lidMapping = adapter;
+        if (repository.lidMapping !== adapter) Object.defineProperty(repository, 'lidMapping', { configurable: true, enumerable: true, writable: true, value: adapter });
+        const attached = repository.lidMapping === adapter && typeof repository.lidMapping.getPNForLID === 'function' && typeof repository.lidMapping.getLIDForPN === 'function';
+        console.info(attached ? '[signal-lid-mapping-adapter-attached]' : '[signal-lid-mapping-adapter-attach-failed]', {
+            sessionId: scopedSessionId,
+            nativeProvider: !!nativeMapping,
+            mongoFallback: !!db,
+            cacheFallback: true,
+            mappingScope: 'session_scoped',
+            getPNForLID: typeof repository.lidMapping?.getPNForLID === 'function',
+            getLIDForPN: typeof repository.lidMapping?.getLIDForPN === 'function'
+        });
+        return attached;
+    } catch (error) {
+        console.warn('[signal-lid-mapping-adapter-attach-failed]', { sessionId: scopedSessionId, errorName: error?.name || 'Error', errorMessage: String(error?.message || error).slice(0, 180) });
+        return false;
+    }
 }
 
 async function resolvePhoneForLid(sessionId, sock, lidValue) {
@@ -10215,6 +10358,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             }
         });
 
+        attachTfbotSignalLidMappingAdapter(sessionId, sock);
         if (typeof state.setAuthSocket === 'function') state.setAuthSocket(sock);
         const previousBootstrapSession = activeSessions.get(sessionId);
         activeSessions.set(sessionId, {
