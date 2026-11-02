@@ -3,7 +3,7 @@ const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(pr
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 7000)));
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
+const TFBOT_CLUSTER_CODE_REVISION = 'r99-router-recovery-ai-search-plain';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
@@ -1038,7 +1038,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-01-r98';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-02-r99';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1146,6 +1146,7 @@ let tfbotCoordinatorActiveProbeAt = 0;
 let tfbotCoordinatorSelectionPromise = null;
 let tfbotCoordinatorPublicRefreshAt = 0;
 let tfbotCoordinatorResolveProbeAt = 0;
+let tfbotRouterUnavailableRetryAt = 0;
 let tfbotCoordinatorStorageReady = false;
 const BOT_TIME_ZONE = process.env.BOT_TIME_ZONE || 'America/Santo_Domingo';
 const CHAT_CONTEXT_MAX_CHARS = Math.max(2500, Number(process.env.CHAT_CONTEXT_MAX_CHARS || 7000));
@@ -5680,17 +5681,35 @@ app.use((req, res, next) => {
     next();
 });
 
-app.use((req, res, next) => {
+app.use(async (req, res, next) => {
     if (!TFBOT_CLUSTER_ENABLED || req.method === 'OPTIONS' || isValidClusterHop(req)) return next();
     const requestPath = normalizeTfbotRequestPath(req.path || '/');
     if (requestPath === '/ok' || requestPath === TFBOT_CLUSTER_HEALTH_PATH || requestPath === TFBOT_ROUTER_OK_PATH || requestPath === TFBOT_ROUTER_RESOLVE_PATH || requestPath === TFBOT_WORKER_CONTROL_PATH || requestPath === TFBOT_WORKER_POLL_PATH || requestPath === TFBOT_WORKER_FAILURE_PATH || requestPath.startsWith('/__tfbot/router/')) return next();
     const requestHost = normalizeTfbotHost(req.get('host') || req.hostname || '');
-    const active = TFBOT_CLUSTER_COORDINATOR_ONLY ? tfbotCoordinatorSelectionCache : tfbotActiveDomainCache;
-    const activeHost = normalizeTfbotHost(active?.host || '');
-    const activeUrl = String(active?.url || '').replace(/\/+$/, '');
+    let active = TFBOT_CLUSTER_COORDINATOR_ONLY ? tfbotCoordinatorSelectionCache : tfbotActiveDomainCache;
+    let activeHost = normalizeTfbotHost(active?.host || '');
+    let activeUrl = String(active?.url || '').replace(/\/+$/, '');
+    if ((!TFBOT_ROUTER_DOMAIN_BY_HOST.has(activeHost) || !activeUrl) && Date.now() >= tfbotRouterUnavailableRetryAt) {
+        tfbotRouterUnavailableRetryAt = Date.now() + 3000;
+        if (TFBOT_CLUSTER_COORDINATOR_ONLY) {
+            if (tfbotCoordinatorStorageReady) {
+                try { active = await refreshTfbotActiveDomain(true); }
+                catch (error) { console.error('[tfbot-router-request-recovery-failed]', { phase: 'coordinator-selection-refresh', error: error?.message || String(error) }); }
+            }
+            active = active || tfbotCoordinatorSelectionCache;
+        } else {
+            try { await pollTfbotCoordinatorSelection(); }
+            catch (error) { console.warn('[tfbot-router-request-recovery-failed]', { phase: 'worker-coordinator-poll', error: error?.message || String(error) }); }
+            active = tfbotActiveDomainCache;
+        }
+        activeHost = normalizeTfbotHost(active?.host || '');
+        activeUrl = String(active?.url || '').replace(/\/+$/, '');
+    }
     if (!TFBOT_ROUTER_DOMAIN_BY_HOST.has(activeHost) || !activeUrl) {
-        res.setHeader('Retry-After', String(Math.ceil(TFBOT_WORKER_COORDINATOR_POLL_MS / 1000)));
-        return res.status(503).json({ ok: false, error: 'tfbot_active_server_unavailable', retryAfterMs: TFBOT_WORKER_COORDINATOR_POLL_MS });
+        const retryAfterMs = Math.max(1000, Math.min(5000, tfbotRouterUnavailableRetryAt - Date.now() || 3000));
+        res.setHeader('Retry-After', String(Math.ceil(retryAfterMs / 1000)));
+        res.setHeader('Cache-Control', 'no-store, max-age=0');
+        return res.status(503).json({ ok: false, error: 'tfbot_active_server_unavailable', retryAfterMs, coordinator: TFBOT_COORDINATOR_HOST, localHost: TFBOT_CLUSTER_INSTANCE_HOST || null, workerState: tfbotWorkerState, selectionCheckedAt: tfbotCoordinatorSelectionAt ? new Date(tfbotCoordinatorSelectionAt).toISOString() : null });
     }
     if (requestHost !== activeHost) {
         let destination;
@@ -6663,8 +6682,9 @@ app.get(TFBOT_ROUTER_RESOLVE_PATH, async (req, res) => {
         const refreshRequested = String(req.query?.refresh || '') === '1';
         const privateRefresh = isValidClusterToken(req);
         const publicRefreshAllowed = refreshRequested && Date.now() - tfbotCoordinatorPublicRefreshAt >= TFBOT_ROUTER_ACTIVE_PROBE_MS;
-        const unavailableCacheExpired = !tfbotCoordinatorSelectionCache && (!tfbotCoordinatorSelectionAt || Date.now() - tfbotCoordinatorSelectionAt >= TFBOT_ROUTER_COORDINATOR_CACHE_MS);
+        const unavailableCacheExpired = !tfbotCoordinatorSelectionCache && Date.now() >= tfbotRouterUnavailableRetryAt;
         const force = (privateRefresh && refreshRequested) || publicRefreshAllowed || unavailableCacheExpired;
+        if (unavailableCacheExpired) tfbotRouterUnavailableRetryAt = Date.now() + 3000;
         if (publicRefreshAllowed && !privateRefresh) tfbotCoordinatorPublicRefreshAt = Date.now();
         let selected = await refreshTfbotActiveDomain(force);
         if (!selected) return res.status(503).json({ ok: false, error: 'no_ready_domain_selection_available', retryAfterMs: TFBOT_WORKER_COORDINATOR_POLL_MS, pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS });
@@ -6700,9 +6720,11 @@ app.get(TFBOT_WORKER_POLL_PATH, async (req, res) => {
     if (!tfbotCoordinatorStorageReady) return res.status(503).json({ ok: false, error: 'tfbot_coordinator_initializing', retryAfterMs: 1200, releaseId: TFBOT_CODE_RELEASE_ID });
     try {
         let selected = tfbotCoordinatorSelectionCache;
-        const unavailableCacheExpired = !selected && (!tfbotCoordinatorSelectionAt || Date.now() - tfbotCoordinatorSelectionAt >= TFBOT_ROUTER_COORDINATOR_CACHE_MS);
-        if (!selected && unavailableCacheExpired) selected = await refreshTfbotActiveDomain(true);
-        if (!selected) return res.status(503).json({ ok: false, error: 'tfbot_active_server_unavailable', retryAfterMs: TFBOT_WORKER_COORDINATOR_POLL_MS, releaseId: TFBOT_CODE_RELEASE_ID, nextFallbackProbeInMs: Math.max(0, TFBOT_ROUTER_COORDINATOR_CACHE_MS - (Date.now() - tfbotCoordinatorSelectionAt)) });
+        if (!selected && Date.now() >= tfbotRouterUnavailableRetryAt) {
+            tfbotRouterUnavailableRetryAt = Date.now() + 3000;
+            selected = await refreshTfbotActiveDomain(true);
+        }
+        if (!selected) return res.status(503).json({ ok: false, error: 'tfbot_active_server_unavailable', retryAfterMs: 3000, releaseId: TFBOT_CODE_RELEASE_ID, releaseCompatibilityKey: getTfbotReleaseCompatibilityKey(TFBOT_CODE_RELEASE_ID), lastProbeHost: tfbotCoordinatorLastProbeHost || null, selectionCheckedAt: tfbotCoordinatorSelectionAt ? new Date(tfbotCoordinatorSelectionAt).toISOString() : null });
         res.setHeader('Cache-Control', 'no-store, max-age=0');
         return res.status(200).json({ ok: true, host: selected.host, url: selected.url, activeHost: selected.host, activeUrl: selected.url, generation: selected.generation, releaseId: TFBOT_CODE_RELEASE_ID, source: 'tfbot7-worker-poll', pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS });
     } catch (error) {
@@ -9590,12 +9612,12 @@ async function explainActionError(error, language, actionName, userName, message
     return fallback;
 }
 
-async function sendActionError(sock, jid, actionName, error, language, userName, messageTimestamp) {
+async function sendActionError(sock, jid, actionName, error, language, userName, messageTimestamp, sendOptions = {}) {
     const rawError = redactActionError(error);
     console.error('[action-error]', { action: String(actionName || 'Action'), error: rawError.slice(0, 1200) });
     const explanation = await explainActionError(error, language, actionName, userName, messageTimestamp);
     try {
-        await sendImageCaptioned(sock, jid, adamLogoBuffer, actionName || 'Action', explanation, userName || 'Inconnu');
+        await sendImageCaptioned(sock, jid, adamLogoBuffer, actionName || 'Action', explanation, userName || 'Inconnu', sendOptions);
     } catch (sendError) {
         console.error('[action-error-send]', sendError?.message || sendError);
     }
@@ -13048,7 +13070,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             console.info('[ai-dispatch-authorized-explicit-prefix]', { sessionId, messageId: msgId, command: parsedCommand.command, explicitPrefix: true, releaseId: TFBOT_CODE_RELEASE_ID });
                                             const promptText = clipLongText(args, AI_MAX_INPUT_CHARS);
                                             if (!promptText) {
-                                                await safeSendFormatted(sock, from, t.ai_title, t.ai_usage, pushName, true, activeHostName);
+                                                await safeSendFormatted(sock, from, t.ai_title, t.ai_usage, pushName, true, activeHostName, { preserveFormatting: true });
                                                 break;
                                             }
                                             const historyKey = `${sessionId}:${from}`;
@@ -13064,10 +13086,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 history.push({ role: 'assistant', content: aiResponseText });
                                                 if (history.length > 7) history = history.slice(-7);
                                                 setSessionChatHistory(historyKey, history);
-                                                await safeSendFormatted(sock, from, t.ai_title, aiResponseText, pushName, true, activeHostName);
+                                                await safeSendFormatted(sock, from, t.ai_title, aiResponseText, pushName, true, activeHostName, { preserveFormatting: true });
                                                 terminalResponseSent = true;
                                             } catch (e) {
-                                                await safeSendActionError(sock, from, t.ai_title, e, messageLang, pushName, m.messageTimestamp);
+                                                await safeSendActionError(sock, from, t.ai_title, e, messageLang, pushName, m.messageTimestamp, { preserveFormatting: true });
                                             }
                                             break;
                                         case 'lang':
@@ -13373,7 +13395,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             break;
                                         case 'cheche':
                                             if (!args) {
-                                                await safeSendFormatted(sock, from, t.search_title, t.search_usage, pushName, true, activeHostName);
+                                                await safeSendFormatted(sock, from, t.search_title, t.search_usage, pushName, true, activeHostName, { preserveFormatting: true });
                                                 break;
                                             }
                                             try {
@@ -13402,10 +13424,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 historyS.push({ role: 'assistant', content: searchAIResponse });
                                                 if (historyS.length > 7) historyS = historyS.slice(-7);
                                                 setSessionChatHistory(historyKey, historyS);
-                                                await safeSendFormatted(sock, from, t.search_title, searchAIResponse, pushName, true, activeHostName);
+                                                await safeSendFormatted(sock, from, t.search_title, searchAIResponse, pushName, true, activeHostName, { preserveFormatting: true });
                                                 terminalResponseSent = true;
                                             } catch (e) {
-                                                await safeSendActionError(sock, from, t.search_title, e, messageLang, pushName, m.messageTimestamp);
+                                                await safeSendActionError(sock, from, t.search_title, e, messageLang, pushName, m.messageTimestamp, { preserveFormatting: true });
                                             }
                                             break;
                                         case 'sites':
