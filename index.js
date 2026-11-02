@@ -4,7 +4,7 @@ const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(proces
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r117-conflict-auth-preserve-live-list-owner-global';
+const TFBOT_CLUSTER_CODE_REVISION = 'r120-per-chat-signal-decrypt-json-list-fast-typing';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
@@ -425,6 +425,127 @@ if (!__tfbotDecodedRetryId && __tfbotRetryNodeId) logger.info({ messageId: __tfb
         const patchedSource = source.slice(0, functionMatch.index) + block + source.slice(closeBrace + 1);
         fs.writeFileSync(filePath, patchedSource, 'utf8');
         return { applied: true, alreadyApplied: false, file: path.basename(filePath), retryRequests: resendMatches.length, stanzaIdFallback: true, selfChatPlaceholderUsesPn: true, disablesAutoSessionRecreationForSelfChat: autoRecreatePattern.test(source) };
+    } catch (error) {
+        return { applied: false, reason: String(error?.message || error).slice(0, 180) };
+    }
+}
+
+function applyBaileysPerChatInboundProcessingPatch() {
+    const marker = '__tfbotPerChatInboundProcessingV119';
+    try {
+        const entryPath = require.resolve('@whiskeysockets/baileys');
+        const entryDirectory = path.dirname(entryPath);
+        const roots = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
+        const candidates = [...new Set(roots.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `messages-recv.${extension}`)))) )];
+        const filePath = candidates.find(candidate => fs.existsSync(candidate));
+        if (!filePath) return { applied: false, reason: 'messages_recv_module_not_found' };
+        let source = fs.readFileSync(filePath, 'utf8');
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), perChatSignalDecryption: true, globalEventProcessingMutexPreserved: true, independentChatsCanDecryptConcurrently: true, slowDecryptTiming: true, slowQueueTiming: true, slowGlobalMutexTiming: true };
+        const mutexAnchor = /const\s+retryMutex\s*=\s*makeMutex\s*\(\s*\)\s*;?/g;
+        const mutexMatches = [...source.matchAll(mutexAnchor)];
+        if (mutexMatches.length !== 1) return { applied: false, reason: `expected_one_retry_mutex_anchor_found_${mutexMatches.length}`, file: path.basename(filePath) };
+        const helper = `
+\tconst ${marker} = true;
+\tconst __tfbotInboundChatQueues = new Map();
+\tconst __tfbotInboundChatKeyForNode = node => {
+\t\tconst rawChat = String(node?.attrs?.from || node?.attrs?.participant || 'unknown').trim().toLowerCase();
+\t\tconst isGroup = /@g\\.us$/i.test(rawChat);
+\t\tconst normalizedChat = rawChat.replace(/:\\d+(?=@(?:hosted\\.)?lid$|@s\\.whatsapp\\.net$)/i, '');
+\t\tconst ownPn = String(authState?.creds?.me?.id || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '').toLowerCase();
+\t\tconst ownLid = String(authState?.creds?.me?.lid || '').trim().replace(/:\\d+(?=@(?:hosted\\.)?lid$)/i, '').toLowerCase();
+\t\tconst isSelfChat = !isGroup && Boolean(normalizedChat) && (normalizedChat === ownPn || normalizedChat === ownLid);
+\t\treturn (isGroup ? 'group:' : 'private:') + (isSelfChat ? 'self-chat' : normalizedChat);
+\t};
+\tconst __tfbotWithInboundChatMutex = async (node, operation) => {
+\t\tconst key = __tfbotInboundChatKeyForNode(node);
+\t\tconst isGroup = key.startsWith('group:');
+\t\tconst enqueuedAt = Date.now();
+\t\tconst previous = __tfbotInboundChatQueues.get(key) || Promise.resolve();
+\t\tlet release;
+\t\tconst gate = new Promise(resolve => { release = resolve; });
+\t\tconst current = previous.catch(() => {}).then(() => gate);
+\t\t__tfbotInboundChatQueues.set(key, current);
+\t\tawait previous.catch(() => {});
+\t\tconst queueWaitMs = Date.now() - enqueuedAt;
+\t\tif (queueWaitMs >= 150) logger.warn({ messageId: node?.attrs?.id || null, chatType: isGroup ? 'group' : 'private', queueWaitMs }, 'tfbot inbound chat queue wait');
+\t\ttry {
+\t\t\treturn await operation();
+\t\t} finally {
+\t\t\trelease();
+\t\t\tif (__tfbotInboundChatQueues.get(key) === current) __tfbotInboundChatQueues.delete(key);
+\t\t}
+\t};
+\tconst __tfbotWithInboundProcessingMutex = async (node, operation) => {
+\t\tconst enqueuedAt = Date.now();
+\t\treturn processingMutex.mutex(async () => {
+\t\t\tconst queueWaitMs = Date.now() - enqueuedAt;
+\t\t\tconst processingStartedAt = Date.now();
+\t\t\tif (queueWaitMs >= 150) logger.warn({ messageId: node?.attrs?.id || null, nodeType: node?.tag || 'unknown', globalProcessingMutexWaitMs: queueWaitMs }, 'tfbot global inbound processing wait');
+\t\t\ttry {
+\t\t\t\treturn await operation();
+\t\t\t} finally {
+\t\t\t\tconst holdMs = Date.now() - processingStartedAt;
+\t\t\t\tif (holdMs >= 500) logger.warn({ messageId: node?.attrs?.id || null, nodeType: node?.tag || 'unknown', globalProcessingMutexHoldMs: holdMs }, 'tfbot global inbound processing held');
+\t\t\t}
+\t\t});
+\t};
+`;
+        const mutexMatch = mutexMatches[0];
+        source = source.slice(0, mutexMatch.index + mutexMatch[0].length) + helper + source.slice(mutexMatch.index + mutexMatch[0].length);
+        const receiptPattern = /const\s+handleReceipt\s*=\s*async\s*\(\s*node(?:\s*:\s*BinaryNode)?\s*\)\s*=>\s*\{/g;
+        const notificationPattern = /const\s+handleNotification\s*=\s*async\s*\(\s*node(?:\s*:\s*BinaryNode)?\s*\)\s*=>\s*\{/g;
+        const handlePattern = /const\s+handleMessage\s*=\s*async\s*\(\s*node(?:\s*:\s*BinaryNode)?\s*\)\s*=>\s*\{/g;
+        const receiptMatches = [...source.matchAll(receiptPattern)];
+        const notificationMatches = [...source.matchAll(notificationPattern)];
+        const handleMatches = [...source.matchAll(handlePattern)];
+        if (receiptMatches.length !== 1) return { applied: false, reason: `expected_one_handle_receipt_function_found_${receiptMatches.length}`, file: path.basename(filePath) };
+        if (notificationMatches.length !== 1) return { applied: false, reason: `expected_one_handle_notification_function_found_${notificationMatches.length}`, file: path.basename(filePath) };
+        if (handleMatches.length !== 1) return { applied: false, reason: `expected_one_handle_message_function_found_${handleMatches.length}`, file: path.basename(filePath) };
+        const receiptStart = receiptMatches[0].index;
+        const notificationStart = notificationMatches[0].index;
+        const handleStart = handleMatches[0].index;
+        const endIndex = source.indexOf('const fetchMessageHistory', handleStart);
+        if (endIndex < 0 || receiptStart >= notificationStart || notificationStart >= handleStart) return { applied: false, reason: 'inbound_handler_boundaries_not_found', file: path.basename(filePath) };
+        let receiptBody = source.slice(receiptStart, notificationStart);
+        let notificationBody = source.slice(notificationStart, handleStart);
+        let handleBody = source.slice(handleStart, endIndex);
+        const processingPattern = /processingMutex\.mutex\s*\(\s*async\s*\(\s*\)\s*=>\s*\{/g;
+        const receiptProcessingMatches = [...receiptBody.matchAll(processingPattern)];
+        const notificationProcessingMatches = [...notificationBody.matchAll(processingPattern)];
+        const messageProcessingMatches = [...handleBody.matchAll(processingPattern)];
+        if (receiptProcessingMatches.length !== 1) return { applied: false, reason: `expected_one_receipt_processing_mutex_found_${receiptProcessingMatches.length}`, file: path.basename(filePath) };
+        if (notificationProcessingMatches.length !== 1) return { applied: false, reason: `expected_one_notification_processing_mutex_found_${notificationProcessingMatches.length}`, file: path.basename(filePath) };
+        if (messageProcessingMatches.length !== 1) return { applied: false, reason: `expected_one_handle_processing_mutex_found_${messageProcessingMatches.length}`, file: path.basename(filePath) };
+        receiptBody = receiptBody.slice(0, receiptProcessingMatches[0].index) + receiptBody.slice(receiptProcessingMatches[0].index).replace(processingPattern, '__tfbotWithInboundProcessingMutex(node, async () => {');
+        notificationBody = notificationBody.slice(0, notificationProcessingMatches[0].index) + notificationBody.slice(notificationProcessingMatches[0].index).replace(processingPattern, '__tfbotWithInboundProcessingMutex(node, async () => {');
+        const handlerStartedInjection = '\n\t\tconst __tfbotInboundHandlerStartedAt = Date.now();';
+        handleBody = handleBody.replace(handlePattern, match => `${match}${handlerStartedInjection}`);
+        const messageProcessingMatch = messageProcessingMatches[0];
+        const callStart = messageProcessingMatch.index + handlerStartedInjection.length;
+        const callbackOpenBrace = callStart + messageProcessingMatch[0].lastIndexOf('{');
+        const callbackCloseBrace = findTfbotMatchingBraceEnd(handleBody, callbackOpenBrace);
+        if (callbackCloseBrace < 0) return { applied: false, reason: 'handle_message_processing_callback_unbalanced', file: path.basename(filePath) };
+        const callCloseParen = handleBody.indexOf(')', callbackCloseBrace + 1);
+        if (callCloseParen < 0 || handleBody.slice(callbackCloseBrace + 1, callCloseParen).trim()) return { applied: false, reason: 'handle_message_processing_call_end_not_found', file: path.basename(filePath) };
+        let callbackBody = handleBody.slice(callbackOpenBrace + 1, callbackCloseBrace);
+        const decryptPattern = /await\s+decrypt\s*\(\s*\)\s*;?/g;
+        const decryptMatches = [...callbackBody.matchAll(decryptPattern)];
+        if (decryptMatches.length !== 1) return { applied: false, reason: `expected_one_decrypt_call_found_${decryptMatches.length}`, file: path.basename(filePath) };
+        callbackBody = callbackBody.replace(decryptPattern, '');
+        const upsertPattern = /await\s+upsertMessage\s*\(\s*msg\s*,\s*node\.attrs\.offline\s*\?\s*'append'\s*:\s*'notify'\s*\)\s*;?/g;
+        const upsertMatches = [...callbackBody.matchAll(upsertPattern)];
+        if (upsertMatches.length !== 1) return { applied: false, reason: `expected_one_message_upsert_call_found_${upsertMatches.length}`, file: path.basename(filePath) };
+        const upsertReplacement = `const __tfbotUpsertReadyAt = Date.now();\n\t\t\t\t\tconst __tfbotTotalBeforeUpsertMs = __tfbotUpsertReadyAt - __tfbotInboundHandlerStartedAt;\n\t\t\t\t\tif (__tfbotTotalBeforeUpsertMs >= 500) logger.warn({ messageId: node?.attrs?.id || null, chatType: /@g\\.us$/i.test(String(node?.attrs?.from || '')) ? 'group' : 'private', totalBeforeUpsertMs: __tfbotTotalBeforeUpsertMs, decryptDurationMs: __tfbotDecryptDurationMs }, 'tfbot inbound message delayed before upsert');\n\t\t\t\t\tawait upsertMessage(msg, node.attrs.offline ? 'append' : 'notify');`;
+        callbackBody = callbackBody.replace(upsertPattern, upsertReplacement);
+        const perChatProcessing = `__tfbotWithInboundChatMutex(node, async () => {\n\t\t\t\tconst __tfbotDecryptStartedAt = Date.now();\n\t\t\t\tawait decrypt();\n\t\t\t\tconst __tfbotDecryptDurationMs = Date.now() - __tfbotDecryptStartedAt;\n\t\t\t\tif (__tfbotDecryptDurationMs >= 250) logger.warn({ messageId: node?.attrs?.id || null, chatType: /@g\\.us$/i.test(String(node?.attrs?.from || '')) ? 'group' : 'private', decryptDurationMs: __tfbotDecryptDurationMs }, 'tfbot inbound message decryption duration');\n\t\t\t\tawait __tfbotWithInboundProcessingMutex(node, async () => {${callbackBody}\n\t\t\t\t});\n\t\t\t})`;
+        handleBody = handleBody.slice(0, callStart) + perChatProcessing + handleBody.slice(callCloseParen + 1);
+        source = source.slice(0, receiptStart) + receiptBody + notificationBody + handleBody + source.slice(endIndex);
+        const inboundLockCalls = source.split('__tfbotWithInboundProcessingMutex(node, async () => {').length - 1;
+        const perChatCalls = source.split('__tfbotWithInboundChatMutex(node, async () => {').length - 1;
+        const globalMutexCalls = source.split('processingMutex.mutex(async () => {').length - 1;
+        if (!source.includes(marker) || inboundLockCalls !== 3 || perChatCalls !== 1 || globalMutexCalls !== 1 || !source.includes('totalBeforeUpsertMs') || !source.includes('globalProcessingMutexWaitMs') || !source.includes('globalProcessingMutexHoldMs')) return { applied: false, reason: 'per_chat_decrypt_patch_verification_failed', file: path.basename(filePath), inboundLockCalls, perChatCalls, globalMutexCalls };
+        fs.writeFileSync(filePath, source, 'utf8');
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), perChatSignalDecryption: true, globalEventProcessingMutexPreserved: true, independentChatsCanDecryptConcurrently: true, receiptAndNotificationCriticalSectionsPreserved: true, selfChatAliasesShareInboundQueue: true, slowDecryptTiming: true, slowQueueTiming: true, slowGlobalMutexTiming: true };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
@@ -1137,6 +1258,7 @@ const baileysGroupLidPnDecryptPatchStatus = applyBaileysGroupLidPnDecryptRetryPa
 const baileysGroupRetrySkdmPatchStatus = applyBaileysGroupRetrySkdmPatch();
 const baileysSelfChatPlaceholderResendPatchStatus = applyBaileysSelfChatPlaceholderResendPnPatch();
 const baileysSignalTransactionPatchStatus = applyBaileysSignalTransactionPatch();
+const baileysPerChatInboundProcessingPatchStatus = applyBaileysPerChatInboundProcessingPatch();
 const baileysOutgoingRetryPreflightPatchStatus = applyBaileysOutgoingRetryPreflightPatch();
 const baileysRetryResendDoubleEncryptionPatchStatus = applyBaileysRetryResendDoubleEncryptionPatch();
 const baileysOwnLidRetryAddressingPatchStatus = applyBaileysOwnLidRetryAddressingPatch();
@@ -1152,7 +1274,8 @@ console.info('[baileys-outgoing-retry-preflight-patch]', { ...baileysOutgoingRet
 console.info('[baileys-retry-resend-double-encryption-patch]', { ...baileysRetryResendDoubleEncryptionPatchStatus, action: baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'avoid_duplicate_pairwise_encryption_on_retry_resend' : 'not_applicable_or_source_shape_not_matched' });
 console.info('[baileys-own-lid-retry-addressing-patch]', { ...baileysOwnLidRetryAddressingPatchStatus, action: baileysOwnLidRetryAddressingPatchStatus.applied ? 'recognize_own_lid_as_self_for_device_encryption' : 'not_applicable_or_source_shape_not_matched' });
 console.info('[baileys-pairing-code-protocol-patch]', baileysPairingCodeProtocolPatchStatus);
-console.info('[baileys-signal-transaction-patch]', { ...baileysSignalTransactionPatchStatus, action: baileysSignalTransactionPatchStatus.applied ? 'serialize_signal_crypto_methods_inside_session_store_transaction' : 'leave_installed_baileys_source_unchanged' });
+console.info('[baileys-signal-transaction-patch]', { ...baileysSignalTransactionPatchStatus, action: baileysSignalTransactionPatchStatus.applied ? 'serialize_signal_crypto_methods_by_signal_peer_or_group_inside_session_store_transaction' : 'leave_installed_baileys_source_unchanged' });
+console.info('[baileys-per-chat-inbound-processing-patch]', baileysPerChatInboundProcessingPatchStatus);
 enqueueTfbotDiagnosticRecord({ name: 'Bot (tfbot)', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION }) });
 
 const {
@@ -1181,7 +1304,7 @@ function getTfbotInstalledPackageVersion(packageName) {
     return null;
 }
 const TFBOT_BAILEYS_VERSION = getTfbotInstalledPackageVersion('@whiskeysockets/baileys');
-enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, baileysVersion: TFBOT_BAILEYS_VERSION, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, groupLidPnDecrypt: baileysGroupLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus, pairingCodeProtocol: baileysPairingCodeProtocolPatchStatus }) });
+enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, baileysVersion: TFBOT_BAILEYS_VERSION, perChatInboundProcessing: baileysPerChatInboundProcessingPatchStatus, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, groupLidPnDecrypt: baileysGroupLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus, pairingCodeProtocol: baileysPairingCodeProtocolPatchStatus }) });
 const { MongoClient } = require('mongodb');
 const { Writable } = require('stream');
 const zlib = require('zlib');
@@ -1330,7 +1453,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-02-r117';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-02-r120';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -4336,10 +4459,48 @@ function createDurableSignalKeyStore(store, logger = null) {
     const cacheTtlMs = 5 * 60 * 1000;
     const cacheMaxEntries = 30000;
     let cacheQueue = Promise.resolve();
+    let activeSignalTransactions = 0;
+    let waitingSignalStoreWriters = 0;
+    let signalStoreWriterActive = false;
+    const signalStoreLockWaiters = [];
     const transactionContext = new AsyncLocalStorage();
+    const waitForSignalStoreLockChange = () => new Promise(resolve => signalStoreLockWaiters.push(resolve));
+    const wakeSignalStoreLockWaiters = () => {
+        const waiters = signalStoreLockWaiters.splice(0);
+        for (const resolve of waiters) resolve();
+    };
+    const acquireSignalTransactionReadLock = async () => {
+        while (signalStoreWriterActive || waitingSignalStoreWriters > 0) await waitForSignalStoreLockChange();
+        activeSignalTransactions++;
+    };
+    const releaseSignalTransactionReadLock = () => {
+        activeSignalTransactions = Math.max(0, activeSignalTransactions - 1);
+        if (activeSignalTransactions === 0) wakeSignalStoreLockWaiters();
+    };
+    const acquireSignalStoreWriteLock = async () => {
+        waitingSignalStoreWriters++;
+        try {
+            while (signalStoreWriterActive || activeSignalTransactions > 0) await waitForSignalStoreLockChange();
+        } finally {
+            waitingSignalStoreWriters = Math.max(0, waitingSignalStoreWriters - 1);
+        }
+        signalStoreWriterActive = true;
+    };
+    const releaseSignalStoreWriteLock = () => {
+        signalStoreWriterActive = false;
+        wakeSignalStoreLockWaiters();
+    };
     const runExclusive = operation => {
         if (transactionContext.getStore() === true) return Promise.resolve().then(operation);
-        const result = cacheQueue.then(operation, operation);
+        const execute = async () => {
+            await acquireSignalStoreWriteLock();
+            try {
+                return await operation();
+            } finally {
+                releaseSignalStoreWriteLock();
+            }
+        };
+        const result = cacheQueue.then(execute, execute);
         cacheQueue = result.catch(() => {});
         return result;
     };
@@ -4427,11 +4588,22 @@ function createDurableSignalKeyStore(store, logger = null) {
             }
             logger?.trace?.({ categoryCount: Object.keys(normalized).length, keyCount: updates.length }, 'durable signal key store committed');
         }),
-        transaction: async (operation, transactionKey) => runExclusive(() => transactionContext.run(true, async () => {
+        transaction: async (operation, transactionKey) => {
             if (typeof operation !== 'function') throw new Error('signal_key_store_transaction_callback_required');
-            if (typeof store.transaction === 'function') return await store.transaction(operation, transactionKey);
-            return await operation();
-        })),
+            if (transactionContext.getStore() === true) {
+                if (typeof store.transaction === 'function') return await store.transaction(operation, transactionKey);
+                return await operation();
+            }
+            if (typeof store.transaction === 'function') {
+                await acquireSignalTransactionReadLock();
+                try {
+                    return await transactionContext.run(true, () => store.transaction(operation, transactionKey));
+                } finally {
+                    releaseSignalTransactionReadLock();
+                }
+            }
+            return await runExclusive(() => transactionContext.run(true, operation));
+        },
         clear: async () => runExclusive(async () => {
             cache.clear();
             if (typeof store.clear === 'function') await store.clear();
@@ -5008,6 +5180,7 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
     const migratedLegacyCategories = new Set();
     let authSocket = null;
     const authTransactionContext = new AsyncLocalStorage();
+    const authTransactionQueues = new Map();
     const setAuthSocket = socket => { authSocket = socket || null; };
     const queueAuthWrite = operation => {
         if (authTransactionContext.getStore() === sessionId) return Promise.resolve().then(operation);
@@ -5032,6 +5205,48 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
             authWriteActivityAt.set(sessionId, Date.now());
             authWriteFailures.set(sessionId, { at: Date.now(), message: String(error?.message || error).slice(0, 240) });
         });
+        return run;
+    };
+    const queueAuthTransaction = (transactionKey, operation) => {
+        if (authTransactionContext.getStore() === sessionId) return Promise.resolve().then(operation);
+        const normalizedTransactionKey = String(transactionKey || 'session-wide').trim().slice(0, 240) || 'session-wide';
+        const enqueuedAt = Date.now();
+        const previous = authTransactionQueues.get(normalizedTransactionKey) || Promise.resolve();
+        const run = previous.catch(() => {}).then(async () => {
+            const queueWaitMs = Date.now() - enqueuedAt;
+            if (pairingSessionsBeingExpired.has(sessionId)) throw new Error('pairing_challenge_expired');
+            const allowWorkerDrain = workerDrainingSessionIds.has(sessionId);
+            const liveSocket = authSocket || activeSessions.get(sessionId)?.sock || null;
+            const phone = getAuthenticatedPhoneNumber(liveSocket?.user || null, creds);
+            const lid = getAuthenticatedLid(liveSocket?.user || null, creds);
+            const ownershipStartedAt = Date.now();
+            if ((phone || lid) && !sessionHasAccountRuntimeLocks(sessionId, [phone, lid])) {
+                await ensureAccountRuntimeLockForIdentity(sessionId, liveSocket?.user || null, creds, { allowWorkerDrain });
+            } else {
+                await assertSessionRuntimeOwnership(sessionId, { allowAccountBootstrap: !phone && !lid, skipLiveAccountIdentityCheck: true, allowWorkerDrain });
+            }
+            const ownershipCheckMs = Date.now() - ownershipStartedAt;
+            const transactionStartedAt = Date.now();
+            try {
+                return await authTransactionContext.run(sessionId, async () => operation());
+            } finally {
+                const transactionDurationMs = Date.now() - transactionStartedAt;
+                if (queueWaitMs >= 250 || ownershipCheckMs >= 350 || transactionDurationMs >= 500) {
+                    console.warn('[signal-transaction-latency]', {
+                        sessionId,
+                        transactionKeyHash: shortLogHash(normalizedTransactionKey),
+                        queueWaitMs,
+                        ownershipCheckMs,
+                        transactionDurationMs,
+                        transactionMode: 'per-signal-peer-or-group'
+                    });
+                }
+            }
+        });
+        authTransactionQueues.set(normalizedTransactionKey, run);
+        run.finally(() => {
+            if (authTransactionQueues.get(normalizedTransactionKey) === run) authTransactionQueues.delete(normalizedTransactionKey);
+        }).catch(() => {});
         return run;
     };
     const flushAuthWrites = () => flushAuthWritesForSession(sessionId);
@@ -5147,10 +5362,10 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
             }
             await runBulkWriteWithFallback(operations, 'signal-keys');
         }),
-        transaction: (operation, transactionKey) => queueAuthWrite(() => authTransactionContext.run(sessionId, async () => {
-            if (typeof operation !== 'function') throw new Error('signal_auth_store_transaction_callback_required');
-            return await operation();
-        }))
+        transaction: (operation, transactionKey) => {
+            if (typeof operation !== 'function') return Promise.reject(new Error('signal_auth_store_transaction_callback_required'));
+            return queueAuthTransaction(transactionKey, operation);
+        }
     };
     const saveCreds = async () => {
         const retryDelays = [0, 350, 900, 1800];
@@ -9077,7 +9292,7 @@ for (const localSession of activeSessions.values()) {
 }
 
 app.get('/list', (req, res) => {
-    res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').type('html').send(`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>TFBot Sessions</title><style>html,body{margin:0;width:100%;height:100%;background:#000;color:#fff}#output{box-sizing:border-box;width:100%;height:100%;height:100svh;margin:0;padding:12px;overflow:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:13px/1.25 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}#state{color:#999;padding:12px 12px 0;font:12px system-ui,sans-serif}</style></head><body><div id="state">Chargement des sessions WhatsApp…</div><pre id="output">Connexion au flux en direct…</pre><script>const output=document.getElementById('output');const state=document.getElementById('state');let source;function render(data){output.textContent=JSON.stringify(data,null,1);state.textContent='En direct · '+new Date().toLocaleTimeString();}function connect(){source=new EventSource('/list/events');source.addEventListener('snapshot',event=>{try{render(JSON.parse(event.data));}catch(error){state.textContent='Données de session invalides';}});source.addEventListener('error',()=>{if(source.readyState===EventSource.CLOSED)state.textContent='Flux interrompu · reconnexion automatique…';});}connect();</script></body></html>`);
+    res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').type('html').send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;min-height:100%;background:#000;color:#fff}body{width:100%;height:100dvh;min-height:100svh;overflow:hidden}#loader{position:fixed;inset:0;display:grid;place-items:center;background:#000}#loader svg{width:52px;height:52px;animation:tfbot-spin .85s linear infinite}#loader circle{fill:none;stroke:#fff;stroke-width:4;stroke-linecap:round;stroke-dasharray:92 160}#output{display:block;width:100%;height:100dvh;min-height:100svh;margin:0;padding:calc(env(safe-area-inset-top) + 12px) calc(env(safe-area-inset-right) + 12px) calc(env(safe-area-inset-bottom) + 12px) calc(env(safe-area-inset-left) + 12px);overflow:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:clamp(12px,2.9vw,15px)/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}#output[hidden],#loader[hidden]{display:none}@keyframes tfbot-spin{to{transform:rotate(360deg)}}</style></head><body><div id="loader" aria-hidden="true"><svg viewBox="0 0 48 48" role="presentation"><circle cx="24" cy="24" r="19"></circle></svg></div><pre id="output" hidden></pre><script>const loader=document.getElementById('loader');const output=document.getElementById('output');let hasSnapshot=false;const stream=new EventSource('/list/events');stream.addEventListener('snapshot',event=>{try{const data=JSON.parse(event.data);output.textContent=JSON.stringify(data,null,2);if(!hasSnapshot){hasSnapshot=true;loader.hidden=true;output.hidden=false;}}catch(error){}});</script></body></html>`);
 });
 
 const sessionListStreamClients = new Set();
@@ -9178,10 +9393,14 @@ app.get('/list/events', async (req, res) => {
     };
     res.once('close', closeClient);
     req.once('aborted', closeClient);
-    await ensureSessionListChangeStream();
     if (!client.closed) {
         const snapshot = await buildSessionListSnapshot();
         writeSessionListStreamSnapshot(client, snapshot);
+    }
+    if (!client.closed) {
+        void ensureSessionListChangeStream().then(stream => {
+            if (stream && !client.closed) scheduleSessionListBroadcast('initial_change_stream_ready');
+        }).catch(error => console.warn('[sessions-list-change-stream-start-failed]', error?.message || String(error)));
     }
 });
 
@@ -12143,6 +12362,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
             for (const m of rawBatch) {
                 try {
+                const messageUpsertHandlerStartedAt = Date.now();
                 const activeMessageSession = activeSessions.get(sessionId);
                 const activeMessageCredentials = activeMessageSession?.authState?.creds;
                 const activeMessageIdentity = getAuthenticatedPhoneNumber(sock.user, activeMessageCredentials) || getAuthenticatedLid(sock.user, activeMessageCredentials);
@@ -12189,6 +12409,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const receivedId = String(m?.key?.id || 'missing-id');
                 const receivedIsGroup = receivedChat.endsWith('@g.us');
                 const receivedIsChannel = receivedChat.endsWith('@newsletter');
+                const receivedTimestampSeconds = Number(m?.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m?.messageTimestamp) || 0;
+                const receivedMessageAgeMs = receivedTimestampSeconds > 0 ? Date.now() - receivedTimestampSeconds * 1000 : null;
+                const receivedUpsertProcessingMs = Date.now() - messageUpsertHandlerStartedAt;
                 const receivedExplicitParsedCommand = String(receivedBody || '').trim()
                     ? parseIncomingCommand(receivedBody, globalLang, getCommandParsingContext(m?.message))
                     : null;
@@ -12272,7 +12495,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     messageClassification: receivedClassification,
                     detectedCommand: receivedParsedCommand?.command || null,
                     detectedInternalCommand: receivedParsedCommand?.internalCommand || null,
-                    timestamp: Number(m?.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m?.messageTimestamp) || null
+                    timestamp: receivedTimestampSeconds || null,
+                    messageAgeMsAtUpsert: receivedMessageAgeMs,
+                    upsertHandlerProcessingMs: receivedUpsertProcessingMs
                 };
                 console.info('[message-received]', receivedDiagnostic);
                 console.info('[message-content-received]', {
@@ -12337,6 +12562,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         internalCommand: receivedParsedCommand.internalCommand,
                         argumentPreview: String(receivedParsedCommand.args || '').slice(0, 1000),
                         stage: 'before_deduplication_policy_and_execution',
+                        messageAgeMsAtDetection: receivedMessageAgeMs,
+                        upsertHandlerToDetectionMs: Date.now() - messageUpsertHandlerStartedAt,
                         aiDispatchRequiresExplicitCommandPrefix: true,
                         action: 'recognized_not_yet_authorized_or_executed'
                     });
@@ -12423,7 +12650,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 processedLocalCache.add(msgCacheKey);
                 let commandTypingPreflight = null;
                 if (receivedParsedCommand) {
-                    console.info('[command-typing-preflight]', { sessionId, messageId: msgId, chatJid: receivedChat, chatType: receivedIsGroup ? 'group' : receivedIsChannel ? 'channel' : 'private', command: receivedParsedCommand.command || null, action: 'start_composing_before_database_claim_and_profile_lookup' });
+                    console.info('[command-typing-preflight]', { sessionId, messageId: msgId, chatJid: receivedChat, chatType: receivedIsGroup ? 'group' : receivedIsChannel ? 'channel' : 'private', command: receivedParsedCommand.command || null, messageAgeMsAtDetection: receivedMessageAgeMs, upsertHandlerToTypingMs: Date.now() - messageUpsertHandlerStartedAt, action: 'start_composing_before_database_claim_and_profile_lookup' });
                     commandTypingPreflight = sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', receivedChat, msgId).catch(() => false);
                 }
                 console.info('[message-pre-dispatch-checks-passed]', {
@@ -13138,7 +13365,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const command = parsedCommand.command;
                         const args = parsedCommand.args;
                         const internalCommand = parsedCommand.internalCommand;
-                        console.info('[command-dispatch-ready]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, senderName: sName, senderJid: sender, chatJid: from, rawChatJid: rawFrom, command, internalCommand, messageLang, isPublicMode, isOwnerReal, globalOwnerIdentitySource: globalOwnerIdentitySource || null, mode: botMode, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid' });
+                        console.info('[command-dispatch-ready]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, senderName: sName, senderJid: sender, chatJid: from, rawChatJid: rawFrom, command, internalCommand, messageLang, isPublicMode, isOwnerReal, globalOwnerIdentitySource: globalOwnerIdentitySource || null, mode: botMode, messageAgeMsAtDetection: receivedMessageAgeMs, upsertHandlerToDispatchMs: Date.now() - messageUpsertHandlerStartedAt, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid' });
                         console.info('[command-detected]', { sessionId, upsertType, messageId: msgId, senderName: sName, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: from, senderJid: sender, senderAliases: senderJids, messageType, messageClassification: 'recognized_command', command, internalCommand, argumentPreview: String(args || '').replace(/[\r\n\t]+/g, ' ').slice(0, 1000), isGroup, isPublicMode, isOwnerReal, mode: botMode, action: 'command_handler_started' });
 
                         await (async () => {
@@ -13152,8 +13379,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     finally { typingUpdateInFlight = false; }
                                 }, 8000);
 
-                                const preflightTypingSent = commandTypingPreflight ? await commandTypingPreflight : false;
-                                if (!preflightTypingSent) await sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', from, msgId);
+                                if (!commandTypingPreflight) void sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', from, msgId);
 
                                 const messageContentForContext = unwrapMessageContent(m.message);
                                 const quoted = getMessageContextInfo(m.message);
@@ -14317,7 +14543,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 const commandStartedAt = Date.now();
                                 try {
                                     await commandExecute();
-                                    console.info('[command-completed]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, senderName: sName, senderJid: sender, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid', command: internalCommand, durationMs: Date.now() - commandStartedAt, action: terminalResponseSent || responseSentForLog ? 'command_completed_response_sent' : 'command_completed_without_confirmed_response', responseSent: !!(terminalResponseSent || responseSentForLog) });
+                                    console.info('[command-completed]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, senderName: sName, senderJid: sender, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid', command: internalCommand, durationMs: Date.now() - commandStartedAt, messageAgeMsAtCompletion: receivedMessageAgeMs === null ? null : Date.now() - receivedTimestampSeconds * 1000, upsertHandlerToCompletionMs: Date.now() - messageUpsertHandlerStartedAt, action: terminalResponseSent || responseSentForLog ? 'command_completed_response_sent' : 'command_completed_without_confirmed_response', responseSent: !!(terminalResponseSent || responseSentForLog) });
                                 } catch (e) {
                                     console.error('[command-failed]', { sessionId, messageId: msgId, senderName: sName, senderJid: sender, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: from, command: internalCommand, durationMs: Date.now() - commandStartedAt, action: 'command_handler_failed', error: e?.message || String(e) });
                                     await safeSendActionError(sock, from, getCommandActionTitle(t, internalCommand), e, messageLang, pushName, m.messageTimestamp);
@@ -15194,8 +15420,10 @@ async function main() {
         signalSessionRecordStorage: 'structured-object-with-_sessions-and-version',
         signalBinaryKeyCategories: ['sender-key', 'identity-key'],
         signalSessionRecordValidation: 'accept-serialized-session-record-object',
-        signalKeyStoreTransaction: 'per-session-reentrant-serialized-transaction-around-whole-signal-operation',
-        signalCryptoOperations: 'decrypt-encrypt-pairwise-and-group-methods-wrapped-in-session-transaction',
+        signalKeyStoreTransaction: 'per-peer-or-group-reentrant-serialized-transaction-with-session-fencing',
+        signalCryptoOperations: 'decrypt-encrypt-pairwise-and-group-methods-wrapped-in-keyed-transaction',
+        inboundMessageProcessing: 'per-chat-ordered-processing-independent-chats-concurrent',
+        inboundMessageLatencyDiagnostics: 'chat-queue-decrypt-and-pre-upsert-duration',
         invalidSignalSessionRecordHandling: 'preserve-invalid-record-and-skip-unusable-value',
         del3UnknownMessageFormats: 'classified_by_exact_whatsapp_message_key',
         lockLeaseMs: SESSION_RUNTIME_LOCK_LEASE_MS,
@@ -15222,7 +15450,7 @@ async function main() {
             tfbotWorkerActive = false;
             tfbotWorkerState = 'coordinator';
             await connectMongo({ coordinatorOnly: true });
-            console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, baileysGroupLidPnDecryptPatch: baileysGroupLidPnDecryptPatchStatus, baileysSignalTransactionPatch: baileysSignalTransactionPatchStatus, baileysOutgoingRetryPreflightPatch: baileysOutgoingRetryPreflightPatchStatus, baileysRetryResendDoubleEncryptionPatch: baileysRetryResendDoubleEncryptionPatchStatus, baileysOwnLidRetryAddressingPatch: baileysOwnLidRetryAddressingPatchStatus, baileysCompanionRegRefreshPatch: baileysCompanionRegRefreshPatchStatus, baileysPairingCodeProtocolPatch: baileysPairingCodeProtocolPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, port: PORT });
+            console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, baileysGroupLidPnDecryptPatch: baileysGroupLidPnDecryptPatchStatus, baileysSignalTransactionPatch: baileysSignalTransactionPatchStatus, baileysPerChatInboundProcessingPatch: baileysPerChatInboundProcessingPatchStatus, baileysOutgoingRetryPreflightPatch: baileysOutgoingRetryPreflightPatchStatus, baileysRetryResendDoubleEncryptionPatch: baileysRetryResendDoubleEncryptionPatchStatus, baileysOwnLidRetryAddressingPatch: baileysOwnLidRetryAddressingPatchStatus, baileysCompanionRegRefreshPatch: baileysCompanionRegRefreshPatchStatus, baileysPairingCodeProtocolPatch: baileysPairingCodeProtocolPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, port: PORT });
             httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
             const savedSelection = await db.collection('cluster_router').findOne({ _id: TFBOT_ROUTER_STATE_ID }).catch(() => null);
             const savedDomain = TFBOT_ROUTER_DOMAIN_BY_HOST.get(normalizeTfbotHost(savedSelection?.activeHost || ''));
