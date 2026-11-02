@@ -3,8 +3,8 @@ const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(pr
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 7000)));
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r108-r107-native-lid-private-routing';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-02-r108')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+const TFBOT_CLUSTER_CODE_REVISION = 'r109-session-isolated-incoming-lid-full-diagnostics';
+const TFBOT_CODE_RELEASE_ID = `TFBOT-2026-11-02:${(String(process.env.RENDER_GIT_COMMIT || '').trim() || 'local').slice(0, 12)}:${TFBOT_CLUSTER_CODE_REVISION}`;
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
@@ -71,10 +71,9 @@ const fs = require('fs');
 const path = require('path');
 const EventEmitter = require('events');
 const { AsyncLocalStorage } = require('async_hooks');
-const TFBOT_DIAGNOSTIC_PHONE = String(process.env.TFBOT_DIAGNOSTIC_PHONE || '18298617960').replace(/\D/g, '');
-const TFBOT_DIAGNOSTIC_SESSION_ID = String(process.env.TFBOT_DIAGNOSTIC_SESSION_ID || '').trim();
 const TFBOT_DIAGNOSTIC_LOG_PATH = path.join(__dirname, 'logs.txt');
-const TFBOT_DIAGNOSTIC_LOG_MAX_BYTES = Math.max(1048576, Math.min(16777216, Number(process.env.TFBOT_DIAGNOSTIC_LOG_MAX_BYTES || 8388608)));
+const TFBOT_DIAGNOSTIC_LOG_MAX_BYTES = Math.max(1048576, Math.min(33554432, Number(process.env.TFBOT_DIAGNOSTIC_LOG_MAX_BYTES || 16777216)));
+const TFBOT_DIAGNOSTIC_QUEUE_MAX_ENTRIES = Math.max(2000, Math.min(50000, Number(process.env.TFBOT_DIAGNOSTIC_QUEUE_MAX_ENTRIES || 20000)));
 const tfbotOriginalConsole = { log: console.log.bind(console), info: console.info.bind(console), warn: console.warn.bind(console), error: console.error.bind(console), debug: console.debug.bind(console) };
 const tfbotDiagnosticSerialize = value => {
     try { return JSON.stringify(value, (key, item) => {
@@ -90,12 +89,10 @@ const tfbotDiagnosticQueue = [];
 let tfbotDiagnosticWriterRunning = false;
 let tfbotDiagnosticDroppedEntries = 0;
 let tfbotDiagnosticSanitizeReady = Promise.resolve();
-let tfbotDiagnosticTargetCacheAt = 0;
-let tfbotDiagnosticTargetCache = null;
 function enqueueTfbotDiagnosticRecord(record) {
     try {
-        if (tfbotDiagnosticQueue.length >= 4000) {
-            const removeCount = tfbotDiagnosticQueue.length - 3000;
+        if (tfbotDiagnosticQueue.length >= TFBOT_DIAGNOSTIC_QUEUE_MAX_ENTRIES) {
+            const removeCount = tfbotDiagnosticQueue.length - Math.floor(TFBOT_DIAGNOSTIC_QUEUE_MAX_ENTRIES * 0.75);
             tfbotDiagnosticQueue.splice(0, removeCount);
             tfbotDiagnosticDroppedEntries += removeCount;
         }
@@ -137,40 +134,6 @@ async function flushTfbotDiagnosticQueue() {
         }
     }
 }
-function getTfbotDiagnosticSession() {
-    const now = Date.now();
-    if (now - tfbotDiagnosticTargetCacheAt < 750) return tfbotDiagnosticTargetCache;
-    try {
-        const preferredRuntime = TFBOT_DIAGNOSTIC_SESSION_ID ? activeSessions.get(TFBOT_DIAGNOSTIC_SESSION_ID) : null;
-        if (preferredRuntime) {
-            tfbotDiagnosticTargetCache = { sessionId: TFBOT_DIAGNOSTIC_SESSION_ID, name: String(preferredRuntime?.sock?.user?.name || preferredRuntime?.sock?.user?.notify || preferredRuntime?.ownerName || 'Adam').slice(0, 80), phone: TFBOT_DIAGNOSTIC_PHONE };
-            tfbotDiagnosticTargetCacheAt = now;
-            return tfbotDiagnosticTargetCache;
-        }
-        const matches = [...activeSessions.entries()].filter(([sessionId, runtime]) => {
-            const credentials = runtime?.authState?.creds || null;
-            const phone = normalizePhoneNumber(getAuthenticatedPhoneNumber(runtime?.sock?.user || null, credentials) || runtime?.number || runtime?.sock?.user?.phoneNumber || '');
-            return !!TFBOT_DIAGNOSTIC_PHONE && phone === TFBOT_DIAGNOSTIC_PHONE;
-        }).sort((a, b) => {
-            const aConnected = ['connecte', 'connected'].includes(String(a[1]?.status || '').toLowerCase()) ? 1 : 0;
-            const bConnected = ['connecte', 'connected'].includes(String(b[1]?.status || '').toLowerCase()) ? 1 : 0;
-            return bConnected - aConnected || Number(b[1]?.connectedAt || b[1]?.readyAt || b[1]?.lastMessageAt || 0) - Number(a[1]?.connectedAt || a[1]?.readyAt || a[1]?.lastMessageAt || 0);
-        });
-        if (!matches.length) {
-            tfbotDiagnosticTargetCache = null;
-            tfbotDiagnosticTargetCacheAt = now;
-            return null;
-        }
-        const [sessionId, runtime] = matches[0];
-        tfbotDiagnosticTargetCache = { sessionId, name: String(runtime?.sock?.user?.name || runtime?.sock?.user?.notify || runtime?.ownerName || 'Adam').slice(0, 80), phone: TFBOT_DIAGNOSTIC_PHONE };
-        tfbotDiagnosticTargetCacheAt = now;
-        return tfbotDiagnosticTargetCache;
-    } catch (error) {
-        tfbotDiagnosticTargetCache = null;
-        tfbotDiagnosticTargetCacheAt = 0;
-        return null;
-    }
-}
 function sanitizeTfbotDiagnosticLog(value, sessionId) {
     let output = String(value || '');
     if (sessionId) output = output.split(sessionId).join('[selected-session]');
@@ -182,7 +145,7 @@ function sanitizeTfbotDiagnosticLog(value, sessionId) {
     output = output.replace(/\b(\d{7,20}(?::\d+)?)(@s\.whatsapp\.net|@lid|@hosted)\b/gi, (_, id, suffix) => `[jid:${shortLogHash(id)}]${suffix}`);
     output = output.replace(/\b(\d{8,22}-\d{4,22})(@g\.us)\b/gi, (_, id, suffix) => `[group:${shortLogHash(id)}]${suffix}`);
     output = output.replace(/\bsession_\d+_[a-z0-9]+\b/gi, '[session]');
-    output = output.replace(/\b\d{8,15}\b/g, number => number === TFBOT_DIAGNOSTIC_PHONE ? `[phone:${number.slice(-2).padStart(number.length, '*')}]` : `[number:${shortLogHash(number)}]`);
+    output = output.replace(/\b\d{8,15}\b/g, number => `[number:${shortLogHash(number)}]`);
     return output.slice(0, 12000);
 }
 async function sanitizeExistingTfbotPublicLogFile() {
@@ -208,20 +171,25 @@ for (const level of Object.keys(tfbotOriginalConsole)) {
     console[level] = (...args) => {
         try {
             const serialized = args.map(value => typeof value === 'string' ? value : tfbotDiagnosticSerialize(value)).join(' ');
-            const target = getTfbotDiagnosticSession();
-            const targetLog = !!target && (serialized.includes(target.sessionId) || !!target.phone && serialized.includes(target.phone));
-            if (targetLog) {
-                const record = { name: target.name, sessionId: shortLogHash(target.sessionId), date: new Date().toISOString(), level: level.toUpperCase(), event: sanitizeTfbotDiagnosticLog(String(args.find(value => typeof value === 'string') || 'runtime'), target.sessionId).slice(0, 180), content: sanitizeTfbotDiagnosticLog(serialized, target.sessionId) };
-                enqueueTfbotDiagnosticRecord(record);
-            }
+            const sessionMatch = serialized.match(/["']sessionId["']\s*:\s*["']([^"']{1,180})["']/i);
+            const rawSessionId = sessionMatch && sessionMatch[1] !== '[selected-session]' ? sessionMatch[1] : '';
+            const record = {
+                name: 'TFBOT',
+                sessionId: rawSessionId ? shortLogHash(rawSessionId) : null,
+                date: new Date().toISOString(),
+                level: level.toUpperCase(),
+                event: sanitizeTfbotDiagnosticLog(String(args.find(value => typeof value === 'string') || 'runtime'), rawSessionId).slice(0, 180),
+                content: sanitizeTfbotDiagnosticLog(serialized, rawSessionId)
+            };
+            enqueueTfbotDiagnosticRecord(record);
         } catch (error) {}
         tfbotOriginalConsole[level](...args);
     };
 }
-enqueueTfbotDiagnosticRecord({ name: 'Adam', sessionId: TFBOT_DIAGNOSTIC_SESSION_ID ? shortLogHash(TFBOT_DIAGNOSTIC_SESSION_ID) : null, date: new Date().toISOString(), level: 'INFO', event: 'diagnostic-log-start', content: 'Journal public de diagnostic démarré; les identifiants, codes et contenus privés sont masqués. Écriture asynchrone pour ne pas ralentir les envois ni les connexions.' });
+enqueueTfbotDiagnosticRecord({ name: 'TFBOT', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'diagnostic-log-start', content: 'Journal de diagnostic multi-sessions démarré. Les événements de toutes les sessions sont enregistrés; numéros, identifiants directs, textes privés, codes, jetons et éléments cryptographiques sont masqués.' });
 
 function applyBaileysLidPnDecryptRetryPatch() {
-    const marker = '__tfbotSelfChatPnDecryptFallbackV107';
+    const marker = '__tfbotPrivateLidPnDecryptFallbackV109';
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
@@ -230,7 +198,7 @@ function applyBaileysLidPnDecryptRetryPatch() {
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
         if (!filePath) return { applied: false, reason: 'decrypt_module_not_found' };
         let source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), selfChatOnly: true, preservesOriginalLidFallback: true, noAutomaticSessionMigration: true };
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), privateLidAndSelfChat: true, triesTrustedPnAliasesBeforeOriginalLid: true, preservesOriginalDecryptError: true };
         const callPattern = /((?:(?:const|let|var)\s+)?[A-Za-z_$][\w$]*\s*=\s*)await\s+repository\.decryptMessage\s*\(\s*\{\s*jid\s*:\s*([^,\n]+?)\s*,\s*type\s*:\s*e2eType\s*,\s*ciphertext\s*:\s*content\s*\}\s*\)\s*;?/g;
         const matches = [...source.matchAll(callPattern)];
         if (matches.length !== 1) return { applied: false, reason: `expected_one_signal_decrypt_call_found_${matches.length}`, file: path.basename(filePath) };
@@ -241,9 +209,11 @@ function applyBaileysLidPnDecryptRetryPatch() {
     const ${marker} = true;
     const __tfbotPrimaryJid = String(${originalJidExpression} || '').trim();
     const __tfbotRemoteJid = String(fullMessage?.key?.remoteJid || '').trim();
-    const __tfbotIsSelfLidChat = fullMessage?.key?.fromMe === true && /@(?:hosted\\.)?lid$/i.test(__tfbotRemoteJid) && !/@(?:g\\.us|newsletter|broadcast)$/i.test(__tfbotRemoteJid);
+    const __tfbotIsPrivateLidChat = /@(?:hosted\\.)?lid$/i.test(__tfbotRemoteJid) && !/@(?:g\\.us|newsletter|broadcast)$/i.test(__tfbotRemoteJid);
+    const __tfbotIsSelfLidChat = fullMessage?.key?.fromMe === true && __tfbotIsPrivateLidChat;
+    const __tfbotIsIncomingPrivateLidChat = fullMessage?.key?.fromMe !== true && __tfbotIsPrivateLidChat;
     const __tfbotNormalizeJid = value => String(value || '').trim().replace(/:\\d+(?=@(?:hosted\\.)?lid$)/i, '').replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
-    const __tfbotPnCandidates = __tfbotIsSelfLidChat ? [
+    const __tfbotSelfChatPnCandidates = __tfbotIsSelfLidChat ? [
         fullMessage?.key?.remoteJidAlt,
         fullMessage?.key?.participantPn,
         fullMessage?.key?.senderPn,
@@ -251,23 +221,31 @@ function applyBaileysLidPnDecryptRetryPatch() {
         stanza?.attrs?.recipient_pn,
         stanza?.attrs?.participant_pn,
         stanza?.attrs?.sender_pn
-    ].map(__tfbotNormalizeJid).filter(value => /^\\d{6,20}@s\\.whatsapp\\.net$/i.test(value)) : [];
+    ] : [];
+    const __tfbotIncomingPnCandidates = __tfbotIsIncomingPrivateLidChat ? [
+        fullMessage?.key?.remoteJidAlt,
+        fullMessage?.key?.senderPn,
+        fullMessage?.key?.participantPn,
+        stanza?.attrs?.sender_pn,
+        stanza?.attrs?.participant_pn
+    ] : [];
+    const __tfbotPnCandidates = [...new Set([...__tfbotSelfChatPnCandidates, ...__tfbotIncomingPnCandidates].map(__tfbotNormalizeJid).filter(value => /^\\d{6,20}@s\\.whatsapp\\.net$/i.test(value)))];
     const __tfbotPrimaryIsLid = /@(?:hosted\\.)?lid$/i.test(__tfbotPrimaryJid);
     const __tfbotCandidates = [...new Set(__tfbotPrimaryIsLid ? [...__tfbotPnCandidates, __tfbotPrimaryJid, __tfbotRemoteJid] : [__tfbotPrimaryJid, ...__tfbotPnCandidates])].filter(Boolean);
     let __tfbotOriginalDecryptError;
     for (const __tfbotCandidateJid of __tfbotCandidates) {
         try {
             const __tfbotDecrypted = await repository.decryptMessage({ jid: __tfbotCandidateJid, type: e2eType, ciphertext: content });
-            if (__tfbotIsSelfLidChat && /^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotCandidateJid)) {
+            if (__tfbotIsPrivateLidChat && /^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotCandidateJid)) {
                 const __tfbotLid = /@(?:hosted\\.)?lid$/i.test(__tfbotPrimaryJid) ? __tfbotNormalizeJid(__tfbotPrimaryJid) : __tfbotNormalizeJid(__tfbotRemoteJid);
                 if (/@(?:hosted\\.)?lid$/i.test(__tfbotLid)) {
                     try {
                         await repository?.lidMapping?.storeLIDPNMappings?.([{ lid: __tfbotLid, pn: __tfbotCandidateJid }]);
                     } catch (mappingError) {
-                        logger?.warn?.({ err: mappingError }, 'self-chat LID/PN mapping persistence skipped after successful alternate decrypt');
+                        logger?.warn?.({ err: mappingError }, 'private LID/PN mapping persistence skipped after successful alternate decrypt');
                     }
                 }
-                logger?.debug?.({ remoteJid: __tfbotRemoteJid, primaryJid: __tfbotPrimaryJid, decryptJid: __tfbotCandidateJid }, 'self-chat PN decrypt fallback succeeded');
+                logger?.debug?.({ remoteJid: __tfbotRemoteJid, primaryJid: __tfbotPrimaryJid, decryptJid: __tfbotCandidateJid, direction: __tfbotIsSelfLidChat ? 'self_chat' : 'incoming_private' }, 'private LID PN decrypt fallback succeeded');
             }
             return __tfbotDecrypted;
         } catch (decryptError) {
@@ -277,13 +255,15 @@ function applyBaileysLidPnDecryptRetryPatch() {
     throw __tfbotOriginalDecryptError || new Error('Signal decryption failed without a usable JID candidate');
 })();`;
         const patchedSource = source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
-        if (!patchedSource.includes(marker) || !patchedSource.includes('peer_recipient_pn') || !patchedSource.includes('storeLIDPNMappings') || patchedSource.includes('migrateSession(__tfbotCandidateJid')) return { applied: false, reason: 'self_chat_decrypt_patch_verification_failed', file: path.basename(filePath) };
+        if (!patchedSource.includes(marker) || !patchedSource.includes('stanza?.attrs?.sender_pn') || !patchedSource.includes('storeLIDPNMappings') || patchedSource.includes('migrateSession(__tfbotCandidateJid')) return { applied: false, reason: 'private_lid_decrypt_patch_verification_failed', file: path.basename(filePath) };
         fs.writeFileSync(filePath, patchedSource, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), selfChatOnly: true, triesTrustedPnAliasesBeforeOriginalLid: true, preservesOriginalDecryptError: true, storesMappingOnlyAfterSuccessfulPnDecrypt: true, noAutomaticSessionMigration: true };
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), privateLidAndSelfChat: true, triesTrustedPnAliasesBeforeOriginalLid: true, incomingUsesSenderPnOnly: true, mappingStoredOnlyAfterSuccessfulPnDecrypt: true, preservesOriginalDecryptError: true, noAutomaticSessionMigration: true };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
 }
+
+
 function findTfbotMatchingBraceEnd(source, openIndex) {
     let depth = 0;
     let quote = '';
@@ -559,7 +539,7 @@ function applyBaileysRetryResendDoubleEncryptionPatch() {
     }
 }
 function applyBaileysOwnLidRetryAddressingPatch() {
-    const marker = '__tfbotOwnLidRetryIdentityResolvedV107';
+    const marker = '__tfbotOwnLidRetryRecipientAndEncodingV109';
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
@@ -568,33 +548,54 @@ function applyBaileysOwnLidRetryAddressingPatch() {
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
         if (!filePath) return { applied: false, reason: 'messages_send_module_not_found', issue: 'Baileys#2856' };
         let source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), issue: 'Baileys#2856', ownLidIdentityCheck: true, preservesParticipantAddress: true };
-        const expressionPattern = /const\s+isMe\s*=\s*areJidsSameUser\s*\(\s*participant(?:!|\?)?\.jid\s*,\s*isParticipantLid\s*\?\s*meLid\s*:\s*meId\s*\)\s*;?/;
-        const matches = [...source.matchAll(new RegExp(expressionPattern.source, 'g'))];
-        if (matches.length !== 1) return { applied: false, reason: `expected_one_retry_own_identity_expression_found_${matches.length}`, file: path.basename(filePath), issue: 'Baileys#2856' };
-        const match = matches[0];
-        const replacement = `const __tfbotRetryParticipantJid = String(participant?.jid || '').trim();
-let __tfbotRetryParticipantPn = '';
-if (isParticipantLid && signalRepository?.lidMapping?.getPNForLID) {
-    try {
-        const __tfbotNormalizedRetryLid = __tfbotRetryParticipantJid.replace(/:\\d+(?=@(?:hosted\\.)?lid$)/i, '');
-        __tfbotRetryParticipantPn = String(await signalRepository.lidMapping.getPNForLID(__tfbotNormalizedRetryLid) || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
-    } catch (error) {}
-}
-const __tfbotRetryOwnLidMatch = isParticipantLid && ((Boolean(meLid) && areJidsSameUser(__tfbotRetryParticipantJid, meLid)) || (Boolean(__tfbotRetryParticipantPn) && areJidsSameUser(__tfbotRetryParticipantPn, meId)));
-const __tfbotRetryOwnPnMatch = !isParticipantLid && areJidsSameUser(__tfbotRetryParticipantJid, meId);
-const isMe = Boolean(__tfbotRetryOwnLidMatch || __tfbotRetryOwnPnMatch);
-const ${marker} = true;`;
-        source = source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
-        if (!source.includes(marker) || !source.includes('getPNForLID') || !source.includes('const isMe = Boolean(__tfbotRetryOwnLidMatch || __tfbotRetryOwnPnMatch)')) return { applied: false, reason: 'own_lid_identity_patch_verification_failed', file: path.basename(filePath), issue: 'Baileys#2856' };
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), issue: 'Baileys#2856', ownLidDeviceDetection: true, retryRecipientChatAddress: true, deviceSentMessageIdentity: true };
+        const retryAnchorPattern = /const\s+isRetryResend\s*=\s*(?:Boolean\(\s*participant(?:!|\?)?\.jid\s*\)|!!\s*participant(?:!|\?)?\.jid)\s*;?/;
+        const retryAnchor = retryAnchorPattern.exec(source);
+        if (!retryAnchor) {
+            const nearby = source.match(/.{0,120}isRetryResend.{0,220}/s)?.[0] || '';
+            return { applied: false, reason: 'retry_resend_anchor_not_found', file: path.basename(filePath), issue: 'Baileys#2856', sourceHint: nearby.slice(0, 300) };
+        }
+        const helper = `\nconst __tfbotIsOwnRetryDeviceV109 = (jid, ownPn, ownLid) => {\n    const parse = value => {\n        const text = String(value || '').trim();\n        const at = text.lastIndexOf('@');\n        if (at < 1) return null;\n        const server = text.slice(at + 1).toLowerCase();\n        const user = text.slice(0, at).replace(/:\\d+$/, '');\n        const kind = /^(?:hosted\\.)?lid$/.test(server) ? 'lid' : server === 's.whatsapp.net' ? 'pn' : '';\n        return kind && user ? { user, kind } : null;\n    };\n    const candidate = parse(jid);\n    const identity = parse(candidate?.kind === 'lid' ? ownLid : ownPn);\n    return Boolean(candidate && identity && candidate.kind === identity.kind && candidate.user === identity.user);\n};\nconst ${marker} = true;`;
+        source = source.slice(0, retryAnchor.index + retryAnchor[0].length) + helper + source.slice(retryAnchor.index + retryAnchor[0].length);
+        const ownEncodingPattern = /const\s+isMe\s*=\s*areJidsSameUser\s*\(\s*participant(?:!|\?)?\.jid\s*,\s*(?:isParticipantLid\s*\?\s*meLid\s*:\s*meId|meId)\s*\)\s*;?/g;
+        const ownEncodingMatches = [...source.matchAll(ownEncodingPattern)];
+        if (ownEncodingMatches.length > 1) return { applied: false, reason: `multiple_own_device_encoding_checks_${ownEncodingMatches.length}`, file: path.basename(filePath), issue: 'Baileys#2856' };
+        let encodingPatched = false;
+        if (ownEncodingMatches.length === 1) {
+            const match = ownEncodingMatches[0];
+            source = source.slice(0, match.index) + 'const isMe = __tfbotIsOwnRetryDeviceV109(participant.jid, meId, meLid);' + source.slice(match.index + match[0].length);
+            encodingPatched = true;
+        } else if (/const\s+isMe\s*=\s*__tfbotIsOwnRetryDeviceV109\s*\(/.test(source) || /const\s+isMe\s*=\s*isOwnDeviceJid\s*\(/.test(source)) {
+            encodingPatched = true;
+        }
+        const recipientPattern = /else\s+if\s*\(\s*areJidsSameUser\s*\(\s*participant(?:!|\?)?\.jid\s*,\s*meId\s*\)\s*\)\s*\{/g;
+        const recipientMatches = [...source.matchAll(recipientPattern)];
+        if (recipientMatches.length > 1) return { applied: false, reason: `multiple_retry_recipient_checks_${recipientMatches.length}`, file: path.basename(filePath), issue: 'Baileys#2856' };
+        let recipientPatched = false;
+        if (recipientMatches.length === 1) {
+            const match = recipientMatches[0];
+            const replacement = 'else if (__tfbotIsOwnRetryDeviceV109(participant.jid, meId, meLid)) {';
+            source = source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
+            recipientPatched = true;
+        } else if (/else\s+if\s*\(\s*__tfbotIsOwnRetryDeviceV109\s*\(/.test(source) || /buildRetryResendAddressing\s*\(/.test(source)) {
+            recipientPatched = true;
+        } else if (/else\s+if\s*\(\s*isMe\s*\)\s*\{/.test(source) && /stanza\.attrs\.recipient\s*=\s*destinationJid/.test(source)) {
+            recipientPatched = true;
+        }
+        if (!encodingPatched || !recipientPatched) {
+            return { applied: false, reason: 'own_lid_retry_patch_incomplete', file: path.basename(filePath), issue: 'Baileys#2856', ownEncodingPatched: encodingPatched, recipientAddressPatched: recipientPatched, sourceHints: { hasIsMe: /const\s+isMe\s*=/.test(source), hasOwnDeviceHelper: /isOwnDeviceJid|buildRetryResendAddressing/.test(source), hasRecipientAttr: /stanza\.attrs\.recipient/.test(source) } };
+        }
+        if (!source.includes(marker) || !source.includes('__tfbotIsOwnRetryDeviceV109(participant.jid, meId, meLid)')) return { applied: false, reason: 'own_lid_retry_patch_verification_failed', file: path.basename(filePath), issue: 'Baileys#2856' };
         fs.writeFileSync(filePath, source, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), issue: 'Baileys#2856', ownLidIdentityCheck: true, hostedLidSupported: true, mappedPnFallback: true, preservesParticipantAddress: true };
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), issue: 'Baileys#2856', ownLidDeviceDetection: true, retryRecipientChatAddress: true, deviceSentMessageIdentity: true, ownEncodingPatched: encodingPatched, recipientAddressPatched: recipientPatched };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180), issue: 'Baileys#2856' };
     }
 }
+
+
 function applyBaileysGroupRetrySkdmPatch() {
-    const result = { applied: false, libsignal: { applied: false }, messagesSend: { applied: false }, issue: 'Baileys#2506', reason: 'not_attempted' };
+    const result = { applied: false, libsignal: { applied: false }, messagesSend: { applied: false }, issue: 'Baileys#2507', reason: 'not_attempted' };
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
@@ -606,74 +607,85 @@ function applyBaileysGroupRetrySkdmPatch() {
         if (!libPath) { result.reason = 'libsignal_module_not_found'; return result; }
         if (!sendPath) { result.reason = 'messages_send_module_not_found'; return result; }
         let libSource = fs.readFileSync(libPath, 'utf8');
-        const libMarker = '__tfbotGroupRetrySkdmRepositoryMethodsV107';
-        if (libSource.includes(libMarker) || (libSource.includes('getSenderKeyDistributionMessage') && libSource.includes('hasSenderKey'))) {
-            result.libsignal = { applied: true, alreadyApplied: true, file: path.basename(libPath) };
+        const libMarker = '__tfbotGroupRetrySkdmRepositoryMethodsV109';
+        const hasSkdmMethod = /async\s+getSenderKeyDistributionMessage\s*\(/.test(libSource);
+        const hasSenderKeyMethod = /async\s+hasSenderKey\s*\(/.test(libSource);
+        if (libSource.includes(libMarker) || hasSkdmMethod && hasSenderKeyMethod) {
+            result.libsignal = { applied: true, alreadyApplied: true, file: path.basename(libPath), exposesSkdmMethods: true };
         } else {
-            const required = ['jidToSignalSenderKeyName', 'GroupSessionBuilder', 'SenderKeyRecord', 'parsedKeys', 'auth.keys.get', 'storage.storeSenderKey'];
+            const required = ['jidToSignalSenderKeyName', 'GroupSessionBuilder', 'auth.keys.get'];
             const missing = required.filter(value => !libSource.includes(value));
             if (missing.length) { result.reason = `libsignal_required_symbols_missing_${missing.join('_')}`; result.libsignal = { applied: false, file: path.basename(libPath) }; return result; }
-            const objectPattern = /((?:const|let|var)\s+repository\s*=\s*\{)/;
+            const objectPattern = /((?:const|let|var)\s+repository\s*(?::\s*[^=]+)?=\s*\{)/;
             const objectMatch = objectPattern.exec(libSource);
             if (!objectMatch) { result.reason = 'signal_repository_object_not_found'; result.libsignal = { applied: false, file: path.basename(libPath) }; return result; }
             const methods = `
         async getSenderKeyDistributionMessage({ group, meId }) {
-            return parsedKeys.transaction(async () => {
-                const senderName = jidToSignalSenderKeyName(group, meId);
-                const senderNameStr = senderName.toString();
-                const { [senderNameStr]: senderKey } = await auth.keys.get('sender-key', [senderNameStr]);
-                if (!senderKey) await storage.storeSenderKey(senderName, new SenderKeyRecord());
+            const senderName = jidToSignalSenderKeyName(group, meId);
+            const senderNameStr = senderName.toString();
+            const readSenderKey = async () => {
+                const keys = await auth.keys.get('sender-key', [senderNameStr]);
+                return keys?.[senderNameStr] || null;
+            };
+            const existingSenderKey = await readSenderKey();
+            if (!existingSenderKey) return null;
+            const createDistribution = async () => {
+                const currentSenderKey = await readSenderKey();
+                if (!currentSenderKey) return null;
                 const skdm = await new GroupSessionBuilder(storage).create(senderName);
                 return skdm.serialize();
-            }, group);
+            };
+            if (typeof auth.keys.transaction === 'function') return auth.keys.transaction(createDistribution, group);
+            return createDistribution();
         },
         async hasSenderKey({ group, meId }) {
             const senderName = jidToSignalSenderKeyName(group, meId).toString();
-            const { [senderName]: key } = await auth.keys.get('sender-key', [senderName]);
-            return !!key;
+            const keys = await auth.keys.get('sender-key', [senderName]);
+            return !!keys?.[senderName];
         },
-        __tfbotGroupRetrySkdmRepositoryMethodsV107: true,
+        ${libMarker}: true,
 `;
             const insertionPoint = objectMatch.index + objectMatch[0].length;
             libSource = libSource.slice(0, insertionPoint) + methods + libSource.slice(insertionPoint);
-            if (!libSource.includes(libMarker) || !libSource.includes('async getSenderKeyDistributionMessage') || !libSource.includes('async hasSenderKey')) { result.reason = 'libsignal_patch_verification_failed'; return result; }
+            if (!libSource.includes(libMarker) || !libSource.includes('async getSenderKeyDistributionMessage') || !libSource.includes('async hasSenderKey') || /storeSenderKey\s*\([^\n]*new SenderKeyRecord/.test(methods)) { result.reason = 'libsignal_patch_verification_failed'; return result; }
             fs.writeFileSync(libPath, libSource, 'utf8');
-            result.libsignal = { applied: true, alreadyApplied: false, file: path.basename(libPath), exposesSkdmMethods: true };
+            result.libsignal = { applied: true, alreadyApplied: false, file: path.basename(libPath), exposesSkdmMethods: true, createsNoEmptySenderKeyRecords: true };
         }
         let sendSource = fs.readFileSync(sendPath, 'utf8');
-        const sendMarker = '__tfbotEmbedGroupSkdmOnRetryResendV107';
-        if (sendSource.includes(sendMarker)) {
-            result.messagesSend = { applied: true, alreadyApplied: true, file: path.basename(sendPath) };
+        const sendMarker = '__tfbotEmbedGroupSkdmOnRetryResendV109';
+        if (sendSource.includes(sendMarker) || /getSenderKeyDistributionMessage\s*\(/.test(sendSource) && /senderKeyDistributionMessage\s*:\s*\{/.test(sendSource) && /isGroupOrStatus/.test(sendSource)) {
+            result.messagesSend = { applied: true, alreadyApplied: true, file: path.basename(sendPath), embedsSkdmOnGroupRetry: true };
         } else {
-            const encodedPattern = /const\s+encodedMessageToSend\s*=\s*isMe\s*\?\s*encodeWAMessage\s*\(\s*\{\s*deviceSentMessage\s*:\s*\{\s*destinationJid\s*,\s*message\s*\}\s*\}\s*\)\s*:\s*encodeWAMessage\s*\(\s*message\s*\)\s*;?/;
-            const encodedMatches = [...sendSource.matchAll(new RegExp(encodedPattern.source, 'g'))];
-            const requiredSendSymbols = ['isGroupOrStatus', 'signalRepository', 'destinationJid', 'meLid', 'meId'];
-            if (encodedMatches.length !== 1 || requiredSendSymbols.some(value => !sendSource.includes(value))) {
-                result.reason = `group_retry_send_anchor_not_found_${encodedMatches.length}`;
-                result.messagesSend = { applied: false, file: path.basename(sendPath) };
-                return result;
+            const encodedPattern = /const\s+encodedMessageToSend\s*=\s*isMe\s*\?\s*encodeWAMessage\s*\(\s*\{\s*deviceSentMessage\s*:\s*\{\s*destinationJid\s*,\s*message\s*:\s*([A-Za-z_$][\w$]*)\s*\}\s*\}\s*\)\s*:\s*encodeWAMessage\s*\(\s*\1\s*\)\s*;?/;
+            const shorthandPattern = /const\s+encodedMessageToSend\s*=\s*isMe\s*\?\s*encodeWAMessage\s*\(\s*\{\s*deviceSentMessage\s*:\s*\{\s*destinationJid\s*,\s*message\s*\}\s*\}\s*\)\s*:\s*encodeWAMessage\s*\(\s*message\s*\)\s*;?/;
+            let match = encodedPattern.exec(sendSource);
+            let messageVariable = match?.[1] || '';
+            if (!match) {
+                match = shorthandPattern.exec(sendSource);
+                messageVariable = match ? 'message' : '';
             }
-            const match = encodedMatches[0];
-            const replacement = `let __tfbotMessageToSendV107 = message;
-if (isGroupOrStatus && !message?.senderKeyDistributionMessage && typeof signalRepository?.hasSenderKey === 'function' && typeof signalRepository?.getSenderKeyDistributionMessage === 'function') {
-    try {
-        let __tfbotGroupSenderIdentityV107 = '';
-        if (meLid && await signalRepository.hasSenderKey({ group: destinationJid, meId: meLid })) __tfbotGroupSenderIdentityV107 = meLid;
-        else if (await signalRepository.hasSenderKey({ group: destinationJid, meId })) __tfbotGroupSenderIdentityV107 = meId;
-        if (__tfbotGroupSenderIdentityV107) {
-            const __tfbotSkdmV107 = await signalRepository.getSenderKeyDistributionMessage({ group: destinationJid, meId: __tfbotGroupSenderIdentityV107 });
-            __tfbotMessageToSendV107 = { ...message, senderKeyDistributionMessage: { groupId: destinationJid, axolotlSenderKeyDistributionMessage: __tfbotSkdmV107 } };
+            if (!match || !messageVariable) { result.reason = 'group_retry_encoded_message_anchor_not_found'; result.messagesSend = { applied: false, file: path.basename(sendPath) }; return result; }
+            const replacement = `let __tfbotGroupRetryMessageV109 = ${messageVariable};
+if (isGroupOrStatus && typeof signalRepository?.getSenderKeyDistributionMessage === 'function') {
+    const __tfbotGroupSenderIdentitiesV109 = [...new Set([meLid, meId].filter(value => typeof value === 'string' && value.length > 0))];
+    for (const __tfbotGroupSenderIdentityV109 of __tfbotGroupSenderIdentitiesV109) {
+        try {
+            const __tfbotSkdmV109 = await signalRepository.getSenderKeyDistributionMessage({ group: destinationJid, meId: __tfbotGroupSenderIdentityV109 });
+            if (__tfbotSkdmV109 && (__tfbotSkdmV109.byteLength || __tfbotSkdmV109.length)) {
+                __tfbotGroupRetryMessageV109 = { ...${messageVariable}, senderKeyDistributionMessage: { groupId: destinationJid, axolotlSenderKeyDistributionMessage: __tfbotSkdmV109 } };
+                break;
+            }
+        } catch (__tfbotSkdmErrorV109) {
+            logger.debug({ err: __tfbotSkdmErrorV109, jid: destinationJid }, 'group retry SKDM unavailable for sender identity; trying the next authenticated identity');
         }
-    } catch (__tfbotSkdmErrorV107) {
-        logger.warn({ err: __tfbotSkdmErrorV107, jid: destinationJid }, 'group retry SKDM preparation failed; preserving original retry message');
     }
 }
 const ${sendMarker} = true;
-const encodedMessageToSend = isMe ? encodeWAMessage({ deviceSentMessage: { destinationJid, message: __tfbotMessageToSendV107 } }) : encodeWAMessage(__tfbotMessageToSendV107);`;
+const encodedMessageToSend = isMe ? encodeWAMessage({ deviceSentMessage: { destinationJid, message: __tfbotGroupRetryMessageV109 } }) : encodeWAMessage(__tfbotGroupRetryMessageV109);`;
             sendSource = sendSource.slice(0, match.index) + replacement + sendSource.slice(match.index + match[0].length);
-            if (!sendSource.includes(sendMarker) || !sendSource.includes('axolotlSenderKeyDistributionMessage: __tfbotSkdmV107')) { result.reason = 'group_retry_send_patch_verification_failed'; return result; }
+            if (!sendSource.includes(sendMarker) || !sendSource.includes('axolotlSenderKeyDistributionMessage: __tfbotSkdmV109') || !sendSource.includes('group retry SKDM unavailable')) { result.reason = 'group_retry_send_patch_verification_failed'; return result; }
             fs.writeFileSync(sendPath, sendSource, 'utf8');
-            result.messagesSend = { applied: true, alreadyApplied: false, file: path.basename(sendPath), bestEffortSkdmOnGroupStatusRetry: true };
+            result.messagesSend = { applied: true, alreadyApplied: false, file: path.basename(sendPath), embedsSkdmOnGroupRetry: true, triesOnlyExistingSenderKeys: true };
         }
         result.applied = result.libsignal.applied && result.messagesSend.applied;
         result.reason = result.applied ? 'ok' : 'partial_application';
@@ -683,6 +695,7 @@ const encodedMessageToSend = isMe ? encodeWAMessage({ deviceSentMessage: { desti
         return result;
     }
 }
+
 
 function applyBaileysCompanionRegRefreshPatch() {
     const socketMarker = '__tfbotCompanionRegRefreshHandlerV84';
@@ -877,8 +890,8 @@ console.info('[baileys-outgoing-retry-preflight-patch]', { ...baileysOutgoingRet
 console.info('[baileys-retry-resend-double-encryption-patch]', { ...baileysRetryResendDoubleEncryptionPatchStatus, action: baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'avoid_duplicate_pairwise_encryption_on_retry_resend' : 'not_applicable_or_source_shape_not_matched' });
 console.info('[baileys-own-lid-retry-addressing-patch]', { ...baileysOwnLidRetryAddressingPatchStatus, action: baileysOwnLidRetryAddressingPatchStatus.applied ? 'preserve_chat_recipient_for_own_lid_device_retry' : 'not_applicable_or_source_shape_not_matched' });
 console.info('[baileys-signal-transaction-patch]', { ...baileysSignalTransactionPatchStatus, action: baileysSignalTransactionPatchStatus.applied ? 'serialize_signal_crypto_methods_inside_session_store_transaction' : 'leave_installed_baileys_source_unchanged' });
-enqueueTfbotDiagnosticRecord({ name: 'Adam', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION }) });
-enqueueTfbotDiagnosticRecord({ name: 'Adam', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus }) });
+enqueueTfbotDiagnosticRecord({ name: 'TFBOT', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION, diagnosticScope: 'all_sessions', retryLookupScope: 'same_session_only' }) });
+enqueueTfbotDiagnosticRecord({ name: 'TFBOT', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus, retryLookupScope: 'same_session_only', diagnosticScope: 'all_sessions' }) });
 
 const {
     default: makeWASocket,
@@ -1021,9 +1034,7 @@ function createRenderPinoLogger(options = {}) {
                     try { parsed = JSON.parse(line); } catch (error) { parsed = { msg: line }; }
                     const diagnosticArgs = [parsed?.msg || parsed?.message || '', parsed];
                     const recoverySessionId = String(parsed?.sessionId || options?.base?.sessionId || '').trim();
-                    if (recoverySessionId && getTfbotDiagnosticSession()?.sessionId === recoverySessionId) {
-                        console.info('[baileys-runtime-diagnostic]', { sessionId: recoverySessionId, component: options?.base?.component || 'baileys', ...parsed });
-                    }
+                    if (recoverySessionId) console.info('[baileys-runtime-diagnostic]', { sessionId: recoverySessionId, component: options?.base?.component || 'baileys', ...parsed });
                     if (!isSignalDecryptionFailure(diagnosticArgs)) continue;
                     console.warn('[baileys-signal-decryption-failure]', { sessionId: recoverySessionId || null, failureClass: classifyWhatsAppFailure(parsed), message: String(parsed?.msg || parsed?.message || '').slice(0, 500), remoteJid: parsed?.key?.remoteJid || parsed?.remoteJid || null, remoteJidAlt: parsed?.key?.remoteJidAlt || null, participant: parsed?.key?.participant || parsed?.participant || null, messageId: parsed?.key?.id || parsed?.messageId || null, errorName: parsed?.err?.name || parsed?.error?.name || parsed?.name || null });
                     if (recoverySessionId) scheduleSignalRecoveryFromLog(recoverySessionId, parsed);
@@ -1037,7 +1048,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-01-r98';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-02-r109';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1218,9 +1229,9 @@ const sessionStartPromises = new Map();
 const SESSION_HEALTH_CHECK_INTERVAL_MS = Math.max(15000, Number(process.env.SESSION_HEALTH_CHECK_INTERVAL_MS) || 30000);
 const SESSION_WS_PONG_TIMEOUT_MS = Math.max(60000, Number(process.env.SESSION_WS_PONG_TIMEOUT_MS) || 120000);
 const SESSION_UNCONNECTED_TTL_MS = Math.max(24 * 60 * 60 * 1000, Math.min(7 * 24 * 60 * 60 * 1000, Number(process.env.SESSION_UNCONNECTED_TTL_MS) || 24 * 60 * 60 * 1000));
-const PAIRING_SESSION_TTL_MS = Math.max(24 * 60 * 60 * 1000, Math.min(7 * 24 * 60 * 60 * 1000, Number(process.env.PAIRING_SESSION_TTL_MS) || 24 * 60 * 60 * 1000));
+const PAIRING_SESSION_TTL_MS = Math.max(15 * 60 * 1000, Math.min(24 * 60 * 60 * 1000, Number(process.env.PAIRING_SESSION_TTL_MS) || 30 * 60 * 1000));
 const GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS = Math.max(60000, Number(process.env.GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS) || 6 * 60 * 60 * 1000);
-const GROUP_SENDER_KEY_RESET_EVERY_SEND = String(process.env.GROUP_SENDER_KEY_RESET_EVERY_SEND || 'false').trim().toLowerCase() === 'true';
+const GROUP_SENDER_KEY_RESET_EVERY_SEND = String(process.env.GROUP_SENDER_KEY_RESET_EVERY_SEND || 'true').trim().toLowerCase() === 'true';
 const groupSenderKeyResetAt = new Map();
 const groupSenderKeyResetInFlight = new Map();
 const GROUP_METADATA_CACHE_TTL_MS = Math.max(30000, Number(process.env.GROUP_METADATA_CACHE_TTL_MS) || 300000);
@@ -1398,6 +1409,7 @@ let globalOwnerAutomationDisablePending = false;
 const globalOwnerAutomationScanAt = new Map();
 let globalOwnerAutomationScanRunning = false;
 const sessionOwnersCache = new Map();
+const sessionOwnerModeRefreshAt = new Map();
 const processedLocalCache = new Set();
 let isPurging = false;
 let expiredSessionCleanupPromise = null;
@@ -5509,16 +5521,38 @@ app.use((req, res, next) => {
     next();
 });
 
-app.get('/logs.txt', (req, res) => {
+async function waitForTfbotDiagnosticQueue(timeoutMs = 2500) {
+    const deadline = Date.now() + Math.max(100, Math.min(5000, Number(timeoutMs) || 2500));
+    while (Date.now() < deadline) {
+        if (!tfbotDiagnosticWriterRunning && tfbotDiagnosticQueue.length) {
+            tfbotDiagnosticWriterRunning = true;
+            await flushTfbotDiagnosticQueue();
+        }
+        if (!tfbotDiagnosticWriterRunning && !tfbotDiagnosticQueue.length) return true;
+        await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    return !tfbotDiagnosticWriterRunning && !tfbotDiagnosticQueue.length;
+}
+
+app.get('/logs.txt', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
     res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-TFBOT-Revision', TFBOT_CLUSTER_CODE_REVISION);
+    res.setHeader('X-TFBOT-Generated-At', new Date().toISOString());
     res.type('text/plain');
-    fs.readFile(TFBOT_DIAGNOSTIC_LOG_PATH, 'utf8', (error, content) => {
-        if (error && error.code !== 'ENOENT') return res.status(500).send('');
+    try {
+        const flushed = await waitForTfbotDiagnosticQueue(2500);
+        const content = await fs.promises.readFile(TFBOT_DIAGNOSTIC_LOG_PATH, 'utf8').catch(error => error.code === 'ENOENT' ? '' : Promise.reject(error));
+        res.setHeader('X-TFBOT-Log-Queue-Flushed', String(flushed));
+        res.setHeader('X-TFBOT-Log-Bytes', String(Buffer.byteLength(content || '', 'utf8')));
         return res.status(200).send(content || '');
-    });
+    } catch (error) {
+        console.error('[diagnostic-log-read-failed]', { revision: TFBOT_CLUSTER_CODE_REVISION, error: error?.message || String(error) });
+        return res.status(500).send('diagnostic_log_read_failed');
+    }
 });
 
 app.use((req, res, next) => {
@@ -7752,6 +7786,7 @@ function serializeSessionListForHtml(value) {
 app.get('/list', async (req, res) => {
   res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('Cache-Control', 'no-store');
   try {
+      await cleanupExpiredUnconnectedSessions();
       const sessionsList = [];
       const ownerCol = db?.collection ? db.collection('session_owners') : null;
       const now = Date.now();
@@ -7790,8 +7825,9 @@ app.get('/list', async (req, res) => {
                 status = localSession.sock ? 'synchronisation' : (localSession.status === 'reauth_required' ? 'reauth_required' : 'deconnecte');
                 localSession.active = false;
                 if (['connecte', 'connected'].includes(String(localSession.status || '').toLowerCase())) localSession.status = status;
-                localSession.unconnectedSinceAt = localSession.unconnectedSinceAt || new Date(now);
-                if (ownerCol) void ownerCol.updateOne({ sessionId }, { $set: { connectionStatus: status, socketAuthenticated: false, socketReady: localSocketReady, statusUpdatedAt: new Date(now), updatedAt: new Date(now), unconnectedSinceAt: localSession.unconnectedSinceAt, pairingPending: true } }).catch(() => {});
+                const localSessionStart = Number(localSession.createdAt) > 0 ? Number(localSession.createdAt) : now;
+                localSession.unconnectedSinceAt = localSession.unconnectedSinceAt || new Date(localSessionStart);
+                if (ownerCol) void ownerCol.updateOne({ sessionId }, { $set: { connectionStatus: status, socketAuthenticated: false, socketReady: localSocketReady, unconnectedSinceAt: localSession.unconnectedSinceAt, pairingPending: true } }).catch(() => {});
             }
         } else if (['connected', 'connecte'].includes(String(status).toLowerCase())) {
             status = remoteOwnerLive ? 'connecte' : ownerLease > now ? 'synchronisation' : 'reconnexion';
@@ -7803,7 +7839,7 @@ app.get('/list', async (req, res) => {
           Numero: localSession?.number || ownerDoc.Number || ownerDoc.number || 'N/A',
           Name: ownerDoc.Name || "Adam D'H7",
           Format: normalizeConnectionFormat(localSession?.format || ownerDoc.format || ownerDoc.Format || 'pair'),
-          Mode: ownerDoc.mode || 'prive',
+          Mode: getSessionBotMode(ownerDoc),
           Alive: aliveStr
         });
       }
@@ -7813,7 +7849,7 @@ app.get('/list', async (req, res) => {
         if (isAuthenticated && !['connecte', 'connected'].includes(String(localSession.status || '').toLowerCase())) {
             await restoreAuthenticatedSessionRuntimeStatus(localSession.id, localSession, localSession.sock, 'sessions_list_verified_open_socket');
         }
-        sessionsList.push({ ID: localSession.id, Sessions: isAuthenticated ? 'connecte' : localSession.sock ? 'synchronisation' : (localSession.status || 'deconnecte'), Numero: localSession.number || 'N/A', Name: "Adam D'H7", Format: normalizeConnectionFormat(localSession.format || 'pair'), Mode: 'prive', Alive: localSession.createdAt ? getUptimeString(now - localSession.createdAt) : '0s' });
+        sessionsList.push({ ID: localSession.id, Sessions: isAuthenticated ? 'connecte' : localSession.sock ? 'synchronisation' : (localSession.status || 'deconnecte'), Numero: localSession.number || 'N/A', Name: "Adam D'H7", Format: normalizeConnectionFormat(localSession.format || 'pair'), Mode: getSessionBotMode(sessionOwnersCache.get(localSession.id)), Alive: localSession.createdAt ? getUptimeString(now - localSession.createdAt) : '0s' });
       }
       const html = `<!DOCTYPE html>
 <html lang="fr">
@@ -7881,7 +7917,7 @@ app.get('/list', async (req, res) => {
               Numero: String(session.number || 'N/A'),
               Name: "Adam D'H7",
               Format: normalizeConnectionFormat(session.format || 'pair'),
-              Mode: 'prive',
+              Mode: getSessionBotMode(sessionOwnersCache.get(sessionId)),
               Alive: session.createdAt ? getUptimeString(Math.max(0, now - Number(session.createdAt))) : '0s'
           };
       });
@@ -8958,6 +8994,27 @@ function normalizeText(str) {
     return str ? String(str).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim() : "";
 }
 
+function getSessionBotMode(record = {}) {
+    const values = [record?.mode, record?.Mode, record?.botMode];
+    for (const value of values) {
+        const normalized = normalizeText(value);
+        if (['public', 'piblik', 'publico'].includes(normalized)) return 'public';
+        if (['prive', 'private', 'privee', 'privado'].includes(normalized)) return 'prive';
+    }
+    return 'prive';
+}
+
+async function persistSessionBotMode(sessionId, mode, currentRecord = {}) {
+    const normalizedMode = mode === 'public' ? 'public' : 'prive';
+    const now = new Date();
+    const update = { mode: normalizedMode, Mode: normalizedMode, botMode: normalizedMode, modeUpdatedAt: now, updatedAt: now };
+    await db.collection('session_owners').updateOne({ sessionId }, { $set: update, $setOnInsert: { sessionId, createdAt: now } }, { upsert: true });
+    const nextRecord = { ...(currentRecord || {}), sessionId, ...update };
+    sessionOwnersCache.set(sessionId, nextRecord);
+    sessionOwnerModeRefreshAt.set(sessionId, Date.now());
+    return nextRecord;
+}
+
 const LANGUAGE_NAMES = { fr: 'French', en: 'English', es: 'Spanish', ht: 'Haitian Creole' };
 const LANGUAGE_LABELS = {
     fr: { fr: 'Français', en: 'Anglais', es: 'Espagnol', ht: 'Créole haïtien' },
@@ -9499,7 +9556,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 }
                 try {
                     const retryCollection = db.collection('baileys_outgoing_messages');
-                    const projection = { message: 1, messageKey: 1, remoteJid: 1, remoteJidAlt: 1, remoteJidAliases: 1, retryLookupKeys: 1, retryPhoneJid: 1, retryLidJid: 1, isSelfChatRetry: 1, fromMe: 1, accountPhone: 1, accountLid: 1, accountJid: 1, sessionId: 1, messageId: 1, messageTimestamp: 1 };
+                    const projection = { message: 1, messageKey: 1, remoteJid: 1, remoteJidAlt: 1, remoteJidAliases: 1, retryLookupKeys: 1, retryPhoneJid: 1, retryLidJid: 1, isSelfChatRetry: 1, fromMe: 1, sessionId: 1, messageId: 1, messageTimestamp: 1 };
                     let stored = await retryCollection.findOne({ _id: `${sessionId}:${messageId}`, sessionId, messageId, fromMe: true }, { projection });
                     let lookupScope = 'same_session_id';
                     if (!stored?.message && sameSessionOutgoingAllowed) {
@@ -9513,34 +9570,20 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             if (stored?.message) lookupScope = 'same_session_pn_lid_message_id_alias_key';
                         }
                     }
-                    const retryMayReferToOwnMessage = retryFromMe || key?.fromMe === undefined || key?.fromMe === null || outgoingIdKnown;
-                    const allowCrossSessionLookup = retryMayReferToOwnMessage && !retryFromMe && !requestMatchesOwnIdentity;
-                    if (!stored?.message && allowCrossSessionLookup) {
-                        const retryAccountPhone = ownPhone;
-                        const retryAccountLid = ownLid;
-                        const retryAccountJid = String(sock.user?.id || state.creds?.me?.id || '').trim();
-                        const sameAccountClauses = [];
-                        if (retryAccountPhone) sameAccountClauses.push({ accountPhone: retryAccountPhone });
-                        if (retryAccountLid) sameAccountClauses.push({ accountLid: normalizeLidCacheKey(retryAccountLid) });
-                        if (!sameAccountClauses.length && retryAccountJid) sameAccountClauses.push({ accountJid: retryAccountJid });
-                        if (sameAccountClauses.length) {
-                            stored = await retryCollection.findOne({ sessionId: { $ne: sessionId }, messageId, fromMe: true, $or: sameAccountClauses }, { projection, sort: { createdAt: -1 } });
-                            if (stored?.message) lookupScope = 'same_authenticated_account_other_session';
-                        }
-                    }
+                    const crossSessionLookupAllowed = false;
                     const storedAliases = [...new Set([stored?.remoteJid, stored?.remoteJidAlt, ...(Array.isArray(stored?.remoteJidAliases) ? stored.remoteJidAliases : [])].map(value => String(value || '').trim()).filter(Boolean))];
                     const storedChatMatches = !requestedChatJid || storedAliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, requestedChatJid));
-                    if (stored?.message && stored.fromMe === true && (stored.sessionId === sessionId || lookupScope === 'same_authenticated_account_other_session') && (sameSessionOutgoingAllowed || storedChatMatches)) {
+                    if (stored?.message && stored.fromMe === true && stored.sessionId === sessionId && (sameSessionOutgoingAllowed || storedChatMatches)) {
                         const restoredMessage = fixBuffers(stored.message);
                         const restoredKey = { ...(stored.messageKey || {}), id: messageId, remoteJid: String(stored.remoteJid || requestedChatJid || ''), remoteJidAlt: String(stored.remoteJidAlt || ''), fromMe: true };
                         cacheRecentMessage(sessionId, { key: restoredKey, message: restoredMessage, messageTimestamp: stored.messageTimestamp || Math.floor(Date.now() / 1000) }, storedAliases);
                         cacheOutgoingRetryMessageMemory(sessionId, { key: restoredKey, message: restoredMessage }, storedAliases);
-                        console.info('[message-retry-store-hit]', { sessionId, messageId, chatMatch: storedChatMatches, lookupScope, storedSessionMatch: stored.sessionId === sessionId, fromMe: true, requestedChatJidPresent: !!requestedChatJid, participantType, crossSessionLookup: lookupScope === 'same_authenticated_account_other_session' });
+                        console.info('[message-retry-store-hit]', { sessionId, messageId, chatMatch: storedChatMatches, lookupScope, storedSessionMatch: stored.sessionId === sessionId, fromMe: true, requestedChatJidPresent: !!requestedChatJid, participantType, crossSessionLookup: false });
                         return restoredMessage;
                     }
                     if (stored?.message) console.warn('[message-retry-chat-mismatch]', { sessionId, messageId, requestedChatJidPresent: !!requestedChatJid, storedChatAliasesCount: storedAliases.length, lookupScope, storedSessionMatch: stored.sessionId === sessionId, storedFromMe: stored.fromMe === true, sameSessionOutgoingAllowed });
-                    logRetryCacheMiss(true, retryFromMe ? 'from_me_message_not_found_in_same_session_by_id' : 'message_not_found_in_session_or_verified_account_scope');
-                    console.warn('[message-retry-lookup-exhausted]', { sessionId, messageId, requestedChatJidPresent: !!requestedChatJid, requestedChatType: diagnosticChatType, requestedParticipantType: participantType, fromMe: retryFromMe, sameSessionOutgoingAllowed, crossSessionLookupAllowed: allowCrossSessionLookup, storeDocumentFound: !!stored?.message, lookupScope });
+                    logRetryCacheMiss(true, retryFromMe ? 'from_me_message_not_found_in_same_session_by_id' : 'message_not_found_in_this_session');
+                    console.warn('[message-retry-lookup-exhausted]', { sessionId, messageId, requestedChatJidPresent: !!requestedChatJid, requestedChatType: diagnosticChatType, requestedParticipantType: participantType, fromMe: retryFromMe, sameSessionOutgoingAllowed, crossSessionLookupAllowed, storeDocumentFound: !!stored?.message, lookupScope });
                 } catch (error) {
                     console.warn('[message-retry-store-read-failed]', { sessionId, messageId, requestedChatJidPresent: !!requestedChatJid, requestedParticipantType: participantType, error: error?.message || String(error) });
                     logRetryCacheMiss(true, 'database_read_failed');
@@ -11125,7 +11168,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             sOwnerTop = null;
                             console.warn('[session-owner-cache-scope-rejected]', { sessionId, action: 'discard_owner_record_from_different_session_id' });
                         }
-                        if (!sOwnerTop || !from.endsWith('@g.us')) {
+                        if (!sOwnerTop || Date.now() - Number(sessionOwnerModeRefreshAt.get(sessionId) || 0) >= 1000) {
                             const ownerReadStartedAt = Date.now();
                             console.info('[message-owner-record-read-started]', { sessionId, messageId: msgId, chatJid: from, hasCachedOwnerRecord: !!sOwnerTop });
                             try {
@@ -11133,6 +11176,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 if (latestOwnerDoc) {
                                     sOwnerTop = latestOwnerDoc;
                                     sessionOwnersCache.set(sessionId, latestOwnerDoc);
+                                    sessionOwnerModeRefreshAt.set(sessionId, Date.now());
                                 } else if (!sOwnerTop) {
                                     console.warn('[message-owner-record-missing]', { sessionId, chatJid: from, messageId: msgId, upsertType });
                                 }
@@ -11573,9 +11617,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         }
 
                         const storedModeValue = [sOwnerTop?.mode, sOwnerTop?.Mode, sOwnerTop?.botMode].find(value => value !== undefined && value !== null && String(value).trim() !== '');
-                        const normalizedStoredMode = normalizeText(storedModeValue || 'prive');
-                        const isPublicMode = ['public', 'piblik', 'publico'].includes(normalizedStoredMode);
-                        const botMode = isPublicMode ? 'public' : 'prive';
+                        const normalizedStoredMode = getSessionBotMode(sOwnerTop);
+                        const isPublicMode = normalizedStoredMode === 'public';
+                        const botMode = normalizedStoredMode;
                         const allowed = !isChannel && (isOwnerReal || isPublicMode);
 
                         const bodyRaw = earlyBody;
@@ -11832,12 +11876,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, 'Mode', t.owner_required, pushName, false, activeHostName);
                                                 break;
                                             }
-                                            if (sOwnerTop.mode === 'prive') {
+                                            if (getSessionBotMode(sOwnerTop) === 'prive') {
                                                 await safeSendFormatted(sock, from, "Mode", t.already_private, pushName, false, activeHostName);
                                             } else {
-                                                sOwnerTop.mode = 'prive';
-                                                await db.collection('session_owners').updateOne({ sessionId: sessionId }, { $set: { mode: 'prive' } });
-                                                sessionOwnersCache.set(sessionId, sOwnerTop);
+                                                sOwnerTop = await persistSessionBotMode(sessionId, 'prive', sOwnerTop);
                                                 await safeSendFormatted(sock, from, "Mode", t.mode_changed_private, pushName, false, activeHostName);
                                             }
                                             break;
@@ -11846,12 +11888,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, 'Mode', t.owner_required, pushName, false, activeHostName);
                                                 break;
                                             }
-                                            if (sOwnerTop.mode === 'public') {
+                                            if (getSessionBotMode(sOwnerTop) === 'public') {
                                                 await safeSendFormatted(sock, from, "Mode", t.already_public, pushName, false, activeHostName);
                                             } else {
-                                                sOwnerTop.mode = 'public';
-                                                await db.collection('session_owners').updateOne({ sessionId: sessionId }, { $set: { mode: 'public' } });
-                                                sessionOwnersCache.set(sessionId, sOwnerTop);
+                                                sOwnerTop = await persistSessionBotMode(sessionId, 'public', sOwnerTop);
                                                 await safeSendFormatted(sock, from, "Mode", t.mode_changed_public, pushName, false, activeHostName);
                                             }
                                             break;
@@ -13078,29 +13118,33 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
         const pairingStatus = ['pairing_expired', 'pairing_error', 'qr_disponible', 'synchronisation', 'synchronizing', 'initialisation', 'connecting', 'opening', 'pending', 'paused', 'pairing_starting', 'pairing'].includes(status);
         const isExplicitlyDisconnected = ['deconnecte', 'disconnected'].includes(status);
         const isPendingPairingCandidate = !isExplicitlyDisconnected && (owner.pairingPending === true || pairingStatus);
+        const idTimestamp = Number(staleSessionId.match(/^session_(\d+)/)?.[1] || 0);
+        const parseSessionDate = value => value instanceof Date ? value.getTime() : Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : new Date(value || 0).getTime();
+        const inferredSessionStart = [owner.pairingStartedAt, owner.createdAt, owner.statusUpdatedAt, owner.disconnectTime, owner.updatedAt, idTimestamp].map(parseSessionDate).find(value => Number.isFinite(value) && value > 0) || cleanupNow;
         if (!owner.unconnectedSinceAt && !['deconnecte', 'disconnected'].includes(status)) {
-            const unconnectedSinceAt = new Date(cleanupNow);
+            const unconnectedSinceAt = new Date(inferredSessionStart);
             await db.collection('session_owners').updateOne(
                 { sessionId: staleSessionId, unconnectedSinceAt: { $exists: false } },
-                { $set: { unconnectedSinceAt, statusUpdatedAt: unconnectedSinceAt, updatedAt: unconnectedSinceAt, connectionStatus: status, pairingPending: true } }
+                { $set: { unconnectedSinceAt, connectionStatus: status, pairingPending: true } }
             ).catch(() => {});
             owner.unconnectedSinceAt = unconnectedSinceAt;
-            owner.statusUpdatedAt = unconnectedSinceAt;
             owner.connectionStatus = status;
             owner.pairingPending = true;
         }
         if (!cleanupStatuses.includes(status) && owner.reauthRequired !== true && !owner.duplicateAccountOf && !isPendingPairingCandidate) continue;
-        const idTimestamp = Number(staleSessionId.match(/^session_(\d+)/)?.[1] || 0);
         const timestampCandidates = status === 'reauth_required' || owner.reauthRequired === true
             ? [owner.lastAuthFailureAt, owner.statusUpdatedAt, owner.disconnectTime, owner.updatedAt, owner.createdAt]
             : status === 'duplicate_account' || owner.duplicateAccountOf
                 ? [owner.duplicateAccountDetectedAt, owner.statusUpdatedAt, owner.updatedAt, owner.createdAt]
-                : ['deconnecte', 'disconnected'].includes(status) && !isPendingPairingCandidate
-                    ? [owner.unconnectedSinceAt, owner.disconnectTime, owner.statusUpdatedAt, owner.updatedAt, owner.createdAt, owner.connectedSince]
-                    : [owner.unconnectedSinceAt, owner.pairingStartedAt, owner.statusUpdatedAt, owner.disconnectTime, owner.updatedAt, owner.createdAt, owner.connectedSince];
-        const sessionTimestamp = timestampCandidates.map(value => value instanceof Date ? value.getTime() : Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : new Date(value || 0).getTime()).find(value => Number.isFinite(value) && value > 0) || idTimestamp || 0;
-        const sessionAgeMs = sessionTimestamp ? cleanupNow - sessionTimestamp : 0;
-        const sessionExpiryMs = SESSION_UNCONNECTED_TTL_MS;
+                : isPendingPairingCandidate
+                    ? [owner.pairingStartedAt, owner.createdAt, idTimestamp, owner.unconnectedSinceAt, owner.statusUpdatedAt, owner.disconnectTime, owner.updatedAt, owner.connectedSince]
+                    : ['deconnecte', 'disconnected'].includes(status)
+                        ? [owner.unconnectedSinceAt, owner.disconnectTime, owner.statusUpdatedAt, owner.updatedAt, owner.createdAt, idTimestamp]
+                        : [owner.unconnectedSinceAt, owner.statusUpdatedAt, owner.disconnectTime, owner.updatedAt, owner.createdAt, idTimestamp];
+        const sessionTimestamp = timestampCandidates.map(parseSessionDate).find(value => Number.isFinite(value) && value > 0) || idTimestamp || 0;
+        const sessionAgeMs = sessionTimestamp ? Math.max(0, cleanupNow - sessionTimestamp) : 0;
+        const sessionExpiryMs = isPendingPairingCandidate ? PAIRING_SESSION_TTL_MS : SESSION_UNCONNECTED_TTL_MS;
+        const isPendingPairingExpired = isPendingPairingCandidate && sessionAgeMs >= PAIRING_SESSION_TTL_MS;
         const isReauthExpired = status === 'reauth_required' || owner.reauthRequired === true;
         const ownerLeaseUntil = new Date(owner.ownerLeaseUntil || 0).getTime();
         if (TFBOT_CLUSTER_ENABLED && owner.ownerInstanceId && owner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && ownerLeaseUntil > cleanupNow && owner.connectionStatus !== 'duplicate_account' && !owner.duplicateAccountOf && owner.reauthRequired !== true) continue;
@@ -13112,15 +13156,14 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
         const credentialsRegistered = credsDoc?.creds?.registered === true;
         const credentialsHaveIdentity = !!(credsDoc?.creds?.me?.id || credsDoc?.creds?.me?.lid);
         const ownerHasAccountIdentity = hasPersistedWhatsAppAccountIdentity(owner);
-        const isUnregisteredOrphan = !runtimeSocketLive && !runtimeIdentity && !credentialsRegistered && !credentialsHaveIdentity && !ownerHasAccountIdentity;
+        const hasRecoverableAccountCredentials = credentialsRegistered || credentialsHaveIdentity || !!runtimeIdentity;
+        const isUnregisteredOrphan = !runtimeSocketLive && !runtimeIdentity && !credentialsRegistered && !credentialsHaveIdentity;
         const noLiveSocketCanOwnSession = !runtime?.sock || runtimeSocketDefinitelyClosed;
         const isDeadReauthRecord = isReauthExpired && isUnregisteredOrphan && noLiveSocketCanOwnSession;
         const isDeadDuplicateRecord = status === 'duplicate_account' && isUnregisteredOrphan && noLiveSocketCanOwnSession;
         const isDeadDisconnectedOrphan = isExplicitlyDisconnected && isUnregisteredOrphan && noLiveSocketCanOwnSession;
         if (!isDeadReauthRecord && !isDeadDuplicateRecord && !isDeadDisconnectedOrphan && (!sessionTimestamp || sessionAgeMs < sessionExpiryMs)) continue;
-        const isPendingPairingExpired = isPendingPairingCandidate && sessionAgeMs >= PAIRING_SESSION_TTL_MS;
         try {
-            const hasRecoverableAccountCredentials = credentialsRegistered || credentialsHaveIdentity || !!runtimeIdentity || ownerHasAccountIdentity;
             if (hasRecoverableAccountCredentials && !isDeadReauthRecord) {
                 if ((!runtime || !runtime.sock || runtimeSocketDefinitelyClosed) && !reconnectTimers.has(staleSessionId) && !isReauthExpired && status !== 'duplicate_account' && !owner.duplicateAccountOf) {
                     scheduleSessionReconnect(staleSessionId, false, owner.format || owner.Format || 'pair');
@@ -13129,7 +13172,7 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
                 continue;
             }
             if (runtime?.sock) {
-                if (!runtimeSocketDefinitelyClosed && !isDeadReauthRecord && !isDeadDuplicateRecord) {
+                if (!runtimeSocketDefinitelyClosed && !isDeadReauthRecord && !isDeadDuplicateRecord && !isPendingPairingExpired) {
                     console.info('[session-expired-cleanup-socket-preserved]', { sessionId: staleSessionId, status, socketStateKnown: runtimeSocketStateKnown, socketOpen: runtimeSocketStateUsable, action: 'keep_any_socket_not_explicitly_closed_by_websocket' });
                     continue;
                 }
@@ -13142,7 +13185,7 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
             }
             const isPendingPairingStatus = ['pairing_expired', 'pairing_error', 'qr_disponible', 'synchronisation', 'initialisation', 'pairing_starting', 'pairing'].includes(status);
             const shouldRemoveExpiredPairing = isPendingPairingExpired || (isPendingPairingStatus && sessionAgeMs >= PAIRING_SESSION_TTL_MS);
-            const removeExpiredUnconnectedSession = isDeadReauthRecord || isDeadDuplicateRecord || isDeadDisconnectedOrphan || sessionAgeMs >= SESSION_UNCONNECTED_TTL_MS && !hasRecoverableAccountCredentials;
+            const removeExpiredUnconnectedSession = isDeadReauthRecord || isDeadDuplicateRecord || isDeadDisconnectedOrphan || isPendingPairingExpired && !hasRecoverableAccountCredentials || sessionAgeMs >= SESSION_UNCONNECTED_TTL_MS && !hasRecoverableAccountCredentials;
             if (!removeExpiredUnconnectedSession) continue;
             const pendingReconnect = reconnectTimers.get(staleSessionId);
             if (pendingReconnect) {
@@ -13151,7 +13194,7 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
             }
             await deleteMongoSession(staleSessionId);
             staleRemoved++;
-            console.info('[session-expired-unconnected-removed]', { sessionId: staleSessionId, status, cleanupReason: isDeadDuplicateRecord ? 'unregistered_duplicate_orphan' : isDeadDisconnectedOrphan ? 'unregistered_disconnected_orphan' : isDeadReauthRecord ? 'dead_reauth_record' : 'expired_unconnected_orphan', ageMs: sessionAgeMs, expiryMs: sessionExpiryMs, pendingPairingExpired: shouldRemoveExpiredPairing, credentialsRegistered, credentialsHaveIdentity, runtimeIdentityAvailable: !!runtimeIdentity, ownerHasAccountIdentity, socketExists: !!runtime?.sock, socketDefinitelyClosed: runtimeSocketDefinitelyClosed, associatedDataRemoved: true, mergedIntoSession: duplicateTarget || null });
+            console.info('[session-expired-unconnected-removed]', { sessionId: staleSessionId, status, cleanupReason: isPendingPairingExpired ? 'expired_unpaired_qr_or_sync_without_auth' : isDeadDuplicateRecord ? 'unregistered_duplicate_orphan' : isDeadDisconnectedOrphan ? 'unregistered_disconnected_orphan' : isDeadReauthRecord ? 'dead_reauth_record' : 'expired_unconnected_orphan', ageMs: sessionAgeMs, expiryMs: sessionExpiryMs, pendingPairingExpired: shouldRemoveExpiredPairing, credentialsRegistered, credentialsHaveIdentity, runtimeIdentityAvailable: !!runtimeIdentity, ownerHasAccountIdentity, socketExists: !!runtime?.sock, socketDefinitelyClosed: runtimeSocketDefinitelyClosed, associatedDataRemoved: true, mergedIntoSession: duplicateTarget || null });
         } catch (error) {
             console.warn('[session-expired-unconnected-removal-failed]', { sessionId: staleSessionId, status, error: error?.message || String(error) });
         }
