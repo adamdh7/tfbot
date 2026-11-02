@@ -3,8 +3,8 @@ const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(pr
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 7000)));
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r110-r108-session-state-and-70s-pairing-lifecycle';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-02-r108')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
+const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
@@ -7326,7 +7326,7 @@ const translations = {
     lang_title: "Langue", lang_current: "Langue actuelle du bot : {lang}.", ai_title: "Message", imaj_title: "Image", image_generated_title: "Image Générée",
     ai_click_to_receive: "Cliquez ici pour recevoir la réponse de l'IA :\n{link}",
     imaj_click_to_receive: "Cliquez ici pour recevoir votre image :\n{link}",
-    code_confirm: "Veuillez autoriser l'envoi du code en cliquant ici :\n{link}",
+    code_confirm: "+_Veuillez autoriser l'envoi du code en cliquant ici_* :\n{link}",
     qrbot_created: "Nouvelle Session Créée",
     qrbot_scan: "Scannez ce code pour connecter la nouvelle session.",
     qrbot_connected: "Session Connectée",
@@ -7420,7 +7420,7 @@ info_text: [
     lang_title: "Language", lang_current: "Current bot language: {lang}.", ai_title: "Message", imaj_title: "Image", image_generated_title: "Generated Image",
     ai_click_to_receive: "Click here to receive the AI response:\n{link}",
     imaj_click_to_receive: "Click here to receive your image:\n{link}",
-    code_confirm: "Please authorize the sending of the code by clicking here:\n{link}",
+    code_confirm: "*_Please authorize the sending of the code by clicking here_* :\n{link}",
     qrbot_created: "New Session Created",
     qrbot_scan: "Scan this QR code to connect the new session.",
     qrbot_connected: "Session Connected",
@@ -7514,7 +7514,7 @@ info_text: [
     lang_title: "Idioma", lang_current: "Idioma actual del bot: {lang}.", ai_title: "Mensaje", imaj_title: "Imagen", image_generated_title: "Imagen Generada",
     ai_click_to_receive: "Haz clic aquí para recibir la respuesta de la IA:\n{link}",
     imaj_click_to_receive: "Haz clic aquí para recibir tu imagen:\n{link}",
-    code_confirm: "Por favor autoriza el envío del código haciendo clic aquí:\n{link}",
+    code_confirm: "*_Por favor autoriza el envío del código haciendo clic aquí_* :\n{link}",
     qrbot_created: "Nueva Sesión Creada",
     qrbot_scan: "Escanea este código para conectar la nueva sesión.",
     qrbot_connected: "Sesión Conectada",
@@ -7608,7 +7608,7 @@ info_text: [
     lang_title: "Lang", lang_current: "Lang bot la kounye a: {lang}.", ai_title: "Mesaj", imaj_title: "Imaj", image_generated_title: "Imaj Jenere",
     ai_click_to_receive: "Klike isit pou resevwa repons IA a :\n{link}",
     imaj_click_to_receive: "Klike isit la pou w resevwa imaj ou a :\n{link}",
-    code_confirm: "Tanpri otorize voye kòd la lè w klike isit :\n{link}",
+    code_confirm: "*_Tanpri otorize voye kòd la lè w klike isit_* :\n{link}",
     qrbot_created: "Nouvo Sesyon Kreye",
     qrbot_scan: "Eskane kòd sa a pou konekte nouvo sesyon an.",
     qrbot_connected: "Sesyon Konekte",
