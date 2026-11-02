@@ -4,7 +4,7 @@
   "dir": "ltr",
   "name": "Bot",
   "short_name": "Bot",
-  "description": "It's us Adam_D'H7, Bienvenue dans Notre univers.",
+  "description": "It's us Adam_D'H7, Bot tfbot est un service web permettant de se connecter et de déployer des bots.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
