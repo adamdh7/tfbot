@@ -4,7 +4,7 @@ const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(proces
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r115-session-cleanup-repair-retry';
+const TFBOT_CLUSTER_CODE_REVISION = 'r116-qr-refresh-pairing-code-self-lid-alive-group-retry';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
@@ -614,38 +614,30 @@ function applyBaileysRetryResendDoubleEncryptionPatch() {
     }
 }
 function applyBaileysOwnLidRetryAddressingPatch() {
-    const marker = '__tfbotOwnLidRetryIdentityResolvedV107';
+    const marker = '__tfbotOwnLidRetryIdentityResolvedV116';
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
         const roots = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
-        const candidates = [...new Set(roots.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `messages-send.${extension}`)))) )];
+        const candidates = [...new Set(roots.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `messages-send.${extension}`)))))];
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
-        if (!filePath) return { applied: false, reason: 'messages_send_module_not_found', issue: 'Baileys#2856' };
+        if (!filePath) return { applied: false, reason: 'messages_send_module_not_found', issue: 'Baileys#2378' };
         let source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), issue: 'Baileys#2856', ownLidIdentityCheck: true, preservesParticipantAddress: true };
-        const expressionPattern = /const\s+isMe\s*=\s*areJidsSameUser\s*\(\s*participant(?:!|\?)?\.jid\s*,\s*isParticipantLid\s*\?\s*meLid\s*:\s*meId\s*\)\s*;?/;
-        const matches = [...source.matchAll(new RegExp(expressionPattern.source, 'g'))];
-        if (matches.length !== 1) return { applied: false, reason: `expected_one_retry_own_identity_expression_found_${matches.length}`, file: path.basename(filePath), issue: 'Baileys#2856' };
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), issue: 'Baileys#2378', recognizesOwnLidDevices: true, preservesOriginalRecipientJid: true };
+        const expressionPattern = /const\s+isMe\s*=\s*user\s*===\s*meUser\s*;?/g;
+        const matches = [...source.matchAll(expressionPattern)];
+        if (matches.length !== 1) return { applied: false, reason: `expected_one_device_identity_expression_found_${matches.length}`, file: path.basename(filePath), issue: 'Baileys#2378' };
         const match = matches[0];
-        const replacement = `const __tfbotRetryParticipantJid = String(participant?.jid || '').trim();
-let __tfbotRetryParticipantPn = '';
-if (isParticipantLid && signalRepository?.lidMapping?.getPNForLID) {
-    try {
-        const __tfbotNormalizedRetryLid = __tfbotRetryParticipantJid.replace(/:\\d+(?=@(?:hosted\\.)?lid$)/i, '');
-        __tfbotRetryParticipantPn = String(await signalRepository.lidMapping.getPNForLID(__tfbotNormalizedRetryLid) || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
-    } catch (error) {}
-}
-const __tfbotRetryOwnLidMatch = isParticipantLid && ((Boolean(meLid) && areJidsSameUser(__tfbotRetryParticipantJid, meLid)) || (Boolean(__tfbotRetryParticipantPn) && areJidsSameUser(__tfbotRetryParticipantPn, meId)));
-const __tfbotRetryOwnPnMatch = !isParticipantLid && areJidsSameUser(__tfbotRetryParticipantJid, meId);
-const isMe = Boolean(__tfbotRetryOwnLidMatch || __tfbotRetryOwnPnMatch);
+        if (!/\bjidDecode\b/.test(source)) return { applied: false, reason: 'jid_decode_helper_not_imported', file: path.basename(filePath), issue: 'Baileys#2378' };
+        const replacement = `const __tfbotOwnLidUserV116 = jidDecode(authState.creds.me?.lid || '')?.user || '';
+const isMe = user === meUser || (isLid && !!__tfbotOwnLidUserV116 && user === __tfbotOwnLidUserV116);
 const ${marker} = true;`;
         source = source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
-        if (!source.includes(marker) || !source.includes('getPNForLID') || !source.includes('const isMe = Boolean(__tfbotRetryOwnLidMatch || __tfbotRetryOwnPnMatch)')) return { applied: false, reason: 'own_lid_identity_patch_verification_failed', file: path.basename(filePath), issue: 'Baileys#2856' };
+        if (!source.includes(marker) || !source.includes('isLid && !!__tfbotOwnLidUserV116')) return { applied: false, reason: 'own_lid_device_identity_verification_failed', file: path.basename(filePath), issue: 'Baileys#2378' };
         fs.writeFileSync(filePath, source, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), issue: 'Baileys#2856', ownLidIdentityCheck: true, hostedLidSupported: true, mappedPnFallback: true, preservesParticipantAddress: true };
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), issue: 'Baileys#2378', recognizesOwnLidDevices: true, preservesOriginalRecipientJid: true };
     } catch (error) {
-        return { applied: false, reason: String(error?.message || error).slice(0, 180), issue: 'Baileys#2856' };
+        return { applied: false, reason: String(error?.message || error).slice(0, 180), issue: 'Baileys#2378' };
     }
 }
 function applyBaileysGroupLidPnDecryptRetryPatch() {
@@ -787,7 +779,7 @@ function applyBaileysGroupRetrySkdmPatch() {
                 result.reason = 'baileys_6_7_23_retry_receipt_parser_symbols_missing';
                 return result;
             }
-            const utilsImport = /import\s*\{([\s\S]*?)\}\s*from\s*['"]\.\.\/Utils['"]/;
+            const utilsImport = /import\s*\{([\s\S]*?)\}\s*from\s*['"]\.\.\/Utils(?:\/index)?(?:\.js)?['"]\s*;?/;
             const utilsMatch = utilsImport.exec(receiveSource);
             if (!utilsMatch) {
                 result.reason = 'baileys_6_7_23_receive_utils_import_not_found';
@@ -796,7 +788,7 @@ function applyBaileysGroupRetrySkdmPatch() {
             let utilsMembers = utilsMatch[1];
             if (!/\bgenerateSignalPubKey\b/.test(utilsMembers)) utilsMembers += ',\n\tgenerateSignalPubKey\n';
             receiveSource = receiveSource.slice(0, utilsMatch.index) + utilsMatch[0].replace(utilsMatch[1], utilsMembers) + receiveSource.slice(utilsMatch.index + utilsMatch[0].length);
-            const receiveImportEnd = /from\s*['"]\.\.\/WABinary['"]\s*;?/;
+            const receiveImportEnd = /from\s*['"]\.\.\/WABinary(?:\/index)?(?:\.js)?['"]\s*;?/;
             const wabinaryMatch = receiveImportEnd.exec(receiveSource);
             if (!wabinaryMatch) {
                 result.reason = 'baileys_6_7_23_receive_wabinary_import_not_found';
@@ -970,115 +962,110 @@ const __tfbotExtractRetryReceiptBundleV115 = receipt => {
     }
 }
 function applyBaileysCompanionRegRefreshPatch() {
-    const socketMarker = '__tfbotCompanionRegRefreshHandlerV84';
-    const ackMarker = '__tfbotPreLoginNotificationAckV84';
+    const marker = '__tfbotCompanionRegRefreshHandlerV116';
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
         const searchDirectories = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
-        const socketCandidates = [...new Set(searchDirectories.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs', 'ts'].map(extension => path.join(directory, folder, `socket.${extension}`)))))];
-        const receiveCandidates = [...new Set(searchDirectories.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs', 'ts'].map(extension => path.join(directory, folder, `messages-recv.${extension}`)))))];
+        const socketCandidates = [...new Set(searchDirectories.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `socket.${extension}`)))))];
+        const socketPath = socketCandidates.find(candidate => fs.existsSync(candidate));
+        if (!socketPath) return { applied: false, reason: 'baileys_socket_module_not_found', issue: 'Baileys#2737' };
+        let source = fs.readFileSync(socketPath, 'utf8');
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(socketPath), issue: 'Baileys#2737', rotatesAdvSecret: true, refreshesCurrentQrRef: true, preservesQrTimer: true };
+        const pairHandlerPattern = /ws\.on\(\s*(['"])CB:iq,type:set,pair-device\1\s*,\s*async\s*\(/;
+        const pairHandlerMatch = pairHandlerPattern.exec(source);
+        if (!pairHandlerMatch) return { applied: false, reason: 'pair_device_handler_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
+        const advPattern = /const\s+advB64\s*=\s*creds\.advSecretKey\s*;?/;
+        const advMatch = advPattern.exec(source.slice(pairHandlerMatch.index));
+        if (!advMatch) return { applied: false, reason: 'pairing_adv_secret_declaration_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
+        const qrPattern = /const\s+qr\s*=\s*\[\s*ref\s*,\s*noiseKeyB64\s*,\s*identityKeyB64\s*,\s*advB64\s*\]\.join\(\s*['"]\s*,\s*['"]\s*\)\s*;?/;
+        const qrMatch = qrPattern.exec(source.slice(pairHandlerMatch.index));
+        if (!qrMatch) return { applied: false, reason: 'baileys_6_7_23_pairing_qr_array_pattern_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
+        if (!/\bgetBinaryNodeChild\s*\(/.test(source)) return { applied: false, reason: 'binary_node_child_accessor_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
+        if (!/\brandomBytes\s*\(/.test(source)) return { applied: false, reason: 'crypto_random_bytes_import_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
+        const outerInjection = `let __tfbotCurrentPairingQRRefV116 = null;
+let __tfbotRefreshPairingQRV116 = null;
+const ${marker} = true;
+ws.on('CB:notification,type:companion_reg_refresh', node => {
+    try {
+        const refreshNode = getBinaryNodeChild(node, 'companion_reg_refresh') || getBinaryNodeChild(node, 'pair-device-rotate-qr');
+        if (!refreshNode || creds.me || typeof __tfbotRefreshPairingQRV116 !== 'function') return;
+        creds.advSecretKey = randomBytes(32).toString('base64');
+        ev.emit('creds.update', { advSecretKey: creds.advSecretKey });
+        __tfbotRefreshPairingQRV116();
+        logger.info({ currentQrRefAvailable: !!__tfbotCurrentPairingQRRefV116 }, 'companion registration refresh rotated the advertised secret and refreshed the current QR');
+    } catch (refreshError) {
+        logger.warn({ err: refreshError }, 'companion registration refresh failed');
+    }
+});
+`;
+        source = source.slice(0, pairHandlerMatch.index) + outerInjection + source.slice(pairHandlerMatch.index);
+        const updatedPairStart = source.indexOf(pairHandlerMatch[0]);
+        const updatedAdvMatch = advPattern.exec(source.slice(updatedPairStart));
+        if (!updatedAdvMatch) return { applied: false, reason: 'pairing_adv_secret_declaration_lost', file: path.basename(socketPath), issue: 'Baileys#2737' };
+        const updatedAdvEnd = updatedPairStart + updatedAdvMatch.index + updatedAdvMatch[0].length;
+        const refreshCallback = `
+		__tfbotRefreshPairingQRV116 = () => {
+			if (!ws.isOpen || !__tfbotCurrentPairingQRRefV116) return false;
+			const refreshedQr = [__tfbotCurrentPairingQRRefV116, noiseKeyB64, identityKeyB64, creds.advSecretKey].join(',');
+			ev.emit('connection.update', { qr: refreshedQr });
+			return true;
+		};`;
+        source = source.slice(0, updatedAdvEnd) + refreshCallback + source.slice(updatedAdvEnd);
+        const updatedQrPattern = /const\s+qr\s*=\s*\[\s*ref\s*,\s*noiseKeyB64\s*,\s*identityKeyB64\s*,\s*advB64\s*\]\.join\(\s*['"]\s*,\s*['"]\s*\)\s*;?/;
+        const updatedQrMatch = updatedQrPattern.exec(source.slice(updatedPairStart));
+        if (!updatedQrMatch) return { applied: false, reason: 'pairing_qr_array_recheck_failed', file: path.basename(socketPath), issue: 'Baileys#2737' };
+        const qrReplacement = `__tfbotCurrentPairingQRRefV116 = ref;
+				const qr = [ref, noiseKeyB64, identityKeyB64, creds.advSecretKey].join(',');`;
+        source = source.slice(0, updatedPairStart + updatedQrMatch.index) + qrReplacement + source.slice(updatedPairStart + updatedQrMatch.index + updatedQrMatch[0].length);
+        if (!source.includes(marker) || !source.includes("CB:notification,type:companion_reg_refresh") || !source.includes('creds.advSecretKey].join')) return { applied: false, reason: 'companion_refresh_patch_verification_failed', file: path.basename(socketPath), issue: 'Baileys#2737' };
+        fs.writeFileSync(socketPath, source, 'utf8');
+        return { applied: true, alreadyApplied: false, file: path.basename(socketPath), issue: 'Baileys#2737', rotatesAdvSecret: true, refreshesCurrentQrRef: true, preservesQrRefPool: true, preservesQrTimer: true, notificationAckHandledByReceiveSocket: true };
+    } catch (error) {
+        return { applied: false, reason: String(error?.message || error).slice(0, 180), issue: 'Baileys#2737' };
+    }
+}
+function applyBaileysPairingCodeProtocolPatch() {
+    const socketMarker = '__tfbotPairingCodeHandshakeNonceV116';
+    const receiveMarker = '__tfbotPairingCodePrimaryHelloStageV116';
+    try {
+        const entryPath = require.resolve('@whiskeysockets/baileys');
+        const entryDirectory = path.dirname(entryPath);
+        const searchDirectories = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
+        const socketCandidates = [...new Set(searchDirectories.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `socket.${extension}`)))))];
+        const receiveCandidates = [...new Set(searchDirectories.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `messages-recv.${extension}`)))))];
         const socketPath = socketCandidates.find(candidate => fs.existsSync(candidate));
         const receivePath = receiveCandidates.find(candidate => fs.existsSync(candidate));
-        if (!socketPath) return { applied: false, reason: 'baileys_socket_module_not_found', issue: 'Baileys#2737' };
-        if (!receivePath) return { applied: false, reason: 'baileys_messages_recv_module_not_found', file: path.basename(socketPath), issue: 'Baileys#2765' };
-
+        if (!socketPath || !receivePath) return { applied: false, reason: `pairing_modules_missing_${!socketPath ? 'socket' : 'messages_recv'}`, issue: 'Baileys#2872' };
         let socketSource = fs.readFileSync(socketPath, 'utf8');
         let receiveSource = fs.readFileSync(receivePath, 'utf8');
         let socketChanged = false;
-        let ackChanged = false;
-
+        let receiveChanged = false;
         if (!socketSource.includes(socketMarker)) {
-            const legacyMarker = '__tfbotCompanionRegRefreshV78';
-            if (socketSource.includes(legacyMarker)) {
-                const legacyStart = socketSource.indexOf(`const ${legacyMarker} = true;`);
-                const legacyEndPattern = /ws\.on\(\s*(['"])CB:notification,type:companion_reg_refresh\1\s*,\s*__tfbotCompanionRefreshHandler\s*\)\s*;?/g;
-                legacyEndPattern.lastIndex = legacyStart;
-                const legacyEnd = legacyEndPattern.exec(socketSource);
-                if (legacyStart < 0 || !legacyEnd) return { applied: false, reason: 'legacy_companion_refresh_cleanup_failed', file: path.basename(socketPath), issue: 'Baileys#2737' };
-                let lineStart = socketSource.lastIndexOf('\n', legacyStart);
-                lineStart = lineStart < 0 ? 0 : lineStart + 1;
-                let lineEnd = socketSource.indexOf('\n', legacyEnd.index + legacyEnd[0].length);
-                lineEnd = lineEnd < 0 ? legacyEnd.index + legacyEnd[0].length : lineEnd + 1;
-                socketSource = socketSource.slice(0, lineStart) + socketSource.slice(lineEnd);
-                socketSource = socketSource.replace(/^\s*let __tfbotCurrentPairingQRRef;\s*\r?\n/gm, '');
-                socketSource = socketSource.replace(/^\s*__tfbotCurrentPairingQRRef\s*=\s*ref;\s*\r?\n/gm, '');
-                socketSource = socketSource.replace(/buildPairingQRData\(\s*ref\s*,\s*noiseKeyB64\s*,\s*identityKeyB64\s*,\s*creds\.advSecretKey\s*,\s*browser\s*\)/g, 'buildPairingQRData(ref, noiseKeyB64, identityKeyB64, advB64, browser)');
-            }
-
-            const pairHandlerPattern = /ws\.on\(\s*(['"])CB:iq,type:set,pair-device\1\s*,\s*async\s*\(/;
-            const pairHandlerMatch = pairHandlerPattern.exec(socketSource);
-            if (!pairHandlerMatch) return { applied: false, reason: 'pair_device_handler_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
-            const handlerSource = socketSource.slice(pairHandlerMatch.index);
-            const advPattern = /const\s+advB64\s*=\s*creds\.advSecretKey\s*;?/;
-            const advMatch = advPattern.exec(handlerSource);
-            if (!advMatch) return { applied: false, reason: 'pairing_adv_secret_declaration_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
-            const qrPattern = /const\s+qr\s*=\s*buildPairingQRData\(\s*ref\s*,\s*noiseKeyB64\s*,\s*identityKeyB64\s*,\s*advB64\s*,\s*browser\s*\)\s*;?/;
-            const qrMatch = qrPattern.exec(handlerSource);
-            if (!qrMatch) return { applied: false, reason: 'pairing_qr_builder_pattern_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
-
-            const childAccessorMatch = socketSource.match(/\b([A-Za-z_$][\w$]*)\.getBinaryNodeChild\s*\(/);
-            const childAccessor = childAccessorMatch ? `${childAccessorMatch[1]}.getBinaryNodeChild` : socketSource.includes('getBinaryNodeChild') ? 'getBinaryNodeChild' : '';
-            if (!childAccessor) return { applied: false, reason: 'binary_node_child_accessor_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
-
-            const namespacedRandom = socketSource.match(/\b([A-Za-z_$][\w$]*)\.randomBytes\s*\(/);
-            const randomBytesExpression = namespacedRandom ? `${namespacedRandom[1]}.randomBytes(32)` : /\brandomBytes\s*\(/.test(socketSource) ? 'randomBytes(32)' : '';
-            if (!randomBytesExpression) return { applied: false, reason: 'crypto_random_bytes_import_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
-
-            const outerInjection = `let __tfbotRefreshPairingQRV84 = null;\n\t\tws.on('CB:notification,type:companion_reg_refresh', node => {\n\t\t\ttry {\n\t\t\t\tconst hasRefreshNode = !!${childAccessor}(node, 'companion_reg_refresh') || !!${childAccessor}(node, 'pair-device-rotate-qr');\n\t\t\t\tif (!hasRefreshNode || creds.me || typeof __tfbotRefreshPairingQRV84 !== 'function') return;\n\t\t\t\tcreds.advSecretKey = ${randomBytesExpression}.toString('base64');\n\t\t\t\tev.emit('creds.update', { advSecretKey: creds.advSecretKey });\n\t\t\t\t__tfbotRefreshPairingQRV84();\n\t\t\t} catch (refreshError) {\n\t\t\t\tlogger.warn({ err: refreshError }, 'companion registration refresh failed');\n\t\t\t}\n\t\t});\n\t\t`;
-            socketSource = socketSource.slice(0, pairHandlerMatch.index) + outerInjection + socketSource.slice(pairHandlerMatch.index);
-
-            const updatedPairStart = socketSource.indexOf(pairHandlerMatch[0]) + pairHandlerMatch[0].length;
-            const updatedAdvMatch = advPattern.exec(socketSource.slice(updatedPairStart));
-            if (!updatedAdvMatch) return { applied: false, reason: 'pairing_adv_secret_declaration_lost', file: path.basename(socketPath), issue: 'Baileys#2737' };
-            const updatedAdvIndex = updatedPairStart + updatedAdvMatch.index;
-            const advEnd = updatedAdvIndex + updatedAdvMatch[0].length;
-            const currentRefInjection = `\n\t\t\tlet __tfbotCurrentPairingQRRefV84 = null;\n\t\t\t__tfbotRefreshPairingQRV84 = () => {\n\t\t\t\tif (!__tfbotCurrentPairingQRRefV84) return false;\n\t\t\t\tev.emit('connection.update', { qr: buildPairingQRData(__tfbotCurrentPairingQRRefV84, noiseKeyB64, identityKeyB64, creds.advSecretKey, browser) });\n\t\t\t\treturn true;\n\t\t\t};`;
-            socketSource = socketSource.slice(0, advEnd) + currentRefInjection + socketSource.slice(advEnd);
-
-            const updatedQrPattern = /const\s+qr\s*=\s*buildPairingQRData\(\s*ref\s*,\s*noiseKeyB64\s*,\s*identityKeyB64\s*,\s*advB64\s*,\s*browser\s*\)\s*;?/;
-            const updatedPairHandlerStart = socketSource.indexOf(pairHandlerMatch[0]);
-            updatedQrPattern.lastIndex = updatedPairHandlerStart;
-            const updatedQrMatch = updatedQrPattern.exec(socketSource);
-            if (!updatedQrMatch) return { applied: false, reason: 'pairing_qr_builder_recheck_failed', file: path.basename(socketPath), issue: 'Baileys#2737' };
-            const qrReplacement = `__tfbotCurrentPairingQRRefV84 = ref;\n\t\t\t\tconst qr = buildPairingQRData(ref, noiseKeyB64, identityKeyB64, creds.advSecretKey, browser);`;
-            socketSource = socketSource.slice(0, updatedQrMatch.index) + qrReplacement + socketSource.slice(updatedQrMatch.index + updatedQrMatch[0].length);
-
-            if (!socketSource.includes(socketMarker)) {
-                const insertionIndex = socketSource.indexOf('let __tfbotRefreshPairingQRV84 = null;');
-                if (insertionIndex < 0) return { applied: false, reason: 'companion_refresh_handler_verification_failed', file: path.basename(socketPath), issue: 'Baileys#2737' };
-                socketSource = socketSource.slice(0, insertionIndex) + `const ${socketMarker} = true;\n\t\t` + socketSource.slice(insertionIndex);
-            }
-            if (!socketSource.includes(socketMarker) || !socketSource.includes("CB:notification,type:companion_reg_refresh") || !socketSource.includes('__tfbotCurrentPairingQRRefV84') || !socketSource.includes('creds.advSecretKey, browser')) {
-                return { applied: false, reason: 'companion_refresh_patch_verification_failed', file: path.basename(socketPath), issue: 'Baileys#2737' };
-            }
+            const registrationHandshake = /if\s*\(\s*!creds\.me\s*\)\s*\{\s*node\s*=\s*generateRegistrationNode\(creds,\s*config\)/;
+            if (!registrationHandshake.test(socketSource)) return { applied: false, reason: 'pairing_registration_handshake_anchor_not_found', file: path.basename(socketPath), issue: 'Baileys#2872' };
+            socketSource = socketSource.replace(registrationHandshake, "if (!creds.me || (!!creds.pairingCode && !creds.registered)) {\n\t\t\tnode = generateRegistrationNode(creds, config)");
+            const noncePattern = /tag:\s*['"]link_code_pairing_nonce['"]\s*,\s*attrs:\s*\{\s*\}\s*,\s*content:\s*['"]0['"]/;
+            if (!noncePattern.test(socketSource)) return { applied: false, reason: 'pairing_zero_nonce_anchor_not_found', file: path.basename(socketPath), issue: 'Baileys#2872' };
+            socketSource = socketSource.replace(noncePattern, "tag: 'link_code_pairing_nonce',\n\t\t\t\t\t\t\tattrs: {},\n\t\t\t\t\t\t\tcontent: Buffer.from([0])");
+            const pairSuccessPattern = /(const\s*\{\s*reply\s*,\s*creds:\s*updatedCreds\s*\}\s*=\s*configureSuccessfulPairing\(stanza,\s*creds\)\s*;?)/;
+            if (!pairSuccessPattern.test(socketSource)) return { applied: false, reason: 'pairing_success_registered_anchor_not_found', file: path.basename(socketPath), issue: 'Baileys#2872' };
+            socketSource = socketSource.replace(pairSuccessPattern, `$1\n\t\t\tupdatedCreds.registered = true;\n\t\t\tconst ${socketMarker} = true;`);
+            if (!socketSource.includes(socketMarker) || !socketSource.includes('content: Buffer.from([0])') || !socketSource.includes('!!creds.pairingCode && !creds.registered')) return { applied: false, reason: 'pairing_socket_patch_verification_failed', file: path.basename(socketPath), issue: 'Baileys#2872' };
             socketChanged = true;
         }
-
-        const ackAlreadyApplied = receiveSource.includes(ackMarker) || /const\s+meId\s*=\s*authState\.creds\.me\s*&&\s*authState\.creds\.me\.id[\s\S]{0,500}node\.tag\s*===\s*['"]message['"][\s\S]{0,500}buildAckStanza\(\s*node\s*,\s*errorCode\s*,\s*meId\s*\)/.test(receiveSource);
-        if (!ackAlreadyApplied) {
-            const directAckPattern = /const\s+stanza\s*=\s*buildAckStanza\(\s*node\s*,\s*errorCode\s*,\s*authState\.creds\.me(?:!|\?)?\.id\s*\)\s*;?/;
-            if (!directAckPattern.test(receiveSource)) return { applied: false, reason: 'prelogin_ack_pattern_not_found', file: path.basename(receivePath), issue: 'Baileys#2765' };
-            const usesBoom = /\bBoom\b/.test(receiveSource);
-            const preloginError = usesBoom ? "new Boom('cannot acknowledge a message before creds.me is available')" : "new Error('cannot acknowledge a message before creds.me is available')";
-            const ackReplacement = `const ${ackMarker} = true;\n\t\tconst meId = authState.creds.me && authState.creds.me.id;\n\t\tif (node.tag === 'message' && !meId) {\n\t\t\tthrow ${preloginError};\n\t\t}\n\t\tconst stanza = buildAckStanza(node, errorCode, meId);`;
-            receiveSource = receiveSource.replace(directAckPattern, ackReplacement);
-            if (!receiveSource.includes(ackMarker) || !/node\.tag\s*===\s*'message'\s*&&\s*!meId/.test(receiveSource) || !/buildAckStanza\(node,\s*errorCode,\s*meId\)/.test(receiveSource)) {
-                return { applied: false, reason: 'prelogin_ack_patch_verification_failed', file: path.basename(receivePath), issue: 'Baileys#2765' };
-            }
-            ackChanged = true;
+        if (!receiveSource.includes(receiveMarker)) {
+            const stageAnchor = /(const\s+linkCodeCompanionReg\s*=\s*getBinaryNodeChild\(node,\s*['"]link_code_companion_reg['"]\)\s*;?)/;
+            if (!stageAnchor.test(receiveSource)) return { applied: false, reason: 'pairing_primary_hello_stage_anchor_not_found', file: path.basename(receivePath), issue: 'Baileys#2872' };
+            receiveSource = receiveSource.replace(stageAnchor, `$1\n\t\t\t\tif (linkCodeCompanionReg?.attrs?.stage !== 'primary_hello') break;\n\t\t\t\tconst ${receiveMarker} = true;`);
+            if (!receiveSource.includes(receiveMarker) || !receiveSource.includes("linkCodeCompanionReg?.attrs?.stage !== 'primary_hello'")) return { applied: false, reason: 'pairing_receive_patch_verification_failed', file: path.basename(receivePath), issue: 'Baileys#2872' };
+            receiveChanged = true;
         }
-
         if (socketChanged) fs.writeFileSync(socketPath, socketSource, 'utf8');
-        if (ackChanged) fs.writeFileSync(receivePath, receiveSource, 'utf8');
-        return {
-            applied: socketSource.includes(socketMarker) && (ackAlreadyApplied || ackChanged),
-            alreadyApplied: !socketChanged && ackAlreadyApplied,
-            socket: { applied: socketSource.includes(socketMarker), file: path.basename(socketPath) },
-            preloginAck: { applied: ackAlreadyApplied || ackChanged, file: path.basename(receivePath) }
-        };
+        if (receiveChanged) fs.writeFileSync(receivePath, receiveSource, 'utf8');
+        return { applied: socketSource.includes(socketMarker) && receiveSource.includes(receiveMarker), alreadyApplied: !socketChanged && !receiveChanged, socket: { applied: socketSource.includes(socketMarker), file: path.basename(socketPath) }, messagesRecv: { applied: receiveSource.includes(receiveMarker), file: path.basename(receivePath) }, issue: 'Baileys#2872', sendsNullByteNonce: true, primaryHelloStageGuard: true, registrationHandshakeBeforeRegistered: true };
     } catch (error) {
-        return { applied: false, reason: String(error?.message || error).slice(0, 180), issue: 'Baileys#2737/#2765' };
+        return { applied: false, reason: String(error?.message || error).slice(0, 180), issue: 'Baileys#2872' };
     }
 }
 
@@ -1155,6 +1142,7 @@ const baileysRetryResendDoubleEncryptionPatchStatus = applyBaileysRetryResendDou
 const baileysOwnLidRetryAddressingPatchStatus = applyBaileysOwnLidRetryAddressingPatch();
 const baileysMessageRetryManagerDeviceJidPatchStatus = applyBaileysMessageRetryManagerDeviceJidPatch();
 const baileysCompanionRegRefreshPatchStatus = applyBaileysCompanionRegRefreshPatch();
+const baileysPairingCodeProtocolPatchStatus = applyBaileysPairingCodeProtocolPatch();
 console.info('[tfbot-local-diagnostics-ready]', { phone: TFBOT_DIAGNOSTIC_PHONE ? `[phone:${TFBOT_DIAGNOSTIC_PHONE.slice(-2).padStart(TFBOT_DIAGNOSTIC_PHONE.length, '*')}]` : null, sessionId: TFBOT_DIAGNOSTIC_SESSION_ID || null, file: 'logs.txt', storage: 'local_filesystem_only', publicRead: true, access: 'public-redacted-log', writer: 'asynchronous' });
 console.info('[baileys-lid-pn-decrypt-retry-patch]', baileysLidPnDecryptPatchStatus);
 console.info('[baileys-group-lid-pn-decrypt-retry-patch]', baileysGroupLidPnDecryptPatchStatus);
@@ -1162,7 +1150,8 @@ console.info('[baileys-self-chat-placeholder-resend-patch]', baileysSelfChatPlac
 console.info('[baileys-group-retry-skdm-patch]', baileysGroupRetrySkdmPatchStatus);
 console.info('[baileys-outgoing-retry-preflight-patch]', { ...baileysOutgoingRetryPreflightPatchStatus, action: baileysOutgoingRetryPreflightPatchStatus.applied ? 'preload_internal_retry_manager_and_persist_generated_full_message_before_network_relay' : 'leave_installed_baileys_source_unchanged' });
 console.info('[baileys-retry-resend-double-encryption-patch]', { ...baileysRetryResendDoubleEncryptionPatchStatus, action: baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'avoid_duplicate_pairwise_encryption_on_retry_resend' : 'not_applicable_or_source_shape_not_matched' });
-console.info('[baileys-own-lid-retry-addressing-patch]', { ...baileysOwnLidRetryAddressingPatchStatus, action: baileysOwnLidRetryAddressingPatchStatus.applied ? 'preserve_chat_recipient_for_own_lid_device_retry' : 'not_applicable_or_source_shape_not_matched' });
+console.info('[baileys-own-lid-retry-addressing-patch]', { ...baileysOwnLidRetryAddressingPatchStatus, action: baileysOwnLidRetryAddressingPatchStatus.applied ? 'recognize_own_lid_as_self_for_device_encryption' : 'not_applicable_or_source_shape_not_matched' });
+console.info('[baileys-pairing-code-protocol-patch]', baileysPairingCodeProtocolPatchStatus);
 console.info('[baileys-signal-transaction-patch]', { ...baileysSignalTransactionPatchStatus, action: baileysSignalTransactionPatchStatus.applied ? 'serialize_signal_crypto_methods_inside_session_store_transaction' : 'leave_installed_baileys_source_unchanged' });
 enqueueTfbotDiagnosticRecord({ name: 'Bot (tfbot)', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION }) });
 
@@ -1192,7 +1181,7 @@ function getTfbotInstalledPackageVersion(packageName) {
     return null;
 }
 const TFBOT_BAILEYS_VERSION = getTfbotInstalledPackageVersion('@whiskeysockets/baileys');
-enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, baileysVersion: TFBOT_BAILEYS_VERSION, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, groupLidPnDecrypt: baileysGroupLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus }) });
+enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, baileysVersion: TFBOT_BAILEYS_VERSION, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, groupLidPnDecrypt: baileysGroupLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus, pairingCodeProtocol: baileysPairingCodeProtocolPatchStatus }) });
 const { MongoClient } = require('mongodb');
 const { Writable } = require('stream');
 const zlib = require('zlib');
@@ -1341,7 +1330,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-02-r115';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-02-r116';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -8874,7 +8863,7 @@ app.get('/list', async (req, res) => {
             localSession.lastDisconnectCode = null;
             localSession.lastDisconnectReason = null;
         }
-        const connectedAt = toTimestamp(localSession?.connectedAt) || toTimestamp(ownerDoc.connectedSince) || toTimestamp(ownerDoc.socketAuthenticatedAt);
+        const connectedAt = toTimestamp(ownerDoc.connectedSince) || toTimestamp(ownerDoc.socketAuthenticatedAt) || toTimestamp(localSession?.connectedAt);
         const aliveSince = status === 'connecte' && connectedAt ? connectedAt : pairingPending ? pairingStartedAt || toTimestamp(ownerDoc.statusUpdatedAt) || idTimestamp : toTimestamp(localSession?.disconnectTime) || toTimestamp(ownerDoc.unconnectedSinceAt) || toTimestamp(ownerDoc.disconnectTime) || toTimestamp(ownerDoc.statusUpdatedAt) || toTimestamp(ownerDoc.createdAt) || idTimestamp;
         const aliveStr = aliveSince ? getUptimeString(Math.max(0, now - aliveSince)) : '0s';
         const activeOwnerUrl = localSession ? (TFBOT_CLUSTER_INSTANCE_URL || TFBOT_CLUSTER_INSTANCE_HOST) : remoteLeaseLive || ownerDoc.ownerInstanceId === TFBOT_CLUSTER_INSTANCE_ID && ownerLease > now ? ownerDoc.ownerInstanceUrl || ownerDoc.ownerInstanceId || null : null;
@@ -10958,7 +10947,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             openReadinessStartedAt: Number(existingSessionRecord?.openReadinessStartedAt || 0) || null,
             openReadinessDiagnosticAt: Number(existingSessionRecord?.openReadinessDiagnosticAt || 0),
             disconnectTime: existingSessionRecord?.disconnectTime || null,
-            connectedAt: Number(existingSessionRecord?.connectedAt || 0) || null,
+            connectedAt: null,
             readyAt: Number(existingSessionRecord?.readyAt || sessionData.readyAt || 0) || null,
             lastPongAt: Date.now(),
             lastSocketActivityAt: Date.now(),
@@ -11362,7 +11351,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     currentSession.status = 'connecte';
                     currentSession.format = connectionFormat;
                     currentSession.sock = sock;
-                    currentSession.connectedAt = Date.now();
+                    currentSession.connectedAt = Number(currentSession.connectedAt || Date.now());
                     currentSession.lastPongAt = Date.now();
                     currentSession.lastSocketActivityAt = Date.now();
                     currentSession.receivedPong = false;
@@ -15048,6 +15037,9 @@ async function main() {
         pairingSessionTtlMs: PAIRING_SESSION_TTL_MS,
         imageUploadBasename: 'tfbot',
         baileysVersion: TFBOT_BAILEYS_VERSION,
+        pairingCodeProtocolPatchApplied: baileysPairingCodeProtocolPatchStatus.applied === true,
+        companionRegRefreshPatchApplied: baileysCompanionRegRefreshPatchStatus.applied === true,
+        ownLidDeviceAddressingPatchApplied: baileysOwnLidRetryAddressingPatchStatus.applied === true,
         groupLidPnDecryptPatchApplied: baileysGroupLidPnDecryptPatchStatus.applied === true,
         groupRetrySkdmPatchApplied: baileysGroupRetrySkdmPatchStatus.applied === true,
         groupSenderKeyResetBeforeSendEnabled: false,
@@ -15095,7 +15087,7 @@ async function main() {
             tfbotWorkerActive = false;
             tfbotWorkerState = 'coordinator';
             await connectMongo({ coordinatorOnly: true });
-            console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, baileysGroupLidPnDecryptPatch: baileysGroupLidPnDecryptPatchStatus, baileysSignalTransactionPatch: baileysSignalTransactionPatchStatus, baileysOutgoingRetryPreflightPatch: baileysOutgoingRetryPreflightPatchStatus, baileysRetryResendDoubleEncryptionPatch: baileysRetryResendDoubleEncryptionPatchStatus, baileysOwnLidRetryAddressingPatch: baileysOwnLidRetryAddressingPatchStatus, baileysCompanionRegRefreshPatch: baileysCompanionRegRefreshPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, port: PORT });
+            console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, baileysGroupLidPnDecryptPatch: baileysGroupLidPnDecryptPatchStatus, baileysSignalTransactionPatch: baileysSignalTransactionPatchStatus, baileysOutgoingRetryPreflightPatch: baileysOutgoingRetryPreflightPatchStatus, baileysRetryResendDoubleEncryptionPatch: baileysRetryResendDoubleEncryptionPatchStatus, baileysOwnLidRetryAddressingPatch: baileysOwnLidRetryAddressingPatchStatus, baileysCompanionRegRefreshPatch: baileysCompanionRegRefreshPatchStatus, baileysPairingCodeProtocolPatch: baileysPairingCodeProtocolPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, port: PORT });
             httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
             const savedSelection = await db.collection('cluster_router').findOne({ _id: TFBOT_ROUTER_STATE_ID }).catch(() => null);
             const savedDomain = TFBOT_ROUTER_DOMAIN_BY_HOST.get(normalizeTfbotHost(savedSelection?.activeHost || ''));
