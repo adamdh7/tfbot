@@ -3,8 +3,8 @@ const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(pr
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 7000)));
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r107-r103-safe-signal-recovery-selfchat-pn-fallback-group-skdm';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-02-r107')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+const TFBOT_CLUSTER_CODE_REVISION = 'r108-r107-native-lid-private-routing';
+const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-02-r108')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
@@ -1426,6 +1426,11 @@ function normalizeLidCacheKey(value) {
     return String(value || '').trim().replace(/:\d+@lid$/i, '@lid').toLowerCase();
 }
 
+function normalizeNativeLidJid(value) {
+    const match = String(value || '').trim().match(/^(\d{3,20})(?::\d+)?@lid$/i);
+    return match ? `${match[1]}@lid` : '';
+}
+
 function normalizePhoneCacheJid(value) {
     const raw = String(value || '').trim();
     if (!/@s\.whatsapp\.net$/i.test(raw)) return '';
@@ -2808,7 +2813,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
     let actualSendFailure = false;
     const requestedDestinationJid = String(jid || '').trim();
     const legacyPrivateMatch = requestedDestinationJid.match(/^(\+?\d{6,20})(?::\d+)?@c\.us$/i);
-    const originalDestinationJid = normalizePhoneCacheJid(requestedDestinationJid) || (legacyPrivateMatch ? `${normalizePhoneNumber(legacyPrivateMatch[1])}@s.whatsapp.net` : requestedDestinationJid);
+    const originalDestinationJid = normalizePhoneCacheJid(requestedDestinationJid) || (legacyPrivateMatch ? `${normalizePhoneNumber(legacyPrivateMatch[1])}@s.whatsapp.net` : normalizeNativeLidJid(requestedDestinationJid) || requestedDestinationJid);
     const queuePartitionKey = getMessageQueuePartitionKey(expectedSessionId, originalDestinationJid, expectedSession);
     const queueEnqueuedAt = Date.now();
     console.info('[whatsapp-send-queued]', { sessionId: expectedSessionId, destinationType: /@g\.us$/i.test(originalDestinationJid) ? 'group' : /@newsletter$/i.test(originalDestinationJid) ? 'channel' : /@lid$/i.test(originalDestinationJid) ? 'private_lid' : 'private_or_other', messageType: Object.keys(content || {}).join(',') || 'unknown', queuePartition: queuePartitionKey, pendingTasks: getMessageQueue(sock, queuePartitionKey).tasks.length });
@@ -2913,7 +2918,15 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 console.warn('[private-send-alternate-resolution-failed]', { sessionId, originalDestinationJid, error: resolveError?.message || String(resolveError) });
             }
         }
-        if (/@(?:hosted\.)?lid$/i.test(destinationJid)) throw new Error('private_phone_jid_required');
+        if (normalizeNativeLidJid(destinationJid)) {
+            destinationJid = normalizeNativeLidJid(destinationJid);
+            if (!isSelfChatDestination) {
+                destinationResolution = 'native_lid_preserved_without_verified_pn';
+                console.info('[private-send-native-lid-preserved]', { sessionId, destinationType: 'private_lid', mappingAvailable: false, action: 'send_to_native_lid_without_guessing_phone' });
+            }
+        } else if (/@(?:hosted\.)?lid$/i.test(destinationJid)) {
+            throw new Error('private_destination_lid_invalid');
+        }
         if (/@s\.whatsapp\.net$/i.test(originalDestinationJid) && !isSelfChatDestination) destinationResolution = 'private_pn';
         if (alternateDestinationJid === destinationJid) alternateDestinationJid = '';
         console.info('[private-send-target]', {
@@ -2930,7 +2943,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             const sendTargetJid = String(targetJid || '').trim();
             const attemptNumber = ++sendAttempt;
             const platformDestination = /@g\.us$/i.test(sendTargetJid) || /@newsletter$/i.test(sendTargetJid) || /@broadcast$/i.test(sendTargetJid);
-            if (!platformDestination && !/@s\.whatsapp\.net$/i.test(sendTargetJid)) throw new Error('private_phone_jid_required');
+            if (!platformDestination && !/@s\.whatsapp\.net$/i.test(sendTargetJid) && !normalizeNativeLidJid(sendTargetJid)) throw new Error('private_destination_jid_invalid');
             if (sessionId && /@g\.us$/i.test(sendTargetJid)) {
                 await resetGroupSenderKeyMemoryBeforeSend(sessionId, sendTargetJid);
             }
@@ -11133,7 +11146,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const senderJids = [...new Set([sender, m.key.participantAlt, m.key.participantPn, m.key.senderPn, (!isGroup ? m.key.remoteJidAlt : null)].filter(Boolean).map(String))];
                         let mappedPrivateChatPhoneJid = '';
                         let mappedPrivateChatPhoneResolution = '';
-                        const normalizedLidForMapping = value => String(value || '').replace(/:\d+@lid$/i, '@lid');
+                        const normalizedLidForMapping = value => normalizeNativeLidJid(value) || String(value || '').replace(/:\d+@lid$/i, '@lid');
                         const normalizedRawChatForMapping = normalizedLidForMapping(rawFrom);
                         for (const senderIdentity of [...senderJids]) {
                             const normalizedSenderIdentity = normalizedLidForMapping(senderIdentity);
@@ -11206,6 +11219,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             } else if (isFromMe && ownRouteNumber && (matchesStoredOwnLid || matchesAuthenticatedOwnLid)) {
                                 from = `${ownRouteNumber}@s.whatsapp.net`;
                                 privateReplyTargetResolution = 'self_chat_pn_from_authenticated_owner';
+                            } else if (normalizeNativeLidJid(normalizedRawChatForMapping)) {
+                                from = normalizeNativeLidJid(normalizedRawChatForMapping);
+                                privateReplyTargetResolution = 'native_lid_fallback_without_verified_pn';
+                                console.warn('[private-lid-native-fallback]', { sessionId, messageId: msgId, fromMe: isFromMe, pnAvailable: false, action: 'retain_valid_native_lid_instead_of_dropping_private_chat' });
                             } else {
                                 from = '';
                                 privateReplyTargetResolution = 'private_phone_jid_unavailable';
@@ -11225,8 +11242,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 targetType: /@s\.whatsapp\.net$/i.test(from) ? 'private_pn' : /@lid$/i.test(from) ? 'private_lid' : 'private_other'
                             });
                         }
-                        if (!rawChatIsGroup && !rawChatIsChannel && !normalizePhoneCacheJid(from)) {
-                            console.warn('[private-message-skipped-without-pn]', { sessionId, messageId: msgId, sourceChatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null });
+                        if (!rawChatIsGroup && !rawChatIsChannel && !normalizePhoneCacheJid(from) && !normalizeNativeLidJid(from)) {
+                            console.warn('[private-message-skipped-without-valid-address]', { sessionId, messageId: msgId, sourceChatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null });
                             return;
                         }
                         const explicitPhoneAliases = [rawFrom, m.key.remoteJidAlt, m.key.senderPn, m.key.participantPn]
