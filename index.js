@@ -4,7 +4,7 @@ const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(proces
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r102-auth-flush-socket-close-typing-caption';
+const TFBOT_CLUSTER_CODE_REVISION = 'r112-private-lid-decrypt-recovery';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
@@ -223,7 +223,8 @@ for (const level of Object.keys(tfbotOriginalConsole)) {
 enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'diagnostic-log-start', content: 'Journal opérationnel du cluster démarré; les identifiants, codes, numéros et contenus privés sont masqués.' });
 
 function applyBaileysLidPnDecryptRetryPatch() {
-    const marker = '__tfbotSelfChatPnDecryptFallbackV107';
+    const marker = '__tfbotPrivateLidPnDecryptFallbackV112';
+    const previousMarker = '__tfbotSelfChatPnDecryptFallbackV107';
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
@@ -232,56 +233,103 @@ function applyBaileysLidPnDecryptRetryPatch() {
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
         if (!filePath) return { applied: false, reason: 'decrypt_module_not_found' };
         let source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), selfChatOnly: true, preservesOriginalLidFallback: true, noAutomaticSessionMigration: true };
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, preservesOriginalLidFallback: true, noAutomaticSessionMigration: true };
+        const injectedBody = `const ${marker} = true;
+    const __tfbotPrimaryJid = String(__TFBOT_ORIGINAL_JID__ || '').trim();
+    const __tfbotRemoteJid = String(fullMessage?.key?.remoteJid || '').trim();
+    const __tfbotNormalizeJid = value => String(value || '').trim().replace(/:\\d+(?=@(?:hosted\\.)?lid$)/i, '').replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
+    const __tfbotIsExcludedChat = /@(?:g\\.us|newsletter|broadcast)$/i.test(__tfbotRemoteJid);
+    const __tfbotLidCandidates = [...new Set([__tfbotPrimaryJid, __tfbotRemoteJid].map(__tfbotNormalizeJid).filter(value => /@(?:hosted\\.)?lid$/i.test(value)))];
+    const __tfbotIsPrivateLidChat = !__tfbotIsExcludedChat && __tfbotLidCandidates.length > 0;
+    const __tfbotIsSelfLidChat = fullMessage?.key?.fromMe === true && __tfbotIsPrivateLidChat;
+    const __tfbotPnCandidates = [];
+    if (__tfbotIsPrivateLidChat) {
+        const __tfbotExplicitPnCandidates = [
+            fullMessage?.key?.remoteJidAlt,
+            fullMessage?.key?.remoteJid,
+            fullMessage?.key?.participantPn,
+            fullMessage?.key?.senderPn,
+            stanza?.attrs?.peer_recipient_pn,
+            stanza?.attrs?.recipient_pn,
+            stanza?.attrs?.participant_pn,
+            stanza?.attrs?.sender_pn
+        ];
+        for (const __tfbotRawPn of __tfbotExplicitPnCandidates) {
+            const __tfbotPn = __tfbotNormalizeJid(__tfbotRawPn);
+            if (/^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotPn) && !__tfbotPnCandidates.includes(__tfbotPn)) __tfbotPnCandidates.push(__tfbotPn);
+        }
+        if (!__tfbotPnCandidates.length && typeof repository?.lidMapping?.getPNForLID === 'function') {
+            for (const __tfbotLid of __tfbotLidCandidates) {
+                let __tfbotMappingTimer = null;
+                try {
+                    const __tfbotMappingLookup = Promise.resolve().then(() => repository.lidMapping.getPNForLID(__tfbotLid));
+                    const __tfbotMappingTimeout = new Promise(resolve => {
+                        __tfbotMappingTimer = setTimeout(() => resolve(''), 1200);
+                        if (typeof __tfbotMappingTimer.unref === 'function') __tfbotMappingTimer.unref();
+                    });
+                    const __tfbotMappedPn = __tfbotNormalizeJid(await Promise.race([__tfbotMappingLookup, __tfbotMappingTimeout]));
+                    if (/^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotMappedPn) && !__tfbotPnCandidates.includes(__tfbotMappedPn)) __tfbotPnCandidates.push(__tfbotMappedPn);
+                } catch (mappingLookupError) {
+                    logger?.debug?.({ mappingLookupErrorName: mappingLookupError?.name || 'Error' }, 'private LID-to-PN lookup did not return a usable mapping');
+                } finally {
+                    if (__tfbotMappingTimer) clearTimeout(__tfbotMappingTimer);
+                }
+            }
+        }
+    }
+    const __tfbotPrimaryIsLid = /@(?:hosted\\.)?lid$/i.test(__tfbotPrimaryJid);
+    const __tfbotOriginalCandidateJid = __tfbotPrimaryJid || __tfbotLidCandidates[0] || __tfbotRemoteJid;
+    const __tfbotPreferPnForPrivateLid = __tfbotIsPrivateLidChat && (__tfbotPrimaryIsLid || /@(?:hosted\.)?lid$/i.test(__tfbotRemoteJid)) && (/@(?:hosted\.)?lid$/i.test(__tfbotRemoteJid) || fullMessage?.key?.fromMe === true);
+    const __tfbotCandidates = [...new Set(__tfbotPreferPnForPrivateLid ? [...__tfbotPnCandidates, __tfbotPrimaryJid, __tfbotRemoteJid] : [__tfbotPrimaryJid, ...__tfbotPnCandidates, __tfbotRemoteJid])].filter(Boolean);
+    let __tfbotOriginalDecryptError;
+    let __tfbotLastDecryptError;
+    for (const __tfbotCandidateJid of __tfbotCandidates) {
+        try {
+            const __tfbotDecrypted = await repository.decryptMessage({ jid: __tfbotCandidateJid, type: e2eType, ciphertext: content });
+            if (__tfbotIsPrivateLidChat && /^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotCandidateJid)) {
+                const __tfbotLid = __tfbotLidCandidates[0] || '';
+                if (__tfbotLid && typeof repository?.lidMapping?.storeLIDPNMappings === 'function') {
+                    try {
+                        await repository.lidMapping.storeLIDPNMappings([{ lid: __tfbotLid, pn: __tfbotCandidateJid }]);
+                    } catch (mappingStoreError) {
+                        logger?.debug?.({ mappingStoreErrorName: mappingStoreError?.name || 'Error' }, 'private LID/PN mapping persistence skipped after successful alternate decrypt');
+                    }
+                }
+                logger?.debug?.({ remoteJid: __tfbotRemoteJid, primaryJid: __tfbotPrimaryJid, decryptAddressType: 'phone_number', selfChat: __tfbotIsSelfLidChat, mappingAvailable: __tfbotPnCandidates.length > 0 }, 'private LID PN decrypt fallback succeeded');
+            }
+            return __tfbotDecrypted;
+        } catch (decryptError) {
+            __tfbotLastDecryptError = decryptError;
+            if (__tfbotNormalizeJid(__tfbotCandidateJid) === __tfbotNormalizeJid(__tfbotOriginalCandidateJid) || !__tfbotOriginalDecryptError && !__tfbotPrimaryJid) __tfbotOriginalDecryptError = decryptError;
+        }
+    }
+    if (__tfbotIsPrivateLidChat) {
+        logger?.warn?.({ remoteJid: __tfbotRemoteJid, fromMe: fullMessage?.key?.fromMe === true, selfChat: __tfbotIsSelfLidChat, mappingAvailable: __tfbotPnCandidates.length > 0, candidateCount: __tfbotCandidates.length, errorName: (__tfbotOriginalDecryptError || __tfbotLastDecryptError)?.name || 'Error' }, 'private LID message could not be decrypted with trusted PN or original LID address');
+    }
+    throw __tfbotOriginalDecryptError || __tfbotLastDecryptError || new Error('Signal decryption failed without a usable JID candidate');`;
+        const buildInjectedBody = originalJidExpression => injectedBody.replace('__TFBOT_ORIGINAL_JID__', originalJidExpression);
+        const oldMarkerIndex = source.indexOf(`const ${previousMarker} = true;`);
+        if (oldMarkerIndex >= 0) {
+            const oldIifeEnd = source.indexOf('})();', oldMarkerIndex);
+            if (oldIifeEnd < 0) return { applied: false, reason: 'previous_private_lid_patch_wrapper_not_found', file: path.basename(filePath) };
+            const originalJidMatch = source.slice(Math.max(0, oldMarkerIndex - 10000), oldMarkerIndex).match(/__tfbotPrimaryJid = String\(([\s\S]*?)\s*\|\|\s*''\)\.trim\(\);/);
+            if (!originalJidMatch) return { applied: false, reason: 'previous_private_lid_patch_original_jid_not_found', file: path.basename(filePath) };
+            const previousBodyStart = source.lastIndexOf('const __tfbotPrimaryJid = String(', oldMarkerIndex);
+            if (previousBodyStart < 0) return { applied: false, reason: 'previous_private_lid_patch_body_not_found', file: path.basename(filePath) };
+            source = source.slice(0, previousBodyStart) + buildInjectedBody(originalJidMatch[1].trim()) + '\n' + source.slice(oldIifeEnd);
+            if (!source.includes(marker) || source.includes(previousMarker)) return { applied: false, reason: 'previous_private_lid_patch_upgrade_verification_failed', file: path.basename(filePath) };
+            fs.writeFileSync(filePath, source, 'utf8');
+            return { applied: true, alreadyApplied: false, upgradedPreviousPatch: true, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, preservesOriginalLidFallback: true, noAutomaticSessionMigration: true };
+        }
         const callPattern = /((?:(?:const|let|var)\s+)?[A-Za-z_$][\w$]*\s*=\s*)await\s+repository\.decryptMessage\s*\(\s*\{\s*jid\s*:\s*([^,\n]+?)\s*,\s*type\s*:\s*e2eType\s*,\s*ciphertext\s*:\s*content\s*\}\s*\)\s*;?/g;
         const matches = [...source.matchAll(callPattern)];
         if (matches.length !== 1) return { applied: false, reason: `expected_one_signal_decrypt_call_found_${matches.length}`, file: path.basename(filePath) };
         const match = matches[0];
-        const left = match[1];
-        const originalJidExpression = match[2].trim();
-        const replacement = `${left}await (async () => {
-    const ${marker} = true;
-    const __tfbotPrimaryJid = String(${originalJidExpression} || '').trim();
-    const __tfbotRemoteJid = String(fullMessage?.key?.remoteJid || '').trim();
-    const __tfbotIsSelfLidChat = fullMessage?.key?.fromMe === true && /@(?:hosted\\.)?lid$/i.test(__tfbotRemoteJid) && !/@(?:g\\.us|newsletter|broadcast)$/i.test(__tfbotRemoteJid);
-    const __tfbotNormalizeJid = value => String(value || '').trim().replace(/:\\d+(?=@(?:hosted\\.)?lid$)/i, '').replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
-    const __tfbotPnCandidates = __tfbotIsSelfLidChat ? [
-        fullMessage?.key?.remoteJidAlt,
-        fullMessage?.key?.participantPn,
-        fullMessage?.key?.senderPn,
-        stanza?.attrs?.peer_recipient_pn,
-        stanza?.attrs?.recipient_pn,
-        stanza?.attrs?.participant_pn,
-        stanza?.attrs?.sender_pn
-    ].map(__tfbotNormalizeJid).filter(value => /^\\d{6,20}@s\\.whatsapp\\.net$/i.test(value)) : [];
-    const __tfbotPrimaryIsLid = /@(?:hosted\\.)?lid$/i.test(__tfbotPrimaryJid);
-    const __tfbotCandidates = [...new Set(__tfbotPrimaryIsLid ? [...__tfbotPnCandidates, __tfbotPrimaryJid, __tfbotRemoteJid] : [__tfbotPrimaryJid, ...__tfbotPnCandidates])].filter(Boolean);
-    let __tfbotOriginalDecryptError;
-    for (const __tfbotCandidateJid of __tfbotCandidates) {
-        try {
-            const __tfbotDecrypted = await repository.decryptMessage({ jid: __tfbotCandidateJid, type: e2eType, ciphertext: content });
-            if (__tfbotIsSelfLidChat && /^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotCandidateJid)) {
-                const __tfbotLid = /@(?:hosted\\.)?lid$/i.test(__tfbotPrimaryJid) ? __tfbotNormalizeJid(__tfbotPrimaryJid) : __tfbotNormalizeJid(__tfbotRemoteJid);
-                if (/@(?:hosted\\.)?lid$/i.test(__tfbotLid)) {
-                    try {
-                        await repository?.lidMapping?.storeLIDPNMappings?.([{ lid: __tfbotLid, pn: __tfbotCandidateJid }]);
-                    } catch (mappingError) {
-                        logger?.warn?.({ err: mappingError }, 'self-chat LID/PN mapping persistence skipped after successful alternate decrypt');
-                    }
-                }
-                logger?.debug?.({ remoteJid: __tfbotRemoteJid, primaryJid: __tfbotPrimaryJid, decryptJid: __tfbotCandidateJid }, 'self-chat PN decrypt fallback succeeded');
-            }
-            return __tfbotDecrypted;
-        } catch (decryptError) {
-            if (!__tfbotOriginalDecryptError) __tfbotOriginalDecryptError = decryptError;
-        }
-    }
-    throw __tfbotOriginalDecryptError || new Error('Signal decryption failed without a usable JID candidate');
-})();`;
+        const replacement = `${match[1]}await (async () => {\n    ${buildInjectedBody(match[2].trim())}\n})();`;
         const patchedSource = source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
-        if (!patchedSource.includes(marker) || !patchedSource.includes('peer_recipient_pn') || !patchedSource.includes('storeLIDPNMappings') || patchedSource.includes('migrateSession(__tfbotCandidateJid')) return { applied: false, reason: 'self_chat_decrypt_patch_verification_failed', file: path.basename(filePath) };
+        if (!patchedSource.includes(marker) || !patchedSource.includes('getPNForLID') || !patchedSource.includes('storeLIDPNMappings') || patchedSource.includes('migrateSession(__tfbotCandidateJid')) return { applied: false, reason: 'private_lid_decrypt_patch_verification_failed', file: path.basename(filePath) };
         fs.writeFileSync(filePath, patchedSource, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), selfChatOnly: true, triesTrustedPnAliasesBeforeOriginalLid: true, preservesOriginalDecryptError: true, storesMappingOnlyAfterSuccessfulPnDecrypt: true, noAutomaticSessionMigration: true };
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, mappingLookupTimeoutMs: 1200, preservesOriginalLidFallback: true, storesMappingOnlyAfterSuccessfulPnDecrypt: true, noAutomaticSessionMigration: true };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
@@ -595,6 +643,66 @@ const ${marker} = true;`;
         return { applied: false, reason: String(error?.message || error).slice(0, 180), issue: 'Baileys#2856' };
     }
 }
+function applyBaileysGroupLidPnDecryptRetryPatch() {
+    const marker = '__tfbotGroupLidPnDecryptFallbackV112';
+    try {
+        const entryPath = require.resolve('@whiskeysockets/baileys');
+        const entryDirectory = path.dirname(entryPath);
+        const roots = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
+        const candidates = [...new Set(roots.flatMap(directory => ['Utils', 'utils'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `decode-wa-message.${extension}`)))) )];
+        const filePath = candidates.find(candidate => fs.existsSync(candidate));
+        if (!filePath) return { applied: false, reason: 'decrypt_module_not_found' };
+        let source = fs.readFileSync(filePath, 'utf8');
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), groupAuthorLidFallback: true, usesTrustedPnMapping: true, triesOriginalLidFirst: true, noSenderKeyReset: true };
+        const callPattern = /((?:(?:const|let|var)\s+)?[A-Za-z_$][\w$]*\s*=\s*)await\s+repository\.decryptGroupMessage\s*\(\s*\{\s*group\s*:\s*([^,\n]+?)\s*,\s*authorJid\s*:\s*([^,\n]+?)\s*,\s*msg\s*:\s*content\s*\}\s*\)\s*;?/g;
+        const matches = [...source.matchAll(callPattern)];
+        if (matches.length !== 1) return { applied: false, reason: `expected_one_group_decrypt_call_found_${matches.length}`, file: path.basename(filePath) };
+        const match = matches[0];
+        const replacement = `${match[1]}await (async () => {
+    const ${marker} = true;
+    const __tfbotGroupJid = String(${match[2].trim()} || '').trim();
+    const __tfbotAuthorJid = String(${match[3].trim()} || '').trim();
+    try {
+        return await repository.decryptGroupMessage({ group: __tfbotGroupJid, authorJid: __tfbotAuthorJid, msg: content });
+    } catch (__tfbotOriginalGroupDecryptError) {
+        const __tfbotNormalizedAuthorLid = __tfbotAuthorJid.replace(/:\\d+(?=@(?:hosted\\.)?lid$)/i, '');
+        if (!/@(?:hosted\\.)?lid$/i.test(__tfbotNormalizedAuthorLid) || typeof repository?.lidMapping?.getPNForLID !== 'function') throw __tfbotOriginalGroupDecryptError;
+        let __tfbotMappingTimer = null;
+        try {
+            const __tfbotMappingLookup = Promise.resolve().then(() => repository.lidMapping.getPNForLID(__tfbotNormalizedAuthorLid));
+            const __tfbotMappingTimeout = new Promise(resolve => {
+                __tfbotMappingTimer = setTimeout(() => resolve(''), 1200);
+                if (typeof __tfbotMappingTimer.unref === 'function') __tfbotMappingTimer.unref();
+            });
+            const __tfbotMappedAuthorPn = String(await Promise.race([__tfbotMappingLookup, __tfbotMappingTimeout]) || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
+            if (!/^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotMappedAuthorPn)) throw __tfbotOriginalGroupDecryptError;
+            const __tfbotDecryptedGroupMessage = await repository.decryptGroupMessage({ group: __tfbotGroupJid, authorJid: __tfbotMappedAuthorPn, msg: content });
+            if (typeof repository?.lidMapping?.storeLIDPNMappings === 'function') {
+                try {
+                    await repository.lidMapping.storeLIDPNMappings([{ lid: __tfbotNormalizedAuthorLid, pn: __tfbotMappedAuthorPn }]);
+                } catch (mappingStoreError) {
+                    logger?.debug?.({ mappingStoreErrorName: mappingStoreError?.name || 'Error' }, 'group LID/PN mapping persistence skipped after successful alternate decrypt');
+                }
+            }
+            logger?.debug?.({ groupJid: __tfbotGroupJid, authorJid: __tfbotNormalizedAuthorLid, decryptAuthorType: 'phone_number' }, 'group LID PN decrypt fallback succeeded');
+            return __tfbotDecryptedGroupMessage;
+        } catch (__tfbotGroupFallbackError) {
+            logger?.warn?.({ groupJid: __tfbotGroupJid, authorJid: __tfbotNormalizedAuthorLid, mappingAvailable: typeof repository?.lidMapping?.getPNForLID === 'function', errorName: __tfbotGroupFallbackError?.name || 'Error' }, 'group LID PN decrypt fallback failed; original LID decrypt error preserved');
+            throw __tfbotOriginalGroupDecryptError;
+        } finally {
+            if (__tfbotMappingTimer) clearTimeout(__tfbotMappingTimer);
+        }
+    }
+})();`;
+        const patchedSource = source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
+        if (!patchedSource.includes(marker) || !patchedSource.includes('getPNForLID') || !patchedSource.includes('decryptGroupMessage({ group: __tfbotGroupJid, authorJid: __tfbotMappedAuthorPn, msg: content })')) return { applied: false, reason: 'group_lid_decrypt_patch_verification_failed', file: path.basename(filePath) };
+        fs.writeFileSync(filePath, patchedSource, 'utf8');
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), groupAuthorLidFallback: true, usesTrustedPnMapping: true, triesOriginalLidFirst: true, mappingLookupTimeoutMs: 1200, noSenderKeyReset: true, noAutomaticSessionMigration: true };
+    } catch (error) {
+        return { applied: false, reason: String(error?.message || error).slice(0, 180) };
+    }
+}
+
 function applyBaileysGroupRetrySkdmPatch() {
     const result = { applied: false, libsignal: { applied: false }, messagesSend: { applied: false }, issue: 'Baileys#2506', reason: 'not_attempted' };
     try {
@@ -863,6 +971,7 @@ function applyBaileysMessageRetryManagerDeviceJidPatch() {
 }
 
 const baileysLidPnDecryptPatchStatus = applyBaileysLidPnDecryptRetryPatch();
+const baileysGroupLidPnDecryptPatchStatus = applyBaileysGroupLidPnDecryptRetryPatch();
 const baileysGroupRetrySkdmPatchStatus = applyBaileysGroupRetrySkdmPatch();
 const baileysSelfChatPlaceholderResendPatchStatus = applyBaileysSelfChatPlaceholderResendPnPatch();
 const baileysSignalTransactionPatchStatus = applyBaileysSignalTransactionPatch();
@@ -873,6 +982,7 @@ const baileysMessageRetryManagerDeviceJidPatchStatus = applyBaileysMessageRetryM
 const baileysCompanionRegRefreshPatchStatus = applyBaileysCompanionRegRefreshPatch();
 console.info('[tfbot-local-diagnostics-ready]', { phone: TFBOT_DIAGNOSTIC_PHONE ? `[phone:${TFBOT_DIAGNOSTIC_PHONE.slice(-2).padStart(TFBOT_DIAGNOSTIC_PHONE.length, '*')}]` : null, sessionId: TFBOT_DIAGNOSTIC_SESSION_ID || null, file: 'logs.txt', storage: 'local_filesystem_only', publicRead: true, access: 'public-redacted-log', writer: 'asynchronous' });
 console.info('[baileys-lid-pn-decrypt-retry-patch]', baileysLidPnDecryptPatchStatus);
+console.info('[baileys-group-lid-pn-decrypt-retry-patch]', baileysGroupLidPnDecryptPatchStatus);
 console.info('[baileys-self-chat-placeholder-resend-patch]', baileysSelfChatPlaceholderResendPatchStatus);
 console.info('[baileys-group-retry-skdm-patch]', baileysGroupRetrySkdmPatchStatus);
 console.info('[baileys-outgoing-retry-preflight-patch]', { ...baileysOutgoingRetryPreflightPatchStatus, action: baileysOutgoingRetryPreflightPatchStatus.applied ? 'preload_internal_retry_manager_and_persist_generated_full_message_before_network_relay' : 'leave_installed_baileys_source_unchanged' });
@@ -880,7 +990,6 @@ console.info('[baileys-retry-resend-double-encryption-patch]', { ...baileysRetry
 console.info('[baileys-own-lid-retry-addressing-patch]', { ...baileysOwnLidRetryAddressingPatchStatus, action: baileysOwnLidRetryAddressingPatchStatus.applied ? 'preserve_chat_recipient_for_own_lid_device_retry' : 'not_applicable_or_source_shape_not_matched' });
 console.info('[baileys-signal-transaction-patch]', { ...baileysSignalTransactionPatchStatus, action: baileysSignalTransactionPatchStatus.applied ? 'serialize_signal_crypto_methods_inside_session_store_transaction' : 'leave_installed_baileys_source_unchanged' });
 enqueueTfbotDiagnosticRecord({ name: 'Adam', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION }) });
-enqueueTfbotDiagnosticRecord({ name: 'Adam', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus }) });
 
 const {
     default: makeWASocket,
@@ -891,6 +1000,24 @@ const {
     initAuthCreds,
     BufferJSON
 } = require('@whiskeysockets/baileys');
+function getTfbotInstalledPackageVersion(packageName) {
+    try {
+        let directory = path.dirname(require.resolve(packageName));
+        for (let depth = 0; depth < 8; depth++) {
+            const packagePath = path.join(directory, 'package.json');
+            if (fs.existsSync(packagePath)) {
+                const packageData = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+                if (packageData?.name === packageName) return String(packageData.version || '') || null;
+            }
+            const parent = path.dirname(directory);
+            if (parent === directory) break;
+            directory = parent;
+        }
+    } catch (error) {}
+    return null;
+}
+const TFBOT_BAILEYS_VERSION = getTfbotInstalledPackageVersion('@whiskeysockets/baileys');
+enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, baileysVersion: TFBOT_BAILEYS_VERSION, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, groupLidPnDecrypt: baileysGroupLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus }) });
 const { MongoClient } = require('mongodb');
 const { Writable } = require('stream');
 const zlib = require('zlib');
@@ -1039,7 +1166,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-02-r102';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-02-r112';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -8029,7 +8156,7 @@ app.get('/sitemap.xml', (req, res) => res.sendFile(path.join(__dirname, 'sitemap
 app.get('/manifest.json', (req, res) => res.sendFile(path.join(__dirname, 'manifest.json')));
 app.get('/sw.js', (req, res) => res.sendFile(path.join(__dirname, 'sw.js')));
 app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s Us Adam D’H7"));
-app.get('/ok', (req, res) => res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Baileys-Companion-Reg-Refresh', baileysCompanionRegRefreshPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-PN-Decryption', baileysLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-Chat-Placeholder-Resend', baileysSelfChatPlaceholderResendPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Retry-Deduplication', baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Own-LID-Retry-Addressing', baileysOwnLidRetryAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Session-Readiness', 'open-event-and-authenticated-identity').send('ok'));
+app.get('/ok', (req, res) => res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Baileys-Companion-Reg-Refresh', baileysCompanionRegRefreshPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-PN-Decryption', baileysLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-PN-Decryption', baileysGroupLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-Chat-Placeholder-Resend', baileysSelfChatPlaceholderResendPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Retry-Deduplication', baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Own-LID-Retry-Addressing', baileysOwnLidRetryAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Session-Readiness', 'open-event-and-authenticated-identity').send('ok'));
 
 
 const handleTFSlugRequest = (req, res) => {
@@ -14282,10 +14409,14 @@ async function main() {
         unconnectedSessionTtlMs: SESSION_UNCONNECTED_TTL_MS,
         pairingSessionTtlMs: PAIRING_SESSION_TTL_MS,
         imageUploadBasename: 'tfbot',
+        baileysVersion: TFBOT_BAILEYS_VERSION,
+        groupLidPnDecryptPatchApplied: baileysGroupLidPnDecryptPatchStatus.applied === true,
+        groupRetrySkdmPatchApplied: baileysGroupRetrySkdmPatchStatus.applied === true,
         groupSenderKeyResetBeforeSendEnabled: false,
         groupSenderKeyResetEveryMessage: false,
         selfChatAddressingMode: 'authenticated_own_phone_only',
         privateLidMappedPhonePrimary: true,
+        privateLidPnDecryptPatchApplied: baileysLidPnDecryptPatchStatus.applied === true,
         passiveSocketHealth: true,
         activeGroupFetchHealthProbe: false,
         publicModeAcceptsOtherBotOwnersAsOrdinaryUsers: true,
@@ -14326,7 +14457,7 @@ async function main() {
             tfbotWorkerActive = false;
             tfbotWorkerState = 'coordinator';
             await connectMongo({ coordinatorOnly: true });
-            console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, baileysSignalTransactionPatch: baileysSignalTransactionPatchStatus, baileysOutgoingRetryPreflightPatch: baileysOutgoingRetryPreflightPatchStatus, baileysRetryResendDoubleEncryptionPatch: baileysRetryResendDoubleEncryptionPatchStatus, baileysOwnLidRetryAddressingPatch: baileysOwnLidRetryAddressingPatchStatus, baileysCompanionRegRefreshPatch: baileysCompanionRegRefreshPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, port: PORT });
+            console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, baileysGroupLidPnDecryptPatch: baileysGroupLidPnDecryptPatchStatus, baileysSignalTransactionPatch: baileysSignalTransactionPatchStatus, baileysOutgoingRetryPreflightPatch: baileysOutgoingRetryPreflightPatchStatus, baileysRetryResendDoubleEncryptionPatch: baileysRetryResendDoubleEncryptionPatchStatus, baileysOwnLidRetryAddressingPatch: baileysOwnLidRetryAddressingPatchStatus, baileysCompanionRegRefreshPatch: baileysCompanionRegRefreshPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, port: PORT });
             httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
             const savedSelection = await db.collection('cluster_router').findOne({ _id: TFBOT_ROUTER_STATE_ID }).catch(() => null);
             const savedDomain = TFBOT_ROUTER_DOMAIN_BY_HOST.get(normalizeTfbotHost(savedSelection?.activeHost || ''));
