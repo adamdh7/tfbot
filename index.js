@@ -4,7 +4,7 @@ const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(proces
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r120-per-chat-signal-decrypt-json-list-fast-typing';
+const TFBOT_CLUSTER_CODE_REVISION = 'r121-isolated-inbound-receipts-stable-account-alive-mobile-list';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
@@ -431,24 +431,14 @@ if (!__tfbotDecodedRetryId && __tfbotRetryNodeId) logger.info({ messageId: __tfb
 }
 
 function applyBaileysPerChatInboundProcessingPatch() {
-    const marker = '__tfbotPerChatInboundProcessingV119';
-    try {
-        const entryPath = require.resolve('@whiskeysockets/baileys');
-        const entryDirectory = path.dirname(entryPath);
-        const roots = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
-        const candidates = [...new Set(roots.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `messages-recv.${extension}`)))) )];
-        const filePath = candidates.find(candidate => fs.existsSync(candidate));
-        if (!filePath) return { applied: false, reason: 'messages_recv_module_not_found' };
-        let source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), perChatSignalDecryption: true, globalEventProcessingMutexPreserved: true, independentChatsCanDecryptConcurrently: true, slowDecryptTiming: true, slowQueueTiming: true, slowGlobalMutexTiming: true };
-        const mutexAnchor = /const\s+retryMutex\s*=\s*makeMutex\s*\(\s*\)\s*;?/g;
-        const mutexMatches = [...source.matchAll(mutexAnchor)];
-        if (mutexMatches.length !== 1) return { applied: false, reason: `expected_one_retry_mutex_anchor_found_${mutexMatches.length}`, file: path.basename(filePath) };
-        const helper = `
+    const marker = '__tfbotPerChatInboundProcessingV121';
+    const previousMarker = '__tfbotPerChatInboundProcessingV119';
+    const helper = `
 \tconst ${marker} = true;
 \tconst __tfbotInboundChatQueues = new Map();
+\tconst __tfbotInboundReceiptQueues = new Map();
 \tconst __tfbotInboundChatKeyForNode = node => {
-\t\tconst rawChat = String(node?.attrs?.from || node?.attrs?.participant || 'unknown').trim().toLowerCase();
+\t\tconst rawChat = String(node?.attrs?.recipient || node?.attrs?.from || node?.attrs?.participant || 'unknown').trim().toLowerCase();
 \t\tconst isGroup = /@g\\.us$/i.test(rawChat);
 \t\tconst normalizedChat = rawChat.replace(/:\\d+(?=@(?:hosted\\.)?lid$|@s\\.whatsapp\\.net$)/i, '');
 \t\tconst ownPn = String(authState?.creds?.me?.id || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '').toLowerCase();
@@ -456,24 +446,34 @@ function applyBaileysPerChatInboundProcessingPatch() {
 \t\tconst isSelfChat = !isGroup && Boolean(normalizedChat) && (normalizedChat === ownPn || normalizedChat === ownLid);
 \t\treturn (isGroup ? 'group:' : 'private:') + (isSelfChat ? 'self-chat' : normalizedChat);
 \t};
-\tconst __tfbotWithInboundChatMutex = async (node, operation) => {
-\t\tconst key = __tfbotInboundChatKeyForNode(node);
-\t\tconst isGroup = key.startsWith('group:');
+\tconst __tfbotRunInboundQueue = async (queueMap, key, node, operation, queueType) => {
 \t\tconst enqueuedAt = Date.now();
-\t\tconst previous = __tfbotInboundChatQueues.get(key) || Promise.resolve();
+\t\tconst previous = queueMap.get(key) || Promise.resolve();
 \t\tlet release;
 \t\tconst gate = new Promise(resolve => { release = resolve; });
 \t\tconst current = previous.catch(() => {}).then(() => gate);
-\t\t__tfbotInboundChatQueues.set(key, current);
+\t\tqueueMap.set(key, current);
 \t\tawait previous.catch(() => {});
 \t\tconst queueWaitMs = Date.now() - enqueuedAt;
-\t\tif (queueWaitMs >= 150) logger.warn({ messageId: node?.attrs?.id || null, chatType: isGroup ? 'group' : 'private', queueWaitMs }, 'tfbot inbound chat queue wait');
+\t\tif (queueWaitMs >= 150) logger.warn({ messageId: node?.attrs?.id || null, nodeType: node?.tag || 'unknown', queueType, queueWaitMs }, 'tfbot inbound partition queue wait');
+\t\tconst startedAt = Date.now();
 \t\ttry {
 \t\t\treturn await operation();
 \t\t} finally {
+\t\t\tconst holdMs = Date.now() - startedAt;
+\t\t\tif (holdMs >= 1000) logger.warn({ messageId: node?.attrs?.id || null, nodeType: node?.tag || 'unknown', queueType, queueHoldMs: holdMs }, 'tfbot inbound partition queue held');
 \t\t\trelease();
-\t\t\tif (__tfbotInboundChatQueues.get(key) === current) __tfbotInboundChatQueues.delete(key);
+\t\t\tif (queueMap.get(key) === current) queueMap.delete(key);
 \t\t}
+\t};
+\tconst __tfbotWithInboundChatMutex = async (node, operation) => {
+\t\tconst key = __tfbotInboundChatKeyForNode(node);
+\t\treturn __tfbotRunInboundQueue(__tfbotInboundChatQueues, key, node, operation, 'chat');
+\t};
+\tconst __tfbotWithInboundReceiptMutex = async (node, operation) => {
+\t\tconst messageId = String(node?.attrs?.id || '').trim() || 'unknown-message';
+\t\tconst key = __tfbotInboundChatKeyForNode(node) + '|' + messageId;
+\t\treturn __tfbotRunInboundQueue(__tfbotInboundReceiptQueues, key, node, operation, 'receipt-message');
 \t};
 \tconst __tfbotWithInboundProcessingMutex = async (node, operation) => {
 \t\tconst enqueuedAt = Date.now();
@@ -490,8 +490,28 @@ function applyBaileysPerChatInboundProcessingPatch() {
 \t\t});
 \t};
 `;
-        const mutexMatch = mutexMatches[0];
-        source = source.slice(0, mutexMatch.index + mutexMatch[0].length) + helper + source.slice(mutexMatch.index + mutexMatch[0].length);
+    try {
+        const entryPath = require.resolve('@whiskeysockets/baileys');
+        const entryDirectory = path.dirname(entryPath);
+        const roots = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
+        const candidates = [...new Set(roots.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `messages-recv.${extension}`)))) )];
+        const filePath = candidates.find(candidate => fs.existsSync(candidate));
+        if (!filePath) return { applied: false, reason: 'messages_recv_module_not_found' };
+        let source = fs.readFileSync(filePath, 'utf8');
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), perChatSignalDecryption: true, receiptsSerializedPerMessage: true, notificationsSerializedPerChat: true, globalMutexLimitedToEventPublication: true, independentChatsCanDecryptConcurrently: true, selfChatAliasesShareInboundQueue: true, slowDecryptTiming: true, slowQueueTiming: true, slowReceiptQueueTiming: true, slowGlobalMutexTiming: true };
+        const upgradePreviousPatch = source.includes(`const ${previousMarker} = true;`);
+        if (upgradePreviousPatch) {
+            const oldHelperStart = source.indexOf(`const ${previousMarker} = true;`);
+            const receiptStartOld = source.indexOf('const handleReceipt', oldHelperStart);
+            if (oldHelperStart < 0 || receiptStartOld < 0) return { applied: false, reason: 'previous_per_chat_patch_boundaries_not_found', file: path.basename(filePath) };
+            source = source.slice(0, oldHelperStart) + helper + source.slice(receiptStartOld);
+        } else {
+            const mutexAnchor = /const\s+retryMutex\s*=\s*makeMutex\s*\(\s*\)\s*;?/g;
+            const mutexMatches = [...source.matchAll(mutexAnchor)];
+            if (mutexMatches.length !== 1) return { applied: false, reason: `expected_one_retry_mutex_anchor_found_${mutexMatches.length}`, file: path.basename(filePath) };
+            const mutexMatch = mutexMatches[0];
+            source = source.slice(0, mutexMatch.index + mutexMatch[0].length) + helper + source.slice(mutexMatch.index + mutexMatch[0].length);
+        }
         const receiptPattern = /const\s+handleReceipt\s*=\s*async\s*\(\s*node(?:\s*:\s*BinaryNode)?\s*\)\s*=>\s*\{/g;
         const notificationPattern = /const\s+handleNotification\s*=\s*async\s*\(\s*node(?:\s*:\s*BinaryNode)?\s*\)\s*=>\s*\{/g;
         const handlePattern = /const\s+handleMessage\s*=\s*async\s*\(\s*node(?:\s*:\s*BinaryNode)?\s*\)\s*=>\s*\{/g;
@@ -509,48 +529,92 @@ function applyBaileysPerChatInboundProcessingPatch() {
         let receiptBody = source.slice(receiptStart, notificationStart);
         let notificationBody = source.slice(notificationStart, handleStart);
         let handleBody = source.slice(handleStart, endIndex);
-        const processingPattern = /processingMutex\.mutex\s*\(\s*async\s*\(\s*\)\s*=>\s*\{/g;
-        const receiptProcessingMatches = [...receiptBody.matchAll(processingPattern)];
-        const notificationProcessingMatches = [...notificationBody.matchAll(processingPattern)];
-        const messageProcessingMatches = [...handleBody.matchAll(processingPattern)];
-        if (receiptProcessingMatches.length !== 1) return { applied: false, reason: `expected_one_receipt_processing_mutex_found_${receiptProcessingMatches.length}`, file: path.basename(filePath) };
-        if (notificationProcessingMatches.length !== 1) return { applied: false, reason: `expected_one_notification_processing_mutex_found_${notificationProcessingMatches.length}`, file: path.basename(filePath) };
-        if (messageProcessingMatches.length !== 1) return { applied: false, reason: `expected_one_handle_processing_mutex_found_${messageProcessingMatches.length}`, file: path.basename(filePath) };
-        receiptBody = receiptBody.slice(0, receiptProcessingMatches[0].index) + receiptBody.slice(receiptProcessingMatches[0].index).replace(processingPattern, '__tfbotWithInboundProcessingMutex(node, async () => {');
-        notificationBody = notificationBody.slice(0, notificationProcessingMatches[0].index) + notificationBody.slice(notificationProcessingMatches[0].index).replace(processingPattern, '__tfbotWithInboundProcessingMutex(node, async () => {');
-        const handlerStartedInjection = '\n\t\tconst __tfbotInboundHandlerStartedAt = Date.now();';
-        handleBody = handleBody.replace(handlePattern, match => `${match}${handlerStartedInjection}`);
-        const messageProcessingMatch = messageProcessingMatches[0];
-        const callStart = messageProcessingMatch.index + handlerStartedInjection.length;
-        const callbackOpenBrace = callStart + messageProcessingMatch[0].lastIndexOf('{');
-        const callbackCloseBrace = findTfbotMatchingBraceEnd(handleBody, callbackOpenBrace);
-        if (callbackCloseBrace < 0) return { applied: false, reason: 'handle_message_processing_callback_unbalanced', file: path.basename(filePath) };
-        const callCloseParen = handleBody.indexOf(')', callbackCloseBrace + 1);
-        if (callCloseParen < 0 || handleBody.slice(callbackCloseBrace + 1, callCloseParen).trim()) return { applied: false, reason: 'handle_message_processing_call_end_not_found', file: path.basename(filePath) };
-        let callbackBody = handleBody.slice(callbackOpenBrace + 1, callbackCloseBrace);
-        const decryptPattern = /await\s+decrypt\s*\(\s*\)\s*;?/g;
-        const decryptMatches = [...callbackBody.matchAll(decryptPattern)];
-        if (decryptMatches.length !== 1) return { applied: false, reason: `expected_one_decrypt_call_found_${decryptMatches.length}`, file: path.basename(filePath) };
-        callbackBody = callbackBody.replace(decryptPattern, '');
-        const upsertPattern = /await\s+upsertMessage\s*\(\s*msg\s*,\s*node\.attrs\.offline\s*\?\s*'append'\s*:\s*'notify'\s*\)\s*;?/g;
-        const upsertMatches = [...callbackBody.matchAll(upsertPattern)];
-        if (upsertMatches.length !== 1) return { applied: false, reason: `expected_one_message_upsert_call_found_${upsertMatches.length}`, file: path.basename(filePath) };
-        const upsertReplacement = `const __tfbotUpsertReadyAt = Date.now();\n\t\t\t\t\tconst __tfbotTotalBeforeUpsertMs = __tfbotUpsertReadyAt - __tfbotInboundHandlerStartedAt;\n\t\t\t\t\tif (__tfbotTotalBeforeUpsertMs >= 500) logger.warn({ messageId: node?.attrs?.id || null, chatType: /@g\\.us$/i.test(String(node?.attrs?.from || '')) ? 'group' : 'private', totalBeforeUpsertMs: __tfbotTotalBeforeUpsertMs, decryptDurationMs: __tfbotDecryptDurationMs }, 'tfbot inbound message delayed before upsert');\n\t\t\t\t\tawait upsertMessage(msg, node.attrs.offline ? 'append' : 'notify');`;
-        callbackBody = callbackBody.replace(upsertPattern, upsertReplacement);
-        const perChatProcessing = `__tfbotWithInboundChatMutex(node, async () => {\n\t\t\t\tconst __tfbotDecryptStartedAt = Date.now();\n\t\t\t\tawait decrypt();\n\t\t\t\tconst __tfbotDecryptDurationMs = Date.now() - __tfbotDecryptStartedAt;\n\t\t\t\tif (__tfbotDecryptDurationMs >= 250) logger.warn({ messageId: node?.attrs?.id || null, chatType: /@g\\.us$/i.test(String(node?.attrs?.from || '')) ? 'group' : 'private', decryptDurationMs: __tfbotDecryptDurationMs }, 'tfbot inbound message decryption duration');\n\t\t\t\tawait __tfbotWithInboundProcessingMutex(node, async () => {${callbackBody}\n\t\t\t\t});\n\t\t\t})`;
-        handleBody = handleBody.slice(0, callStart) + perChatProcessing + handleBody.slice(callCloseParen + 1);
+        const globalToken = '__tfbotWithInboundProcessingMutex(node, async () => {';
+        const receiptToken = '__tfbotWithInboundReceiptMutex(node, async () => {';
+        const chatToken = '__tfbotWithInboundChatMutex(node, async () => {';
+        if (upgradePreviousPatch) {
+            if (receiptBody.split(globalToken).length - 1 === 1) receiptBody = receiptBody.replace(globalToken, receiptToken);
+            else if (!receiptBody.includes(receiptToken)) return { applied: false, reason: 'previous_receipt_mutex_wrapper_not_found', file: path.basename(filePath) };
+            if (notificationBody.split(globalToken).length - 1 === 1) notificationBody = notificationBody.replace(globalToken, chatToken);
+            else if (!notificationBody.includes(chatToken)) return { applied: false, reason: 'previous_notification_mutex_wrapper_not_found', file: path.basename(filePath) };
+            const previousMessageGlobalCount = handleBody.split(globalToken).length - 1;
+            if (previousMessageGlobalCount === 1) {
+                const globalStart = handleBody.indexOf(globalToken);
+                const globalOpenBrace = globalStart + globalToken.lastIndexOf('{');
+                const globalCloseBrace = findTfbotMatchingBraceEnd(handleBody, globalOpenBrace);
+                if (globalCloseBrace < 0) return { applied: false, reason: 'previous_message_global_mutex_unbalanced', file: path.basename(filePath) };
+                const globalCloseParen = handleBody.indexOf(')', globalCloseBrace + 1);
+                if (globalCloseParen < 0) return { applied: false, reason: 'previous_message_global_mutex_close_not_found', file: path.basename(filePath) };
+                const inner = handleBody.slice(globalOpenBrace + 1, globalCloseBrace);
+                const wrapperStart = handleBody.slice(Math.max(0, globalStart - 6), globalStart) === 'await ' ? globalStart - 6 : globalStart;
+                handleBody = handleBody.slice(0, wrapperStart) + inner + handleBody.slice(globalCloseParen + 1);
+            } else if (previousMessageGlobalCount !== 0) return { applied: false, reason: `unexpected_previous_message_global_mutex_count_${previousMessageGlobalCount}`, file: path.basename(filePath) };
+        } else {
+            const processingPattern = /processingMutex\.mutex\s*\(\s*async\s*\(\s*\)\s*=>\s*\{/g;
+            const receiptLocks = [...receiptBody.matchAll(processingPattern)];
+            const notificationLocks = [...notificationBody.matchAll(processingPattern)];
+            if (receiptLocks.length !== 1) return { applied: false, reason: `expected_one_receipt_processing_mutex_found_${receiptLocks.length}`, file: path.basename(filePath) };
+            if (notificationLocks.length !== 1) return { applied: false, reason: `expected_one_notification_processing_mutex_found_${notificationLocks.length}`, file: path.basename(filePath) };
+            receiptBody = receiptBody.replace(processingPattern, '__tfbotWithInboundReceiptMutex(node, async () => {');
+            notificationBody = notificationBody.replace(processingPattern, '__tfbotWithInboundChatMutex(node, async () => {');
+            const messageLocks = [...handleBody.matchAll(processingPattern)];
+            if (messageLocks.length !== 1) return { applied: false, reason: `expected_one_handle_processing_mutex_found_${messageLocks.length}`, file: path.basename(filePath) };
+            const handlerStartedInjection = '\n\t\tconst __tfbotInboundHandlerStartedAt = Date.now();';
+            handleBody = handleBody.replace(handlePattern, match => `${match}${handlerStartedInjection}`);
+            const messageLock = [...handleBody.matchAll(processingPattern)][0];
+            if (!messageLock) return { applied: false, reason: 'message_processing_mutex_lost_after_timing_injection', file: path.basename(filePath) };
+            const callbackOpenBrace = messageLock.index + messageLock[0].lastIndexOf('{');
+            const callbackCloseBrace = findTfbotMatchingBraceEnd(handleBody, callbackOpenBrace);
+            if (callbackCloseBrace < 0) return { applied: false, reason: 'handle_message_processing_callback_unbalanced', file: path.basename(filePath) };
+            const callCloseParen = handleBody.indexOf(')', callbackCloseBrace + 1);
+            if (callCloseParen < 0) return { applied: false, reason: 'handle_message_processing_call_end_not_found', file: path.basename(filePath) };
+            let callbackBody = handleBody.slice(callbackOpenBrace + 1, callbackCloseBrace);
+            const decryptPattern = /await\s+decrypt\s*\(\s*\)\s*;?/g;
+            const decryptMatches = [...callbackBody.matchAll(decryptPattern)];
+            if (decryptMatches.length !== 1) return { applied: false, reason: `expected_one_decrypt_call_found_${decryptMatches.length}`, file: path.basename(filePath) };
+            callbackBody = callbackBody.replace(decryptPattern, '');
+            const upsertPattern = /await\s+upsertMessage\s*\(\s*msg\s*,\s*node\.attrs\.offline\s*\?\s*['"]append['"]\s*:\s*['"]notify['"]\s*\)\s*;?/g;
+            const upserts = [...callbackBody.matchAll(upsertPattern)];
+            if (upserts.length !== 1) return { applied: false, reason: `expected_one_original_message_upsert_found_${upserts.length}`, file: path.basename(filePath) };
+            callbackBody = callbackBody.replace(upsertPattern, "await upsertMessage(msg, node.attrs.offline ? 'append' : 'notify');");
+            const perChatProcessing = `__tfbotWithInboundChatMutex(node, async () => {
+\t\t\t\tconst __tfbotDecryptStartedAt = Date.now();
+\t\t\t\tawait decrypt();
+\t\t\t\tconst __tfbotDecryptDurationMs = Date.now() - __tfbotDecryptStartedAt;
+\t\t\t\tif (__tfbotDecryptDurationMs >= 250) logger.warn({ messageId: node?.attrs?.id || null, chatType: /@g\\.us$/i.test(String(node?.attrs?.from || '')) ? 'group' : 'private', decryptDurationMs: __tfbotDecryptDurationMs }, 'tfbot inbound message decryption duration');
+\t\t\t\t${callbackBody}
+\t\t\t})`;
+            handleBody = handleBody.slice(0, messageLock.index) + perChatProcessing + handleBody.slice(callCloseParen + 1);
+        }
+        const notificationUpsertPattern = /await\s+upsertMessage\s*\(\s*fullMsg\s*,\s*['"]append['"]\s*\)\s*;?/g;
+        const notificationUpserts = [...notificationBody.matchAll(notificationUpsertPattern)];
+        if (notificationUpserts.length === 1) notificationBody = notificationBody.replace(notificationUpsertPattern, "await __tfbotWithInboundProcessingMutex(node, async () => { await upsertMessage(fullMsg, 'append'); });");
+        else if (notificationUpserts.length !== 0 || !notificationBody.includes("await __tfbotWithInboundProcessingMutex(node, async () => { await upsertMessage(fullMsg, 'append'); });")) return { applied: false, reason: `expected_one_notification_upsert_found_${notificationUpserts.length}`, file: path.basename(filePath) };
+        const messageUpsertPattern = /await\s+upsertMessage\s*\(\s*msg\s*,\s*node\.attrs\.offline\s*\?\s*['"]append['"]\s*:\s*['"]notify['"]\s*\)\s*;?/g;
+        const messageUpserts = [...handleBody.matchAll(messageUpsertPattern)];
+        if (messageUpserts.length === 1) {
+            const messageUpsertReplacement = upgradePreviousPatch
+                ? "await __tfbotWithInboundProcessingMutex(node, async () => { await upsertMessage(msg, node.attrs.offline ? 'append' : 'notify'); });"
+                : `const __tfbotUpsertReadyAt = Date.now();
+\t\t\t\t\tconst __tfbotTotalBeforeUpsertMs = __tfbotUpsertReadyAt - __tfbotInboundHandlerStartedAt;
+\t\t\t\t\tif (__tfbotTotalBeforeUpsertMs >= 500) logger.warn({ messageId: node?.attrs?.id || null, chatType: /@g\\.us$/i.test(String(node?.attrs?.from || '')) ? 'group' : 'private', totalBeforeUpsertMs: __tfbotTotalBeforeUpsertMs, decryptDurationMs: __tfbotDecryptDurationMs }, 'tfbot inbound message delayed before upsert');
+\t\t\t\t\tawait __tfbotWithInboundProcessingMutex(node, async () => { await upsertMessage(msg, node.attrs.offline ? 'append' : 'notify'); });`;
+            handleBody = handleBody.replace(messageUpsertPattern, messageUpsertReplacement);
+        }
+        else if (messageUpserts.length !== 0 || !handleBody.includes("await __tfbotWithInboundProcessingMutex(node, async () => { await upsertMessage(msg, node.attrs.offline ? 'append' : 'notify'); });")) return { applied: false, reason: `expected_one_message_upsert_call_found_${messageUpserts.length}`, file: path.basename(filePath) };
         source = source.slice(0, receiptStart) + receiptBody + notificationBody + handleBody + source.slice(endIndex);
         const inboundLockCalls = source.split('__tfbotWithInboundProcessingMutex(node, async () => {').length - 1;
         const perChatCalls = source.split('__tfbotWithInboundChatMutex(node, async () => {').length - 1;
-        const globalMutexCalls = source.split('processingMutex.mutex(async () => {').length - 1;
-        if (!source.includes(marker) || inboundLockCalls !== 3 || perChatCalls !== 1 || globalMutexCalls !== 1 || !source.includes('totalBeforeUpsertMs') || !source.includes('globalProcessingMutexWaitMs') || !source.includes('globalProcessingMutexHoldMs')) return { applied: false, reason: 'per_chat_decrypt_patch_verification_failed', file: path.basename(filePath), inboundLockCalls, perChatCalls, globalMutexCalls };
+        const receiptQueueCalls = source.split('__tfbotWithInboundReceiptMutex(node, async () => {').length - 1;
+        const globalMutexCalls = [...source.matchAll(/processingMutex\.mutex\s*\(\s*async\s*\(\s*\)\s*=>\s*\{/g)].length;
+        const receiptFunction = source.slice(source.indexOf('const handleReceipt'), source.indexOf('const handleNotification'));
+        if (!source.includes(marker) || inboundLockCalls !== 2 || perChatCalls !== 2 || receiptQueueCalls !== 1 || globalMutexCalls !== 1 || !source.includes('sendMessagesAgain(') || !receiptFunction.includes('__tfbotWithInboundReceiptMutex') || !source.includes('totalBeforeUpsertMs') || !source.includes('globalProcessingMutexWaitMs') || !source.includes('globalProcessingMutexHoldMs')) return { applied: false, reason: 'per_chat_receipt_isolation_patch_verification_failed', file: path.basename(filePath), inboundLockCalls, perChatCalls, receiptQueueCalls, globalMutexCalls };
         fs.writeFileSync(filePath, source, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), perChatSignalDecryption: true, globalEventProcessingMutexPreserved: true, independentChatsCanDecryptConcurrently: true, receiptAndNotificationCriticalSectionsPreserved: true, selfChatAliasesShareInboundQueue: true, slowDecryptTiming: true, slowQueueTiming: true, slowGlobalMutexTiming: true };
+        return { applied: true, alreadyApplied: false, upgradedPreviousPatch: upgradePreviousPatch, file: path.basename(filePath), perChatSignalDecryption: true, receiptsSerializedPerMessage: true, notificationsSerializedPerChat: true, globalMutexLimitedToEventPublication: true, independentChatsCanDecryptConcurrently: true, selfChatAliasesShareInboundQueue: true, slowDecryptTiming: true, slowQueueTiming: true, slowReceiptQueueTiming: true, slowGlobalMutexTiming: true };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
 }
-
 function applyBaileysSignalTransactionPatch() {
     const marker = '__tfbotAtomicSignalTransactionsV64';
     try {
@@ -1453,7 +1517,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-02-r120';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-02-r121';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -8993,7 +9057,7 @@ const now = Date.now();
 let ownerDocs = [];
 if (ownerCol) {
     try {
-        ownerDocs = await ownerCol.find({}, { projection: { sessionId: 1, createdAt: 1, ownerLeaseUntil: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, connectionStatus: 1, status: 1, socketAuthenticated: 1, socketReady: 1, connectedSince: 1, socketAuthenticatedAt: 1, everAuthenticated: 1, everConnected: 1, reauthRequired: 1, credentialsRevoked: 1, duplicateAccountOf: 1, duplicateOfSessionId: 1, format: 1, Format: 1, pairingChallengeStartedAt: 1, pairingStartedAt: 1, pairingPending: 1, pairingAttemptPending: 1, pairingCleanupPending: 1, PairingNumber: 1, nextRestoreRetryAt: 1, lastWhatsAppEvent: 1, lastWhatsAppEventAt: 1, lastDisconnectCode: 1, lastDisconnectReason: 1, lastAuthFailure: 1, lastAuthFailureAt: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, Name: 1, Number: 1, number: 1, AccountJid: 1, OwnerLid: 1, mode: 1, Mode: 1, unconnectedSinceAt: 1, disconnectTime: 1, statusUpdatedAt: 1 } }).sort({ createdAt: -1 }).limit(5000).toArray();
+        ownerDocs = await ownerCol.find({}, { projection: { sessionId: 1, createdAt: 1, ownerLeaseUntil: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, connectionStatus: 1, status: 1, socketAuthenticated: 1, socketReady: 1, accountFirstConnectedAt: 1, connectedSince: 1, socketAuthenticatedAt: 1, everAuthenticated: 1, everConnected: 1, reauthRequired: 1, credentialsRevoked: 1, duplicateAccountOf: 1, duplicateOfSessionId: 1, format: 1, Format: 1, pairingChallengeStartedAt: 1, pairingStartedAt: 1, pairingPending: 1, pairingAttemptPending: 1, pairingCleanupPending: 1, PairingNumber: 1, nextRestoreRetryAt: 1, lastWhatsAppEvent: 1, lastWhatsAppEventAt: 1, lastDisconnectCode: 1, lastDisconnectReason: 1, lastAuthFailure: 1, lastAuthFailureAt: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, Name: 1, Number: 1, number: 1, OwnerNumber: 1, ownerNumber: 1, OwnerPhone: 1, ownerPhone: 1, OwnerAdminNumber: 1, ownerAdminNumber: 1, AdminNumber: 1, adminNumber: 1, AdminPhone: 1, adminPhone: 1, DeployerNumber: 1, deployerNumber: 1, AccountJid: 1, OwnerLid: 1, AdminLid: 1, OwnerAdminLid: 1, mode: 1, Mode: 1, unconnectedSinceAt: 1, disconnectTime: 1, statusUpdatedAt: 1 } }).sort({ createdAt: -1 }).limit(5000).toArray();
     } catch (ownerReadError) {
         console.error('[sessions-list-database-read-failed]', ownerReadError?.message || String(ownerReadError));
     }
@@ -9148,7 +9212,7 @@ const credentialStateValid = !credentialsRevoked && hasAuthenticatedWhatsAppCred
       localSession.lastDisconnectCode = null;
       localSession.lastDisconnectReason = null;
   }
-  const connectedAt = localSocketOperational ? toTimestamp(localSession?.connectedAt) || toTimestamp(ownerDoc.socketAuthenticatedAt) || toTimestamp(ownerDoc.connectedSince) : remoteOwnerLive ? toTimestamp(ownerDoc.socketAuthenticatedAt) || toTimestamp(ownerDoc.connectedSince) : toTimestamp(ownerDoc.connectedSince) || toTimestamp(ownerDoc.socketAuthenticatedAt);
+  const connectedAt = toTimestamp(ownerDoc.accountFirstConnectedAt) || toTimestamp(ownerDoc.connectedSince) || toTimestamp(localSession?.accountFirstConnectedAt) || toTimestamp(localSession?.connectedSince) || toTimestamp(ownerDoc.socketAuthenticatedAt) || toTimestamp(localSession?.connectedAt);
   const aliveSince = status === 'connecte' && connectedAt ? connectedAt : pairingPending ? pairingStartedAt || toTimestamp(ownerDoc.statusUpdatedAt) || idTimestamp : toTimestamp(localSession?.disconnectTime) || toTimestamp(ownerDoc.unconnectedSinceAt) || toTimestamp(ownerDoc.disconnectTime) || toTimestamp(ownerDoc.statusUpdatedAt) || toTimestamp(ownerDoc.createdAt) || idTimestamp;
   const aliveStr = aliveSince ? getUptimeString(Math.max(0, now - aliveSince)) : '0s';
   const activeOwnerUrl = localSession ? (TFBOT_CLUSTER_INSTANCE_URL || TFBOT_CLUSTER_INSTANCE_HOST) : remoteLeaseLive || ownerDoc.ownerInstanceId === TFBOT_CLUSTER_INSTANCE_ID && ownerLease > now ? ownerDoc.ownerInstanceUrl || ownerDoc.ownerInstanceId || null : null;
@@ -9202,7 +9266,7 @@ for (const [sessionId, authDoc] of credentialDocsBySession.entries()) {
   if (!restoreError && localSession?.lastRestoreError) localSession.lastRestoreError = null;
   const eventName = socketAuthenticated ? 'open' : localSession?.lastWhatsAppEvent || null;
   const currentClose = String(eventName || '').toLowerCase() === 'close';
-  const aliveSince = socketAuthenticated ? toTimestamp(localSession?.connectedAt) : pairingPending ? pairingStartedAt || idTimestamp : toTimestamp(localSession?.disconnectTime) || toTimestamp(localSession?.createdAt) || idTimestamp;
+  const aliveSince = socketAuthenticated ? toTimestamp(localSession?.accountFirstConnectedAt) || toTimestamp(localSession?.connectedSince) || idTimestamp || toTimestamp(localSession?.connectedAt) : pairingPending ? pairingStartedAt || idTimestamp : toTimestamp(localSession?.disconnectTime) || toTimestamp(localSession?.createdAt) || idTimestamp;
   sessionsList.push({
       ID: sessionId,
       Sessions: status,
@@ -9255,7 +9319,7 @@ for (const localSession of activeSessions.values()) {
   const restoreError = activeRetryAt && !isAuthenticated ? String(localSession.lastRestoreError || '') || null : null;
   if (!restoreError && localSession.lastRestoreError) localSession.lastRestoreError = null;
   const currentClose = String(localSession.lastWhatsAppEvent || '').toLowerCase() === 'close';
-  const aliveSince = isAuthenticated ? toTimestamp(localSession.connectedAt) : pairingPending ? challengeAt || idTimestamp : toTimestamp(localSession.disconnectTime) || toTimestamp(localSession.createdAt) || idTimestamp;
+  const aliveSince = isAuthenticated ? toTimestamp(localSession.accountFirstConnectedAt) || toTimestamp(localSession.connectedSince) || idTimestamp || toTimestamp(localSession.connectedAt) : pairingPending ? challengeAt || idTimestamp : toTimestamp(localSession.disconnectTime) || toTimestamp(localSession.createdAt) || idTimestamp;
   sessionsList.push({ ID: localSession.id, Sessions: localDisplayStatus, Categorie: isAuthenticated ? 'active' : activeRetryAt ? 'reconnexion' : pairingPending ? 'connexion' : 'authentification_incomplete', Credentials: isAuthenticated || registered ? 'recuperables' : 'incomplets', Owner: TFBOT_CLUSTER_INSTANCE_URL || TFBOT_CLUSTER_INSTANCE_HOST, OwnerLeaseUntil: tfbotWorkerLeaseUntil > now ? new Date(tfbotWorkerLeaseUntil).toISOString() : null, SocketAuthenticated: isAuthenticated, SocketReady: isWhatsAppSocketReady(localSession, localSession.sock), RestoreError: restoreError, NextRetryAt: activeRetryAt ? new Date(activeRetryAt).toISOString() : null, DuplicateOf: null, Numero: getAuthenticatedPhoneNumber(localSession.sock?.user || null, localSession.authState?.creds) || 'N/A', Name: sanitizeSessionDisplayName(localSession.sock?.user?.name || localSession.sock?.user?.notify || localSession.authState?.creds?.me?.name || 'Bot (tfbot)'), Format: format, Mode: 'prive', WhatsAppEvent: localSession.lastWhatsAppEvent || null, WhatsAppStateAt: localSession.lastWhatsAppEventAt || null, DisconnectCode: currentClose && !isAuthenticated ? localSession.lastDisconnectCode || null : null, DisconnectReason: currentClose && !isAuthenticated ? localSession.lastDisconnectReason || null : null, Alive: aliveSince ? getUptimeString(Math.max(0, now - aliveSince)) : '0s' });
 }
         return sessionsList;
@@ -9285,14 +9349,14 @@ for (const localSession of activeSessions.values()) {
                 WhatsAppStateAt: session.lastWhatsAppEventAt || null,
                 DisconnectCode: null,
                 DisconnectReason: null,
-                Alive: session.createdAt ? getUptimeString(Math.max(0, now - Number(session.createdAt))) : '0s'
+                Alive: authenticated ? getUptimeString(Math.max(0, now - (toTimestamp(session.accountFirstConnectedAt) || toTimestamp(session.connectedSince) || getIdTimestamp(sessionId) || toTimestamp(session.connectedAt) || now))) : session.createdAt ? getUptimeString(Math.max(0, now - Number(session.createdAt))) : '0s'
             };
         });
     }
 }
 
 app.get('/list', (req, res) => {
-    res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').type('html').send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;min-height:100%;background:#000;color:#fff}body{width:100%;height:100dvh;min-height:100svh;overflow:hidden}#loader{position:fixed;inset:0;display:grid;place-items:center;background:#000}#loader svg{width:52px;height:52px;animation:tfbot-spin .85s linear infinite}#loader circle{fill:none;stroke:#fff;stroke-width:4;stroke-linecap:round;stroke-dasharray:92 160}#output{display:block;width:100%;height:100dvh;min-height:100svh;margin:0;padding:calc(env(safe-area-inset-top) + 12px) calc(env(safe-area-inset-right) + 12px) calc(env(safe-area-inset-bottom) + 12px) calc(env(safe-area-inset-left) + 12px);overflow:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:clamp(12px,2.9vw,15px)/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}#output[hidden],#loader[hidden]{display:none}@keyframes tfbot-spin{to{transform:rotate(360deg)}}</style></head><body><div id="loader" aria-hidden="true"><svg viewBox="0 0 48 48" role="presentation"><circle cx="24" cy="24" r="19"></circle></svg></div><pre id="output" hidden></pre><script>const loader=document.getElementById('loader');const output=document.getElementById('output');let hasSnapshot=false;const stream=new EventSource('/list/events');stream.addEventListener('snapshot',event=>{try{const data=JSON.parse(event.data);output.textContent=JSON.stringify(data,null,2);if(!hasSnapshot){hasSnapshot=true;loader.hidden=true;output.hidden=false;}}catch(error){}});</script></body></html>`);
+    res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').type('html').send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;min-height:100%;background:#000;color:#fff;overscroll-behavior:none}body{width:100%;height:100dvh;min-height:100svh;overflow:hidden;overscroll-behavior:none}#loader{position:fixed;inset:0;display:grid;place-items:center;background:#000}#loader svg{width:52px;height:52px;animation:tfbot-spin .85s linear infinite}#loader circle{fill:none;stroke:#fff;stroke-width:4;stroke-linecap:round;stroke-dasharray:92 160}#output{display:block;width:100%;height:100dvh;min-height:100svh;margin:0;padding:calc(env(safe-area-inset-top) + 12px) calc(env(safe-area-inset-right) + 12px) calc(env(safe-area-inset-bottom) + 12px) calc(env(safe-area-inset-left) + 12px);overflow:auto;overscroll-behavior:none;-webkit-overflow-scrolling:touch;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:clamp(12px,2.9vw,15px)/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}#output[hidden],#loader[hidden]{display:none}@media (hover:none) and (pointer:coarse){#output{scrollbar-width:none;-ms-overflow-style:none}#output::-webkit-scrollbar{display:none;width:0;height:0}}@keyframes tfbot-spin{to{transform:rotate(360deg)}}</style></head><body><div id="loader" aria-hidden="true"><svg viewBox="0 0 48 48" role="presentation"><circle cx="24" cy="24" r="19"></circle></svg></div><pre id="output" hidden></pre><script>const loader=document.getElementById('loader');const output=document.getElementById('output');let hasSnapshot=false;const stream=new EventSource('/list/events');stream.addEventListener('snapshot',event=>{try{const data=JSON.parse(event.data);output.textContent=JSON.stringify(data,null,2);if(!hasSnapshot){hasSnapshot=true;loader.hidden=true;output.hidden=false;}}catch(error){}});</script></body></html>`);
 });
 
 const sessionListStreamClients = new Set();
@@ -10197,7 +10261,9 @@ function getGlobalSuperOwnerNumbers() {
     const configured = [
         '18092813169',
         process.env.TFBOT_GLOBAL_OWNER_NUMBERS,
+        process.env.TFBOT_GLOBAL_SUPER_OWNER_NUMBERS,
         process.env.TFBOT_GLOBAL_OWNER_NUMBER,
+        process.env.TFBOT_SUPER_OWNER_NUMBERS,
         process.env.TFBOT_DEPLOYER_NUMBERS,
         process.env.TFBOT_DEPLOYER_NUMBER,
         process.env.TFBOT_OWNER_NUMBERS,
@@ -10218,7 +10284,10 @@ function getConfiguredOwnerAccessIdentities(ownerRecord = {}, currentSessionId =
     if (currentSessionId && String(ownerRecord?.sessionId || '') === String(currentSessionId)) {
         const numberValues = [
             ownerRecord?.Number, ownerRecord?.number, ownerRecord?.OwnerNumber, ownerRecord?.ownerNumber,
-            ownerRecord?.OwnerPhone, ownerRecord?.ownerPhone, ownerRecord?.PairingNumber, ownerRecord?.AccountJid, ownerRecord?.accountJid
+            ownerRecord?.OwnerPhone, ownerRecord?.ownerPhone, ownerRecord?.OwnerAdminNumber, ownerRecord?.ownerAdminNumber,
+            ownerRecord?.AdminNumber, ownerRecord?.adminNumber, ownerRecord?.AdminPhone, ownerRecord?.adminPhone,
+            ownerRecord?.DeployerNumber, ownerRecord?.deployerNumber, ownerRecord?.CreatedByNumber, ownerRecord?.createdByNumber,
+            ownerRecord?.SuperOwnerNumber, ownerRecord?.superOwnerNumber, ownerRecord?.PairingNumber, ownerRecord?.AccountJid, ownerRecord?.accountJid
         ];
         const lidValues = [
             ownerRecord?.AdminLid, ownerRecord?.adminLid, ownerRecord?.OwnerAdminLid, ownerRecord?.ownerAdminLid,
@@ -11637,12 +11706,25 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     const now = Date.now();
                     const existingRecord = await ownerCol.findOne({ sessionId });
                     const accountRebound = !!(existingRecord?.Number && currentBotNum && normalizePhoneNumber(existingRecord.Number) !== currentBotNum);
+                    const parseAccountConnectionTime = value => {
+                        if (value instanceof Date) return value.getTime();
+                        const numeric = Number(value || 0);
+                        if (Number.isFinite(numeric) && numeric > 0) return numeric;
+                        const parsed = Date.parse(String(value || ''));
+                        return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+                    };
+                    const persistedAccountFirstConnectedAt = accountRebound ? 0 : parseAccountConnectionTime(existingRecord?.accountFirstConnectedAt) || parseAccountConnectionTime(existingRecord?.connectedSince) || parseAccountConnectionTime(existingRecord?.socketAuthenticatedAt);
+                    const runtimeConnectedSince = accountRebound ? 0 : parseAccountConnectionTime(confirmedSession.accountFirstConnectedAt) || parseAccountConnectionTime(confirmedSession.connectedSince);
+                    const accountConnectedSince = persistedAccountFirstConnectedAt || runtimeConnectedSince || now;
+                    confirmedSession.accountFirstConnectedAt = accountConnectedSince;
+                    confirmedSession.connectedSince = accountConnectedSince;
                     const updateData = {
                         sessionId,
                         AccountJid: currentBotAccountJid || existingRecord?.AccountJid || null,
                         format: connectionFormat,
                         Format: connectionFormat,
-                        connectedSince: Number(existingRecord?.connectedSince || 0) || now,
+                        accountFirstConnectedAt: accountConnectedSince,
+                        connectedSince: accountConnectedSince,
                         statusUpdatedAt: new Date(now),
                         updatedAt: new Date(now),
                         reauthRequired: false,
@@ -12894,8 +12976,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const configuredOwnerAccess = getConfiguredOwnerAccessIdentities(sOwnerTop, sessionId);
                         const configuredOwnerMatch = matchConfiguredOwnerAccess(configuredOwnerAccess, senderJids, senderNumbers, rawFrom, isGroup, sessionId);
                         const globalOwnerNumbers = getGlobalSuperOwnerNumbers();
-                        let globalOwnerMatch = senderNumbers.some(number => globalOwnerNumbers.has(normalizePhoneNumber(number)));
-                        let globalOwnerIdentitySource = globalOwnerMatch ? 'message_phone_alias' : '';
+                        const globalOwnerAccessMatch = matchConfiguredOwnerAccess({ numbers: globalOwnerNumbers, lids: new Set() }, senderJids, senderNumbers, rawFrom, isGroup, sessionId);
+                        let globalOwnerMatch = globalOwnerAccessMatch.matched || senderNumbers.some(number => globalOwnerNumbers.has(normalizePhoneNumber(number)));
+                        let globalOwnerIdentitySource = globalOwnerMatch ? globalOwnerAccessMatch.accountMatch ? 'phone_or_remembered_lid_mapping' : globalOwnerAccessMatch.lidMatch ? 'configured_global_owner_lid' : 'message_phone_alias' : '';
                         if (!globalOwnerMatch) {
                             for (const senderLid of senderJids.filter(value => /@(?:hosted\.)?lid$/i.test(String(value || '')))) {
                                 try {
@@ -13226,6 +13309,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 command: receivedParsedCommand.command,
                                 internalCommand: receivedParsedCommand.internalCommand,
                                 isOwnerReal,
+                                globalOwnerMatch,
+                                globalOwnerIdentitySource: globalOwnerIdentitySource || null,
+                                configuredSessionOwnerMatch: configuredOwnerMatch.matched,
                                 isPublicMode,
                                 allowed,
                                 mode: botMode,
@@ -13247,6 +13333,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             detectedCommand: receivedParsedCommand?.command || null,
                             detectedInternalCommand: receivedParsedCommand?.internalCommand || null,
                             isOwnerReal,
+                            globalOwnerMatch,
+                            globalOwnerIdentitySource: globalOwnerIdentitySource || null,
+                            configuredSessionOwnerMatch: configuredOwnerMatch.matched,
                             isPublicMode,
                             allowed,
                             authorizationReason: isPublicMode ? 'public_mode' : isOwnerReal ? 'owner' : 'private_mode_owner_only',
@@ -13267,6 +13356,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     command: receivedParsedCommand.command,
                                     internalCommand: receivedParsedCommand.internalCommand,
                                     isOwnerReal,
+                                    globalOwnerMatch,
+                                    globalOwnerIdentitySource: globalOwnerIdentitySource || null,
                                     isPublicMode,
                                     mode: botMode,
                                     modeFields: { mode: sOwnerTop?.mode ?? null, Mode: sOwnerTop?.Mode ?? null, botMode: sOwnerTop?.botMode ?? null },
@@ -13274,7 +13365,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     action: 'recognized_but_not_executed'
                                 });
                             }
-                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, senderAliases: senderJids, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', messageType, fromMe: isFromMe, isGroup, isChannel, isOwnerReal, botMode, isPublicMode, messageClassification: receivedClassification, detectedCommand: receivedParsedCommand?.command || null, detectedInternalCommand: receivedParsedCommand?.internalCommand || null, modeFields: { mode: sOwnerTop?.mode ?? null, Mode: sOwnerTop?.Mode ?? null, botMode: sOwnerTop?.botMode ?? null }, bodyLength: body.length, bodyPreview: body.slice(0, 240), action: 'not_processed_due_to_mode', reason: 'mode_disallows_non_owner' });
+                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, senderAliases: senderJids, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', messageType, fromMe: isFromMe, isGroup, isChannel, isOwnerReal, globalOwnerMatch, globalOwnerIdentitySource: globalOwnerIdentitySource || null, botMode, isPublicMode, messageClassification: receivedClassification, detectedCommand: receivedParsedCommand?.command || null, detectedInternalCommand: receivedParsedCommand?.internalCommand || null, modeFields: { mode: sOwnerTop?.mode ?? null, Mode: sOwnerTop?.Mode ?? null, botMode: sOwnerTop?.botMode ?? null }, bodyLength: body.length, bodyPreview: body.slice(0, 240), action: 'not_processed_due_to_mode', reason: 'mode_disallows_non_owner' });
                             return;
                         }
                         if (!body) {
@@ -15422,8 +15513,9 @@ async function main() {
         signalSessionRecordValidation: 'accept-serialized-session-record-object',
         signalKeyStoreTransaction: 'per-peer-or-group-reentrant-serialized-transaction-with-session-fencing',
         signalCryptoOperations: 'decrypt-encrypt-pairwise-and-group-methods-wrapped-in-keyed-transaction',
-        inboundMessageProcessing: 'per-chat-ordered-processing-independent-chats-concurrent',
-        inboundMessageLatencyDiagnostics: 'chat-queue-decrypt-and-pre-upsert-duration',
+        inboundMessageProcessing: 'per-chat-message-decrypt-and-receipt-retry-queues-global-mutex-event-publication-only',
+        inboundMessageLatencyDiagnostics: 'chat-queue-decrypt-receipt-queue-global-mutex-and-pre-upsert-duration',
+        accountAliveClock: 'persisted-account-first-connected-at-preserved-across-runtime-restores',
         invalidSignalSessionRecordHandling: 'preserve-invalid-record-and-skip-unusable-value',
         del3UnknownMessageFormats: 'classified_by_exact_whatsapp_message_key',
         lockLeaseMs: SESSION_RUNTIME_LOCK_LEASE_MS,
