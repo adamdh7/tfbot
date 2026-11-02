@@ -3,8 +3,8 @@ const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(pr
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 7000)));
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r106-r103-base-group-lid-and-diagnostics-fix';
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-01-r106')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+const TFBOT_CLUSTER_CODE_REVISION = 'r107-r103-safe-signal-recovery-selfchat-pn-fallback-group-skdm';
+const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)-2026-11-02-r107')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
@@ -86,50 +86,12 @@ const tfbotDiagnosticSerialize = value => {
     }); }
     catch (error) { return String(value); }
 };
-let tfbotDiagnosticTargetCacheAt = 0;
-let tfbotDiagnosticTargetCache = null;
-const TFBOT_DIAGNOSTIC_BOOT_TIME = new Date().toISOString();
 const tfbotDiagnosticQueue = [];
 let tfbotDiagnosticWriterRunning = false;
 let tfbotDiagnosticDroppedEntries = 0;
-function appendTfbotDiagnosticContent(content) {
-    try {
-        const contentBytes = Buffer.byteLength(content, 'utf8');
-        const currentStat = fs.existsSync(TFBOT_DIAGNOSTIC_LOG_PATH) ? fs.statSync(TFBOT_DIAGNOSTIC_LOG_PATH) : null;
-        if (currentStat && currentStat.size + contentBytes > TFBOT_DIAGNOSTIC_LOG_MAX_BYTES) {
-            const current = fs.readFileSync(TFBOT_DIAGNOSTIC_LOG_PATH);
-            const keepBytes = Math.max(0, TFBOT_DIAGNOSTIC_LOG_MAX_BYTES - contentBytes - 65536);
-            let tail = current.subarray(Math.max(0, current.length - keepBytes));
-            const lineBreak = tail.indexOf(10);
-            if (lineBreak >= 0) tail = tail.subarray(lineBreak + 1);
-            fs.writeFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, tail);
-        }
-        fs.appendFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, content, 'utf8');
-        return true;
-    } catch (error) {
-        try { tfbotOriginalConsole.error('[tfbot-diagnostic-write-failed]', error?.message || String(error)); } catch (ignored) {}
-        return false;
-    }
-}
-function writeTfbotDiagnosticRecord(record) {
-    return appendTfbotDiagnosticContent(`${JSON.stringify(record)}\n`);
-}
-function flushTfbotDiagnosticQueue() {
-    tfbotDiagnosticWriterRunning = false;
-    if (!tfbotDiagnosticQueue.length) return;
-    let content = '';
-    if (tfbotDiagnosticDroppedEntries) {
-        const dropped = tfbotDiagnosticDroppedEntries;
-        tfbotDiagnosticDroppedEntries = 0;
-        content += `${JSON.stringify({ name: 'TFBOT', date: new Date().toISOString(), level: 'WARN', event: 'diagnostic-log-queue-overflow', content: `${dropped} entrée(s) de diagnostic ont été abandonnées.` })}\n`;
-    }
-    content += tfbotDiagnosticQueue.splice(0, 48).join('');
-    appendTfbotDiagnosticContent(content);
-    if (tfbotDiagnosticQueue.length && !tfbotDiagnosticWriterRunning) {
-        tfbotDiagnosticWriterRunning = true;
-        setImmediate(flushTfbotDiagnosticQueue);
-    }
-}
+let tfbotDiagnosticSanitizeReady = Promise.resolve();
+let tfbotDiagnosticTargetCacheAt = 0;
+let tfbotDiagnosticTargetCache = null;
 function enqueueTfbotDiagnosticRecord(record) {
     try {
         if (tfbotDiagnosticQueue.length >= 4000) {
@@ -142,9 +104,37 @@ function enqueueTfbotDiagnosticRecord(record) {
             tfbotDiagnosticWriterRunning = true;
             setImmediate(flushTfbotDiagnosticQueue);
         }
-        return true;
-    } catch (error) {
-        return false;
+    } catch (error) {}
+}
+async function flushTfbotDiagnosticQueue() {
+    try {
+        await tfbotDiagnosticSanitizeReady;
+        while (tfbotDiagnosticQueue.length) {
+            const batch = tfbotDiagnosticQueue.splice(0, 48);
+            let content = batch.join('');
+            if (tfbotDiagnosticDroppedEntries) {
+                const dropped = tfbotDiagnosticDroppedEntries;
+                tfbotDiagnosticDroppedEntries = 0;
+                content = `${JSON.stringify({ name: 'Adam', date: new Date().toISOString(), level: 'WARN', event: 'diagnostic-log-queue-overflow', content: `${dropped} entrée(s) de diagnostic ont été abandonnées pour protéger la latence du bot.` })}\n${content}`;
+            }
+            try {
+                const currentStat = await fs.promises.stat(TFBOT_DIAGNOSTIC_LOG_PATH).catch(() => null);
+                const contentBytes = Buffer.byteLength(content, 'utf8');
+                if (currentStat && currentStat.size + contentBytes > TFBOT_DIAGNOSTIC_LOG_MAX_BYTES) {
+                    const current = await fs.promises.readFile(TFBOT_DIAGNOSTIC_LOG_PATH).catch(() => Buffer.alloc(0));
+                    const keepBytes = Math.max(0, TFBOT_DIAGNOSTIC_LOG_MAX_BYTES - contentBytes - 65536);
+                    const tail = current.subarray(Math.max(0, current.length - keepBytes));
+                    await fs.promises.writeFile(TFBOT_DIAGNOSTIC_LOG_PATH, tail);
+                }
+                await fs.promises.appendFile(TFBOT_DIAGNOSTIC_LOG_PATH, content, 'utf8');
+            } catch (writeError) {}
+        }
+    } finally {
+        tfbotDiagnosticWriterRunning = false;
+        if (tfbotDiagnosticQueue.length && !tfbotDiagnosticWriterRunning) {
+            tfbotDiagnosticWriterRunning = true;
+            setImmediate(flushTfbotDiagnosticQueue);
+        }
     }
 }
 function getTfbotDiagnosticSession() {
@@ -153,7 +143,7 @@ function getTfbotDiagnosticSession() {
     try {
         const preferredRuntime = TFBOT_DIAGNOSTIC_SESSION_ID ? activeSessions.get(TFBOT_DIAGNOSTIC_SESSION_ID) : null;
         if (preferredRuntime) {
-            tfbotDiagnosticTargetCache = { sessionId: TFBOT_DIAGNOSTIC_SESSION_ID, name: String(preferredRuntime?.sock?.user?.name || preferredRuntime?.sock?.user?.notify || preferredRuntime?.ownerName || 'TFBOT').slice(0, 80), phone: TFBOT_DIAGNOSTIC_PHONE };
+            tfbotDiagnosticTargetCache = { sessionId: TFBOT_DIAGNOSTIC_SESSION_ID, name: String(preferredRuntime?.sock?.user?.name || preferredRuntime?.sock?.user?.notify || preferredRuntime?.ownerName || 'Adam').slice(0, 80), phone: TFBOT_DIAGNOSTIC_PHONE };
             tfbotDiagnosticTargetCacheAt = now;
             return tfbotDiagnosticTargetCache;
         }
@@ -172,7 +162,7 @@ function getTfbotDiagnosticSession() {
             return null;
         }
         const [sessionId, runtime] = matches[0];
-        tfbotDiagnosticTargetCache = { sessionId, name: String(runtime?.sock?.user?.name || runtime?.sock?.user?.notify || runtime?.ownerName || 'TFBOT').slice(0, 80), phone: TFBOT_DIAGNOSTIC_PHONE };
+        tfbotDiagnosticTargetCache = { sessionId, name: String(runtime?.sock?.user?.name || runtime?.sock?.user?.notify || runtime?.ownerName || 'Adam').slice(0, 80), phone: TFBOT_DIAGNOSTIC_PHONE };
         tfbotDiagnosticTargetCacheAt = now;
         return tfbotDiagnosticTargetCache;
     } catch (error) {
@@ -195,132 +185,101 @@ function sanitizeTfbotDiagnosticLog(value, sessionId) {
     output = output.replace(/\b\d{8,15}\b/g, number => number === TFBOT_DIAGNOSTIC_PHONE ? `[phone:${number.slice(-2).padStart(number.length, '*')}]` : `[number:${shortLogHash(number)}]`);
     return output.slice(0, 12000);
 }
+async function sanitizeExistingTfbotPublicLogFile() {
+    try {
+        const existing = await fs.promises.readFile(TFBOT_DIAGNOSTIC_LOG_PATH, 'utf8');
+        const sanitized = existing.split('\n').map(line => {
+            if (!line) return line;
+            try {
+                const record = JSON.parse(line);
+                if (record.event !== undefined) record.event = sanitizeTfbotDiagnosticLog(record.event, '');
+                if (record.content !== undefined) record.content = sanitizeTfbotDiagnosticLog(record.content, '');
+                if (record.name !== undefined) record.name = String(record.name).slice(0, 80);
+                return JSON.stringify(record);
+            } catch (error) {
+                return sanitizeTfbotDiagnosticLog(line, '');
+            }
+        }).join('\n');
+        if (sanitized !== existing) await fs.promises.writeFile(TFBOT_DIAGNOSTIC_LOG_PATH, sanitized, 'utf8');
+    } catch (error) {}
+}
+tfbotDiagnosticSanitizeReady = sanitizeExistingTfbotPublicLogFile();
 for (const level of Object.keys(tfbotOriginalConsole)) {
     console[level] = (...args) => {
         try {
             const serialized = args.map(value => typeof value === 'string' ? value : tfbotDiagnosticSerialize(value)).join(' ');
             const target = getTfbotDiagnosticSession();
             const targetLog = !!target && (serialized.includes(target.sessionId) || !!target.phone && serialized.includes(target.phone));
-            const startupLog = /tfbot-release-boot|tfbot-local-diagnostics-ready|baileys-.*-patch|tfbot-build-active|tfbot-diagnostic/i.test(serialized);
-            const failureLog = level === 'warn' || level === 'error';
-            if (targetLog || startupLog || failureLog) {
-                const record = {
-                    name: target?.name || 'TFBOT',
-                    sessionId: target?.sessionId ? shortLogHash(target.sessionId) : null,
-                    date: new Date().toISOString(),
-                    level: level.toUpperCase(),
-                    event: sanitizeTfbotDiagnosticLog(String(args.find(value => typeof value === 'string') || 'runtime'), target?.sessionId || '').slice(0, 180),
-                    content: sanitizeTfbotDiagnosticLog(serialized, target?.sessionId || '')
-                };
-                if (failureLog || startupLog) writeTfbotDiagnosticRecord(record);
-                else enqueueTfbotDiagnosticRecord(record);
+            if (targetLog) {
+                const record = { name: target.name, sessionId: shortLogHash(target.sessionId), date: new Date().toISOString(), level: level.toUpperCase(), event: sanitizeTfbotDiagnosticLog(String(args.find(value => typeof value === 'string') || 'runtime'), target.sessionId).slice(0, 180), content: sanitizeTfbotDiagnosticLog(serialized, target.sessionId) };
+                enqueueTfbotDiagnosticRecord(record);
             }
         } catch (error) {}
         tfbotOriginalConsole[level](...args);
     };
 }
-writeTfbotDiagnosticRecord({ name: 'TFBOT', sessionId: null, date: TFBOT_DIAGNOSTIC_BOOT_TIME, level: 'INFO', event: 'tfbot-diagnostic-start', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, bootTime: TFBOT_DIAGNOSTIC_BOOT_TIME, writer: 'batched_async_with_sync_boot_and_errors' }) });
+enqueueTfbotDiagnosticRecord({ name: 'Adam', sessionId: TFBOT_DIAGNOSTIC_SESSION_ID ? shortLogHash(TFBOT_DIAGNOSTIC_SESSION_ID) : null, date: new Date().toISOString(), level: 'INFO', event: 'diagnostic-log-start', content: 'Journal public de diagnostic démarré; les identifiants, codes et contenus privés sont masqués. Écriture asynchrone pour ne pas ralentir les envois ni les connexions.' });
 
 function applyBaileysLidPnDecryptRetryPatch() {
-    const marker = 'self-chat PN identity selected before Signal decryption';
+    const marker = '__tfbotSelfChatPnDecryptFallbackV107';
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
-        const searchDirectories = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
-        const candidates = [...new Set(searchDirectories.flatMap(directory => ['Utils', 'utils'].flatMap(folder => ['js', 'cjs', 'mjs', 'ts'].map(extension => path.join(directory, folder, `decode-wa-message.${extension}`)))))];
+        const roots = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
+        const candidates = [...new Set(roots.flatMap(directory => ['Utils', 'utils'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `decode-wa-message.${extension}`)))) )];
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
         if (!filePath) return { applied: false, reason: 'decrypt_module_not_found' };
         let source = fs.readFileSync(filePath, 'utf8');
-        const originalLidFallback = ': [decryptionJid, fullMessage?.key?.remoteJidAlt, fullMessage?.key?.participantAlt, stanza.attrs.participant_lid, stanza.attrs.sender_lid, stanza.attrs.peer_recipient_lid];';
-        const previousLidFallback = ': [fullMessage?.key?.remoteJidAlt, fullMessage?.key?.participantAlt, stanza.attrs.participant_lid, stanza.attrs.sender_lid, stanza.attrs.peer_recipient_lid];';
-        const mappingMarker = '__tfbotSelfChatSessionMappingV87';
-        const primaryDecryptCall = 'msgBuffer = await repository.decryptMessage({ jid: __tfbotDecryptionJid, type: e2eType, ciphertext: content });';
-        const mappingInjection = `${primaryDecryptCall}
-if (__tfbotSelfChatPn && /@(?:hosted\.)?lid$/i.test(String(decryptionJid || ''))) {
-    const ${mappingMarker} = true;
-    try {
-        await repository?.lidMapping?.storeLIDPNMappings?.([{ lid: decryptionJid, pn: __tfbotSelfChatPn }]);
-        if (typeof repository?.migrateSession === 'function') await repository.migrateSession(__tfbotSelfChatPn, decryptionJid);
-        logger.debug({ lid: decryptionJid, pn: __tfbotSelfChatPn }, 'self-chat Signal session migrated from PN to LID after successful PN decryption');
-    } catch (mappingError) {
-        logger.warn({ err: mappingError, lid: decryptionJid, pn: __tfbotSelfChatPn }, 'self-chat PN/LID Signal mapping or session migration failed');
-    }
-}`;
-        const oldMappingInjection = `${primaryDecryptCall}
-if (__tfbotSelfChatPn && /@(?:hosted\.)?lid$/i.test(String(decryptionJid || ''))) {
-    const ${mappingMarker} = true;
-    try {
-        await repository?.lidMapping?.storeLIDPNMappings?.([{ lid: decryptionJid, pn: __tfbotSelfChatPn }]);
-    } catch (mappingError) {
-        logger.debug({ err: mappingError, lid: decryptionJid, pn: __tfbotSelfChatPn }, 'self-chat PN/LID session mapping update skipped');
-    }
-}`;
-        if (source.includes(marker)) {
-            let upgradedSource = source;
-            if (upgradedSource.includes(oldMappingInjection)) upgradedSource = upgradedSource.replace(oldMappingInjection, mappingInjection);
-            if (!upgradedSource.includes(originalLidFallback) && upgradedSource.includes(previousLidFallback)) upgradedSource = upgradedSource.replace(previousLidFallback, originalLidFallback);
-            if (!upgradedSource.includes(mappingMarker)) {
-                if (!upgradedSource.includes(primaryDecryptCall)) return { applied: false, reason: 'self_chat_decrypt_mapping_anchor_not_found', file: path.basename(filePath) };
-                upgradedSource = upgradedSource.replace(primaryDecryptCall, mappingInjection);
-            }
-            if (!upgradedSource.includes(originalLidFallback) || !upgradedSource.includes(mappingMarker)) return { applied: false, reason: 'self_chat_decrypt_patch_upgrade_verification_failed', file: path.basename(filePath) };
-            if (upgradedSource !== source) {
-                fs.writeFileSync(filePath, upgradedSource, 'utf8');
-                return { applied: true, alreadyApplied: false, upgradedExistingPatch: true, file: path.basename(filePath), selfChatPrimary: 'authenticated PN from remoteJidAlt', mappingPersisted: true, sessionMigration: true };
-            }
-            return { applied: true, alreadyApplied: true, file: path.basename(filePath), mappingPersisted: true, sessionMigration: true };
-        }
-        const declarationPattern = /const\s+decryptionJid\s*=\s*await\s+getDecryptionJid\(\s*author\s*,\s*repository\s*\)\s*;?/;
-        const declarationMatch = declarationPattern.exec(source);
-        if (!declarationMatch) return { applied: false, reason: 'decryption_jid_declaration_not_found', file: path.basename(filePath) };
-        const selfPhoneSelection = `\nconst __tfbotSelfChatPn = fullMessage?.key?.fromMe === true && /@(?:hosted\\.)?lid$/i.test(String(fullMessage?.key?.remoteJid || '')) ? String(fullMessage?.key?.remoteJidAlt || '').trim() : '';\nconst __tfbotDecryptionJid = /@s\\.whatsapp\\.net$/i.test(__tfbotSelfChatPn) ? __tfbotSelfChatPn : decryptionJid;`;
-        source = source.slice(0, declarationMatch.index + declarationMatch[0].length) + selfPhoneSelection + source.slice(declarationMatch.index + declarationMatch[0].length);
-        const casePattern = /case\s+(['"])pkmsg\1\s*:\s*case\s+(['"])msg\2\s*:/;
-        const caseStart = source.search(casePattern);
-        if (caseStart < 0) return { applied: false, reason: 'decrypt_case_not_found', file: path.basename(filePath) };
-        const caseBlock = source.slice(caseStart);
-        const decryptCallPattern = /msgBuffer\s*=\s*await\s+repository\.decryptMessage\(\s*\{\s*jid:\s*(?:user|decryptionJid)\s*,\s*type:\s*e2eType\s*,\s*ciphertext:\s*content\s*\}\s*\)\s*;?/;
-        const decryptCallMatch = decryptCallPattern.exec(caseBlock);
-        if (!decryptCallMatch) return { applied: false, reason: 'decrypt_call_pattern_not_found', file: path.basename(filePath) };
-        const replacement = `try {
-    ${mappingInjection}
-} catch (decryptError) {
-    const primaryIdentity = String(__tfbotDecryptionJid || '').trim();
-    const primaryIsLid = /@(?:hosted\\.)?lid$/i.test(primaryIdentity);
-    const alternateCandidates = primaryIsLid
-        ? [fullMessage?.key?.remoteJidAlt, fullMessage?.key?.participantPn, fullMessage?.key?.senderPn, stanza.attrs.peer_recipient_pn, stanza.attrs.recipient_pn, stanza.attrs.participant_pn, stanza.attrs.sender_pn]
-        : [decryptionJid, fullMessage?.key?.remoteJidAlt, fullMessage?.key?.participantAlt, stanza.attrs.participant_lid, stanza.attrs.sender_lid, stanza.attrs.peer_recipient_lid];
-    let alternateIdentity = alternateCandidates.map(value => String(value || '').trim()).find(value => value && value !== primaryIdentity && /@(?:hosted\\.)?lid$|@s\\.whatsapp\\.net$/i.test(value)) || '';
-    if (!alternateIdentity) {
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), selfChatOnly: true, preservesOriginalLidFallback: true, noAutomaticSessionMigration: true };
+        const callPattern = /((?:(?:const|let|var)\s+)?[A-Za-z_$][\w$]*\s*=\s*)await\s+repository\.decryptMessage\s*\(\s*\{\s*jid\s*:\s*([^,\n]+?)\s*,\s*type\s*:\s*e2eType\s*,\s*ciphertext\s*:\s*content\s*\}\s*\)\s*;?/g;
+        const matches = [...source.matchAll(callPattern)];
+        if (matches.length !== 1) return { applied: false, reason: `expected_one_signal_decrypt_call_found_${matches.length}`, file: path.basename(filePath) };
+        const match = matches[0];
+        const left = match[1];
+        const originalJidExpression = match[2].trim();
+        const replacement = `${left}await (async () => {
+    const ${marker} = true;
+    const __tfbotPrimaryJid = String(${originalJidExpression} || '').trim();
+    const __tfbotRemoteJid = String(fullMessage?.key?.remoteJid || '').trim();
+    const __tfbotIsSelfLidChat = fullMessage?.key?.fromMe === true && /@(?:hosted\\.)?lid$/i.test(__tfbotRemoteJid) && !/@(?:g\\.us|newsletter|broadcast)$/i.test(__tfbotRemoteJid);
+    const __tfbotNormalizeJid = value => String(value || '').trim().replace(/:\\d+(?=@(?:hosted\\.)?lid$)/i, '').replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
+    const __tfbotPnCandidates = __tfbotIsSelfLidChat ? [
+        fullMessage?.key?.remoteJidAlt,
+        fullMessage?.key?.participantPn,
+        fullMessage?.key?.senderPn,
+        stanza?.attrs?.peer_recipient_pn,
+        stanza?.attrs?.recipient_pn,
+        stanza?.attrs?.participant_pn,
+        stanza?.attrs?.sender_pn
+    ].map(__tfbotNormalizeJid).filter(value => /^\\d{6,20}@s\\.whatsapp\\.net$/i.test(value)) : [];
+    const __tfbotPrimaryIsLid = /@(?:hosted\\.)?lid$/i.test(__tfbotPrimaryJid);
+    const __tfbotCandidates = [...new Set(__tfbotPrimaryIsLid ? [...__tfbotPnCandidates, __tfbotPrimaryJid, __tfbotRemoteJid] : [__tfbotPrimaryJid, ...__tfbotPnCandidates])].filter(Boolean);
+    let __tfbotOriginalDecryptError;
+    for (const __tfbotCandidateJid of __tfbotCandidates) {
         try {
-            const mappedIdentity = primaryIsLid
-                ? await repository?.lidMapping?.getPNForLID?.(primaryIdentity)
-                : await repository?.lidMapping?.getLIDForPN?.(primaryIdentity);
-            alternateIdentity = String(mappedIdentity || '').trim();
-        } catch (mappingError) {}
-    }
-    if (!alternateIdentity || alternateIdentity === primaryIdentity || !/@(?:hosted\\.)?lid$|@s\\.whatsapp\\.net$/i.test(alternateIdentity)) throw decryptError;
-    try {
-        msgBuffer = await repository.decryptMessage({ jid: alternateIdentity, type: e2eType, ciphertext: content });
-        if (primaryIsLid && /@s\\.whatsapp\\.net$/i.test(alternateIdentity) && fullMessage?.key?.fromMe === true) {
-            try {
-                await repository?.lidMapping?.storeLIDPNMappings?.([{ lid: primaryIdentity, pn: alternateIdentity }]);
-                if (typeof repository?.migrateSession === 'function') await repository.migrateSession(alternateIdentity, primaryIdentity);
-                logger.debug({ lid: primaryIdentity, pn: alternateIdentity }, 'self-chat Signal session migrated after alternate PN decryption');
-            } catch (mappingStoreError) {
-                logger.warn({ err: mappingStoreError, lid: primaryIdentity, pn: alternateIdentity }, 'self-chat alternate PN/LID session migration failed');
+            const __tfbotDecrypted = await repository.decryptMessage({ jid: __tfbotCandidateJid, type: e2eType, ciphertext: content });
+            if (__tfbotIsSelfLidChat && /^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotCandidateJid)) {
+                const __tfbotLid = /@(?:hosted\\.)?lid$/i.test(__tfbotPrimaryJid) ? __tfbotNormalizeJid(__tfbotPrimaryJid) : __tfbotNormalizeJid(__tfbotRemoteJid);
+                if (/@(?:hosted\\.)?lid$/i.test(__tfbotLid)) {
+                    try {
+                        await repository?.lidMapping?.storeLIDPNMappings?.([{ lid: __tfbotLid, pn: __tfbotCandidateJid }]);
+                    } catch (mappingError) {
+                        logger?.warn?.({ err: mappingError }, 'self-chat LID/PN mapping persistence skipped after successful alternate decrypt');
+                    }
+                }
+                logger?.debug?.({ remoteJid: __tfbotRemoteJid, primaryJid: __tfbotPrimaryJid, decryptJid: __tfbotCandidateJid }, 'self-chat PN decrypt fallback succeeded');
             }
+            return __tfbotDecrypted;
+        } catch (decryptError) {
+            if (!__tfbotOriginalDecryptError) __tfbotOriginalDecryptError = decryptError;
         }
-        logger.debug({ key: fullMessage.key, primary: primaryIdentity, retryWith: alternateIdentity }, '${marker}');
-    } catch {
-        throw decryptError;
     }
-}`;
-        const patchedCaseBlock = caseBlock.replace(decryptCallPattern, replacement);
-        const patchedSource = source.slice(0, caseStart) + patchedCaseBlock;
-        if (!patchedSource.includes(marker) || !patchedSource.includes('jid: __tfbotDecryptionJid') || !patchedSource.includes('jid: alternateIdentity') || !patchedSource.includes(mappingMarker)) return { applied: false, reason: 'decrypt_patch_verification_failed', file: path.basename(filePath) };
+    throw __tfbotOriginalDecryptError || new Error('Signal decryption failed without a usable JID candidate');
+})();`;
+        const patchedSource = source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
+        if (!patchedSource.includes(marker) || !patchedSource.includes('peer_recipient_pn') || !patchedSource.includes('storeLIDPNMappings') || patchedSource.includes('migrateSession(__tfbotCandidateJid')) return { applied: false, reason: 'self_chat_decrypt_patch_verification_failed', file: path.basename(filePath) };
         fs.writeFileSync(filePath, patchedSource, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), selfChatPrimary: 'authenticated PN from remoteJidAlt', mappingPersisted: true, sessionMigration: true };
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), selfChatOnly: true, triesTrustedPnAliasesBeforeOriginalLid: true, preservesOriginalDecryptError: true, storesMappingOnlyAfterSuccessfulPnDecrypt: true, noAutomaticSessionMigration: true };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
@@ -358,53 +317,6 @@ function findTfbotMatchingBraceEnd(source, openIndex) {
         }
     }
     return -1;
-}
-
-function applyBaileysGroupLidParticipantPnDecryptPatch() {
-    const marker = '__tfbotGroupLidParticipantPnDecryptFallbackV106';
-    try {
-        const entryPath = require.resolve('@whiskeysockets/baileys');
-        const entryDirectory = path.dirname(entryPath);
-        const roots = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
-        const candidates = [...new Set(roots.flatMap(directory => ['Utils', 'utils'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `decode-wa-message.${extension}`)))))];
-        const filePath = candidates.find(candidate => fs.existsSync(candidate));
-        if (!filePath) return { applied: false, reason: 'decode_wa_message_module_not_found' };
-        const source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), retriesWithParticipantPn: true };
-        const pattern = /msgBuffer\s*=\s*await\s+repository\.decryptGroupMessage\(\s*\{\s*group:\s*sender\s*,\s*authorJid:\s*author\s*,\s*msg:\s*content\s*\}\s*\)\s*;?/;
-        const matches = [...source.matchAll(new RegExp(pattern.source, 'g'))];
-        if (matches.length !== 1) return { applied: false, reason: `expected_one_group_decrypt_call_found_${matches.length}`, file: path.basename(filePath) };
-        const match = matches[0];
-        const replacement = `const __tfbotGroupOriginalAuthor = String(author || '').trim();
-const __tfbotGroupParticipantPn = String(fullMessage?.key?.participantPn || fullMessage?.key?.senderPn || fullMessage?.key?.participantAlt || stanza?.attrs?.participant_pn || stanza?.attrs?.sender_pn || stanza?.attrs?.peer_recipient_pn || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
-const ${marker} = true;
-try {
-    msgBuffer = await repository.decryptGroupMessage({ group: sender, authorJid: author, msg: content });
-} catch (__tfbotGroupLidDecryptError) {
-    const __tfbotGroupDecryptErrorText = String(__tfbotGroupLidDecryptError?.message || __tfbotGroupLidDecryptError || '');
-    if (!/No session found to decrypt message|No sessions|SessionError/i.test(__tfbotGroupDecryptErrorText)) throw __tfbotGroupLidDecryptError;
-    const __tfbotGroupAuthorIsLid = /@(?:hosted\\.)?lid$/i.test(__tfbotGroupOriginalAuthor);
-    let __tfbotGroupFallbackPn = __tfbotGroupParticipantPn;
-    if (!__tfbotGroupFallbackPn && __tfbotGroupAuthorIsLid) {
-        try {
-            __tfbotGroupFallbackPn = String(await repository?.lidMapping?.getPNForLID?.(__tfbotGroupOriginalAuthor) || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
-        } catch (__tfbotGroupMappingError) {}
-    }
-    if (!__tfbotGroupAuthorIsLid || !/^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotGroupFallbackPn) || __tfbotGroupFallbackPn === __tfbotGroupOriginalAuthor) throw __tfbotGroupLidDecryptError;
-    try {
-        msgBuffer = await repository.decryptGroupMessage({ group: sender, authorJid: __tfbotGroupFallbackPn, msg: content });
-        logger.warn({ group: sender, messageId: fullMessage?.key?.id || null, fallback: 'participant_pn' }, 'group LID message decrypted with participant PN fallback');
-    } catch (__tfbotGroupPnDecryptError) {
-        throw __tfbotGroupLidDecryptError;
-    }
-}`;
-        const patched = source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
-        if (!patched.includes(marker) || !patched.includes('authorJid: __tfbotGroupFallbackPn') || !patched.includes('throw __tfbotGroupLidDecryptError')) return { applied: false, reason: 'group_lid_decrypt_patch_verification_failed', file: path.basename(filePath) };
-        fs.writeFileSync(filePath, patched, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), retriesWithParticipantPn: true, preservesOriginalErrorOnFallbackFailure: true };
-    } catch (error) {
-        return { applied: false, reason: String(error?.message || error).slice(0, 180) };
-    }
 }
 
 function applyBaileysSelfChatPlaceholderResendPnPatch() {
@@ -622,7 +534,7 @@ function applyBaileysOutgoingRetryPreflightPatch() {
 }
 
 function applyBaileysRetryResendDoubleEncryptionPatch() {
-    const marker = '__tfbotRetryResendSingleEncryptionV103';
+    const marker = '__tfbotRetryResendSingleEncryptionV107';
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
@@ -632,44 +544,22 @@ function applyBaileysRetryResendDoubleEncryptionPatch() {
         if (!filePath) return { applied: false, reason: 'messages_send_module_not_found', issue: 'Baileys#2781' };
         let source = fs.readFileSync(filePath, 'utf8');
         if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), issue: 'Baileys#2781', skipsSecondEncryptionWhenParticipantNodeExists: true };
-        const retryPatterns = [
-            /if\s*\(\s*isRetryResend\s*\)\s*\{/g,
-            /if\s*\(\s*isRetryResend\s*&&\s*participant(?:\?\.)?\s*\)\s*\{/g,
-            /if\s*\(\s*isRetryResend\s*&&\s*!participants\.length\s*\)\s*\{/g
-        ];
-        let match = null;
-        for (const pattern of retryPatterns) {
-            const matches = [...source.matchAll(pattern)];
-            if (matches.length === 1) {
-                match = matches[0];
-                break;
-            }
-            if (matches.length > 1) return { applied: false, reason: 'ambiguous_retry_resend_blocks', matches: matches.length, file: path.basename(filePath), issue: 'Baileys#2781' };
-        }
-        if (!match) {
-            const participantAnchor = /const\s+isParticipantLid\s*=\s*isLidUser\s*\(\s*participant(?:!)?\.jid\s*\)/.exec(source);
-            if (!participantAnchor) return { applied: false, reason: 'retry_resend_identity_anchor_not_found', file: path.basename(filePath), issue: 'Baileys#2781' };
-            const before = source.slice(Math.max(0, participantAnchor.index - 500), participantAnchor.index);
-            const localIf = [...before.matchAll(/if\s*\(\s*isRetryResend\s*\)\s*\{/g)].pop();
-            if (!localIf) return { applied: false, reason: 'retry_resend_guard_not_found', file: path.basename(filePath), issue: 'Baileys#2781' };
-            const absoluteIndex = Math.max(0, participantAnchor.index - 500) + localIf.index;
-            match = { index: absoluteIndex, 0: localIf[0] };
-        }
-        const originalGuard = match[0];
-        const replacementGuard = `if (isRetryResend && !participants.length) {`;
-        const patched = source.slice(0, match.index) + replacementGuard + source.slice(match.index + originalGuard.length);
-        const verified = patched.includes(replacementGuard) && patched.includes('const isParticipantLid') && !patched.includes(marker);
-        if (!verified) return { applied: false, reason: 'single_encryption_patch_verification_failed', file: path.basename(filePath), issue: 'Baileys#2781' };
-        const finalSource = patched.replace(replacementGuard, `${replacementGuard}\n\t\tconst ${marker} = true;`);
+        if (!/\bparticipants\s*\.\s*length\b/.test(source) || !/\bparticipants\s*\.\s*push\s*\(/.test(source)) return { applied: false, reason: 'participant_fanout_array_not_found', file: path.basename(filePath), issue: 'Baileys#2781' };
+        const patterns = [...source.matchAll(/if\s*\(\s*isRetryResend\s*\)\s*\{/g)];
+        if (patterns.length !== 1) return { applied: false, reason: `expected_one_retry_resend_guard_found_${patterns.length}`, file: path.basename(filePath), issue: 'Baileys#2781' };
+        const match = patterns[0];
+        const guard = 'if (isRetryResend && !participants.length) {';
+        const patched = source.slice(0, match.index) + guard + source.slice(match.index + match[0].length);
+        const finalSource = patched.replace(guard, `${guard}\n\t\tconst ${marker} = true;`);
+        if (!finalSource.includes(marker) || !finalSource.includes('if (isRetryResend && !participants.length)')) return { applied: false, reason: 'single_encryption_patch_verification_failed', file: path.basename(filePath), issue: 'Baileys#2781' };
         fs.writeFileSync(filePath, finalSource, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), issue: 'Baileys#2781', skipsSecondEncryptionWhenParticipantNodeExists: true, preservesParticipantNode: true, preservesGroupRetryWhenNoParticipantNode: true };
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), issue: 'Baileys#2781', skipsSecondEncryptionWhenParticipantNodeExists: true, preservesParticipantAddress: true };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180), issue: 'Baileys#2781' };
     }
 }
-
 function applyBaileysOwnLidRetryAddressingPatch() {
-    const marker = '__tfbotOwnLidRetryIdentityResolvedV103';
+    const marker = '__tfbotOwnLidRetryIdentityResolvedV107';
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
@@ -678,8 +568,8 @@ function applyBaileysOwnLidRetryAddressingPatch() {
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
         if (!filePath) return { applied: false, reason: 'messages_send_module_not_found', issue: 'Baileys#2856' };
         let source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), issue: 'Baileys#2856', ownLidIdentityCheck: true, hostedLidSupported: true, preservesParticipantAddress: true };
-        const expressionPattern = /const\s+isMe\s*=\s*areJidsSameUser\s*\(\s*participant(?:!)?\.jid\s*,\s*isParticipantLid\s*\?\s*meLid\s*:\s*meId\s*\)\s*;?/;
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), issue: 'Baileys#2856', ownLidIdentityCheck: true, preservesParticipantAddress: true };
+        const expressionPattern = /const\s+isMe\s*=\s*areJidsSameUser\s*\(\s*participant(?:!|\?)?\.jid\s*,\s*isParticipantLid\s*\?\s*meLid\s*:\s*meId\s*\)\s*;?/;
         const matches = [...source.matchAll(new RegExp(expressionPattern.source, 'g'))];
         if (matches.length !== 1) return { applied: false, reason: `expected_one_retry_own_identity_expression_found_${matches.length}`, file: path.basename(filePath), issue: 'Baileys#2856' };
         const match = matches[0];
@@ -688,7 +578,7 @@ let __tfbotRetryParticipantPn = '';
 if (isParticipantLid && signalRepository?.lidMapping?.getPNForLID) {
     try {
         const __tfbotNormalizedRetryLid = __tfbotRetryParticipantJid.replace(/:\\d+(?=@(?:hosted\\.)?lid$)/i, '');
-        __tfbotRetryParticipantPn = String(await signalRepository.lidMapping.getPNForLID(__tfbotNormalizedRetryLid) || '').trim();
+        __tfbotRetryParticipantPn = String(await signalRepository.lidMapping.getPNForLID(__tfbotNormalizedRetryLid) || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
     } catch (error) {}
 }
 const __tfbotRetryOwnLidMatch = isParticipantLid && ((Boolean(meLid) && areJidsSameUser(__tfbotRetryParticipantJid, meLid)) || (Boolean(__tfbotRetryParticipantPn) && areJidsSameUser(__tfbotRetryParticipantPn, meId)));
@@ -701,6 +591,96 @@ const ${marker} = true;`;
         return { applied: true, alreadyApplied: false, file: path.basename(filePath), issue: 'Baileys#2856', ownLidIdentityCheck: true, hostedLidSupported: true, mappedPnFallback: true, preservesParticipantAddress: true };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180), issue: 'Baileys#2856' };
+    }
+}
+function applyBaileysGroupRetrySkdmPatch() {
+    const result = { applied: false, libsignal: { applied: false }, messagesSend: { applied: false }, issue: 'Baileys#2506', reason: 'not_attempted' };
+    try {
+        const entryPath = require.resolve('@whiskeysockets/baileys');
+        const entryDirectory = path.dirname(entryPath);
+        const roots = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
+        const libCandidates = [...new Set(roots.flatMap(directory => ['Signal', 'signal'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `libsignal.${extension}`)))) )];
+        const sendCandidates = [...new Set(roots.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `messages-send.${extension}`)))) )];
+        const libPath = libCandidates.find(candidate => fs.existsSync(candidate));
+        const sendPath = sendCandidates.find(candidate => fs.existsSync(candidate));
+        if (!libPath) { result.reason = 'libsignal_module_not_found'; return result; }
+        if (!sendPath) { result.reason = 'messages_send_module_not_found'; return result; }
+        let libSource = fs.readFileSync(libPath, 'utf8');
+        const libMarker = '__tfbotGroupRetrySkdmRepositoryMethodsV107';
+        if (libSource.includes(libMarker) || (libSource.includes('getSenderKeyDistributionMessage') && libSource.includes('hasSenderKey'))) {
+            result.libsignal = { applied: true, alreadyApplied: true, file: path.basename(libPath) };
+        } else {
+            const required = ['jidToSignalSenderKeyName', 'GroupSessionBuilder', 'SenderKeyRecord', 'parsedKeys', 'auth.keys.get', 'storage.storeSenderKey'];
+            const missing = required.filter(value => !libSource.includes(value));
+            if (missing.length) { result.reason = `libsignal_required_symbols_missing_${missing.join('_')}`; result.libsignal = { applied: false, file: path.basename(libPath) }; return result; }
+            const objectPattern = /((?:const|let|var)\s+repository\s*=\s*\{)/;
+            const objectMatch = objectPattern.exec(libSource);
+            if (!objectMatch) { result.reason = 'signal_repository_object_not_found'; result.libsignal = { applied: false, file: path.basename(libPath) }; return result; }
+            const methods = `
+        async getSenderKeyDistributionMessage({ group, meId }) {
+            return parsedKeys.transaction(async () => {
+                const senderName = jidToSignalSenderKeyName(group, meId);
+                const senderNameStr = senderName.toString();
+                const { [senderNameStr]: senderKey } = await auth.keys.get('sender-key', [senderNameStr]);
+                if (!senderKey) await storage.storeSenderKey(senderName, new SenderKeyRecord());
+                const skdm = await new GroupSessionBuilder(storage).create(senderName);
+                return skdm.serialize();
+            }, group);
+        },
+        async hasSenderKey({ group, meId }) {
+            const senderName = jidToSignalSenderKeyName(group, meId).toString();
+            const { [senderName]: key } = await auth.keys.get('sender-key', [senderName]);
+            return !!key;
+        },
+        __tfbotGroupRetrySkdmRepositoryMethodsV107: true,
+`;
+            const insertionPoint = objectMatch.index + objectMatch[0].length;
+            libSource = libSource.slice(0, insertionPoint) + methods + libSource.slice(insertionPoint);
+            if (!libSource.includes(libMarker) || !libSource.includes('async getSenderKeyDistributionMessage') || !libSource.includes('async hasSenderKey')) { result.reason = 'libsignal_patch_verification_failed'; return result; }
+            fs.writeFileSync(libPath, libSource, 'utf8');
+            result.libsignal = { applied: true, alreadyApplied: false, file: path.basename(libPath), exposesSkdmMethods: true };
+        }
+        let sendSource = fs.readFileSync(sendPath, 'utf8');
+        const sendMarker = '__tfbotEmbedGroupSkdmOnRetryResendV107';
+        if (sendSource.includes(sendMarker)) {
+            result.messagesSend = { applied: true, alreadyApplied: true, file: path.basename(sendPath) };
+        } else {
+            const encodedPattern = /const\s+encodedMessageToSend\s*=\s*isMe\s*\?\s*encodeWAMessage\s*\(\s*\{\s*deviceSentMessage\s*:\s*\{\s*destinationJid\s*,\s*message\s*\}\s*\}\s*\)\s*:\s*encodeWAMessage\s*\(\s*message\s*\)\s*;?/;
+            const encodedMatches = [...sendSource.matchAll(new RegExp(encodedPattern.source, 'g'))];
+            const requiredSendSymbols = ['isGroupOrStatus', 'signalRepository', 'destinationJid', 'meLid', 'meId'];
+            if (encodedMatches.length !== 1 || requiredSendSymbols.some(value => !sendSource.includes(value))) {
+                result.reason = `group_retry_send_anchor_not_found_${encodedMatches.length}`;
+                result.messagesSend = { applied: false, file: path.basename(sendPath) };
+                return result;
+            }
+            const match = encodedMatches[0];
+            const replacement = `let __tfbotMessageToSendV107 = message;
+if (isGroupOrStatus && !message?.senderKeyDistributionMessage && typeof signalRepository?.hasSenderKey === 'function' && typeof signalRepository?.getSenderKeyDistributionMessage === 'function') {
+    try {
+        let __tfbotGroupSenderIdentityV107 = '';
+        if (meLid && await signalRepository.hasSenderKey({ group: destinationJid, meId: meLid })) __tfbotGroupSenderIdentityV107 = meLid;
+        else if (await signalRepository.hasSenderKey({ group: destinationJid, meId })) __tfbotGroupSenderIdentityV107 = meId;
+        if (__tfbotGroupSenderIdentityV107) {
+            const __tfbotSkdmV107 = await signalRepository.getSenderKeyDistributionMessage({ group: destinationJid, meId: __tfbotGroupSenderIdentityV107 });
+            __tfbotMessageToSendV107 = { ...message, senderKeyDistributionMessage: { groupId: destinationJid, axolotlSenderKeyDistributionMessage: __tfbotSkdmV107 } };
+        }
+    } catch (__tfbotSkdmErrorV107) {
+        logger.warn({ err: __tfbotSkdmErrorV107, jid: destinationJid }, 'group retry SKDM preparation failed; preserving original retry message');
+    }
+}
+const ${sendMarker} = true;
+const encodedMessageToSend = isMe ? encodeWAMessage({ deviceSentMessage: { destinationJid, message: __tfbotMessageToSendV107 } }) : encodeWAMessage(__tfbotMessageToSendV107);`;
+            sendSource = sendSource.slice(0, match.index) + replacement + sendSource.slice(match.index + match[0].length);
+            if (!sendSource.includes(sendMarker) || !sendSource.includes('axolotlSenderKeyDistributionMessage: __tfbotSkdmV107')) { result.reason = 'group_retry_send_patch_verification_failed'; return result; }
+            fs.writeFileSync(sendPath, sendSource, 'utf8');
+            result.messagesSend = { applied: true, alreadyApplied: false, file: path.basename(sendPath), bestEffortSkdmOnGroupStatusRetry: true };
+        }
+        result.applied = result.libsignal.applied && result.messagesSend.applied;
+        result.reason = result.applied ? 'ok' : 'partial_application';
+        return result;
+    } catch (error) {
+        result.reason = String(error?.message || error).slice(0, 180);
+        return result;
     }
 }
 
@@ -881,7 +861,7 @@ function applyBaileysMessageRetryManagerDeviceJidPatch() {
 }
 
 const baileysLidPnDecryptPatchStatus = applyBaileysLidPnDecryptRetryPatch();
-const baileysGroupLidParticipantPnDecryptPatchStatus = applyBaileysGroupLidParticipantPnDecryptPatch();
+const baileysGroupRetrySkdmPatchStatus = applyBaileysGroupRetrySkdmPatch();
 const baileysSelfChatPlaceholderResendPatchStatus = applyBaileysSelfChatPlaceholderResendPnPatch();
 const baileysSignalTransactionPatchStatus = applyBaileysSignalTransactionPatch();
 const baileysOutgoingRetryPreflightPatchStatus = applyBaileysOutgoingRetryPreflightPatch();
@@ -891,14 +871,14 @@ const baileysMessageRetryManagerDeviceJidPatchStatus = applyBaileysMessageRetryM
 const baileysCompanionRegRefreshPatchStatus = applyBaileysCompanionRegRefreshPatch();
 console.info('[tfbot-local-diagnostics-ready]', { phone: TFBOT_DIAGNOSTIC_PHONE ? `[phone:${TFBOT_DIAGNOSTIC_PHONE.slice(-2).padStart(TFBOT_DIAGNOSTIC_PHONE.length, '*')}]` : null, sessionId: TFBOT_DIAGNOSTIC_SESSION_ID || null, file: 'logs.txt', storage: 'local_filesystem_only', publicRead: true, access: 'public-redacted-log', writer: 'asynchronous' });
 console.info('[baileys-lid-pn-decrypt-retry-patch]', baileysLidPnDecryptPatchStatus);
-console.info('[baileys-group-lid-participant-pn-decrypt-patch]', baileysGroupLidParticipantPnDecryptPatchStatus);
 console.info('[baileys-self-chat-placeholder-resend-patch]', baileysSelfChatPlaceholderResendPatchStatus);
+console.info('[baileys-group-retry-skdm-patch]', baileysGroupRetrySkdmPatchStatus);
 console.info('[baileys-outgoing-retry-preflight-patch]', { ...baileysOutgoingRetryPreflightPatchStatus, action: baileysOutgoingRetryPreflightPatchStatus.applied ? 'preload_internal_retry_manager_and_persist_generated_full_message_before_network_relay' : 'leave_installed_baileys_source_unchanged' });
 console.info('[baileys-retry-resend-double-encryption-patch]', { ...baileysRetryResendDoubleEncryptionPatchStatus, action: baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'avoid_duplicate_pairwise_encryption_on_retry_resend' : 'not_applicable_or_source_shape_not_matched' });
 console.info('[baileys-own-lid-retry-addressing-patch]', { ...baileysOwnLidRetryAddressingPatchStatus, action: baileysOwnLidRetryAddressingPatchStatus.applied ? 'preserve_chat_recipient_for_own_lid_device_retry' : 'not_applicable_or_source_shape_not_matched' });
 console.info('[baileys-signal-transaction-patch]', { ...baileysSignalTransactionPatchStatus, action: baileysSignalTransactionPatchStatus.applied ? 'serialize_signal_crypto_methods_inside_session_store_transaction' : 'leave_installed_baileys_source_unchanged' });
-enqueueTfbotDiagnosticRecord({ name: 'TFBOT', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION, bootTime: TFBOT_DIAGNOSTIC_BOOT_TIME }) });
-enqueueTfbotDiagnosticRecord({ name: 'TFBOT', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, groupLidParticipantPnDecrypt: baileysGroupLidParticipantPnDecryptPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus }) });
+enqueueTfbotDiagnosticRecord({ name: 'Adam', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION }) });
+enqueueTfbotDiagnosticRecord({ name: 'Adam', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus }) });
 
 const {
     default: makeWASocket,
@@ -983,23 +963,12 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
         : /SessionError:\s*No sessions|No sessions|No session found to decrypt message/i.test(failureText) ? 'signal_session_missing'
         : /Bad MAC|SignalErrorBadMac|SignalErrorInvalidMessage|retry.{0,20}(?:error|code).{0,8}(?:4|7)\b/i.test(failureText) ? 'bad_mac'
         : 'signal_decryption_error';
-    if (!details.remoteJid || !details.peerJid) {
-        const flushKey = `${sessionId}:unattributed-signal-auth-flush`;
-        if (Number(signalRecoveryCooldowns.get(flushKey) || 0) <= now) {
-            signalRecoveryCooldowns.set(flushKey, now + 15000);
-            const flushTimer = setTimeout(async () => {
-                try {
-                    await flushAuthWritesForSession(sessionId);
-                    console.info('[signal-auth-flush-after-unattributed-failure]', { sessionId, action: 'flush_pending_auth_writes_without_deleting_signal_keys' });
-                } catch (error) {
-                    console.warn('[signal-auth-flush-after-unattributed-failure-failed]', { sessionId, error: error?.message || String(error) });
-                }
-            }, 100);
-            if (typeof flushTimer.unref === 'function') flushTimer.unref();
-        }
-        return;
-    }
-    const peerKey = `${sessionId}:${details.isGroup ? details.remoteJid : details.peerJid}:${details.isGroup ? details.peerJid : 'private'}`;
+    const runtime = activeSessions.get(sessionId);
+    const credentials = runtime?.authState?.creds || null;
+    const user = runtime?.sock?.user || null;
+    const ownJids = [getAuthenticatedPhoneNumber(user, credentials) ? `${getAuthenticatedPhoneNumber(user, credentials)}@s.whatsapp.net` : '', getAuthenticatedLid(user, credentials), user?.id, credentials?.me?.id, credentials?.me?.lid].map(value => String(value || '').trim()).filter(Boolean);
+    const selfPeer = !details.isGroup && [details.remoteJid, details.peerJid, ...(details.aliases || [])].some(value => ownJids.some(own => areEquivalentWhatsAppChatJids(sessionId, value, own)));
+    const peerKey = `${sessionId}:${details.isGroup ? details.remoteJid : details.peerJid || details.remoteJid || 'unknown'}:${details.isGroup ? details.peerJid : 'private'}`;
     const previous = signalRecoveryCounters.get(peerKey) || { count: 0, windowAt: now };
     if (now - Number(previous.windowAt || 0) > SIGNAL_RECOVERY_WINDOW_MS) {
         previous.count = 0;
@@ -1009,113 +978,39 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
     previous.lastKind = kind;
     signalRecoveryCounters.set(peerKey, previous);
     while (signalRecoveryCounters.size > 2000) signalRecoveryCounters.delete(signalRecoveryCounters.keys().next().value);
-    const selfRuntime = activeSessions.get(sessionId);
-    const selfCredentials = selfRuntime?.authState?.creds || null;
-    const selfUser = selfRuntime?.sock?.user || null;
-    const ownPhoneNumber = getAuthenticatedPhoneNumber(selfUser, selfCredentials);
-    const ownPhoneJid = ownPhoneNumber ? `${ownPhoneNumber}@s.whatsapp.net` : '';
-    const ownSignalJids = [...new Set([getAuthenticatedLid(selfUser, selfCredentials), ownPhoneJid, selfUser?.id, selfCredentials?.me?.id, selfCredentials?.me?.lid].map(value => String(value || '').trim()).filter(Boolean))];
-    const signalPeerCandidates = [...new Set([details.peerJid, details.remoteJid, ...(Array.isArray(details.aliases) ? details.aliases : [])].map(value => String(value || '').trim()).filter(Boolean))];
-    const selfPeer = !details.isGroup && signalPeerCandidates.some(peerJid => ownSignalJids.some(ownJid => areEquivalentWhatsAppChatJids(sessionId, peerJid, ownJid)));
-    const privateRepairRequired = !details.isGroup && (['signal_session_missing', 'bad_mac', 'message_counter_error'].includes(kind) || previous.count >= SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD && kind === 'signal_decryption_error');
-    if (privateRepairRequired) {
-        const repairKey = `${sessionId}:${details.peerJid}:private-pairwise-session`;
-        if (Number(signalPrivatePeerRepairCooldowns.get(repairKey) || 0) <= now && !signalRecoveryTimers.has(repairKey)) {
-            signalPrivatePeerRepairCooldowns.set(repairKey, now + SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS);
-            const repairTimer = setTimeout(async () => {
-                signalRecoveryTimers.delete(repairKey);
-                const current = activeSessions.get(sessionId);
-                const repository = current?.sock?.signalRepository;
-                if (!current || current.status === 'deconnecte' || typeof repository?.deleteSession !== 'function') return;
-                try {
-                    const currentCredentials = current.authState?.creds || null;
-                    const currentUser = current.sock?.user || null;
-                    const ownPhone = getAuthenticatedPhoneNumber(currentUser, currentCredentials);
-                    const ownPhoneJid = ownPhone ? `${ownPhone}@s.whatsapp.net` : '';
-                    const ownLid = normalizeLidCacheKey(getAuthenticatedLid(currentUser, currentCredentials));
-                    if (selfPeer) {
-                        if (ownPhoneJid && /@lid$/i.test(ownLid) && typeof repository.migrateSession === 'function') {
-                            await repository?.lidMapping?.storeLIDPNMappings?.([{ lid: ownLid, pn: ownPhoneJid }]);
-                            await repository.migrateSession(ownPhoneJid, ownLid);
-                            await flushAuthWritesForSession(sessionId);
-                            console.warn('[signal-self-chat-recovery-migrated]', { sessionId, messageId: details.messageId || null, failureKind: kind, ownPhoneHash: shortLogHash(ownPhoneJid), ownLidHash: shortLogHash(ownLid), signalKeysDeleted: false, action: 'store_verified_pn_lid_mapping_and_migrate_session_to_lid' });
-                        } else {
-                            await flushAuthWritesForSession(sessionId);
-                            console.warn('[signal-self-chat-recovery-preserved]', { sessionId, messageId: details.messageId || null, failureKind: kind, ownPhoneAvailable: !!ownPhoneJid, ownLidAvailable: /@lid$/i.test(ownLid), migrateSessionAvailable: typeof repository.migrateSession === 'function', signalKeysDeleted: false, action: 'preserve_self_signal_keys_and_wait_for_verified_pn_lid_mapping' });
-                        }
-                    } else {
-                        await repository.deleteSession([details.peerJid]);
-                        await flushAuthWritesForSession(sessionId);
-                        console.warn('[signal-private-peer-recovery-reset]', { sessionId, messageId: details.messageId || null, peerHash: shortLogHash(details.peerJid), failureKind: kind, signalKeysDeleted: true });
-                    }
-                } catch (error) {
-                    console.error(selfPeer ? '[signal-self-chat-recovery-failed]' : '[signal-private-peer-recovery-failed]', { sessionId, messageId: details.messageId || null, failureKind: kind, error: error?.message || String(error) });
-                }
-            }, 180);
-            signalRecoveryTimers.set(repairKey, repairTimer);
-            if (typeof repairTimer.unref === 'function') repairTimer.unref();
-        }
-    }
-    if (details.isGroup && ['signal_session_missing', 'bad_mac', 'signal_decryption_error', 'message_counter_error'].includes(kind)) {
-        const groupRecoveryKey = `${sessionId}:${details.remoteJid}:sender-key-recovery`;
-        const recoveryUntil = Number(signalRecoveryCooldowns.get(groupRecoveryKey) || 0);
-        if (recoveryUntil <= now && !signalRecoveryTimers.has(groupRecoveryKey)) {
-            signalRecoveryCooldowns.set(groupRecoveryKey, now + SIGNAL_GROUP_SENDER_KEY_RECOVERY_COOLDOWN_MS);
-            const recoveryTimer = setTimeout(async () => {
-                signalRecoveryTimers.delete(groupRecoveryKey);
-                try {
-                    const resetCount = await resetSessionGroupSenderKeyMemory(sessionId, `signal_${kind}`, details.remoteJid);
-                    console.warn('[signal-group-sender-key-recovery]', {
-                        sessionId,
-                        groupJid: details.remoteJid,
-                        participant: details.peerJid,
-                        messageId: details.messageId || null,
-                        failureKind: kind,
-                        resetCount,
-                        action: 'redistribute_sender_key_to_current_group_devices_on_next_outgoing_group_message',
-                        signalSessionsDeleted: false
-                    });
-                } catch (error) {
-                    console.warn('[signal-group-sender-key-recovery-failed]', { sessionId, groupJid: details.remoteJid, failureKind: kind, error: error?.message || String(error) });
-                }
-            }, 250);
-            signalRecoveryTimers.set(groupRecoveryKey, recoveryTimer);
-            if (typeof recoveryTimer.unref === 'function') recoveryTimer.unref();
-        }
-    }
-    console.warn(details.isGroup ? '[signal-group-session-failure]' : selfPeer ? '[signal-private-self-chat-repair]' : '[signal-peer-session-repair]', {
+    console.warn(details.isGroup ? '[signal-group-decrypt-failure-keys-preserved]' : selfPeer ? '[signal-self-chat-decrypt-failure-keys-preserved]' : '[signal-private-decrypt-failure-keys-preserved]', {
         sessionId,
-        peer: details.peerJid,
+        peer: details.peerJid || null,
         groupJid: details.isGroup ? details.remoteJid : null,
         messageId: details.messageId || null,
         attempts: previous.count,
         failureKind: kind,
-        repairRequested: privateRepairRequired
+        automaticSessionDeletion: false,
+        automaticSessionMigration: false,
+        automaticSenderKeyReset: false,
+        action: 'preserve_signal_sessions_and_sender_keys_flush_pending_auth_writes_only'
     });
     const shouldFlush = previous.count === 1 || previous.count % SIGNAL_RECOVERY_THRESHOLD === 0;
-    if (shouldFlush) {
-        const flushKey = `${peerKey}:auth-flush`;
-        if (Number(signalRecoveryCooldowns.get(flushKey) || 0) <= now) {
-            signalRecoveryCooldowns.set(flushKey, now + SIGNAL_RECOVERY_COOLDOWN_MS);
-            const flushTimer = setTimeout(async () => {
-                try {
-                    await flushAuthWritesForSession(sessionId);
-                    console.info('[signal-auth-flush-after-peer-decrypt-failure]', {
-                        sessionId,
-                        peer: details.peerJid,
-                        groupJid: details.isGroup ? details.remoteJid : null,
-                        attempts: previous.count,
-                        action: 'persist_queued_auth_changes_without_resetting_peer_or_group_keys'
-                    });
-                } catch (error) {
-                    console.warn('[signal-auth-flush-after-peer-decrypt-failure-failed]', { sessionId, peer: details.peerJid, error: error?.message || String(error) });
-                }
-            }, 100);
-            if (typeof flushTimer.unref === 'function') flushTimer.unref();
+    if (!shouldFlush) return;
+    const flushKey = `${peerKey}:auth-flush`;
+    if (Number(signalRecoveryCooldowns.get(flushKey) || 0) > now) return;
+    signalRecoveryCooldowns.set(flushKey, now + SIGNAL_RECOVERY_COOLDOWN_MS);
+    const flushTimer = setTimeout(async () => {
+        try {
+            await flushAuthWritesForSession(sessionId);
+            console.info('[signal-auth-flush-after-decrypt-failure]', {
+                sessionId,
+                peer: details.peerJid || null,
+                groupJid: details.isGroup ? details.remoteJid : null,
+                attempts: previous.count,
+                action: 'persist_pending_auth_writes_without_mutating_sessions_or_sender_keys'
+            });
+        } catch (error) {
+            console.warn('[signal-auth-flush-after-decrypt-failure-failed]', { sessionId, peer: details.peerJid || null, error: error?.message || String(error) });
         }
-    }
+    }, 100);
+    if (typeof flushTimer.unref === 'function') flushTimer.unref();
 }
-
 function createRenderPinoLogger(options = {}) {
     const sink = new Writable({
         write(chunk, encoding, callback) {
@@ -2791,32 +2686,31 @@ function getMessageQueuePartitionKey(sessionId, jid, session) {
 async function resetSignalPeerSessionForSendRetry(sock, sessionId, jid, allowOwnPeer = false) {
     const peerJid = String(jid || '').trim();
     if (!peerJid || /@(?:g\.us|newsletter|broadcast)$/i.test(peerJid)) return false;
-    const activeSession = activeSessions.get(sessionId);
-    const ownCredentials = activeSession?.authState?.creds || sock?.authState?.creds || null;
-    const ownPhoneNumber = getAuthenticatedPhoneNumber(sock?.user || null, ownCredentials);
-    const ownPhoneJid = normalizePhoneCacheJid(ownPhoneNumber ? `${ownPhoneNumber}@s.whatsapp.net` : '');
+    const runtime = activeSessions.get(sessionId);
+    if (!runtime && !sock) return false;
+    const now = Date.now();
+    const ownCredentials = runtime?.authState?.creds || sock?.authState?.creds || null;
+    const ownPhone = getAuthenticatedPhoneNumber(sock?.user || null, ownCredentials);
+    const ownPhoneJid = normalizePhoneCacheJid(ownPhone ? `${ownPhone}@s.whatsapp.net` : '');
     const ownLidJid = normalizeLidCacheKey(getAuthenticatedLid(sock?.user || null, ownCredentials));
     const peerPhoneJid = normalizePhoneCacheJid(peerJid) || normalizePhoneCacheJid(getRememberedPhoneForLid(sessionId, peerJid));
-    const peerLidJid = normalizeLidCacheKey(peerJid);
-    const isOwnPeer = !!(
-        ownPhoneJid && peerPhoneJid && ownPhoneJid === peerPhoneJid ||
-        /@lid$/i.test(ownLidJid) && /@lid$/i.test(peerLidJid) && ownLidJid === peerLidJid
-    );
+    const isOwnPeer = !!((ownPhoneJid && peerPhoneJid && ownPhoneJid === peerPhoneJid) || (/@lid$/i.test(ownLidJid) && /@lid$/i.test(peerJid) && ownLidJid === normalizeLidCacheKey(peerJid)));
     if (isOwnPeer && !allowOwnPeer) return false;
-    const repository = sock?.signalRepository;
-    if (typeof repository?.deleteSession !== 'function') return false;
-    const repairJids = isOwnPeer ? [...new Set([peerJid, ownPhoneJid, ownLidJid].filter(Boolean))] : [peerJid];
-    const repairJid = repairJids.join('|');
-    const key = `${sessionId}:send:${isOwnPeer ? 'self' : repairJid}`;
-    const now = Date.now();
-    if (Number(signalPeerSendRepairCooldowns.get(key) || 0) > now) return false;
-    signalPeerSendRepairCooldowns.set(key, now + 30000);
+    const repairKey = `${sessionId}:send-preserve:${isOwnPeer ? 'self' : shortLogHash(peerJid)}`;
+    if (Number(signalPeerSendRepairCooldowns.get(repairKey) || 0) > now) return false;
+    signalPeerSendRepairCooldowns.set(repairKey, now + 30000);
     while (signalPeerSendRepairCooldowns.size > 4000) signalPeerSendRepairCooldowns.delete(signalPeerSendRepairCooldowns.keys().next().value);
-    await repository.deleteSession(repairJids);
     await flushAuthWritesForSession(sessionId);
+    console.warn('[signal-peer-session-preserved-for-send-retry]', {
+        sessionId,
+        peerHash: shortLogHash(peerJid),
+        selfPeer: isOwnPeer,
+        signalKeysDeleted: false,
+        sessionMigrated: false,
+        action: 'flush_pending_auth_writes_and_retry_without_deleting_or_migrating_signal_session'
+    });
     return true;
 }
-
 async function reportTfbotWorkerSendFailure(sessionId, error) {
     if (!TFBOT_CLUSTER_ENABLED || TFBOT_CLUSTER_COORDINATOR_ONLY || !TFBOT_CLUSTER_TOKEN || !TFBOT_CLUSTER_COORDINATOR_URL) return false;
     const message = String(error?.message || error || 'send_failed');
@@ -3069,18 +2963,12 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             const transientSignalFailure = /No sessions|SessionError|MessageCounterError|Bad MAC|pre.?key|failed to decrypt|Chain closed|smax-invalid|statusCode\s*[:=]\s*479|\b479\b/i.test(errorText);
             if (transientSignalFailure && isSelfChatDestination) {
                 try {
-                    if (ownPhoneJid && ownLidJid && typeof sock.signalRepository?.migrateSession === 'function') {
-                        await sock.signalRepository?.lidMapping?.storeLIDPNMappings?.([{ lid: ownLidJid, pn: ownPhoneJid }]);
-                        await sock.signalRepository.migrateSession(ownPhoneJid, ownLidJid);
-                        console.warn('[self-chat-signal-session-migrated-for-retry]', { sessionId, ownPhoneHash: shortLogHash(ownPhoneJid), ownLidHash: shortLogHash(ownLidJid), action: 'migrate_signal_session_without_deleting_peer_keys' });
-                    } else {
-                        console.warn('[self-chat-signal-session-migration-unavailable]', { sessionId, ownPhoneAvailable: !!ownPhoneJid, ownLidAvailable: !!ownLidJid, migrateSessionAvailable: typeof sock.signalRepository?.migrateSession === 'function' });
-                    }
                     await flushAuthWritesForSession(sessionId);
+                    console.warn('[self-chat-signal-session-preserved-for-retry]', { sessionId, ownPhoneAvailable: !!ownPhoneJid, ownLidAvailable: !!ownLidJid, sessionMigrated: false, signalKeysDeleted: false, action: 'flush_auth_writes_and_retry_same_authenticated_pn_without_signal_key_mutation' });
                     await new Promise(resolve => setTimeout(resolve, 250));
                     result = await sendTo(destinationJid);
                     sentDestinationJid = destinationJid;
-                    destinationResolution = `${destinationResolution}_self_signal_migrated_retry`;
+                    destinationResolution = `${destinationResolution}_self_signal_preserved_retry`;
                 } catch (selfRepairError) {
                     failureError = selfRepairError;
                     result = null;
@@ -5609,28 +5497,15 @@ app.use((req, res, next) => {
 });
 
 app.get('/logs.txt', (req, res) => {
-    const generatedAt = new Date().toISOString();
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0, private');
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
     res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    res.setHeader('Surrogate-Control', 'no-store');
-    res.setHeader('CDN-Cache-Control', 'no-store');
-    res.setHeader('Vary', '*');
-    res.setHeader('X-TFBOT-Revision', TFBOT_CLUSTER_CODE_REVISION);
-    res.setHeader('X-TFBOT-Boot-Time', TFBOT_DIAGNOSTIC_BOOT_TIME);
-    res.setHeader('X-TFBOT-Generated-At', generatedAt);
-    res.setHeader('X-TFBOT-Process-Id', String(process.pid));
+    res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.type('text/plain');
-    try {
-        flushTfbotDiagnosticQueue();
-        const content = fs.existsSync(TFBOT_DIAGNOSTIC_LOG_PATH) ? fs.readFileSync(TFBOT_DIAGNOSTIC_LOG_PATH, 'utf8') : '';
-        const status = JSON.stringify({ event: 'logs-endpoint-response', revision: TFBOT_CLUSTER_CODE_REVISION, bootTime: TFBOT_DIAGNOSTIC_BOOT_TIME, generatedAt, uptimeSeconds: Math.floor(process.uptime()), bytes: Buffer.byteLength(content, 'utf8'), status: content.trim() ? 'logs_available' : 'no_diagnostic_records_yet' });
-        return res.status(200).send(`${status}\n${content}`);
-    } catch (error) {
-        return res.status(500).send(`${JSON.stringify({ event: 'logs-endpoint-read-failed', revision: TFBOT_CLUSTER_CODE_REVISION, generatedAt, error: String(error?.message || error).slice(0, 180) })}\n`);
-    }
+    fs.readFile(TFBOT_DIAGNOSTIC_LOG_PATH, 'utf8', (error, content) => {
+        if (error && error.code !== 'ENOENT') return res.status(500).send('');
+        return res.status(200).send(content || '');
+    });
 });
 
 app.use((req, res, next) => {
@@ -13729,7 +13604,7 @@ async function main() {
             tfbotWorkerActive = false;
             tfbotWorkerState = 'coordinator';
             await connectMongo({ coordinatorOnly: true });
-            console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, baileysGroupLidParticipantPnDecryptPatch: baileysGroupLidParticipantPnDecryptPatchStatus, baileysSignalTransactionPatch: baileysSignalTransactionPatchStatus, baileysOutgoingRetryPreflightPatch: baileysOutgoingRetryPreflightPatchStatus, baileysRetryResendDoubleEncryptionPatch: baileysRetryResendDoubleEncryptionPatchStatus, baileysOwnLidRetryAddressingPatch: baileysOwnLidRetryAddressingPatchStatus, baileysCompanionRegRefreshPatch: baileysCompanionRegRefreshPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, port: PORT });
+            console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, baileysSignalTransactionPatch: baileysSignalTransactionPatchStatus, baileysOutgoingRetryPreflightPatch: baileysOutgoingRetryPreflightPatchStatus, baileysRetryResendDoubleEncryptionPatch: baileysRetryResendDoubleEncryptionPatchStatus, baileysOwnLidRetryAddressingPatch: baileysOwnLidRetryAddressingPatchStatus, baileysCompanionRegRefreshPatch: baileysCompanionRegRefreshPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, port: PORT });
             httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
             const savedSelection = await db.collection('cluster_router').findOne({ _id: TFBOT_ROUTER_STATE_ID }).catch(() => null);
             const savedDomain = TFBOT_ROUTER_DOMAIN_BY_HOST.get(normalizeTfbotHost(savedSelection?.activeHost || ''));
