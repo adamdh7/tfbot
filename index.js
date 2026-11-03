@@ -3,7 +3,7 @@ const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(pr
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(1000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 3000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r144-history-append-ignore-selfchat-lid-preserve-group-profile-ping-image-owner-silent';
+const TFBOT_CLUSTER_CODE_REVISION = 'r147-auth-proof-fast-515-reopen-nonblocking-dedupe-safe-image-normalizer';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
@@ -1523,7 +1523,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-03-r144';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-03-r147';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1771,6 +1771,7 @@ let db;
 
 let recentMsgsCache = [];
 const lidPhoneResolutionCache = new Map();
+const lidPhoneLookupInFlight = new Map();
 const lidPhonePersistedKeys = new Map();
 const userProfilePersistenceCache = new Map();
 const lidPhonePersistingKeys = new Set();
@@ -2573,6 +2574,33 @@ async function resolvePhoneForLid(sessionId, sock, lidValue) {
     return null;
 }
 
+function schedulePhoneResolutionForLid(sessionId, sock, lidValue, source = 'background_lid_lookup') {
+    const lid = normalizeLidCacheKey(lidValue);
+    if (!sessionId || !lid || !/@lid$/i.test(lid)) return Promise.resolve('');
+    const cached = normalizePhoneCacheJid(getRememberedPhoneForLid(sessionId, lid));
+    const record = lidPhoneResolutionCache.get(`${sessionId}:${lid}`);
+    if (cached && record && Date.now() - Number(record.updatedAt || 0) <= LID_PHONE_MAPPING_FRESH_MS) return Promise.resolve(cached);
+    const key = `${sessionId}:${lid}`;
+    const existing = lidPhoneLookupInFlight.get(key);
+    if (existing) return existing;
+    const lookup = promiseWithTimeout(
+        Promise.resolve().then(() => sock?.signalRepository?.lidMapping?.getPNForLID?.(lid)),
+        1500,
+        'background LID-to-PN lookup'
+    ).then(value => {
+        const phone = normalizePhoneCacheJid(value);
+        if (phone) rememberLidPhonePair(sessionId, lid, phone, 'signal_lid_mapping');
+        return phone;
+    }).catch(error => {
+        console.info('[lid-phone-background-resolution-unavailable]', { sessionId, lidHash: shortLogHash(lid), source, errorName: error?.name || 'Error' });
+        return '';
+    }).finally(() => {
+        if (lidPhoneLookupInFlight.get(key) === lookup) lidPhoneLookupInFlight.delete(key);
+    });
+    lidPhoneLookupInFlight.set(key, lookup);
+    return lookup;
+}
+
 async function resolveLidForPhone(sessionId, sock, phoneValue) {
     const phone = normalizePhoneCacheJid(phoneValue);
     if (!phone) return null;
@@ -2820,7 +2848,8 @@ function queueMessage(executeFn, delayMs = 150, queueKey = null, partitionKey = 
 }
 
 async function claimMessageForProcessing(sessionId, messageId, remoteJid = '', accountIdentity = '', upsertType = 'notify') {
-    if (!db || !sessionId || !messageId) return true;
+    if (!sessionId || !messageId) return false;
+    if (!db) return true;
     const normalizedChat = String(remoteJid || 'unknown-chat').trim();
     const normalizedMessageId = String(messageId || '').trim();
     const accountScope = String(accountIdentity || sessionId).trim();
@@ -2850,7 +2879,7 @@ async function claimMessageForProcessing(sessionId, messageId, remoteJid = '', a
         return result.upsertedCount === 1 || result.matchedCount === 1;
     } catch (error) {
         if (error && error.code === 11000) return false;
-        console.error('[message-dedupe]', { sessionId, remoteJid: normalizedChat, messageId: normalizedMessageId, error: error?.message || String(error) });
+        console.warn('[message-dedupe-persistent-claim-unavailable]', { sessionId, remoteJid: normalizedChat, messageId: normalizedMessageId, error: error?.message || String(error), action: 'continue_under_exclusive_session_runtime_lock_and_local_message_id_deduplication' });
         return true;
     }
 }
@@ -3627,9 +3656,6 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             } catch (ownMappingError) {
                 console.warn('[self-chat-phone-resolution-failed]', { sessionId, error: ownMappingError?.message || String(ownMappingError) });
             }
-        } else if (!ownLidJid && ownPhoneJid) {
-            const ownLidResolution = await resolveLidForPhone(sessionId, sock, ownPhoneJid);
-            ownLidJid = normalizeLidCacheKey(ownLidResolution?.lid || '');
         }
         let destinationPhoneJid = normalizePhoneCacheJid(originalDestinationJid);
         if (!destinationPhoneJid && sessionId && /@lid$/i.test(originalDestinationJid)) {
@@ -3641,12 +3667,9 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             (ownPhoneJid && destinationPhoneJid === ownPhoneJid)
         );
         if (!isSelfChatDestination && ownPhoneJid && /@lid$/i.test(originalDestinationJid) && sessionId) {
-            try {
-                const resolvedSelfCheck = await resolvePhoneForLid(sessionId, sock, originalDestinationJid);
-                isSelfChatDestination = normalizePhoneCacheJid(resolvedSelfCheck?.phone || '') === ownPhoneJid;
-            } catch (selfCheckError) {
-                console.warn('[self-chat-identity-check-failed]', { sessionId, error: selfCheckError?.message || String(selfCheckError) });
-            }
+            const rememberedSelfCheck = normalizePhoneCacheJid(getRememberedPhoneForLid(sessionId, originalDestinationJid));
+            isSelfChatDestination = rememberedSelfCheck === ownPhoneJid;
+            if (!isSelfChatDestination) void schedulePhoneResolutionForLid(sessionId, sock, originalDestinationJid, 'outgoing_self_chat_identity').catch(() => '');
         }
         const originalDestinationIsLid = /@lid$/i.test(originalDestinationJid);
         const originalDestinationIsPhone = /@s\.whatsapp\.net$/i.test(originalDestinationJid);
@@ -3671,26 +3694,15 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         let alternateDestinationJid = '';
         let alternateDestinationResolution = '';
         if (!isSelfChatDestination && sessionId && /@lid$/i.test(originalDestinationJid)) {
-            try {
-                const normalizedOriginalLid = normalizeLidCacheKey(originalDestinationJid);
-                const resolved = await resolvePhoneForLid(sessionId, sock, originalDestinationJid);
-                const mappedPhone = normalizePhoneCacheJid(resolved?.phone || getRememberedPhoneForLid(sessionId, originalDestinationJid));
-                const sessionMapping = lidPhoneResolutionCache.get(`${sessionId}:${normalizedOriginalLid}`);
-                const sessionMappingFresh = !!(sessionMapping?.phone && normalizePhoneCacheJid(sessionMapping.phone) === mappedPhone && Date.now() - Number(sessionMapping.updatedAt || 0) <= LID_PHONE_MAPPING_FRESH_MS);
-                const liveSignalMapping = resolved?.source === 'signal_lid_mapping';
-                if (mappedPhone && (liveSignalMapping || sessionMappingFresh)) {
-                    destinationJid = mappedPhone;
-                    destinationResolution = `private_pn_from_lid_${resolved?.source || 'fresh_session_mapping'}`;
-                    console.info('[private-send-pn-from-lid]', {
-                        sessionId,
-                        mappingSource: resolved?.source || sessionMapping?.source || 'fresh_session_mapping',
-                        mappingAgeMs: sessionMapping ? Math.max(0, Date.now() - Number(sessionMapping.updatedAt || 0)) : null
-                    });
-                } else {
-                    throw new Error('private_phone_jid_unavailable');
-                }
-            } catch (resolveError) {
-                console.warn('[private-send-alternate-resolution-failed]', { sessionId, originalDestinationJid, error: resolveError?.message || String(resolveError) });
+            const normalizedOriginalLid = normalizeLidCacheKey(originalDestinationJid);
+            const sessionMapping = lidPhoneResolutionCache.get(`${sessionId}:${normalizedOriginalLid}`);
+            const mappedPhone = normalizePhoneCacheJid(sessionMapping?.phone || '');
+            const sessionMappingFresh = !!(mappedPhone && Date.now() - Number(sessionMapping?.updatedAt || 0) <= LID_PHONE_MAPPING_FRESH_MS);
+            if (sessionMappingFresh) {
+                console.info('[private-send-original-lid-preserved]', { sessionId, mappingAvailable: true, mappingAgeMs: Math.max(0, Date.now() - Number(sessionMapping.updatedAt || 0)), action: 'keep_original_lid_for_outgoing_signal_addressing' });
+            } else {
+                void schedulePhoneResolutionForLid(sessionId, sock, originalDestinationJid, 'outgoing_private_chat').catch(() => '');
+                console.info('[private-send-original-lid-preserved]', { sessionId, mappingAvailable: false, action: 'send_to_original_lid_without_waiting_for_phone_resolution' });
             }
         }
         if (normalizeNativeLidJid(destinationJid)) {
@@ -3775,13 +3787,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             if (!result) {
                 let retryTargetJid = alternateDestinationJid && alternateDestinationJid !== destinationJid ? alternateDestinationJid : '';
                 if (!retryTargetJid && !isSelfChatDestination && /@lid$/i.test(originalDestinationJid)) {
-                    try {
-                        const resolved = await resolvePhoneForLid(sessionId, sock, originalDestinationJid);
-                        const mappedPhone = normalizePhoneCacheJid(resolved?.phone || getRememberedPhoneForLid(sessionId, originalDestinationJid));
-                        if (mappedPhone && mappedPhone !== destinationJid) retryTargetJid = mappedPhone;
-                    } catch (resolveError) {
-                        console.warn('[private-send-retry-resolution-failed]', { sessionId, originalDestinationJid, error: resolveError?.message || String(resolveError) });
-                    }
+                    void schedulePhoneResolutionForLid(sessionId, sock, originalDestinationJid, 'outgoing_private_send_retry').catch(() => '');
                 }
                 if (!retryTargetJid) {
                     console.error('[whatsapp-send-failed]', { sessionId, jid: destinationJid, originalJid: originalDestinationJid, destinationResolution, alternateDestinationResolution, isSelfChatDestination, messageType: outgoingDiagnosticType, messageText: outgoingDiagnosticText || null, failureClass: classifyWhatsAppFailure(failureError), errorName: failureError?.name || failureError?.constructor?.name || null, error: String(failureError?.message || failureError).slice(0, 1000) });
@@ -7570,7 +7576,7 @@ async function isSessionLockStillActive(sessionId) {
 async function resolveClusterTargetForPairing(req) {
     const body = req.method === 'GET' ? req.query : (req.body || {});
     const sessionId = String(body?.sessionId || '').trim();
-    const number = normalizePhoneNumber(body?.number || body?.phone || body?.jid || body?.msisdn || '');
+    const number = normalizePairingPhoneNumber(body?.number || body?.phone || body?.jid || body?.msisdn || '');
     const localServing = !TFBOT_CLUSTER_COORDINATOR_ONLY && tfbotWorkerActive && !tfbotWorkerStopping;
     const chooseServingTarget = async (excludedIds = []) => {
         if (localServing) return { _id: TFBOT_CLUSTER_INSTANCE_ID, url: TFBOT_CLUSTER_INSTANCE_URL, local: true };
@@ -8414,21 +8420,11 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
             }
             const socketReadyState = socket?.ws?.readyState ?? socket?.ws?._socket?.readyState ?? socket?.socket?.readyState;
             const socketReadyStateName = String(socketReadyState ?? '').trim().toUpperCase();
-            const socketKnownNotOpen = socketReadyState !== undefined && socketReadyState !== null
-                && (Number(socketReadyState) === 0 || Number(socketReadyState) === 2 || Number(socketReadyState) === 3 || ['CONNECTING', 'CLOSING', 'CLOSED'].includes(socketReadyStateName));
-            const socketExplicitlyNotOpen = socketKnownNotOpen || socket?.ws?.isOpen === false;
             const socketReady = websocketOpenObserved || websocketIsOpen(socket);
-            if (!socketReady && socketExplicitlyNotOpen) {
-                schedule(120, 'waiting_for_websocket_open_event');
+            const socketIsConnecting = Number(socketReadyState) === 0 || socketReadyStateName === 'CONNECTING';
+            if (socketReadyState !== undefined && socketReadyState !== null && (Number(socketReadyState) === 2 || Number(socketReadyState) === 3 || ['CLOSING', 'CLOSED'].includes(socketReadyStateName))) {
+                schedule(350, 'waiting_for_replacement_socket_after_close');
                 return;
-            }
-            if (!socketReady && socketReadyState === undefined && socket?.ws?.isOpen === undefined) {
-                const connectionStartedAt = Number(active?.connectionStartedAt || Date.now());
-                if (Date.now() - connectionStartedAt < 2500) {
-                    schedule(120, 'waiting_for_websocket_open_or_baileys_ready_fallback');
-                    return;
-                }
-                console.warn('[pairing-code-websocket-open-state-unavailable]', { sessionId, action: 'continue_only_after_baileys_ready_signal_and_bounded_open_grace' });
             }
             consumedGeneration = readyGeneration;
             requestStarted = true;
@@ -8436,7 +8432,7 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
             active.pairingCodeRequestStarted = true;
             if (sessionData && sessionData !== active) sessionData.pairingCodeRequestStarted = true;
             const requestSocket = socket;
-            console.info('[pairing-code-request-started]', { sessionId, attempt: requestAttempts, numberLength: normalizedNumber.length, trigger, baileysQrReady: qrReady, websocketReady: socketReady, websocketReadyState: socketReadyState ?? null, websocketStateKnown: socketReadyState !== undefined && socketReadyState !== null, websocketOpenObserved, baileysConnectingObserved: true, qrAvailable: !!active.qrString, action: socketReady ? 'request_code_after_websocket_open' : 'request_code_after_baileys_ready_fallback' });
+            console.info('[pairing-code-request-started]', { sessionId, attempt: requestAttempts, numberLength: normalizedNumber.length, trigger, baileysQrReady: qrReady, websocketReady: socketReady, websocketReadyState: socketReadyState ?? null, websocketStateKnown: socketReadyState !== undefined && socketReadyState !== null, websocketOpenObserved, baileysConnectingObserved: true, qrAvailable: !!active.qrString, action: socketReady ? 'request_code_after_baileys_ready_signal_on_open_socket' : socketIsConnecting ? 'request_code_after_baileys_ready_signal_while_websocket_connecting' : 'request_code_after_baileys_ready_signal' });
             try {
                 const result = await requestSocket.requestPairingCode(normalizedNumber);
                 if (activeSessions.get(sessionId)?.sock && activeSessions.get(sessionId).sock !== requestSocket) throw new Error('pairing_socket_replaced_during_code_request');
@@ -8511,7 +8507,7 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
 
 app.all('/get-code', async (req, res) => {
     const body = req.method === 'GET' ? req.query : req.body;
-    const number = normalizePhoneNumber(body?.number || body?.phone || body?.jid || body?.msisdn || '');
+    const number = normalizePairingPhoneNumber(body?.number || body?.phone || body?.jid || body?.msisdn || '');
     const method = String(body?.method || 'code').toLowerCase();
     const connectionFormat = normalizeConnectionFormat(method === 'qr' ? 'qr' : 'pair');
     const autoExpire = body?.autoExpire === true || body?.autoExpire === 'true' || body?.autoExpire === 1 || body?.autoExpire === '1';
@@ -8777,7 +8773,7 @@ const links_common = "*_Bot (tfbot)_* : https://bot.adamdh7.org\n*_Brefs (tfbref
 
 const translations = {
   fr: {
-    cmd_ai: "assistant", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "chercher",
+    cmd_ai: "Assistant", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "chercher",
     cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "lien", cmd_tagall: "tagtout",
     cmd_hidetag: "hidetag", cmd_kick: "expulse", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "expulsetout", cmd_kickall2: "expulsetout2", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
@@ -8871,7 +8867,7 @@ info_text: [
     ].join('\n')
   },
   en: {
-    cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "search",
+    cmd_ai: "AI", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "search",
     cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "link", cmd_tagall: "tagall",
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "kickall", cmd_kickall2: "kickall2", cmd_ferme: "close", cmd_ouvert: "open", cmd_bienvenue: "welcome",
@@ -8965,7 +8961,7 @@ info_text: [
     ].join('\n')
   },
   es: {
-    cmd_ai: "asistente", cmd_lang: "lang", cmd_imaj: "imagen", cmd_cheche: "buscar",
+    cmd_ai: "Asistente", cmd_lang: "lang", cmd_imaj: "imagen", cmd_cheche: "buscar",
     cmd_menu: "menú", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "código", cmd_lien: "enlace", cmd_tagall: "etiquetartodo",
     cmd_hidetag: "hidetag", cmd_kick: "expulsar", cmd_add: "añadir", cmd_promote: "promover", cmd_demote: "degradar",
     cmd_kickall: "borrartodo", cmd_kickall2: "borrartodo2", cmd_ferme: "cerrar", cmd_ouvert: "abrir", cmd_bienvenue: "bienvenida",
@@ -9059,7 +9055,7 @@ info_text: [
     ].join('\n')
   },
   ht: {
-    cmd_ai: "asistan", cmd_lang: "lang", cmd_imaj: "imaj", cmd_cheche: "cheche",
+    cmd_ai: "Asistan", cmd_lang: "lang", cmd_imaj: "imaj", cmd_cheche: "cheche",
     cmd_menu: "meni", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "kòd", cmd_lien: "lyen", cmd_tagall: "tout",
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "siptout", cmd_kickall2: "siptout2", cmd_ferme: "fèmen", cmd_ouvri: "ouvri", cmd_bienvenue: "byenveni",
@@ -9226,12 +9222,29 @@ async function normalizeOutgoingImageBuffer(imageBuffer) {
     const cached = outgoingImageNormalizationCache.get(source);
     if (cached) return cached;
     const sharp = require('sharp');
-    const normalized = await sharp(source, { failOn: 'none' })
-        .rotate()
-        .resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true })
-        .jpeg({ quality: 88, mozjpeg: true })
-        .toBuffer();
-    if (!normalized.length || !normalized.subarray(0, 3).equals(Buffer.from([255, 216, 255]))) throw new Error('outgoing_image_normalization_failed');
+    const sourceMime = detectImageMimeType(source);
+    const expectedMimeByFormat = { jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
+    let sourceMetadata = null;
+    try {
+        sourceMetadata = await sharp(source, { failOn: 'warning' }).metadata();
+    } catch (metadataError) {}
+    if (sourceMetadata?.width > 0 && sourceMetadata?.height > 0 && expectedMimeByFormat[sourceMetadata.format] === sourceMime) {
+        outgoingImageNormalizationCache.set(source, source);
+        return source;
+    }
+    let normalized;
+    try {
+        normalized = await sharp(source, { failOn: 'none' })
+            .rotate()
+            .resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true })
+            .jpeg({ quality: 88, mozjpeg: true })
+            .toBuffer();
+    } catch (normalizationError) {
+        throw new Error('outgoing_image_normalization_failed');
+    }
+    let normalizedMetadata = null;
+    try { normalizedMetadata = normalized.length ? await sharp(normalized, { failOn: 'warning' }).metadata() : null; } catch (metadataError) {}
+    if (!normalized.length || normalizedMetadata?.format !== 'jpeg' || !normalized.subarray(0, 3).equals(Buffer.from([255, 216, 255]))) throw new Error('outgoing_image_normalization_failed');
     outgoingImageNormalizationCache.set(source, normalized);
     return normalized;
 }
@@ -9297,8 +9310,7 @@ async function getWhatsAppGroupProfilePictureBuffer(sock, groupJid, timeoutMs = 
         if (!response.ok || !contentType.startsWith('image/') || contentLength > 8 * 1024 * 1024) return null;
         const imageBytes = Buffer.from(await response.arrayBuffer());
         if (!imageBytes.length || imageBytes.length > 8 * 1024 * 1024 || !detectImageMimeType(imageBytes).startsWith('image/')) return null;
-        const sharp = require('sharp');
-        return await sharp(imageBytes, { failOn: 'none' }).rotate().jpeg({ quality: 88, mozjpeg: true }).toBuffer();
+        return await normalizeOutgoingImageBuffer(imageBytes);
     } catch (error) {
         console.info('[group-profile-picture-unavailable]', { groupJidHash: shortLogHash(groupJid), reason: error?.name === 'AbortError' ? 'profile_download_timeout' : 'profile_image_not_decodable' });
         return null;
@@ -10464,7 +10476,14 @@ async function uploadToBref(buffer, filename, mimeType = 'application/octet-stre
 }
 
 function normalizePhoneNumber(number) {
-    return String(number || '').replace(/[^0-9]/g, '');
+    return String(number || '').normalize('NFKC').replace(/[\p{Cf}\u061c\u200e\u200f]/gu, '').replace(/[^0-9]/g, '');
+}
+
+function normalizePairingPhoneNumber(value) {
+    const normalizedInput = String(value || '').normalize('NFKC').replace(/[\p{Cf}\u061c\u200e\u200f]/gu, '');
+    const digits = normalizePhoneNumber(normalizedInput);
+    if (/^(?:809|829|849)\d{7}$/.test(digits)) return `1${digits}`;
+    return digits;
 }
 
 function hasPersistedWhatsAppAccountIdentity(record = {}) {
@@ -11385,7 +11404,50 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const latestRuntime = activeSessions.get(sessionId);
                 if (latestRuntime?.sock !== sock) throw new Error('credential_update_socket_generation_changed');
                 if (hasIdentity) await ensureAccountRuntimeLockForIdentity(sessionId, liveUser, state.creds);
-                await saveCreds();
+                const credentialsSaved = await saveCreds();
+                if (credentialsSaved !== true) throw new Error('auth_credentials_snapshot_not_confirmed');
+                if (hasIdentity) {
+                    const pairingProofAt = new Date();
+                    const pairingProofResult = await db.collection('session_owners').updateOne(
+                        { sessionId, everAuthenticated: { $ne: true }, everConnected: { $ne: true }, socketAuthenticated: { $ne: true }, $or: [{ pairingPending: true }, { pairingAttemptPending: true }, { pairingStartedAt: { $exists: true } }, { pairingChallengeStartedAt: { $exists: true } }, { connectionStatus: { $in: ['pairing_starting', 'pairing', 'qr_disponible', 'synchronisation', 'synchronizing', 'reconnexion', 'deconnecte'] } }] },
+                        { $set: { everAuthenticated: true, pairingPending: false, pairingAttemptPending: false, connectionStatus: 'synchronisation', socketAuthenticated: false, socketReady: false, pairingCredentialsConfirmedAt: pairingProofAt, statusUpdatedAt: pairingProofAt, updatedAt: pairingProofAt }, $unset: { pairingChallengeStartedAt: 1, pairingStartedAt: 1, pairingRestartRequiredAt: 1, pairingRestartAttempts: 1, pairingRestartFailed: 1, pairingRestartFailedAt: 1, pairingExpiredAt: 1 } },
+                        { upsert: false }
+                    );
+                    if (pairingProofResult.modifiedCount > 0) {
+                        const pairingRuntime = activeSessions.get(sessionId);
+                        if (pairingRuntime?.sock === sock) {
+                            pairingRuntime.everAuthenticated = true;
+                            pairingRuntime.pairingAttemptPending = false;
+                            pairingRuntime.pairingChallengeStartedAt = null;
+                            if (!pairingRuntime.openEventSeen) {
+                                pairingRuntime.status = 'synchronisation';
+                                pairingRuntime.active = false;
+                            }
+                        }
+                        const cachedOwner = sessionOwnersCache.get(sessionId);
+                        if (cachedOwner) {
+                            cachedOwner.everAuthenticated = true;
+                            cachedOwner.pairingPending = false;
+                            cachedOwner.pairingAttemptPending = false;
+                            cachedOwner.connectionStatus = 'synchronisation';
+                            cachedOwner.socketAuthenticated = false;
+                            cachedOwner.socketReady = false;
+                            cachedOwner.pairingCredentialsConfirmedAt = pairingProofAt;
+                            cachedOwner.statusUpdatedAt = pairingProofAt;
+                            cachedOwner.updatedAt = pairingProofAt;
+                            delete cachedOwner.pairingChallengeStartedAt;
+                            delete cachedOwner.pairingStartedAt;
+                            delete cachedOwner.pairingRestartRequiredAt;
+                            delete cachedOwner.pairingRestartAttempts;
+                            delete cachedOwner.pairingRestartFailed;
+                            delete cachedOwner.pairingRestartFailedAt;
+                            delete cachedOwner.pairingExpiredAt;
+                        }
+                        clearPairingChallengeTimer(sessionId);
+                        clearPairingRestartWatchdog(sessionId);
+                        console.info('[pairing-credentials-identity-confirmed]', { sessionId, identityPresent: true, registered: state.creds?.registered === true, action: 'persist_account_authentication_proof_before_515_reconnect_and_cancel_unregistered_pairing_expiry' });
+                    }
+                }
                 return { registered: state.creds?.registered === true, identityKnown: hasIdentity };
             });
             persistCredentialUpdate.then(result => {
@@ -11644,9 +11706,14 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     const hydrationCacheKey = `${sessionId}:id:${hydrationMessageId}`;
                     const hydrationTimestampSeconds = Number(item?.messageTimestamp && typeof item.messageTimestamp.toNumber === 'function' ? item.messageTimestamp.toNumber() : item?.messageTimestamp) || 0;
                     const hydrationOpenedAt = Number(activeSessions.get(sessionId)?.socketOpenedAt || 0);
+                    const hydrationRuntimeStatus = String(activeSessions.get(sessionId)?.status || '').toLowerCase();
+                    const hydrationDuringSync = ['opening', 'synchronisation', 'synchronizing', 'reconnexion', 'connecting', 'initialisation', 'pairing', 'qr_disponible'].includes(hydrationRuntimeStatus);
+                    const hydrationAgeMs = hydrationTimestampSeconds > 0 ? Math.max(0, Date.now() - hydrationTimestampSeconds * 1000) : 0;
                     const hydrationPredatesSocket = hydrationOpenedAt > 0 && hydrationTimestampSeconds > 0 && hydrationTimestampSeconds * 1000 < hydrationOpenedAt - 15000;
-                    if (processedLocalCache.has(hydrationCacheKey) || hydrationPredatesSocket) {
-                        console.info('[message-update-hydration-ignored]', { sessionId, messageId: hydrationMessageId, reason: processedLocalCache.has(hydrationCacheKey) ? 'already_processed_or_history_sync' : 'message_predates_current_socket', action: 'do_not_redispatch_as_new_command' });
+                    const hydrationStaleDuringSync = hydrationDuringSync && hydrationAgeMs > 30000;
+                    if (processedLocalCache.has(hydrationCacheKey) || hydrationPredatesSocket || hydrationStaleDuringSync) {
+                        const hydrationIgnoreReason = processedLocalCache.has(hydrationCacheKey) ? 'already_processed_or_history_sync' : hydrationPredatesSocket ? 'message_predates_current_socket' : 'stale_message_hydrated_during_synchronization';
+                        console.info('[message-update-hydration-ignored]', { sessionId, messageId: hydrationMessageId, reason: hydrationIgnoreReason, sessionStatus: hydrationRuntimeStatus || null, messageAgeMs: hydrationAgeMs || null, action: 'do_not_redispatch_as_new_command' });
                         processedLocalCache.add(hydrationCacheKey);
                         continue;
                     }
@@ -12183,7 +12250,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         { $set: { connectionStatus: 'deconnecte', socketAuthenticated: false, socketReady: false, statusUpdatedAt: new Date(closeAt), updatedAt: new Date(closeAt), disconnectTime: new Date(closeAt), unconnectedSinceAt: currentSession?.unconnectedSinceAt || new Date(closeAt), pairingPending: false, pairingAttemptPending: false, reauthRequired: false, lastWhatsAppEvent: 'close', lastWhatsAppEventAt: new Date(closeAt), lastDisconnectCode: statusCode ?? null, lastDisconnectReason: disconnectReason } },
                         { upsert: true }
                     ).catch(error => console.warn('[session-close-state-save-failed]', { sessionId, error: error?.message || String(error) }));
-                    scheduleSessionReconnect(sessionId, autoExpire, connectionFormat);
+                    scheduleSessionReconnect(sessionId, autoExpire, connectionFormat, numericDisconnectCode === 515 && pairing515CredentialsReady ? { delayMs: 150 } : {});
                 }
             }
             } catch (connectionHandlerError) {
@@ -12636,7 +12703,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 for (let ownershipAttempt = 0; ownershipAttempt < 5; ownershipAttempt++) {
                     try {
                         if (!TFBOT_CLUSTER_ENABLED || tfbotWorkerActive && !tfbotWorkerStopping && !workerDrainingSessionIds.has(sessionId)) {
-                            if (liveAccountLockKey) {
+                            if (liveAccountLockKey && !sessionHasAccountRuntimeLocks(sessionId, [liveAccountPhone, liveAccountLid])) {
                                 const accountLock = await ensureAccountRuntimeLockForIdentity(sessionId, sock.user, state.creds);
                                 if (!accountLock.acquired) throw new Error('account_runtime_lock_not_owned');
                             }
@@ -13086,28 +13153,32 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     messageClassification: receivedClassification,
                     detectedCommand: receivedParsedCommand?.command || null
                 });
-                let messageClaimed = true;
-                let messageClaimTimedOut = false;
-                try {
-                    messageClaimed = await promiseWithTimeout(claimMessageForProcessing(sessionId, msgId, receivedChat, liveAccountPhone || liveAccountLid || '', upsertType), 7000, 'message processing database claim');
-                } catch (claimError) {
-                    messageClaimTimedOut = /timed out/i.test(String(claimError?.message || claimError));
-                    console.error(messageClaimTimedOut ? '[message-processing-claim-timeout]' : '[message-processing-claim-failed-open]', {
-                        sessionId,
-                        messageId: msgId,
-                        chatJid: receivedChat,
-                        durationMs: Date.now() - claimStartedAt,
-                        error: claimError?.message || String(claimError),
-                        action: 'continue_processing_to_avoid_silent_command_loss'
-                    });
-                    messageClaimed = true;
-                }
+                const distributedClaimPromise = claimMessageForProcessing(sessionId, msgId, receivedChat, liveAccountPhone || liveAccountLid || '', upsertType).catch(claimError => {
+                    console.warn('[message-dedupe-persistent-claim-unavailable]', { sessionId, messageId: msgId, chatJid: receivedChat, error: claimError?.message || String(claimError), action: 'continue_under_exclusive_session_runtime_lock_and_local_message_id_deduplication' });
+                    return true;
+                });
+                let distributedClaimKnown = false;
+                let distributedClaimValue = false;
+                void distributedClaimPromise.then(claimed => {
+                    distributedClaimKnown = true;
+                    distributedClaimValue = claimed === true;
+                }).catch(() => {});
+                const quickClaimOutcome = await Promise.race([
+                    distributedClaimPromise.then(claimed => ({ resolved: true, claimed: claimed === true })),
+                    new Promise(resolve => {
+                        const timer = setTimeout(() => resolve({ resolved: false, claimed: false }), 180);
+                        if (typeof timer.unref === 'function') timer.unref();
+                    })
+                ]);
+                const messageClaimTimedOut = quickClaimOutcome.resolved !== true;
+                const messageClaimed = quickClaimOutcome.resolved ? quickClaimOutcome.claimed : true;
                 console.info('[message-processing-claim-result]', {
                     sessionId,
                     messageId: msgId,
                     chatJid: receivedChat,
                     claimed: messageClaimed,
-                    timedOut: messageClaimTimedOut,
+                    claimMode: quickClaimOutcome.resolved ? 'confirmed_distributed_claim' : 'exclusive_session_lock_local_dedupe_fast_path',
+                    distributedClaimPending: !quickClaimOutcome.resolved,
                     durationMs: Date.now() - claimStartedAt
                 });
                 if (!messageClaimed) {
@@ -13131,13 +13202,34 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     databaseClaimTimedOut: messageClaimTimedOut
                 });
                 setImmediate(() => {
-                    const messageClaimHeartbeat = setInterval(() => {
-                        void renewMessageProcessingClaim(sessionId, msgId, liveAccountPhone || liveAccountLid || '');
-                    }, Math.max(10000, Math.floor(MESSAGE_PROCESSING_LEASE_MS / 3)));
-                    if (typeof messageClaimHeartbeat.unref === 'function') messageClaimHeartbeat.unref();
-                    void enqueueInboundCommand(sessionId, receivedChat, async () => {
+                    let messageClaimHeartbeat = null;
+                    let messageProcessingCompleted = false;
                     let messageProcessingSucceeded = true;
                     let messageProcessingError = '';
+                    let messageClaimFinalized = false;
+                    const startMessageClaimHeartbeat = () => {
+                        if (messageClaimHeartbeat || messageProcessingCompleted) return;
+                        messageClaimHeartbeat = setInterval(() => {
+                            void renewMessageProcessingClaim(sessionId, msgId, liveAccountPhone || liveAccountLid || '');
+                        }, Math.max(10000, Math.floor(MESSAGE_PROCESSING_LEASE_MS / 3)));
+                        if (typeof messageClaimHeartbeat.unref === 'function') messageClaimHeartbeat.unref();
+                    };
+                    const finalizeMessageClaim = async claimed => {
+                        if (!claimed || !messageProcessingCompleted || messageClaimFinalized) return;
+                        messageClaimFinalized = true;
+                        if (messageClaimHeartbeat) clearInterval(messageClaimHeartbeat);
+                        await finishMessageProcessingClaim(sessionId, msgId, liveAccountPhone || liveAccountLid || '', messageProcessingSucceeded, messageProcessingError);
+                    };
+                    if (distributedClaimKnown && distributedClaimValue) startMessageClaimHeartbeat();
+                    else if (!distributedClaimKnown) {
+                        void distributedClaimPromise.then(claimed => {
+                            if (claimed) {
+                                if (!messageProcessingCompleted) startMessageClaimHeartbeat();
+                                else void finalizeMessageClaim(true).catch(() => {});
+                            }
+                        }).catch(() => {});
+                    }
+                    void enqueueInboundCommand(sessionId, receivedChat, async () => {
                     try {
                         const dispatchRuntime = activeSessions.get(sessionId);
                         if (!dispatchRuntime || dispatchRuntime.sock !== sock || !isAuthenticatedSocketOperational(dispatchRuntime, sock)) throw new Error('whatsapp_session_not_operational_at_command_dispatch');
@@ -13176,7 +13268,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             sOwnerTop = null;
                             console.warn('[session-owner-cache-scope-rejected]', { sessionId, action: 'discard_owner_record_from_different_session_id' });
                         }
-                        if (!sOwnerTop || !from.endsWith('@g.us')) {
+                        if (!sOwnerTop) {
                             const ownerReadStartedAt = Date.now();
                             console.info('[message-owner-record-read-started]', { sessionId, messageId: msgId, chatJid: from, hasCachedOwnerRecord: !!sOwnerTop });
                             try {
@@ -13225,19 +13317,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 });
                                 continue;
                             }
-                            try {
-                                const mappedPrivateIdentity = normalizePhoneCacheJid(await promiseWithTimeout(sock.signalRepository?.lidMapping?.getPNForLID?.(normalizedSenderIdentity), 1500, 'incoming LID-to-PN lookup'));
-                                if (mappedPrivateIdentity) {
-                                    rememberLidPhonePair(sessionId, normalizedSenderIdentity, mappedPrivateIdentity, 'signal_lid_mapping');
-                                    if (!(isFromMe && normalizedSenderIdentity === normalizedRawChatForMapping)) senderJids.push(mappedPrivateIdentity);
-                                    if (isCurrentPrivateChatLid) {
-                                        mappedPrivateChatPhoneJid = mappedPrivateIdentity;
-                                        mappedPrivateChatPhoneResolution = 'signal_lid_mapping';
-                                    }
-                                }
-                            } catch (mappingError) {
-                                console.warn('[incoming-sender-lid-resolution]', { sessionId, messageId: msgId, senderIdentity: normalizedSenderIdentity, durationBoundMs: 1500, error: mappingError?.message || String(mappingError) });
-                            }
+                            void schedulePhoneResolutionForLid(sessionId, sock, normalizedSenderIdentity, 'incoming_sender_identity').then(mappedPrivateIdentity => {
+                                if (!mappedPrivateIdentity || activeSessions.get(sessionId)?.sock !== sock) return;
+                                console.info('[incoming-sender-lid-resolution-background-completed]', { sessionId, messageId: msgId, senderIdentityHash: shortLogHash(normalizedSenderIdentity), phoneIdentityHash: shortLogHash(mappedPrivateIdentity), currentMessageDispatchNotDelayed: true });
+                            }).catch(() => '');
                         }
                         if (!rawChatIsGroup && !rawChatIsChannel && /@lid$/i.test(normalizedRawChatForMapping)) {
                             const directPhoneCandidates = [
@@ -13248,10 +13331,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             ];
                             let directPhoneCandidate = directPhoneCandidates.find(candidate => normalizePhoneCacheJid(candidate.value));
                             if (!directPhoneCandidate) {
-                                const resolved = await resolvePhoneForLid(sessionId, sock, normalizedRawChatForMapping);
-                                const resolvedRecord = lidPhoneResolutionCache.get(`${sessionId}:${normalizedRawChatForMapping}`);
-                                const resolvedFresh = !!(resolved?.phone && resolvedRecord?.phone && Date.now() - Number(resolvedRecord.updatedAt || 0) <= LID_PHONE_MAPPING_FRESH_MS);
-                                if (resolvedFresh) directPhoneCandidate = { value: resolved.phone, source: resolved.source };
+                                void schedulePhoneResolutionForLid(sessionId, sock, normalizedRawChatForMapping, 'incoming_private_chat').catch(() => '');
                             }
                             const directPhone = normalizePhoneCacheJid(directPhoneCandidate?.value || '');
                             const authenticatedRouteNumber = getAuthenticatedPhoneNumber(sock.user, state.creds);
@@ -14101,7 +14181,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 if (metadataLien && metadataLien.desc) lienTextForm += `\n\n${String(metadataLien.desc)}`;
                                                 const lienCapTitle = t.cmd_lien.charAt(0).toUpperCase() + t.cmd_lien.slice(1);
                                                 const groupProfilePicture = await getWhatsAppGroupProfilePictureBuffer(sock, from, 2200);
-                                                if (groupProfilePicture) await trackedSendImageCaptioned(sock, from, groupProfilePicture, lienCapTitle, lienTextForm, pushName);
+                                                const linkImage = groupProfilePicture || adamLogoBuffer;
+                                                if (Buffer.isBuffer(linkImage) && linkImage.length) await trackedSendImageCaptioned(sock, from, linkImage, lienCapTitle, lienTextForm, pushName);
                                                 else await safeSendFormatted(sock, from, lienCapTitle, lienTextForm, pushName, false, activeHostName);
                                             } catch (e) {
                                                 await safeSendActionError(sock, from, t.cmd_lien, e, messageLang, pushName, m.messageTimestamp);
@@ -14698,8 +14779,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, t.cmd_code, t.owner_required, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            const pairingNumber = normalizePhoneNumber(args);
-                                            if (!/^\+?[0-9][0-9\s().-]*$/.test(args) || pairingNumber.length < 8 || pairingNumber.length > 15) {
+                                            const pairingNumberInput = String(args || '').normalize('NFKC').replace(/[\p{Cf}\u061c\u200e\u200f]/gu, '').trim();
+                                            const pairingNumber = normalizePairingPhoneNumber(pairingNumberInput);
+                                            if (!/^\+?[0-9][0-9\s().-]*$/u.test(pairingNumberInput) || pairingNumber.length < 8 || pairingNumber.length > 15 || /^0+$/.test(pairingNumber)) {
                                                 await safeSendFormatted(sock, from, t.cmd_code, t.code_usage, pushName, true, activeHostName);
                                                 break;
                                             }
@@ -14717,7 +14799,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                     response = await fetch(pairingApiUrl, {
                                                         method: 'POST',
                                                         headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'Authorization': `Bearer ${internalApiToken}` },
-                                                        body: JSON.stringify({ number: args.replace(/[^0-9]/g, ''), method: 'code', autoExpire: true }),
+                                                        body: JSON.stringify({ number: pairingNumber, method: 'code', autoExpire: true }),
                                                         redirect: 'error',
                                                         cache: 'no-store',
                                                         signal: pairingController.signal
@@ -14989,14 +15071,20 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         messageProcessingError = cmdError?.message || String(cmdError);
                         console.error('[message-handler]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, messageClassification: receivedClassification, detectedCommand: receivedParsedCommand?.internalCommand || receivedParsedCommand?.command || null, incomingChatJid: rawFrom, replyTargetJid: from, action: 'message_handler_failed', error: messageProcessingError });
                     } finally {
-                        clearInterval(messageClaimHeartbeat);
+                        messageProcessingCompleted = true;
                         if (!messageProcessingSucceeded) processedLocalCache.delete(`${sessionId}:id:${msgId}`);
-                        await finishMessageProcessingClaim(sessionId, msgId, liveAccountPhone || liveAccountLid || '', messageProcessingSucceeded, messageProcessingError);
+                        if (messageClaimHeartbeat) clearInterval(messageClaimHeartbeat);
+                        if (distributedClaimKnown) await finalizeMessageClaim(distributedClaimValue);
+                        else void distributedClaimPromise.then(claimed => finalizeMessageClaim(claimed)).catch(() => {});
                     }
                     }, msgId, receivedSenderJid, !!receivedParsedCommand).catch(async dispatchQueueError => {
-                        clearInterval(messageClaimHeartbeat);
+                        messageProcessingCompleted = true;
+                        messageProcessingSucceeded = false;
+                        messageProcessingError = dispatchQueueError?.message || String(dispatchQueueError);
+                        if (messageClaimHeartbeat) clearInterval(messageClaimHeartbeat);
                         processedLocalCache.delete(`${sessionId}:id:${msgId}`);
-                        await finishMessageProcessingClaim(sessionId, msgId, liveAccountPhone || liveAccountLid || '', false, dispatchQueueError?.message || String(dispatchQueueError)).catch(() => {});
+                        if (distributedClaimKnown) await finalizeMessageClaim(distributedClaimValue).catch(() => {});
+                        else void distributedClaimPromise.then(claimed => finalizeMessageClaim(claimed)).catch(() => {});
                         console.error('[message-command-queue-failed]', { sessionId, messageId: msgId, chatJid: receivedChat, error: dispatchQueueError?.message || String(dispatchQueueError), action: 'release_claim_without_blocking_other_chat_partitions' });
                     });
                 });
