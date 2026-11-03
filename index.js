@@ -3,7 +3,7 @@ const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(pr
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(1000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 3000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r140-credential-snapshot-group-pn-send-queue-owner-typing';
+const TFBOT_CLUSTER_CODE_REVISION = 'r144-history-append-ignore-selfchat-lid-preserve-group-profile-ping-image-owner-silent';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
@@ -370,7 +370,8 @@ function findTfbotMatchingBraceEnd(source, openIndex) {
 }
 
 function applyBaileysSelfChatPlaceholderResendPnPatch() {
-    const marker = '__tfbotSelfChatRetryStanzaIdAndPnPlaceholderV101';
+    const marker = '__tfbotSelfChatRetryStanzaIdAndOriginalLidV102';
+    const previousMarker = '__tfbotSelfChatRetryStanzaIdAndPnPlaceholderV101';
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
@@ -379,7 +380,16 @@ function applyBaileysSelfChatPlaceholderResendPnPatch() {
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
         if (!filePath) return { applied: false, reason: 'messages_recv_module_not_found' };
         let source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), stanzaIdFallback: true, selfChatPlaceholderUsesPn: true };
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), stanzaIdFallback: true, selfChatRetryPreservesOriginalLid: true };
+        if (source.includes(previousMarker)) {
+            const oldRequestKey = 'const __tfbotRetryRequestKey = __tfbotIsSelfChatRetry ? { ...msgKey, id: String(msgKey.id), remoteJid: __tfbotOwnPnJid, remoteJidAlt: __tfbotOwnLidJid || msgKey.remoteJidAlt } : msgKey;';
+            if (source.split(oldRequestKey).length - 1 !== 1) return { applied: false, reason: 'previous_self_chat_retry_key_rewrite_not_found', file: path.basename(filePath) };
+            source = source.replace(oldRequestKey, 'const __tfbotRetryRequestKey = { ...msgKey, id: String(msgKey.id) };');
+            source = source.replace(`const ${previousMarker} = true;`, `const ${marker} = true;`);
+            if (!source.includes(marker) || source.includes(previousMarker) || source.includes('remoteJid: __tfbotOwnPnJid')) return { applied: false, reason: 'self_chat_retry_original_lid_upgrade_verification_failed', file: path.basename(filePath) };
+            fs.writeFileSync(filePath, source, 'utf8');
+            return { applied: true, alreadyApplied: false, upgradedPreviousPatch: true, file: path.basename(filePath), stanzaIdFallback: true, selfChatRetryPreservesOriginalLid: true };
+        }
         const functionMatch = /(?:const|let|var)\s+sendRetryRequest\s*=\s*async\s*\(/.exec(source) || /async\s+function\s+sendRetryRequest\s*\(/.exec(source);
         if (!functionMatch) return { applied: false, reason: 'send_retry_request_not_found', file: path.basename(filePath) };
         const arrowIndex = source.indexOf('=>', functionMatch.index);
@@ -396,7 +406,7 @@ const __tfbotRetryChild = Array.isArray(node?.content) ? node.content.find(child
 const __tfbotRetryNodeId = String(node?.attrs?.id || __tfbotRetryChild?.attrs?.id || '').trim();
 const __tfbotDecodedRetryId = String(msgKey?.id || '').trim();
 if (!__tfbotDecodedRetryId && __tfbotRetryNodeId) msgKey.id = __tfbotRetryNodeId;
-const __tfbotOwnPnJid = String(authState?.creds?.me?.id || '').trim().replace(/:\d+(?=@s\.whatsapp\.net$)/i, '');
+const __tfbotOwnPnJid = String(authState?.creds?.me?.id || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
 const __tfbotOwnLidJid = String(authState?.creds?.me?.lid || '').trim();
 const __tfbotRetryChatJid = String(node?.attrs?.recipient || msgKey?.remoteJid || msgKey?.remoteJidAlt || '').trim();
 const __tfbotIsSelfChatRetry = msgKey?.fromMe === true && Boolean(__tfbotOwnPnJid) && Boolean(__tfbotRetryChatJid) && ((__tfbotOwnLidJid && areJidsSameUser(__tfbotRetryChatJid, __tfbotOwnLidJid)) || areJidsSameUser(__tfbotRetryChatJid, __tfbotOwnPnJid));
@@ -404,7 +414,7 @@ if (!String(msgKey?.id || '').trim()) {
     logger.warn({ stanzaIdPresent: Boolean(__tfbotRetryNodeId), decodedIdPresent: Boolean(__tfbotDecodedRetryId), fromMe: msgKey?.fromMe === true, remoteJidType: /@(?:hosted\\.)?lid$/i.test(__tfbotRetryChatJid) ? 'lid' : /@s\\.whatsapp\\.net$/i.test(__tfbotRetryChatJid) ? 'pn' : 'unknown' }, 'retry request ignored because no message id was available in decoded key or retry stanza');
     return;
 }
-const __tfbotRetryRequestKey = __tfbotIsSelfChatRetry ? { ...msgKey, id: String(msgKey.id), remoteJid: __tfbotOwnPnJid, remoteJidAlt: __tfbotOwnLidJid || msgKey.remoteJidAlt } : msgKey;
+const __tfbotRetryRequestKey = { ...msgKey, id: String(msgKey.id) };
 const ${marker} = true;
 if (!__tfbotDecodedRetryId && __tfbotRetryNodeId) logger.info({ messageId: __tfbotRetryNodeId, selfChat: __tfbotIsSelfChatRetry, source: 'retry_stanza_id' }, 'retry message id restored from receipt stanza before retry manager lookup');`;
         block = block.slice(0, keyMatch.index) + injection + block.slice(keyMatch.index + keyMatch[0].length);
@@ -414,17 +424,14 @@ if (!__tfbotDecodedRetryId && __tfbotRetryNodeId) logger.info({ messageId: __tfb
         const resendMatches = [...block.matchAll(resendPattern)];
         if (!resendMatches.length) return { applied: false, reason: 'placeholder_resend_call_not_found', file: path.basename(filePath) };
         block = block.replace(resendPattern, 'requestPlaceholderResend(__tfbotRetryRequestKey, __tfbotIsSelfChatRetry ? fullMessage : undefined)');
-        if (!block.includes(marker) || !block.includes('node?.attrs?.id') || !block.includes('msgKey.id = __tfbotRetryNodeId') || !block.includes('remoteJid: __tfbotOwnPnJid') || resendPattern.test(block)) {
-            return { applied: false, reason: 'self_chat_retry_stanza_id_patch_verification_failed', file: path.basename(filePath) };
-        }
+        if (!block.includes(marker) || !block.includes('node?.attrs?.id') || !block.includes('msgKey.id = __tfbotRetryNodeId') || !block.includes('const __tfbotRetryRequestKey = { ...msgKey, id: String(msgKey.id) };') || block.includes('remoteJid: __tfbotOwnPnJid')) return { applied: false, reason: 'self_chat_retry_original_lid_patch_verification_failed', file: path.basename(filePath) };
         const patchedSource = source.slice(0, functionMatch.index) + block + source.slice(closeBrace + 1);
         fs.writeFileSync(filePath, patchedSource, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), retryRequests: resendMatches.length, stanzaIdFallback: true, selfChatPlaceholderUsesPn: true, disablesAutoSessionRecreationForSelfChat: autoRecreatePattern.test(source) };
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), retryRequests: resendMatches.length, stanzaIdFallback: true, selfChatRetryPreservesOriginalLid: true, disablesAutoSessionRecreationForSelfChat: autoRecreatePattern.test(source) };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
 }
-
 function applyBaileysPerChatInboundProcessingPatch() {
     const marker = '__tfbotPerChatInboundProcessingV123';
     const previousMarkers = ['__tfbotPerChatInboundProcessingV122', '__tfbotPerChatInboundProcessingV121', '__tfbotPerChatInboundProcessingV119'];
@@ -1516,7 +1523,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-03-r140';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-03-r144';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1918,7 +1925,6 @@ const ownIdentityRefreshPromises = new Map();
 const OUTGOING_RETRY_MEMORY_TTL_MS = Math.max(60000, Math.min(86400000, Number(process.env.OUTGOING_RETRY_MEMORY_TTL_MS || 21600000)));
 const OUTGOING_RETRY_MEMORY_MAX_ENTRIES = Math.max(500, Math.min(10000, Number(process.env.OUTGOING_RETRY_MEMORY_MAX_ENTRIES || 3000)));
 const outgoingRetryPreflightIds = new Map();
-const pendingInboundMessagesBySession = new Map();
 const outgoingMessageIdCache = new Map();
 const outgoingTextEchoCache = new Map();
 const OUTGOING_ECHO_TTL_MS = 120000;
@@ -6805,6 +6811,9 @@ app.use(async (req, res, next) => {
 });
 
 app.get('/logs.txt', (req, res) => {
+    if (!isAuthorizedAdmin(req)) return res.status(404).type('text/plain').send('Not found.');
+    if (String(req.query?.token || '').trim()) res.cookie('tfbot_admin', String(process.env.ADMIN_API_TOKEN || process.env.TOKEN || ''), { httpOnly: true, secure: true, sameSite: 'strict', maxAge: 3600000, path: '/' });
+    res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -6837,7 +6846,10 @@ app.use((req, res, next) => {
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     const requestPath = normalizeTfbotRequestPath(req.path || '/').replace(/\/+$/, '') || '/';
     if (requestPath === '/ok' || requestPath === TFBOT_CLUSTER_HEALTH_PATH || requestPath === TFBOT_ROUTER_OK_PATH || requestPath === TFBOT_ROUTER_RESOLVE_PATH || requestPath === TFBOT_WORKER_CONTROL_PATH || requestPath === TFBOT_WORKER_POLL_PATH || requestPath === TFBOT_WORKER_FAILURE_PATH || isValidClusterHop(req)) return next();
-    if (requestPath === '/list' || requestPath === '/list/events') return next();
+    if (requestPath === '/list' || requestPath === '/list/events') {
+        if (!isAuthorizedAdmin(req)) return res.status(404).type('text/plain').send('Not found.');
+        return next();
+    }
     if (requestPath === '/') {
         if (isAllowedEmbeddedHomeRequest(req)) return next();
         return sendAccessDeniedPage(req, res);
@@ -8765,7 +8777,7 @@ const links_common = "*_Bot (tfbot)_* : https://bot.adamdh7.org\n*_Brefs (tfbref
 
 const translations = {
   fr: {
-    cmd_ai: "ia", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "chercher",
+    cmd_ai: "assistant", cmd_lang: "lang", cmd_imaj: "image", cmd_cheche: "chercher",
     cmd_menu: "menu", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "code", cmd_lien: "lien", cmd_tagall: "tagtout",
     cmd_hidetag: "hidetag", cmd_kick: "expulse", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "expulsetout", cmd_kickall2: "expulsetout2", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
@@ -8779,7 +8791,7 @@ const translations = {
     lang_title: "Langue", lang_current: "Langue actuelle du bot : {lang}.", ai_title: "Message", imaj_title: "Image", image_generated_title: "Image Générée",
     ai_click_to_receive: "Cliquez ici pour recevoir la réponse de l'IA :\n{link}",
     imaj_click_to_receive: "Cliquez ici pour recevoir votre image :\n{link}",
-    code_confirm: "+_Veuillez autoriser l'envoi du code en cliquant ici_* :\n{link}",
+    code_confirm: "+_Veuillez autoriser l'envoi du code en cliquant ici_* :\n{link}", code_error: "Le code n’a pas pu être généré.", code_active: "Le code n’a pas pu être généré.",
     qrbot_created: "Nouvelle Session Créée",
     qrbot_scan: "Scannez ce code pour connecter la nouvelle session.",
     qrbot_connected: "Session Connectée",
@@ -8814,7 +8826,7 @@ const translations = {
     take_time: "Le chargement peut prendre quelques instants.",
     quota_error: "La limite d’utilisation du service a été atteinte. Réessaie plus tard.",
     ai_error: "L’assistant n’a pas pu traiter la demande. Réessaie dans quelques instants.",
-    ai_usage: "Utilisation : ia <question>.",
+    ai_usage: "Utilisation : assistant <question>.",
     url_usage: "Réponds à une image, une vidéo, un audio, un document ou un sticker avec url pour obtenir son lien.",
     url_error: "Le média n’a pas pu être traité. Vérifie qu’il est toujours accessible, puis réessaie.",
     qr_usage: "Utilisation : qr <texte ou lien>.", qr_too_long: "Le texte est trop long pour un QR code. Utilise un texte plus court ou un lien.", qr_generated: "QR code généré.",
@@ -8826,7 +8838,7 @@ const translations = {
     command_error: "L’action n’a pas pu être terminée. Vérifie les informations et autorisations requises, puis réessaie.",
 info_text: [
         "*IA & recherche*",
-        "ai <question> — Assistant IA",
+        "assistant <question> — Assistant IA",
         "image <description> — Générer une image",
         "chercher <question> — Recherche Web",
         "lang <fr|en|es|ht> — Langue",
@@ -8873,7 +8885,7 @@ info_text: [
     lang_title: "Language", lang_current: "Current bot language: {lang}.", ai_title: "Message", imaj_title: "Image", image_generated_title: "Generated Image",
     ai_click_to_receive: "Click here to receive the AI response:\n{link}",
     imaj_click_to_receive: "Click here to receive your image:\n{link}",
-    code_confirm: "*_Please authorize the sending of the code by clicking here_* :\n{link}",
+    code_confirm: "*_Please authorize the sending of the code by clicking here_* :\n{link}", code_error: "The code could not be generated.", code_active: "The code could not be generated.",
     qrbot_created: "New Session Created",
     qrbot_scan: "Scan this QR code to connect the new session.",
     qrbot_connected: "Session Connected",
@@ -8953,7 +8965,7 @@ info_text: [
     ].join('\n')
   },
   es: {
-    cmd_ai: "ia", cmd_lang: "lang", cmd_imaj: "imagen", cmd_cheche: "buscar",
+    cmd_ai: "asistente", cmd_lang: "lang", cmd_imaj: "imagen", cmd_cheche: "buscar",
     cmd_menu: "menú", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "código", cmd_lien: "enlace", cmd_tagall: "etiquetartodo",
     cmd_hidetag: "hidetag", cmd_kick: "expulsar", cmd_add: "añadir", cmd_promote: "promover", cmd_demote: "degradar",
     cmd_kickall: "borrartodo", cmd_kickall2: "borrartodo2", cmd_ferme: "cerrar", cmd_ouvert: "abrir", cmd_bienvenue: "bienvenida",
@@ -8967,7 +8979,7 @@ info_text: [
     lang_title: "Idioma", lang_current: "Idioma actual del bot: {lang}.", ai_title: "Mensaje", imaj_title: "Imagen", image_generated_title: "Imagen Generada",
     ai_click_to_receive: "Haz clic aquí para recibir la respuesta de la IA:\n{link}",
     imaj_click_to_receive: "Haz clic aquí para recibir tu imagen:\n{link}",
-    code_confirm: "*_Por favor autoriza el envío del código haciendo clic aquí_* :\n{link}",
+    code_confirm: "*_Por favor autoriza el envío del código haciendo clic aquí_* :\n{link}", code_error: "No se pudo generar el código.", code_active: "No se pudo generar el código.",
     qrbot_created: "Nueva Sesión Creada",
     qrbot_scan: "Escanea este código para conectar la nueva sesión.",
     qrbot_connected: "Sesión Conectada",
@@ -9002,7 +9014,7 @@ info_text: [
     take_time: "La carga puede tardar unos momentos.",
     quota_error: "Se ha alcanzado el límite de uso del servicio. Inténtalo de nuevo más tarde.",
     ai_error: "El asistente no pudo procesar la solicitud. Inténtalo de nuevo en unos momentos.",
-    ai_usage: "Uso: ia <pregunta>.",
+    ai_usage: "Uso: asistente <pregunta>.",
     url_usage: "Responde a una imagen, vídeo, audio, documento o sticker con url para obtener su enlace.",
     url_error: "No se pudo procesar el archivo multimedia. Comprueba que siga disponible e inténtalo de nuevo.",
     qr_usage: "Uso: qr <texto o enlace>.", qr_too_long: "El texto es demasiado largo para un código QR. Usa un texto más corto o un enlace.", qr_generated: "Código QR generado.",
@@ -9014,7 +9026,7 @@ info_text: [
     command_error: "No se pudo completar la acción. Comprueba la información y los permisos necesarios e inténtalo de nuevo.",
 info_text: [
         "*IA y búsqueda*",
-        "ia <pregunta> — Asistente IA",
+        "asistente <pregunta> — Asistente IA",
         "imagen <descripción> — Crear imagen",
         "buscar <pregunta> — Buscar en la Web",
         "lang <fr|en|es|ht> — Idioma",
@@ -9047,7 +9059,7 @@ info_text: [
     ].join('\n')
   },
   ht: {
-    cmd_ai: "ai", cmd_lang: "lang", cmd_imaj: "imaj", cmd_cheche: "cheche",
+    cmd_ai: "asistan", cmd_lang: "lang", cmd_imaj: "imaj", cmd_cheche: "cheche",
     cmd_menu: "meni", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "kòd", cmd_lien: "lyen", cmd_tagall: "tout",
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "siptout", cmd_kickall2: "siptout2", cmd_ferme: "fèmen", cmd_ouvri: "ouvri", cmd_bienvenue: "byenveni",
@@ -9061,7 +9073,7 @@ info_text: [
     lang_title: "Lang", lang_current: "Lang bot la kounye a: {lang}.", ai_title: "Mesaj", imaj_title: "Imaj", image_generated_title: "Imaj Jenere",
     ai_click_to_receive: "Klike isit pou resevwa repons IA a :\n{link}",
     imaj_click_to_receive: "Klike isit la pou w resevwa imaj ou a :\n{link}",
-    code_confirm: "*_Tanpri otorize voye kòd la lè w klike isit_* :\n{link}",
+    code_confirm: "*_Tanpri otorize voye kòd la lè w klike isit_* :\n{link}", code_error: "Kòd la pa t kapab kreye.", code_active: "Kòd la pa t kapab kreye.",
     qrbot_created: "Nouvo Sesyon Kreye",
     qrbot_scan: "Eskane kòd sa a pou konekte nouvo sesyon an.",
     qrbot_connected: "Sesyon Konekte",
@@ -9096,7 +9108,7 @@ info_text: [
     take_time: "Chajman an ka pran kèk moman.",
     quota_error: "Limit itilizasyon sèvis la rive. Eseye ankò pita.",
     ai_error: "Asistan an pa t kapab trete demann lan. Eseye ankò nan kèk moman.",
-    ai_usage: "Itilizasyon : ai <kesyon>.",
+    ai_usage: "Itilizasyon : asistan <kesyon>.",
     url_usage: "Reponn sou yon imaj, videyo, odyo, dokiman oswa sticker ak url pou jwenn lyen li.",
     url_error: "Medya a pa t kapab trete. Verifye si li toujou disponib epi eseye ankò.",
     qr_usage: "Itilizasyon : qr <tèks oswa lyen>.", qr_too_long: "Tèks la twò long pou yon kòd QR. Sèvi ak yon tèks ki pi kout oswa yon lyen.", qr_generated: "Kòd QR la kreye.",
@@ -9108,7 +9120,7 @@ info_text: [
     command_error: "Aksyon an pa t kapab fini. Verifye enfòmasyon yo ak otorizasyon ki nesesè yo, epi eseye ankò.",
 info_text: [
         "*IA ak rechèch*",
-        "ai <kesyon> — Asistan IA",
+        "asistan <kesyon> — Asistan IA",
         "imaj <deskripsyon> — Kreye imaj",
         "cheche <kesyon> — Rechèch sou entènèt",
         "lang <fr|en|es|ht> — Lang",
@@ -9202,15 +9214,47 @@ function splitCaptionBodies(type, text, userName, maxChars = MAX_WHATSAPP_CAPTIO
     return bodies.length ? bodies : [''];
 }
 
+const outgoingImageNormalizationCache = new WeakMap();
+
 async function normalizeOutgoingImageBuffer(imageBuffer) {
-    if (Buffer.isBuffer(imageBuffer)) return imageBuffer.length ? imageBuffer : null;
-    if (imageBuffer instanceof Uint8Array) return imageBuffer.length ? Buffer.from(imageBuffer.buffer, imageBuffer.byteOffset, imageBuffer.byteLength) : null;
-    return null;
+    const source = Buffer.isBuffer(imageBuffer)
+        ? imageBuffer
+        : imageBuffer instanceof Uint8Array
+            ? Buffer.from(imageBuffer.buffer, imageBuffer.byteOffset, imageBuffer.byteLength)
+            : null;
+    if (!source?.length) return null;
+    const cached = outgoingImageNormalizationCache.get(source);
+    if (cached) return cached;
+    const sharp = require('sharp');
+    const normalized = await sharp(source, { failOn: 'none' })
+        .rotate()
+        .resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true })
+        .jpeg({ quality: 88, mozjpeg: true })
+        .toBuffer();
+    if (!normalized.length || !normalized.subarray(0, 3).equals(Buffer.from([255, 216, 255]))) throw new Error('outgoing_image_normalization_failed');
+    outgoingImageNormalizationCache.set(source, normalized);
+    return normalized;
 }
 
 async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, sendOptions = {}) {
-    const deliveryImageBuffer = await normalizeOutgoingImageBuffer(imageBuffer);
-    if (!deliveryImageBuffer) throw new Error('outgoing_image_buffer_unavailable');
+    let deliveryImageBuffer = null;
+    try {
+        deliveryImageBuffer = await normalizeOutgoingImageBuffer(imageBuffer);
+    } catch (imageNormalizationError) {
+        console.error('[whatsapp-outgoing-image-normalization-failed]', { action: String(type || 'Message'), errorName: imageNormalizationError?.name || 'Error', error: String(imageNormalizationError?.message || imageNormalizationError).slice(0, 220) });
+    }
+    if (!deliveryImageBuffer) {
+        const fallbackOwnerName = sanitizeSessionDisplayName(sendOptions.ownerName || sock?.user?.name || sock?.user?.notify || sock?.user?.verifiedName || '') || 'Compte connecté';
+        const fallbackFormatting = sendOptions.preserveFormatting === true || hasWhatsAppFormatting(text);
+        const fallbackBodies = splitCaptionBodies(type, text, userName, MAX_WHATSAPP_CAPTION_CHARS, fallbackFormatting, fallbackOwnerName);
+        let fallbackResult = null;
+        for (const body of fallbackBodies) {
+            const fallbackOptions = {};
+            if (Array.isArray(sendOptions.mentions) && sendOptions.mentions.length) fallbackOptions.mentions = sendOptions.mentions.filter(mention => body.includes(`@${String(mention).split('@')[0]}`));
+            fallbackResult = await queuedSendMessage(sock, jid, { text: buildCaption(type, body, userName, fallbackFormatting, fallbackOwnerName), ...fallbackOptions }, sendOptions.messageOptions || {}, 220);
+        }
+        return fallbackResult;
+    }
     const preserveFormatting = sendOptions.preserveFormatting === true || hasWhatsAppFormatting(text);
     const ownerName = sanitizeSessionDisplayName(sendOptions.ownerName || sock?.user?.name || sock?.user?.notify || sock?.user?.verifiedName || '') || 'Compte connecté';
     const bodies = splitCaptionBodies(type, text, userName, MAX_WHATSAPP_CAPTION_CHARS, preserveFormatting, ownerName);
@@ -9230,6 +9274,39 @@ async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, 
     }
     return lastResult;
 }
+
+async function getWhatsAppGroupProfilePictureBuffer(sock, groupJid, timeoutMs = 2200) {
+    if (typeof sock?.profilePictureUrl !== 'function') return null;
+    let pictureUrl = '';
+    try {
+        pictureUrl = await promiseWithTimeout(sock.profilePictureUrl(String(groupJid || ''), 'image'), timeoutMs, 'group profile picture lookup');
+    } catch (error) {
+        console.info('[group-profile-picture-unavailable]', { groupJidHash: shortLogHash(groupJid), reason: 'profile_lookup_unavailable' });
+        return null;
+    }
+    if (!pictureUrl) return null;
+    let parsedUrl;
+    try { parsedUrl = new URL(String(pictureUrl)); } catch (error) { return null; }
+    if (parsedUrl.protocol !== 'https:' || !/(?:^|\.)whatsapp\.net$/i.test(parsedUrl.hostname)) return null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.max(500, Number(timeoutMs) || 2200));
+    try {
+        const response = await fetch(parsedUrl, { method: 'GET', headers: { Accept: 'image/*' }, redirect: 'error', cache: 'no-store', signal: controller.signal });
+        const contentType = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+        const contentLength = Number(response.headers.get('content-length') || 0);
+        if (!response.ok || !contentType.startsWith('image/') || contentLength > 8 * 1024 * 1024) return null;
+        const imageBytes = Buffer.from(await response.arrayBuffer());
+        if (!imageBytes.length || imageBytes.length > 8 * 1024 * 1024 || !detectImageMimeType(imageBytes).startsWith('image/')) return null;
+        const sharp = require('sharp');
+        return await sharp(imageBytes, { failOn: 'none' }).rotate().jpeg({ quality: 88, mozjpeg: true }).toBuffer();
+    } catch (error) {
+        console.info('[group-profile-picture-unavailable]', { groupJidHash: shortLogHash(groupJid), reason: error?.name === 'AbortError' ? 'profile_download_timeout' : 'profile_image_not_decodable' });
+        return null;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 const logoPath = path.join(__dirname, 'adamdh7.png');
 let adamLogoBuffer = fs.existsSync(logoPath) ? fs.readFileSync(logoPath) : null;
 async function inspectAdamLogo() {
@@ -9237,12 +9314,17 @@ async function inspectAdamLogo() {
         console.warn('[logo-image-source-unavailable]');
         return false;
     }
-    const isPng = adamLogoBuffer.length >= 8 && adamLogoBuffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-    const isJpeg = adamLogoBuffer.length >= 3 && adamLogoBuffer[0] === 255 && adamLogoBuffer[1] === 216 && adamLogoBuffer[2] === 255;
-    const detectedFormat = isPng ? 'png' : isJpeg ? 'jpeg' : 'unsupported';
-    console.info('[logo-image-source-preserved]', { originalBytes: adamLogoBuffer.length, detectedFormat, fileExtension: path.extname(logoPath).toLowerCase() });
-    if (detectedFormat === 'unsupported') console.warn('[logo-image-source-format-warning]', { originalBytes: adamLogoBuffer.length });
-    return true;
+    const originalBytes = adamLogoBuffer.length;
+    try {
+        const normalizedLogo = await normalizeOutgoingImageBuffer(adamLogoBuffer);
+        if (!normalizedLogo) throw new Error('logo_image_empty_after_normalization');
+        adamLogoBuffer = normalizedLogo;
+        console.info('[logo-image-normalized]', { originalBytes, finalBytes: normalizedLogo.length, format: 'jpeg', fileExtension: path.extname(logoPath).toLowerCase() });
+        return true;
+    } catch (error) {
+        console.error('[logo-image-normalization-failed]', { originalBytes, reason: String(error?.message || error).slice(0, 180) });
+        return false;
+    }
 }
 
 app.get('/sitemap.xml', (req, res) => res.sendFile(path.join(__dirname, 'sitemap.xml')));
@@ -9267,7 +9349,13 @@ function isAuthorizedAdmin(req) {
     if (isValidClusterHop(req)) return true;
     const expected = String(process.env.ADMIN_API_TOKEN || process.env.TOKEN || '');
     const authorization = String(req.get('Authorization') || '');
-    const supplied = authorization.match(/^Bearer\s+(.+)$/i)?.[1]?.trim() || String(req.get('X-API-Key') || req.get('X-API-Token') || '').trim();
+    const cookieToken = String(req.headers?.cookie || '').split(';').map(value => value.trim()).find(value => value.startsWith('tfbot_admin='))?.slice('tfbot_admin='.length) || '';
+    let decodedCookie = cookieToken;
+    try { decodedCookie = decodeURIComponent(cookieToken); } catch (error) {}
+    const supplied = authorization.match(/^Bearer\s+(.+)$/i)?.[1]?.trim()
+        || String(req.get('X-API-Key') || req.get('X-API-Token') || '').trim()
+        || String(req.query?.token || '').trim()
+        || decodedCookie;
     if (!expected || !supplied) return false;
     const expectedBuffer = Buffer.from(expected);
     const suppliedBuffer = Buffer.from(supplied);
@@ -9725,7 +9813,9 @@ for (const localSession of activeSessions.values()) {
 }
 
 app.get('/list', (req, res) => {
-    res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').type('html').send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;min-height:100%;background:#000;color:#fff;overscroll-behavior:none;overscroll-behavior-y:none;touch-action:pan-y}body{width:100%;height:100dvh;min-height:100svh;overflow:hidden;overscroll-behavior:none}#loader{position:fixed;inset:0;display:grid;place-items:center;background:#000}#loader svg{width:52px;height:52px;animation:tfbot-spin .85s linear infinite}#loader circle{fill:none;stroke:#fff;stroke-width:4;stroke-linecap:round;stroke-dasharray:92 160}#output{display:block;width:100%;height:100dvh;min-height:100svh;margin:0;padding:calc(env(safe-area-inset-top) + 12px) calc(env(safe-area-inset-right) + 12px) calc(env(safe-area-inset-bottom) + 12px) calc(env(safe-area-inset-left) + 12px);overflow:auto;overscroll-behavior:none;overscroll-behavior-y:none;overscroll-behavior-x:none;-webkit-overflow-scrolling:touch;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:clamp(12px,2.9vw,15px)/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}#output[hidden],#loader[hidden]{display:none}@media (hover:none) and (pointer:coarse){#output{scrollbar-width:none;-ms-overflow-style:none}#output::-webkit-scrollbar{display:none;width:0;height:0}}@keyframes tfbot-spin{to{transform:rotate(360deg)}}</style></head><body><div id="loader" aria-hidden="true"><svg viewBox="0 0 48 48" role="presentation"><circle cx="24" cy="24" r="19"></circle></svg></div><pre id="output" hidden></pre><script>const loader=document.getElementById('loader');const output=document.getElementById('output');let hasSnapshot=false;const stream=new EventSource('/list/events');stream.addEventListener('snapshot',event=>{try{const data=JSON.parse(event.data);output.textContent=JSON.stringify(data,null,2);if(!hasSnapshot){hasSnapshot=true;loader.hidden=true;output.hidden=false;}}catch(error){}});</script></body></html>`);
+    if (!isAuthorizedAdmin(req)) return res.status(404).type('text/plain').send('Not found.');
+    if (String(req.query?.token || '').trim()) res.cookie('tfbot_admin', String(process.env.ADMIN_API_TOKEN || process.env.TOKEN || ''), { httpOnly: true, secure: true, sameSite: 'strict', maxAge: 3600000, path: '/' });
+    res.set('Referrer-Policy', 'no-referrer').set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').type('html').send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;min-height:100%;background:#000;color:#fff;overscroll-behavior:none;overscroll-behavior-y:none;touch-action:pan-y}body{width:100%;height:100dvh;min-height:100svh;overflow:hidden;overscroll-behavior:none}#loader{position:fixed;inset:0;display:grid;place-items:center;background:#000}#loader svg{width:52px;height:52px;animation:tfbot-spin .85s linear infinite}#loader circle{fill:none;stroke:#fff;stroke-width:4;stroke-linecap:round;stroke-dasharray:92 160}#output{display:block;width:100%;height:100dvh;min-height:100svh;margin:0;padding:calc(env(safe-area-inset-top) + 12px) calc(env(safe-area-inset-right) + 12px) calc(env(safe-area-inset-bottom) + 12px) calc(env(safe-area-inset-left) + 12px);overflow:auto;overscroll-behavior:none;overscroll-behavior-y:none;overscroll-behavior-x:none;-webkit-overflow-scrolling:touch;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:clamp(12px,2.9vw,15px)/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}#output[hidden],#loader[hidden]{display:none}@media (hover:none) and (pointer:coarse){#output{scrollbar-width:none;-ms-overflow-style:none}#output::-webkit-scrollbar{display:none;width:0;height:0}}@keyframes tfbot-spin{to{transform:rotate(360deg)}}</style></head><body><div id="loader" aria-hidden="true"><svg viewBox="0 0 48 48" role="presentation"><circle cx="24" cy="24" r="19"></circle></svg></div><pre id="output" hidden></pre><script>if(location.search)history.replaceState(null,'',location.pathname);const loader=document.getElementById('loader');const output=document.getElementById('output');let hasSnapshot=false;const stream=new EventSource('/list/events');stream.addEventListener('snapshot',event=>{try{const data=JSON.parse(event.data);output.textContent=JSON.stringify(data,null,2);if(!hasSnapshot){hasSnapshot=true;loader.hidden=true;output.hidden=false;}}catch(error){}});</script></body></html>`);
 });
 
 const sessionListStreamClients = new Set();
@@ -10483,50 +10573,6 @@ function extractBody(m) {
     return msg.conversation || msg.extendedTextMessage?.text || msg.imageMessage?.caption || msg.videoMessage?.caption || msg.documentMessage?.caption || msg.buttonsResponseMessage?.selectedButtonId || msg.listResponseMessage?.singleSelectReply?.selectedRowId || '';
 }
 
-function enqueuePendingInboundMessage(sessionId, sock, message) {
-    const messageId = String(message?.key?.id || '').trim();
-    if (!sessionId || !messageId || !message?.message || !String(extractBody(message) || '').trim()) return false;
-    const active = activeSessions.get(sessionId);
-    const credentials = active?.authState?.creds;
-    const identity = getAuthenticatedPhoneNumber(sock?.user, credentials) || getAuthenticatedLid(sock?.user, credentials);
-    const readyState = sock?.ws?.readyState ?? sock?.ws?._socket?.readyState ?? sock?.socket?.readyState;
-    const socketOpen = sock?.ws?.isOpen === true || Number(readyState) === 1 || String(readyState).toUpperCase() === 'OPEN';
-    const baileyOpen = active?.openEventSeen === true && !isSocketDefinitelyClosed(sock);
-    if (active?.sock !== sock || !hasAuthenticatedWhatsAppCredentials(credentials, sock?.user || null) || !identity || (!socketOpen && !baileyOpen)) return false;
-    let queue = pendingInboundMessagesBySession.get(sessionId);
-    if (!queue || queue.sock !== sock) {
-        queue = { sock, messages: new Map() };
-        pendingInboundMessagesBySession.set(sessionId, queue);
-    }
-    const now = Date.now();
-    for (const [id, item] of queue.messages.entries()) if (now - item.queuedAt > 120000) queue.messages.delete(id);
-    if (!queue.messages.has(messageId)) queue.messages.set(messageId, { message, queuedAt: now });
-    while (queue.messages.size > 200) queue.messages.delete(queue.messages.keys().next().value);
-    console.info('[message-upsert-deferred-until-authenticated]', { sessionId, messageId, chatJid: message?.key?.remoteJid || message?.key?.remoteJidAlt || null, fromMe: message?.key?.fromMe === true, queuedCount: queue.messages.size, action: 'replay_readable_message_once_socket_is_authenticated_without_losing_command' });
-    return true;
-}
-
-function flushPendingInboundMessages(sessionId, sock) {
-    const queue = pendingInboundMessagesBySession.get(sessionId);
-    const active = activeSessions.get(sessionId);
-    if (!queue || queue.sock !== sock || active?.sock !== sock || active.status !== 'connecte') return 0;
-    pendingInboundMessagesBySession.delete(sessionId);
-    const now = Date.now();
-    const messages = [...queue.messages.values()].filter(item => now - item.queuedAt <= 120000).map(item => item.message);
-    if (!messages.length) return 0;
-    setImmediate(() => {
-        const latest = activeSessions.get(sessionId);
-        if (latest?.sock !== sock || latest.status !== 'connecte' || serverShuttingDown) return;
-        try {
-            sock.ev.emit('messages.upsert', { type: 'notify', messages });
-            console.info('[message-upsert-deferred-batch-flushed]', { sessionId, count: messages.length, action: 'replay_messages_after_authentication' });
-        } catch (error) {
-            console.error('[message-upsert-deferred-batch-flush-failed]', { sessionId, count: messages.length, error: error?.message || String(error) });
-        }
-    });
-    return messages.length;
-}
-
 function getMessageAuditDetails(message) {
     const content = unwrapMessageContent(message?.message);
     const messageType = Object.keys(content || {})[0] || 'unknown';
@@ -10787,42 +10833,17 @@ function fitErrorExplanation(value) {
 function errorFallbackText(actionName, language, errorClass = 'action_failure') {
     const lang = ['fr', 'en', 'es', 'ht'].includes(language) ? language : 'ht';
     const messages = {
-        fr: {
-            permission_or_admin: 'Droits administrateur requis.',
-            timeout: 'Délai dépassé. Réessaie.',
-            connection_or_encryption: 'Connexion indisponible. Réessaie.',
-            action_failure: 'Action impossible. Vérifie les informations et réessaie.'
-        },
-        en: {
-            permission_or_admin: 'Administrator permission required.',
-            timeout: 'Request timed out. Try again.',
-            connection_or_encryption: 'Connection unavailable. Try again.',
-            action_failure: 'Action failed. Check the details and try again.'
-        },
-        es: {
-            permission_or_admin: 'Se requieren permisos de administrador.',
-            timeout: 'Tiempo agotado. Inténtalo de nuevo.',
-            connection_or_encryption: 'Conexión no disponible. Inténtalo de nuevo.',
-            action_failure: 'No se pudo completar. Comprueba los datos e inténtalo de nuevo.'
-        },
-        ht: {
-            permission_or_admin: 'Dwa administratè nesesè.',
-            timeout: 'Tan an fini. Eseye ankò.',
-            connection_or_encryption: 'Koneksyon pa disponib. Eseye ankò.',
-            action_failure: 'Aksyon an pa t fini. Verifye enfòmasyon yo epi eseye ankò.'
-        }
+        fr: { permission_or_admin: 'Cette action n’est pas disponible.', timeout: 'Cette action n’a pas pu être terminée.', connection_or_encryption: 'Cette action n’a pas pu être terminée.', action_failure: 'Cette action n’a pas pu être terminée.' },
+        en: { permission_or_admin: 'This action is unavailable.', timeout: 'This action could not be completed.', connection_or_encryption: 'This action could not be completed.', action_failure: 'This action could not be completed.' },
+        es: { permission_or_admin: 'Esta acción no está disponible.', timeout: 'No se pudo completar esta acción.', connection_or_encryption: 'No se pudo completar esta acción.', action_failure: 'No se pudo completar esta acción.' },
+        ht: { permission_or_admin: 'Aksyon sa a pa disponib.', timeout: 'Aksyon sa a pa t kapab fini.', connection_or_encryption: 'Aksyon sa a pa t kapab fini.', action_failure: 'Aksyon sa a pa t kapab fini.' }
     };
     const category = Object.prototype.hasOwnProperty.call(messages[lang], errorClass) ? errorClass : 'action_failure';
-    if (/^(?:code|cmd[_ -]?code|kòd|kod)$/i.test(normalizeText(actionName)) && category === 'action_failure') {
-        const codeFallbacks = {
-            fr: 'La demande de code d’association n’a pas pu être finalisée. Vérifie le numéro et l’état de la session, puis réessaie.',
-            en: 'The pairing-code request could not be completed. Check the number and session status, then try again.',
-            es: 'No se pudo completar la solicitud del código de vinculación. Comprueba el número y el estado de la sesión e inténtalo de nuevo.',
-            ht: 'Demann kòd koneksyon an pa t kapab fini. Verifye nimewo a ak eta sesyon an, epi eseye ankò.'
-        };
+    if (/^(?:code|cmd[_ -]?code|kòd|kod)$/i.test(normalizeText(actionName))) {
+        const codeFallbacks = { fr: 'Le code n’a pas pu être généré.', en: 'The code could not be generated.', es: 'No se pudo generar el código.', ht: 'Kòd la pa t kapab kreye.' };
         return codeFallbacks[lang];
     }
-    return String(messages[lang][category] || messages.ht[category]).replace(/\s+/g, ' ').trim();
+    return messages[lang][category];
 }
 
 async function explainActionError(error, language, actionName, userName, messageTimestamp) {
@@ -10837,14 +10858,14 @@ async function explainActionError(error, language, actionName, userName, message
 async function sendActionError(sock, jid, actionName, error, language, userName, messageTimestamp, sendOptions = {}) {
     const rawError = redactActionError(error);
     console.error('[action-error]', { action: String(actionName || 'Action'), error: rawError.slice(0, 1200) });
-    const explanation = await explainActionError(error, language, actionName, userName, messageTimestamp);
+    const explanation = errorFallbackText(actionName, language, /(?:not-authorized|forbidden|permission|admin|403)/i.test(rawError) ? 'permission_or_admin' : /(?:timeout|timed out|abort)/i.test(rawError) ? 'timeout' : /(?:signal|decrypt|bad mac|websocket)/i.test(rawError) ? 'connection_or_encryption' : 'action_failure');
     const sentResult = await sendImageCaptioned(sock, jid, adamLogoBuffer, actionName || 'Action', explanation, userName || 'Inconnu', sendOptions);
     if (!sentResult?.key?.id) throw new Error('whatsapp_action_error_message_id_missing');
     return sentResult;
 }
 
 const canonicalCommandAliases = {
-    ai: 'ai', ia: 'ai', asistan: 'ai', iu: 'ai', tfasistan: 'ai', lang: 'lang', language: 'lang', image: 'imaj', imagen: 'imaj', imaj: 'imaj',
+    ai: 'ai', ia: 'ai', assistant: 'ai', asistente: 'ai', asistan: 'ai', iu: 'ai', tfasistan: 'ai', lang: 'lang', language: 'lang', image: 'imaj', imagen: 'imaj', imaj: 'imaj',
     search: 'cheche', chercher: 'cheche', buscar: 'cheche', cheche: 'cheche',
     menu: 'menu', meni: 'menu', 'menú': 'menu', cmds: 'menu', qrbot: 'qrbot', qr: 'qr', code: 'code', codigo: 'code', kòd: 'code',
     link: 'lien', lien: 'lien', enlace: 'lien', lyen: 'lien', sites: 'sites', sit: 'sites',
@@ -10901,7 +10922,7 @@ function hasExplicitAiCommandPrefix(body) {
     source = source.replace(/^\./u, '').trim();
     const match = source.match(/^([\p{L}\p{N}_-]+)(?:(?:\s+|[:：,]\s*)([\s\S]*)|$)/u);
     if (!match) return false;
-    return new Set(['ai', 'ia', 'asistan', 'iu', 'tfasistan']).has(normalizeText(match[1]));
+    return new Set(['ai', 'ia', 'assistant', 'asistente', 'asistan', 'iu', 'tfasistan']).has(normalizeText(match[1]));
 }
 
 function parseIncomingCommand(body, language, context = {}) {
@@ -10918,7 +10939,7 @@ function parseIncomingCommand(body, language, context = {}) {
     
     let parsedArgs = args;
     if (internalCommand === 'ai') {
-        const aiPrefixes = new Set(['ai', 'ia', 'asistan', 'iu', 'tfasistan']);
+        const aiPrefixes = new Set(['ai', 'ia', 'assistant', 'asistente', 'asistan', 'iu', 'tfasistan']);
         for (let i = 0; i < 4 && parsedArgs; i++) {
             const prefixMatch = parsedArgs.match(/^([\p{L}\p{N}_-]+)[*`_]*(?:(?:\s+|[:：,]\s*)([\s\S]*)|$)/u);
             if (!prefixMatch || !aiPrefixes.has(normalizeText(prefixMatch[1]))) break;
@@ -10987,7 +11008,6 @@ async function cleanupSocket(sessionId, options = {}) {
     const authStoreQuietMs = Math.max(250, Math.min(5000, Number(options.authStoreQuietMs) || 1200));
     const socketCloseTimeoutMs = Math.max(1000, Math.min(10000, Number(options.socketCloseTimeoutMs) || 5000));
     clearSessionOpenReadinessRetry(sessionId);
-    pendingInboundMessagesBySession.delete(sessionId);
     const session = activeSessions.get(sessionId);
     if (typeof session?.authState?.setAuthSocket === 'function') session.authState.setAuthSocket(null);
     const oldSocket = session?.sock;
@@ -11620,6 +11640,16 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     });
                 }
                 if (item?.key?.id && update.message && typeof update.message === 'object') {
+                    const hydrationMessageId = String(item.key.id);
+                    const hydrationCacheKey = `${sessionId}:id:${hydrationMessageId}`;
+                    const hydrationTimestampSeconds = Number(item?.messageTimestamp && typeof item.messageTimestamp.toNumber === 'function' ? item.messageTimestamp.toNumber() : item?.messageTimestamp) || 0;
+                    const hydrationOpenedAt = Number(activeSessions.get(sessionId)?.socketOpenedAt || 0);
+                    const hydrationPredatesSocket = hydrationOpenedAt > 0 && hydrationTimestampSeconds > 0 && hydrationTimestampSeconds * 1000 < hydrationOpenedAt - 15000;
+                    if (processedLocalCache.has(hydrationCacheKey) || hydrationPredatesSocket) {
+                        console.info('[message-update-hydration-ignored]', { sessionId, messageId: hydrationMessageId, reason: processedLocalCache.has(hydrationCacheKey) ? 'already_processed_or_history_sync' : 'message_predates_current_socket', action: 'do_not_redispatch_as_new_command' });
+                        processedLocalCache.add(hydrationCacheKey);
+                        continue;
+                    }
                     const hydrated = { ...item, ...update, key: item.key, message: update.message };
                     const hydratedBody = String(extractBody(hydrated) || '').trim();
                     const hydratedFormat = getWhatsAppMessageFormat(hydrated);
@@ -11971,14 +12001,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     const reconnectTimer = reconnectTimers.get(sessionId);
                     if (reconnectTimer) clearTimeout(reconnectTimer);
                     reconnectTimers.delete(sessionId);
-                    const replayedPendingMessages = flushPendingInboundMessages(sessionId, sock);
-                    if (replayedPendingMessages) console.info('[session-open-pending-messages-replayed]', { sessionId, count: replayedPendingMessages });
+                    currentSession.socketOpenedAt = Date.now();
+                    console.info('[session-open-history-boundary-set]', { sessionId, socketOpenedAt: currentSession.socketOpenedAt, action: 'ignore_messages_created_before_this_socket_open' });
                     scheduleSessionListBroadcast('whatsapp_connection_open');
                 }
             }
             if (connection === 'close') {
                 clearSessionOpenReadinessRetry(sessionId, sock);
-                pendingInboundMessagesBySession.delete(sessionId);
                 sessionData.active = false;
                 const currentSession = activeSessions.get(sessionId);
                 const previousStatus = currentSession?.status || null;
@@ -12440,7 +12469,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             if (!identityValues.length) return false;
             const botIdentities = [currentBotJid, sock.user?.id, sock.user?.lid, sock.user?.phoneNumber, state.creds?.me?.id, state.creds?.me?.lid].map(value => String(value || '').trim()).filter(Boolean);
             const ownerRecordBelongsToSession = String(ownerDocument?.sessionId || '') === String(sessionId || '');
-            const ownerIdentities = (ownerRecordBelongsToSession ? [ownerDocument?.Number, ownerDocument?.number, ownerDocument?.OwnerNumber, ownerDocument?.ownerNumber, ownerDocument?.OwnerPhone, ownerDocument?.ownerPhone, ownerDocument?.DeployerNumber, ownerDocument?.deployerNumber, ownerDocument?.PairingNumber, ownerDocument?.AccountJid, ownerDocument?.accountJid, ownerDocument?.OwnerLid, ownerDocument?.ownerLid] : []).map(value => String(value || '').trim()).filter(Boolean);
+            const configuredOwnerIdentities = getConfiguredOwnerAccessIdentities(ownerDocument, sessionId);
+            const ownerIdentities = [...(ownerRecordBelongsToSession ? [ownerDocument?.Number, ownerDocument?.number, ownerDocument?.OwnerNumber, ownerDocument?.ownerNumber, ownerDocument?.OwnerPhone, ownerDocument?.ownerPhone, ownerDocument?.DeployerNumber, ownerDocument?.deployerNumber, ownerDocument?.PairingNumber, ownerDocument?.AccountJid, ownerDocument?.accountJid, ownerDocument?.OwnerLid, ownerDocument?.ownerLid] : []), ...[...configuredOwnerIdentities.numbers].map(number => `${number}@s.whatsapp.net`), ...configuredOwnerIdentities.lids].map(value => String(value || '').trim()).filter(Boolean);
             const normalizeIdentifier = value => normalizeActionJid(value);
             const targetIdentifiers = identityValues.map(normalizeIdentifier).filter(Boolean);
             if (targetIdentifiers.some(value => botIdentities.some(botValue => normalizeIdentifier(botValue) === value))) return true;
@@ -12453,8 +12483,23 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const rememberedNumber = normalizedJidNumber(remembered);
                 if (rememberedNumber) targetNumbers.push(rememberedNumber);
             }
-            if (targetNumbers.some(number => ownerNumbers.includes(number) || botNumbers.includes(number))) return true;
-            return false;
+            if (targetNumbers.some(number => ownerNumbers.includes(number) || botNumbers.includes(number) || configuredOwnerIdentities.numbers.has(number))) return true;
+            return identityValues.some(value => configuredOwnerIdentities.lids.has(normalizeLidCacheKey(value)));
+        };
+
+        const isProtectedTargetRequestWithoutJid = (requestedValue, ownerDocument) => {
+            const raw = String(requestedValue || '').trim().replace(/^@/, '');
+            if (!raw) return false;
+            const normalizedName = normalizePersonName(raw);
+            const protectedNames = [ownerDocument?.Name, ownerDocument?.name, activeHostName, sock.user?.name, sock.user?.notify]
+                .map(normalizePersonName)
+                .filter(Boolean);
+            if (normalizedName && protectedNames.includes(normalizedName)) return true;
+            const configured = getConfiguredOwnerAccessIdentities(ownerDocument, sessionId);
+            const requestedNumber = normalizePhoneNumber(raw);
+            if (/^\d{6,20}$/.test(requestedNumber) && configured.numbers.has(requestedNumber)) return true;
+            const requestedLid = normalizeLidCacheKey(raw);
+            return /@lid$/i.test(requestedLid) && configured.lids.has(requestedLid);
         };
 
         const resolveTargets = async (arg, m, metadata = null, ownerDocument = null, currentBotJid = null) => {
@@ -12697,6 +12742,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 try {
                 const messageUpsertHandlerStartedAt = Date.now();
                 const activeMessageSession = activeSessions.get(sessionId);
+                const activeMessageStatusAtReceipt = String(activeMessageSession?.status || '').toLowerCase();
                 const activeMessageCredentials = activeMessageSession?.authState?.creds;
                 const activeMessageIdentity = getAuthenticatedPhoneNumber(sock.user, activeMessageCredentials) || getAuthenticatedLid(sock.user, activeMessageCredentials);
                 const activeMessageReadyState = sock?.ws?.readyState ?? sock?.ws?._socket?.readyState ?? sock?.socket?.readyState;
@@ -12722,10 +12768,49 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             .catch(ownerMessageSaveError => console.warn('[owner-outgoing-message-retry-copy-save-failed]', { sessionId, messageId: earlyReceivedId, error: ownerMessageSaveError?.message || String(ownerMessageSaveError) }));
                     }
                 }
+                const earlyMessageTimestampSeconds = Number(m?.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m?.messageTimestamp) || 0;
+                const earlyMessageAgeMs = earlyMessageTimestampSeconds > 0 ? Math.max(0, Date.now() - earlyMessageTimestampSeconds * 1000) : 0;
+                const sessionWasSynchronizingAtReceipt = ['opening', 'synchronisation', 'synchronizing', 'reconnexion', 'connecting', 'initialisation', 'pairing', 'qr_disponible'].includes(activeMessageStatusAtReceipt);
+                const socketOpenedAt = Number(activeMessageSession?.socketOpenedAt || 0);
+                const messagePredatesCurrentSocket = socketOpenedAt > 0 && earlyMessageTimestampSeconds > 0 && earlyMessageTimestampSeconds * 1000 < socketOpenedAt - 15000;
+                const ignoreHistoricalMessage = upsertType === 'append' || messagePredatesCurrentSocket || (upsertType === 'notify' && sessionWasSynchronizingAtReceipt && earlyMessageAgeMs > 30000);
+                if (ignoreHistoricalMessage) {
+                    const historyMessageId = String(m?.key?.id || '').trim();
+                    const historyChat = String(m?.key?.remoteJid || m?.key?.remoteJidAlt || 'unknown-chat');
+                    cacheRecentMessage(sessionId, m);
+                    cacheMessageIdentityAliases(sessionId, m);
+                    if (historyMessageId) {
+                        const historyCacheKey = `${sessionId}:id:${historyMessageId}`;
+                        processedLocalCache.add(historyCacheKey);
+                        if (processedLocalCache.size > 3000) {
+                            const historyKeys = Array.from(processedLocalCache);
+                            for (let historyIndex = 0; historyIndex < 500 && historyIndex < historyKeys.length; historyIndex++) processedLocalCache.delete(historyKeys[historyIndex]);
+                        }
+                        void claimMessageForProcessing(sessionId, historyMessageId, historyChat, liveAccountPhone || liveAccountLid || activeMessageIdentity || '', upsertType)
+                            .then(claimed => claimed ? finishMessageProcessingClaim(sessionId, historyMessageId, liveAccountPhone || liveAccountLid || activeMessageIdentity || '', true, 'history_sync_ignored') : false)
+                            .catch(historyClaimError => console.warn('[message-history-ignore-claim-failed]', { sessionId, messageId: historyMessageId, error: historyClaimError?.message || String(historyClaimError) }));
+                    }
+                    console.info('[message-history-sync-ignored]', { sessionId, messageId: historyMessageId || null, chatJid: historyChat, upsertType, messageAgeMs: earlyMessageAgeMs || null, sessionStatusAtReceipt: activeMessageStatusAtReceipt || null, fromMe: m?.key?.fromMe === true, action: 'retain_for_history_and_duplicate_detection_without_command_dispatch' });
+                    continue;
+                }
                 const activeMessageAuthenticated = activeMessageOperational;
                 if (!activeMessageAuthenticated) {
-                    const deferred = enqueuePendingInboundMessage(sessionId, sock, m);
-                    console.info(deferred ? '[message-deferred-until-session-open]' : '[message-ignored]', { sessionId, messageId: m?.key?.id || null, chatJid: m?.key?.remoteJid || m?.key?.remoteJidAlt || null, reason: deferred ? 'session_transition_authentication_pending' : 'session_not_authenticated_and_active', registered: activeMessageCredentials?.registered === true, identityAvailable: !!activeMessageIdentity, socketReady: activeMessageSocketReady, deferred });
+                    const transitionMessageId = String(m?.key?.id || '').trim();
+                    const transitionChat = String(m?.key?.remoteJid || m?.key?.remoteJidAlt || 'unknown-chat');
+                    cacheRecentMessage(sessionId, m);
+                    cacheMessageIdentityAliases(sessionId, m);
+                    if (transitionMessageId) {
+                        const transitionCacheKey = `${sessionId}:id:${transitionMessageId}`;
+                        processedLocalCache.add(transitionCacheKey);
+                        if (processedLocalCache.size > 3000) {
+                            const transitionKeys = Array.from(processedLocalCache);
+                            for (let transitionIndex = 0; transitionIndex < 500 && transitionIndex < transitionKeys.length; transitionIndex++) processedLocalCache.delete(transitionKeys[transitionIndex]);
+                        }
+                        void claimMessageForProcessing(sessionId, transitionMessageId, transitionChat, liveAccountPhone || liveAccountLid || activeMessageIdentity || '', upsertType)
+                            .then(claimed => claimed ? finishMessageProcessingClaim(sessionId, transitionMessageId, liveAccountPhone || liveAccountLid || activeMessageIdentity || '', true, 'session_transition_ignored') : false)
+                            .catch(transitionClaimError => console.warn('[message-transition-ignore-claim-failed]', { sessionId, messageId: transitionMessageId, error: transitionClaimError?.message || String(transitionClaimError) }));
+                    }
+                    console.info('[message-ignored-during-session-transition]', { sessionId, messageId: transitionMessageId || null, chatJid: transitionChat, upsertType, sessionStatusAtReceipt: activeMessageStatusAtReceipt || null, registered: activeMessageCredentials?.registered === true, identityAvailable: !!activeMessageIdentity, socketReady: activeMessageSocketReady, action: 'mark_processed_without_replay_or_command_dispatch' });
                     continue;
                 }
                 const liveSessionForMessage = activeSessions.get(sessionId);
@@ -13841,13 +13926,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, 'Mode', t.owner_required, pushName, false, activeHostName);
                                                 break;
                                             }
-                                            if (sOwnerTop.mode === 'prive') {
-                                                await safeSendFormatted(sock, from, "Mode", t.already_private, pushName, false, activeHostName);
-                                            } else {
+                                            if (sOwnerTop.mode !== 'prive') {
                                                 sOwnerTop.mode = 'prive';
                                                 await db.collection('session_owners').updateOne({ sessionId: sessionId }, { $set: { mode: 'prive' } });
                                                 sessionOwnersCache.set(sessionId, sOwnerTop);
-                                                await safeSendFormatted(sock, from, "Mode", t.mode_changed_private, pushName, false, activeHostName);
                                             }
                                             break;
                                         case 'public':
@@ -13855,13 +13937,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, 'Mode', t.owner_required, pushName, false, activeHostName);
                                                 break;
                                             }
-                                            if (sOwnerTop.mode === 'public') {
-                                                await safeSendFormatted(sock, from, "Mode", t.already_public, pushName, false, activeHostName);
-                                            } else {
+                                            if (sOwnerTop.mode !== 'public') {
                                                 sOwnerTop.mode = 'public';
                                                 await db.collection('session_owners').updateOne({ sessionId: sessionId }, { $set: { mode: 'public' } });
                                                 sessionOwnersCache.set(sessionId, sOwnerTop);
-                                                await safeSendFormatted(sock, from, "Mode", t.mode_changed_public, pushName, false, activeHostName);
                                             }
                                             break;
                                         case 'menu':
@@ -13984,12 +14063,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                             await new Promise(resolve => setTimeout(resolve, 250));
                                                         }
                                                         if (!permanentSessionReady) throw new Error('qr_session_open_confirmation_timeout');
-                                                        const activeMsg = t.qrbot_active.replace('{id}', realId);
-                                                        await sendFormatted(sock, from, t.qrbot_connected, activeMsg, pushName, false, activeHostName);
+                                                        console.info('[qrbot-session-connected]', { sessionId: tempId, createdSessionId: realId, action: 'connection_established_without_confirmation_message' });
                                                         console.info('[qr-session-promoted-and-ready]', { temporarySessionId: tempId, sessionId: permanentSessionId, accountIdentityVerified: true, authWritesFlushedBeforeRename: true, authWritesFlushedAfterRename: true, permanentSocketOpen: true });
                                                     } catch (qrPromotionError) {
                                                         console.error('[qr-session-promotion-failed]', { temporarySessionId: tempId, sessionId: permanentSessionId, error: qrPromotionError?.message || String(qrPromotionError), authPreserved: true });
-                                                        try { await safeSendFormatted(sock, from, t.qrbot_connected, t.command_error, pushName, true, activeHostName); } catch (sendError) {}
+                                                        try { await safeSendFormatted(sock, from, t.cmd_qrbot, t.command_error, pushName, true, activeHostName); } catch (sendError) {}
                                                     }
                                                 }
                                                 if (connection === 'close') {
@@ -14014,20 +14092,17 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 break;
                                             }
                                             try {
-                                                const metadataLien = await promiseWithTimeout(getGroupMetadataCached(sessionId, sock, from), 2500, 'cached group metadata for link command').catch(error => {
-                                                    console.warn('[link-group-metadata-optional-timeout]', { sessionId, error: error?.message || String(error) });
-                                                    return null;
-                                                });
+                                                const metadataLien = getCachedGroupMetadata(sessionId, from) || null;
                                                 const c = await sock.groupInviteCode(from);
                                                 const link = `https://chat.whatsapp.com/${c}`;
-                                                
                                                 let lienTextForm = '';
                                                 if (metadataLien && metadataLien.subject) lienTextForm += `*${metadataLien.subject}*\n`;
                                                 lienTextForm += `> _${link}_`;
                                                 if (metadataLien && metadataLien.desc) lienTextForm += `\n\n${String(metadataLien.desc)}`;
-
                                                 const lienCapTitle = t.cmd_lien.charAt(0).toUpperCase() + t.cmd_lien.slice(1);
-                                                await trackedSendImageCaptioned(sock, from, adamLogoBuffer, lienCapTitle, lienTextForm, pushName);
+                                                const groupProfilePicture = await getWhatsAppGroupProfilePictureBuffer(sock, from, 2200);
+                                                if (groupProfilePicture) await trackedSendImageCaptioned(sock, from, groupProfilePicture, lienCapTitle, lienTextForm, pushName);
+                                                else await safeSendFormatted(sock, from, lienCapTitle, lienTextForm, pushName, false, activeHostName);
                                             } catch (e) {
                                                 await safeSendActionError(sock, from, t.cmd_lien, e, messageLang, pushName, m.messageTimestamp);
                                             }
@@ -14046,6 +14121,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             await trackedSendImageCaptioned(sock, from, adamLogoBuffer, tagTitle, tagBody, pushName, { mentions: participants, preserveFormatting: true });
                                             break;
                                         case 'add':
+                                            if (isGroup && isProtectedTargetRequestWithoutJid(args, sOwnerTop)) {
+                                                console.info('[protected-group-target-ignored]', { sessionId, group: from, command: 'add', targetMatchedBy: 'owner_or_bot_name_before_permission_checks' });
+                                                break;
+                                            }
                                             const isAdminKAdd = await checkAdmin();
                                             if (!isGroup || !isAdminKAdd) {
                                                 await safeSendFormatted(sock, from, t.cmd_add, isGroup ? t.admin_required : t.group_required, pushName, true, activeHostName);
@@ -14054,12 +14133,16 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             const metadataAdd = await getMeta();
                                             const targetsAdd = await resolveTargets(args, m, metadataAdd, sOwnerTop, botId);
                                             if (targetsAdd.length === 0) {
+                                                if (isProtectedTargetRequestWithoutJid(args, sOwnerTop)) {
+                                                    console.info('[protected-group-target-ignored]', { sessionId, group: from, command: 'add', targetMatchedBy: 'owner_or_bot_identity_without_resolved_jid' });
+                                                    break;
+                                                }
                                                 await safeSendFormatted(sock, from, t.cmd_add, t.target_usage.replace('{command}', t.cmd_add), pushName, true, activeHostName);
                                                 break;
                                             }
-                                            const filteredTargetsAdd = targetsAdd.filter(tr => tr !== botId);
+                                            const filteredTargetsAdd = targetsAdd.filter(target => !isProtectedWhatsAppTarget(target, sOwnerTop, botId, findActionParticipant(target, metadataAdd)?.phoneNumber || findActionParticipant(target, metadataAdd)?.phone || ''));
                                             if (filteredTargetsAdd.length === 0) {
-                                                await safeSendFormatted(sock, from, t.cmd_add, t.no_eligible_target, pushName, true, activeHostName);
+                                                console.info('[protected-group-target-ignored]', { sessionId, group: from, command: 'add', action: 'ignore_owner_or_bot_target' });
                                                 break;
                                             }
                                             for (const target of filteredTargetsAdd) {
@@ -14076,6 +14159,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         case 'kick':
                                         case 'promote':
                                         case 'demote':
+                                            if (isGroup && isProtectedTargetRequestWithoutJid(args, sOwnerTop)) {
+                                                console.info('[protected-group-target-ignored]', { sessionId, group: from, command: internalCommand, targetMatchedBy: 'owner_or_bot_name_before_permission_checks' });
+                                                break;
+                                            }
                                             const isAdminK = await checkAdmin();
                                             if (!isGroup || !isAdminK) {
                                                 await safeSendFormatted(sock, from, t.cmd_kick, isGroup ? t.admin_required : t.group_required, pushName, true, activeHostName);
@@ -14084,6 +14171,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             const metadataTargets = await getMeta();
                                             const targets = await resolveTargets(args, m, metadataTargets, sOwnerTop, botId);
                                             if (targets.length === 0) {
+                                                if (isProtectedTargetRequestWithoutJid(args, sOwnerTop)) {
+                                                    console.info('[protected-group-target-ignored]', { sessionId, group: from, command: internalCommand, targetMatchedBy: 'owner_or_bot_identity_without_resolved_jid' });
+                                                    break;
+                                                }
                                                 const targetCommandLabel = internalCommand === 'kick' ? t.cmd_kick : internalCommand === 'promote' ? t.cmd_promote : t.cmd_demote;
                                                 await safeSendFormatted(sock, from, targetCommandLabel, t.target_usage.replace('{command}', targetCommandLabel), pushName, true, activeHostName);
                                                 break;
@@ -14094,7 +14185,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 return !isProtectedWhatsAppTarget(target, sOwnerTop, botId, alternates);
                                             });
                                             if (filteredTargets.length === 0) {
-                                                await safeSendFormatted(sock, from, getCommandActionTitle(t, internalCommand), t.no_eligible_target, pushName, true, activeHostName);
+                                                console.info('[protected-group-target-ignored]', { sessionId, group: from, command: internalCommand, action: 'ignore_owner_or_bot_target' });
                                                 break;
                                             }
                                             const actionMap = { kick: 'remove', promote: 'promote', demote: 'demote' };
@@ -14200,8 +14291,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             const currentB = await getGroupSetting(sessionId, from, 'bienvenue');
                                             const newB = !currentB;
                                             await setGroupSetting(sessionId, from, 'bienvenue', newB);
-                                            const bwStat = newB ? t.welcome_on : t.welcome_off;
-                                            await safeSendFormatted(sock, from, t.cmd_bienvenue, `*${bwStat}*`, pushName, false, activeHostName);
                                             break;
                                         case 'nolien':
                                             const isAdminNL = await checkAdmin();
@@ -14212,8 +14301,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             const currentNL = await getGroupSetting(sessionId, from, 'noLien');
                                             const newNL = currentNL === 'simple' ? 'off' : 'simple';
                                             await setGroupSetting(sessionId, from, 'noLien', newNL);
-                                            const nlStat = newNL === 'simple' ? t.nolien_on : t.nolien_off;
-                                            await safeSendFormatted(sock, from, t.cmd_nolien, `*${nlStat}*`, pushName, false, activeHostName);
                                             break;
                                         case 'nolien2':
                                             const isAdminNL2 = await checkAdmin();
@@ -14224,8 +14311,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             const currentNL2 = await getGroupSetting(sessionId, from, 'noLien');
                                             const newNL2 = currentNL2 === 'strict' ? 'off' : 'strict';
                                             await setGroupSetting(sessionId, from, 'noLien', newNL2);
-                                            const nl2Stat = newNL2 === 'strict' ? t.nolien2_on : t.nolien2_off;
-                                            await safeSendFormatted(sock, from, t.cmd_nolien2, `*${nl2Stat}*`, pushName, false, activeHostName);
                                             break;
                                         case 'del':
                                             if (!quoted?.stanzaId) {
@@ -14235,7 +14320,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             const cachedQuotedMessage = recentMsgsCache.find(entry => entry.sessionId === sessionId && entry.id === quoted.stanzaId && entry.from === from);
                                             const quotedOriginalKey = cachedQuotedMessage?.key || {};
                                             const quotedParticipant = quotedOriginalKey.participant || quoted.participant || (isGroup ? cachedQuotedMessage?.sender : null) || null;
-                                            const quotedFromMe = !!cachedQuotedMessage?.fromMe || !!quotedOriginalKey.fromMe;
+                                            const quotedFromMe = !!cachedQuotedMessage?.fromMe || !!quotedOriginalKey.fromMe || quoted.fromMe === true;
+                                            const quotedDelProtected = quotedFromMe || !!(sOwnerTop && isProtectedWhatsAppTarget(quotedParticipant, sOwnerTop, sock.user?.id || botId, [quotedOriginalKey.remoteJid, quotedOriginalKey.remoteJidAlt, quotedOriginalKey.participant, quotedOriginalKey.participantAlt, quotedOriginalKey.participantPn, quotedOriginalKey.senderPn, quoted.participant, quoted.participantPn, quoted.participantAlt, quoted.senderPn].filter(Boolean).join(' ')));
+                                            if (quotedDelProtected) {
+                                                console.info('[protected-group-target-ignored]', { sessionId, group: from, command: 'del', quotedMessageId: quoted.stanzaId, action: 'ignore_owner_or_bot_message' });
+                                                break;
+                                            }
                                             if (isGroup) {
                                                 if (quotedFromMe && !isOwnerReal) {
                                                     await safeSendFormatted(sock, from, t.cmd_del, t.owner_required, pushName, true, activeHostName);
@@ -14264,9 +14354,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                     console.error('[message-delete-failed]', { sessionId, chat: from, messageId: quoted.stanzaId, deleteEveryone: deleteEveryoneError?.message || String(deleteEveryoneError), deleteForMe: deleteForMeError?.message || String(deleteForMeError) });
                                                 }
                                             }
-                                            await safeSendFormatted(sock, from, t.cmd_del, deletionCompleted ? t.del_completed : t.delete_failed, pushName, false, activeHostName);
+                                            if (!deletionCompleted) await safeSendFormatted(sock, from, t.cmd_del, errorFallbackText('del', messageLang), pushName, false, activeHostName);
                                             break;
                                         case 'del2':
+                                            if (isGroup && isProtectedTargetRequestWithoutJid(args, sOwnerTop)) {
+                                                console.info('[protected-group-target-ignored]', { sessionId, group: from, command: 'del2', targetMatchedBy: 'owner_or_bot_name_before_permission_checks' });
+                                                break;
+                                            }
                                             const isAdminDel2 = await checkAdmin();
                                             if (!isGroup || !isAdminDel2) {
                                                 await safeSendFormatted(sock, from, t.cmd_del2, isGroup ? t.admin_required : t.group_required, pushName, true, activeHostName);
@@ -14275,13 +14369,17 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             const metadataDel2 = await getMeta();
                                             const targetsDel2 = await resolveTargets(args, m, metadataDel2, sOwnerTop, botId);
                                             if (targetsDel2.length === 0) {
+                                                if (isProtectedTargetRequestWithoutJid(args, sOwnerTop)) {
+                                                    console.info('[protected-group-target-ignored]', { sessionId, group: from, command: 'del2', targetMatchedBy: 'owner_or_bot_identity_without_resolved_jid' });
+                                                    break;
+                                                }
                                                 await safeSendFormatted(sock, from, t.cmd_del2, t.del2_usage, pushName, true, activeHostName);
                                                 break;
                                             }
                                             const targetJid = targetsDel2[0];
                                             const targetParticipantDel2 = findActionParticipant(targetJid, metadataDel2);
                                             if (isProtectedWhatsAppTarget(targetJid, sOwnerTop, botId, targetParticipantDel2?.phoneNumber || targetParticipantDel2?.phone || targetParticipantDel2?.idAlt || '')) {
-                                                await safeSendFormatted(sock, from, t.cmd_del2, t.no_eligible_target, pushName, true, activeHostName);
+                                                console.info('[protected-group-target-ignored]', { sessionId, group: from, command: 'del2', action: 'ignore_owner_or_bot_target' });
                                                 break;
                                             }
                                             const currentDel2Targets = await getDel2Targets(sessionId, from);
@@ -14299,15 +14397,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 const storedNumber = normalizedJidNumber(storedTarget);
                                                 return !!storedNumber && storedNumber === normalizedJidNumber(targetJid);
                                             });
-                                            let msgTextDel2 = "";
-                                            if (existingDel2Target) {
-                                                await removeDel2Target(sessionId, from, existingDel2Target);
-                                                msgTextDel2 = t.del2_deactivated.replace('{user}', targetJid.split('@')[0]);
-                                            } else {
-                                                await addDel2Target(sessionId, from, targetJid);
-                                                msgTextDel2 = t.del2_activated.replace('{user}', targetJid.split('@')[0]);
-                                            }
-                                            await trackedSendImageCaptioned(sock, from, adamLogoBuffer, t.cmd_del2, msgTextDel2, pushName, { mentions: [targetJid] });
+                                            if (existingDel2Target) await removeDel2Target(sessionId, from, existingDel2Target);
+                                            else await addDel2Target(sessionId, from, targetJid);
                                             break;
                                         case 'del3':
                                             if (!isGroup) {
@@ -14355,7 +14446,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             if (quoted.participantAlt) quotedDel3Key.participantAlt = quoted.participantAlt;
                                             if (quoted.participantPn) quotedDel3Key.participantPn = quoted.participantPn;
                                             if (quoted.senderPn) quotedDel3Key.senderPn = quoted.senderPn;
-                                            const quotedDel3OwnerProtected = !!(sOwnerTop && isProtectedWhatsAppTarget(quotedDel3Participant, sOwnerTop, sock.user?.id || '', [quotedDel3Key.remoteJid, quotedDel3Key.remoteJidAlt, quotedDel3Key.participant, quotedDel3Key.participantAlt, quotedDel3Key.participantPn, quotedDel3Key.senderPn].filter(Boolean).join(' ')));
+                                            const quotedDel3OwnerProtected = quotedDel3FromMe || !!(sOwnerTop && isProtectedWhatsAppTarget(quotedDel3Participant, sOwnerTop, sock.user?.id || botId, [quotedDel3Key.remoteJid, quotedDel3Key.remoteJidAlt, quotedDel3Key.participant, quotedDel3Key.participantAlt, quotedDel3Key.participantPn, quotedDel3Key.senderPn].filter(Boolean).join(' ')));
+                                            if (quotedDel3OwnerProtected) {
+                                                console.info('[protected-group-target-ignored]', { sessionId, group: from, command: 'del3', quotedMessageId: quotedDel3Id, action: 'ignore_owner_or_bot_message' });
+                                                break;
+                                            }
                                             const currentDel3Rules = await getDel3Rules(sessionId, from);
                                             const del3AlreadyEnabled = !!del3Format && currentDel3Rules.some(rule => rule.format === del3Format);
                                             const botCanModerateDel3 = await canBotModerateGroup(from, true);
@@ -14366,44 +14461,29 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             console.info('[del3-selected-message-kept-as-format-sample]', { sessionId, group: from, messageId: quotedDel3Id, format: del3Format || 'unknown', ownerProtected: quotedDel3OwnerProtected, fromMe: quotedDel3FromMe, action: 'do_not_delete_the_selected_sample; only_future_matching_messages_are_subject_to_the_rule' });
                                             if (!del3Format) {
                                                 console.info('[del3-selected-message-format-unknown]', { sessionId, group: from, messageId: quotedDel3Id, messageContentAvailable: !!quotedDel3Message, automaticRuleChanged: false });
-                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_deleted_unclassified || t.del3_delete_failed, pushName, false, activeHostName);
                                                 break;
                                             }
                                             if (del3AlreadyEnabled) {
                                                 await removeDel3Rule(sessionId, from, del3Format);
-                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_deactivated, pushName, false, activeHostName);
                                                 console.info('[del3-rule-deactivated]', { sessionId, group: from, format: del3Format, selectedSamplePreserved: true });
                                                 break;
                                             }
                                             await stageDel3Rule(sessionId, from, del3Format, extractBody({ message: quotedDel3Message }));
-                                            console.info('[del3-rule-staged]', { sessionId, group: from, format: del3Format, selectedSamplePreserved: true, activationRequiresDeliveredConfirmation: true });
-                                            let del3ActivationConfirmation = null;
-                                            try {
-                                                del3ActivationConfirmation = await safeSendFormatted(sock, from, t.cmd_del3, t.del3_activated, pushName, false, activeHostName);
-                                            } catch (del3ConfirmationError) {
-                                                await discardPendingDel3Rule(sessionId, from, del3Format).catch(() => {});
-                                                throw del3ConfirmationError;
-                                            }
-                                            if (!del3ActivationConfirmation?.key?.id) {
-                                                await discardPendingDel3Rule(sessionId, from, del3Format).catch(() => {});
-                                                console.warn('[del3-rule-not-activated]', { sessionId, group: from, format: del3Format, reason: 'activation_confirmation_not_delivered', selectedSamplePreserved: true });
-                                                break;
-                                            }
+                                            console.info('[del3-rule-staged]', { sessionId, group: from, format: del3Format, selectedSamplePreserved: true, activationRequiresDeliveredConfirmation: false });
                                             try {
                                                 const activatedAt = await activateDel3Rule(sessionId, from, del3Format);
-                                                console.info('[del3-rule-activated]', { sessionId, group: from, format: del3Format, activatedAt, confirmationMessageId: del3ActivationConfirmation.key.id, futureMessages: 'same_group_same_whatsapp_format_except_host_and_bot' });
+                                                console.info('[del3-rule-activated]', { sessionId, group: from, format: del3Format, activatedAt, futureMessages: 'same_group_same_whatsapp_format_except_host_and_bot' });
                                             } catch (del3ActivationError) {
                                                 await discardPendingDel3Rule(sessionId, from, del3Format).catch(() => {});
-                                                console.error('[del3-rule-activation-failed-after-confirmation]', { sessionId, group: from, format: del3Format, error: del3ActivationError?.message || String(del3ActivationError), selectedSamplePreserved: true });
-                                                try { await sendImageCaptioned(sock, from, adamLogoBuffer, t.cmd_del3, t.command_error, pushName); } catch (sendError) {}
+                                                console.error('[del3-rule-activation-failed]', { sessionId, group: from, format: del3Format, error: del3ActivationError?.message || String(del3ActivationError), selectedSamplePreserved: true });
                                                 break;
                                             }
                                             if (!quotedDel3OwnerProtected && !quotedDel3FromMe) {
                                                 try {
                                                     const del3SampleDeletion = await queuedDeleteMessageWithAck(sock, from, quotedDel3Key, 180, 6500);
-                                                    console.info('[del3-selected-sample-deleted-after-confirmation]', { sessionId, group: from, sampleMessageId: quotedDel3Id, format: del3Format, confirmationMessageId: del3ActivationConfirmation.key.id, acknowledgementStatus: del3SampleDeletion?.acknowledgementStatus || null });
+                                                    console.info('[del3-selected-sample-deleted]', { sessionId, group: from, sampleMessageId: quotedDel3Id, format: del3Format, acknowledgementStatus: del3SampleDeletion?.acknowledgementStatus || null });
                                                 } catch (del3SampleDeleteError) {
-                                                    console.warn('[del3-selected-sample-delete-failed-after-confirmation]', { sessionId, group: from, sampleMessageId: quotedDel3Id, format: del3Format, error: del3SampleDeleteError?.message || String(del3SampleDeleteError), ruleRemainsActive: true });
+                                                    console.warn('[del3-selected-sample-delete-failed]', { sessionId, group: from, sampleMessageId: quotedDel3Id, format: del3Format, error: del3SampleDeleteError?.message || String(del3SampleDeleteError), ruleRemainsActive: true });
                                                 }
                                             } else {
                                                 console.info('[del3-selected-sample-protected]', { sessionId, group: from, sampleMessageId: quotedDel3Id, ownerProtected: quotedDel3OwnerProtected, fromMe: quotedDel3FromMe, action: 'preserve_selected_sample' });
@@ -14576,9 +14656,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                     { $set: { lang: messageLang, updatedAt: Date.now(), expireAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) }, $setOnInsert: { createdAt: new Date() } },
                                                     { upsert: true }
                                                 );
-                                                const languageTranslations = translations[messageLang] || translations.ht;
-                                                const languageText = languageTranslations.lang_changed.replace('{lang}', `${langCode.toUpperCase()} (${getLanguageLabel(langCode, messageLang)})`);
-                                                await safeSendFormatted(sock, from, languageTranslations.lang_title, languageText, pushName, false, activeHostName);
                                             } else if (!langCode) {
                                                 const currentLanguage = (translations[messageLang] || translations.ht).lang_current.replace('{lang}', `${messageLang.toUpperCase()} (${getLanguageLabel(messageLang, messageLang)})`);
                                                 await safeSendFormatted(sock, from, t.lang_title, currentLanguage, pushName, false, activeHostName);
@@ -14660,39 +14737,17 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 if (data?.ok !== true || !data?.code) throw new Error(String(data?.error || 'pair_code_not_returned'));
                                                 data.code = normalizePairingCode(data.code);
                                                 if (isCancelled) return;
-                                                if (data && data.code) {
-                                                    const tfid_code = crypto.randomInt(100000000000, 999999999999);
-                                                    const confirmLink_code = `${pairingApiBase.replace(/\/+$/, '')}/TF-${tfid_code}`;
-                                                    const confirmText = t.code_confirm.replace('{link}', confirmLink_code);
-                                                    const msgConfirmation = await trackedSendImageCaptioned(sock, from, adamLogoBuffer, t.cmd_code, confirmText, pushName);
-                                                    responseSentForLog = !!msgConfirmation;
-                                                    console.info('[pair-code-confirmation-sent]', { sessionId, messageId: msgId, replyTargetJid: from, responseMessageId: msgConfirmation?.key?.id || null, connectionFormat: normalizeConnectionFormat(activeSessions.get(sessionId)?.format || 'pair') });
-                                                    
-                                                    let clicked_code = false;
-                                                    const timeoutId_code = setTimeout(async () => {
-                                                        if (!clicked_code) {
-                                                            try { await queuedSendMessage(sock, from, { delete: msgConfirmation.key }, {}, 200); } catch (e) {}
-                                                            tfEvents.removeAllListeners('ok-' + tfid_code);
-                                                        }
-                                                    }, 120000);
-
-                                                    tfEvents.once('ok-' + tfid_code, async () => {
-                                                        clicked_code = true;
-                                                        clearTimeout(timeoutId_code);
-                                                        try {
-                                                            await queuedSendMessage(sock, from, { delete: msgConfirmation.key }, {}, 200);
-                                                            await queuedSendMessage(sock, from, { text: String(data.code).trim() }, {}, 200);
-                                                        } catch (e) {
-                                                            console.error('[pairing-code-confirmation-delivery-failed]', { sessionId, messageId: msgId, error: redactActionError(e).slice(0, 500) });
-                                                            await safeSendFormatted(sock, from, t.cmd_code, errorFallbackText('code', messageLang), pushName, true, activeHostName);
-                                                        }
-                                                    });
-                                                } else {
-                                                    throw new Error(data?.error || data?.message || 'code_api_response_missing_code');
+                                                if (!data || !data.code) throw new Error(data?.error || data?.message || 'pair_code_not_returned');
+                                                if (!isCancelled) {
+                                                    const codeMessage = await safeSendFormatted(sock, from, t.cmd_code, `*${String(data.code).trim()}*`, pushName, false, activeHostName);
+                                                    responseSentForLog = !!codeMessage?.key?.id;
+                                                    terminalResponseSent = responseSentForLog;
+                                                    console.info('[pairing-code-delivered]', { sessionId, messageId: msgId, delivered: responseSentForLog, connectionFormat: normalizeConnectionFormat(activeSessions.get(sessionId)?.format || 'pair') });
                                                 }
                                             } catch (e) {
+                                                const safeCodeMessage = t.code_error;
                                                 console.error('[pairing-code-command-failed]', { sessionId, messageId: msgId, error: redactActionError(e).slice(0, 700) });
-                                                await safeSendFormatted(sock, from, t.cmd_code, errorFallbackText('code', messageLang), pushName, true, activeHostName);
+                                                await safeSendFormatted(sock, from, t.cmd_code, safeCodeMessage, pushName, false, activeHostName);
                                                 terminalResponseSent = true;
                                             }
                                             break;
