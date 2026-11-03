@@ -4,7 +4,7 @@ const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(proces
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r129-bounded-pairing-515-restart-abort';
+const TFBOT_CLUSTER_CODE_REVISION = 'r130-terminal-incomplete-pairing-watchdog';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
@@ -1468,7 +1468,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-03-r129';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-03-r130';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1661,6 +1661,8 @@ const PAIRING_SESSION_TTL_MS = Math.max(10000, Math.min(60000, Number(process.en
 const PAIRING_CHALLENGE_TTL_MS = Math.max(10000, Math.min(60000, Number(process.env.PAIRING_CHALLENGE_TTL_MS) || 60000));
 const PAIRING_515_CREDENTIAL_TIMEOUT_MS = Math.max(3000, Math.min(20000, Number(process.env.PAIRING_515_CREDENTIAL_TIMEOUT_MS) || 10000));
 const PAIRING_515_STORE_TIMEOUT_MS = Math.max(4000, Math.min(20000, Number(process.env.PAIRING_515_STORE_TIMEOUT_MS) || 10000));
+const PAIRING_515_RESTART_OPEN_TIMEOUT_MS = Math.max(15000, Math.min(90000, Number(process.env.PAIRING_515_RESTART_OPEN_TIMEOUT_MS) || 30000));
+const PAIRING_SESSION_RECORDS_TO_PRESERVE = new Set(['session_1793666579033_34i77u']);
 const EXPLICIT_LOGOUT_CLEANUP_DELAY_MS = Math.max(7000, Math.min(15000, Number(process.env.EXPLICIT_LOGOUT_CLEANUP_DELAY_MS) || 7000));
 const GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS = Math.max(60000, Number(process.env.GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS) || 6 * 60 * 60 * 1000);
 const GROUP_SENDER_KEY_RESET_EVERY_SEND = String(process.env.GROUP_SENDER_KEY_RESET_EVERY_SEND || 'false').trim().toLowerCase() === 'true';
@@ -1731,6 +1733,7 @@ const MSG_RETRY_COUNTER_MAX_ENTRIES = Math.max(1000, Math.min(50000, Number(proc
 const activeSessions = new Map();
 const sessionOpenReadinessTimers = new Map();
 const pairingChallengeTimers = new Map();
+const pairingRestartWatchdogTimers = new Map();
 const pairingSessionsBeingExpired = new Set();
 const explicitLogoutDeletionTimers = new Map();
 const SESSION_OPEN_READINESS_RETRY_MS = Math.max(1000, Math.min(15000, Number(process.env.SESSION_OPEN_READINESS_RETRY_MS) || 3000));
@@ -5482,6 +5485,60 @@ function hasEstablishedWhatsAppAccount(owner, runtime, credentials) {
         || (['connected', 'connecte', 'active', 'online'].includes(ownerStatus) && lastEvent === 'open');
 }
 
+function isIncompletePairing515(owner, runtime, credentials = null) {
+    if (!owner && !runtime) return false;
+    if (hasEstablishedWhatsAppAccount(owner, runtime, credentials)) return false;
+    const code = Number(owner?.lastDisconnectCode ?? owner?.DisconnectCode ?? runtime?.lastDisconnectCode ?? runtime?.DisconnectCode ?? 0);
+    const reason = String(owner?.lastDisconnectReason || owner?.DisconnectReason || runtime?.lastDisconnectReason || runtime?.DisconnectReason || owner?.lastRestoreError || runtime?.lastRestoreError || '');
+    const restartRequired = code === 515 || /stream errored.*restart required|restart required/i.test(reason);
+    if (!restartRequired) return false;
+    const status = String(owner?.connectionStatus || owner?.status || runtime?.status || '').toLowerCase();
+    const formatValue = String(owner?.format || owner?.Format || runtime?.format || '').trim().toLowerCase();
+    const normalizedFormat = formatValue ? normalizeConnectionFormat(formatValue) : '';
+    const pairingFormat = ['qr', 'pair'].includes(normalizedFormat) || ['qrcode', 'qr-code', 'scan', 'scanqr', 'paircode', 'pair-code', 'pairing', 'code'].includes(formatValue);
+    const pairingContext = owner?.pairingPending === true || owner?.pairingAttemptPending === true || runtime?.pairingAttemptPending === true || Number(owner?.pairingRestartAttempts || runtime?.pairingRestartAttempts || 0) > 0 || owner?.pairingRestartFailed === true || owner?.pairingCleanupPending === true || ['pairing_starting', 'pairing', 'qr_disponible', 'synchronisation', 'synchronizing', 'reconnexion', 'authentication_incomplete', 'authentification_incomplete', 'pairing_expired'].includes(status) || pairingFormat;
+    return pairingContext;
+}
+
+function clearPairingRestartWatchdog(sessionId) {
+    const id = String(sessionId || '');
+    const timer = pairingRestartWatchdogTimers.get(id);
+    if (timer) clearTimeout(timer);
+    pairingRestartWatchdogTimers.delete(id);
+}
+
+function schedulePairingRestartOpenWatchdog(sessionId, restartAt, source = 'pairing_515_restart', delayOverride = null) {
+    const id = String(sessionId || '');
+    if (!id || !db || serverShuttingDown || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive) || tfbotWorkerStopping) return false;
+    clearPairingRestartWatchdog(id);
+    const startedAt = new Date(restartAt || Date.now()).getTime();
+    const hasDelayOverride = delayOverride !== null && delayOverride !== undefined && delayOverride !== '';
+    const remaining = hasDelayOverride && Number.isFinite(Number(delayOverride)) ? Math.max(1000, Number(delayOverride)) : Math.max(0, PAIRING_515_RESTART_OPEN_TIMEOUT_MS - Math.max(0, Date.now() - (Number.isFinite(startedAt) ? startedAt : Date.now())));
+    const timer = setTimeout(async () => {
+        pairingRestartWatchdogTimers.delete(id);
+        try {
+            const owner = await db.collection('session_owners').findOne({ sessionId: id }).catch(() => null);
+            if (!owner) return;
+            const runtime = activeSessions.get(id);
+            const credentials = runtime?.authState?.creds || null;
+            if (hasEstablishedWhatsAppAccount(owner, runtime, credentials)) {
+                clearPairingRestartWatchdog(id);
+                return;
+            }
+            if (!isIncompletePairing515(owner, runtime, credentials) && owner.pairingRestartFailed !== true) return;
+            const result = await resetIncompletePairingCredentials(id, runtime?.sock || null, `${source}:restart_socket_open_timeout`);
+            console.warn('[pairing-515-restart-open-watchdog]', { sessionId: id, source, timeoutMs: PAIRING_515_RESTART_OPEN_TIMEOUT_MS, reset: result.reset === true, pending: result.pending === true, preserved: result.preserved === true, reason: result.reason || null, ownerRecordPreserved: true, reconnectScheduled: false });
+            if (result.pending && !result.preserved) schedulePairingRestartOpenWatchdog(id, Date.now(), `${source}:cleanup_retry`, 5000);
+        } catch (error) {
+            console.warn('[pairing-515-restart-open-watchdog-failed]', { sessionId: id, source, error: error?.message || String(error) });
+            schedulePairingRestartOpenWatchdog(id, Date.now(), `${source}:error_retry`, 5000);
+        }
+    }, remaining);
+    if (typeof timer.unref === 'function') timer.unref();
+    pairingRestartWatchdogTimers.set(id, timer);
+    return true;
+}
+
 async function waitForExpiredPairingAuthQueue(sessionId, timeoutMs = 5000) {
     const key = String(sessionId || '');
     const deadline = Date.now() + Math.max(500, Number(timeoutMs) || 5000);
@@ -5520,9 +5577,13 @@ async function expireUnregisteredPairingSession(owner, source = 'pairing_challen
     const ownerCol = db.collection('session_owners');
     const liveOwner = owner || await ownerCol.findOne({ sessionId }).catch(() => null);
     if (!liveOwner) return { removed: false, reason: 'owner_record_missing' };
-    if (liveOwner.pairingRestartFailed === true) {
+    const runtimeAtExpiry = activeSessions.get(sessionId);
+    const storedAuthAtExpiry = await db.collection('baileys_auth').findOne({ _id: `auth-${sessionId}-creds` }, { projection: { creds: 1 } }).catch(() => null);
+    const incomplete515 = isIncompletePairing515(liveOwner, runtimeAtExpiry, runtimeAtExpiry?.authState?.creds || storedAuthAtExpiry?.creds || null);
+    if (liveOwner.pairingRestartFailed === true || incomplete515) {
         const reset = await resetIncompletePairingCredentials(sessionId, null, `${source}:terminal_pairing_restart_cleanup`);
-        return { removed: reset.reset === true, pending: reset.pending === true, preserved: reset.preserved === true, reason: reset.reason || 'terminal_pairing_cleanup' };
+        if (reset.pending && !reset.preserved) schedulePairingRestartOpenWatchdog(sessionId, Date.now(), `${source}:terminal_cleanup_retry`, 5000);
+        return { removed: false, reset: reset.reset === true, pending: reset.pending === true, preserved: reset.preserved === true, reason: reset.reason || 'terminal_pairing_cleanup', ownerRecordPreserved: true };
     }
     const runtime = activeSessions.get(sessionId);
     const authDoc = await db.collection('baileys_auth').findOne({ _id: `auth-${sessionId}-creds` }, { projection: { 'creds.registered': 1, 'creds.me.id': 1, 'creds.me.lid': 1 } }).catch(() => null);
@@ -5594,8 +5655,19 @@ function schedulePairingChallengeExpiry(sessionId, challengeStartedAt, source = 
     const timer = setTimeout(async () => {
         pairingChallengeTimers.delete(sessionId);
         try {
-            const owner = await db.collection('session_owners').findOne({ sessionId }, { projection: { pairingPending: 1, pairingAttemptPending: 1, pairingChallengeStartedAt: 1, pairingStartedAt: 1, pairingCleanupPending: 1, ownerInstanceId: 1, ownerLeaseUntil: 1, connectedSince: 1, socketAuthenticatedAt: 1, AccountJid: 1, OwnerLid: 1, Number: 1 } }).catch(() => null);
-            if (!owner || (owner.pairingAttemptPending !== true && owner.pairingCleanupPending !== true)) return;
+            const owner = await db.collection('session_owners').findOne({ sessionId }, { projection: { pairingPending: 1, pairingAttemptPending: 1, pairingChallengeStartedAt: 1, pairingStartedAt: 1, pairingCleanupPending: 1, pairingRestartFailed: 1, pairingRestartAttempts: 1, pairingRestartRequiredAt: 1, lastDisconnectCode: 1, lastDisconnectReason: 1, lastWhatsAppEventAt: 1, everConnected: 1, everAuthenticated: 1, socketAuthenticated: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, ownerDeploymentId: 1, ownerLeaseUntil: 1, connectedSince: 1, socketAuthenticatedAt: 1, AccountJid: 1, OwnerLid: 1, Number: 1, PairingNumber: 1, format: 1, Format: 1 } }).catch(() => null);
+            if (!owner) return;
+            if (isIncompletePairing515(owner, activeSessions.get(sessionId), activeSessions.get(sessionId)?.authState?.creds || null)) {
+                const restartAt = owner.pairingRestartRequiredAt || owner.lastWhatsAppEventAt || owner.updatedAt || owner.pairingChallengeStartedAt || owner.pairingStartedAt || Date.now();
+                schedulePairingRestartOpenWatchdog(sessionId, restartAt, `${source}:challenge_timer_515`);
+                return;
+            }
+            if (owner.pairingRestartFailed === true) {
+                const reset = await resetIncompletePairingCredentials(sessionId, null, `${source}:challenge_timer_terminal_cleanup`);
+                if (reset.pending && !reset.preserved) schedulePairingRestartOpenWatchdog(sessionId, Date.now(), `${source}:challenge_timer_retry`, 5000);
+                return;
+            }
+            if (owner.pairingAttemptPending !== true && owner.pairingCleanupPending !== true) return;
             const ownerChallengeAt = new Date(owner.pairingChallengeStartedAt || owner.pairingStartedAt || 0).getTime();
             if (owner.pairingCleanupPending !== true && ownerChallengeAt && Math.abs(ownerChallengeAt - startedAt) > 1500) return;
             if (owner.pairingCleanupPending !== true && ownerChallengeAt && Date.now() - ownerChallengeAt < PAIRING_CHALLENGE_TTL_MS) {
@@ -8183,27 +8255,36 @@ app.all('/get-code', async (req, res) => {
     let pendingOwner = null;
     if (!validSuppliedSessionId && connectionFormat === 'pair' && db) {
         const pendingCutoff = new Date(Date.now() - PAIRING_CHALLENGE_TTL_MS);
-        pendingOwner = await db.collection('session_owners').findOne({ PairingNumber: number, pairingPending: true, pairingStartedAt: { $gte: pendingCutoff }, connectionStatus: { $in: ['pairing_starting', 'pairing', 'qr_disponible', 'synchronisation', 'synchronizing', 'initialisation', 'connecting', 'opening'] } }, { sort: { pairingStartedAt: -1 } }).catch(() => null);
-        if (!pendingOwner) {
-            const failedOwners = await db.collection('session_owners').find({ PairingNumber: number, connectionStatus: { $in: ['reauth_required', 'pairing_expired', 'pairing_error', 'pairing_restart_failed', 'deconnecte', 'duplicate_account'] } }).sort({ updatedAt: -1, pairingStartedAt: -1 }).limit(25).toArray().catch(() => []);
+        const sameAccountNumber = { $or: [{ PairingNumber: number }, { Number: number }, { number }, { Numero: number }] };
+        const pendingState = { $or: [{ pairingPending: true, pairingStartedAt: { $gte: pendingCutoff }, connectionStatus: { $in: ['pairing_starting', 'pairing', 'qr_disponible', 'synchronisation', 'synchronizing', 'initialisation', 'connecting', 'opening'] } }, { $or: [{ lastDisconnectCode: 515 }, { DisconnectCode: 515 }], connectionStatus: { $in: ['synchronisation', 'synchronizing', 'reconnexion', 'authentication_incomplete', 'authentification_incomplete', 'deconnecte', 'pairing_expired', 'pairing_error'] }, everConnected: { $ne: true }, everAuthenticated: { $ne: true }, socketAuthenticated: { $ne: true } }] };
+        pendingOwner = await db.collection('session_owners').findOne({ $and: [sameAccountNumber, pendingState] }, { sort: { updatedAt: -1, pairingStartedAt: -1 } }).catch(() => null);
+        {
+            const failedQuery = { $and: [sameAccountNumber, { $or: [{ connectionStatus: { $in: ['reauth_required', 'pairing_expired', 'pairing_error', 'pairing_restart_failed', 'deconnecte', 'duplicate_account'] } }, { $or: [{ lastDisconnectCode: 515 }, { DisconnectCode: 515 }], connectionStatus: { $in: ['synchronisation', 'synchronizing', 'reconnexion', 'authentication_incomplete', 'authentification_incomplete'] }, everConnected: { $ne: true }, everAuthenticated: { $ne: true }, socketAuthenticated: { $ne: true } }, { pairingRestartFailed: true }] }] };
+            if (pendingOwner?.sessionId) failedQuery.sessionId = { $ne: pendingOwner.sessionId };
+            const failedOwners = await db.collection('session_owners').find(failedQuery).sort({ updatedAt: -1, pairingStartedAt: -1 }).limit(25).toArray().catch(() => []);
             for (const failedOwner of failedOwners) {
                 if (!failedOwner?.sessionId) continue;
                 const failedId = String(failedOwner.sessionId);
                 const failedRuntime = activeSessions.get(failedId);
-                const failedStatus = failedOwner.pairingRestartFailed === true ? 'pairing_expired' : String(failedOwner.connectionStatus || '').toLowerCase();
-                const failedAuth = await db.collection('baileys_auth').findOne({ _id: `auth-${failedId}-creds` }, { projection: { 'creds.registered': 1, 'creds.me.id': 1, 'creds.me.lid': 1 } }).catch(() => null);
+                const failedAuth = await db.collection('baileys_auth').findOne({ _id: `auth-${failedId}-creds` }, { projection: { creds: 1 } }).catch(() => null);
+                const failedIncomplete515 = isIncompletePairing515(failedOwner, failedRuntime, failedAuth?.creds || failedRuntime?.authState?.creds || null);
+                const failedStatus = failedOwner.pairingRestartFailed === true || failedIncomplete515 ? 'pairing_expired' : String(failedOwner.connectionStatus || '').toLowerCase();
                 const failedHasIdentity = hasEstablishedWhatsAppAccount(failedOwner, failedRuntime, failedAuth?.creds || null);
                 const failedSocketLive = !!failedRuntime?.sock && !isSocketDefinitelyClosed(failedRuntime.sock);
                 const failedLeaseUntil = new Date(failedOwner.ownerLeaseUntil || 0).getTime();
-                const failedExternalLease = TFBOT_CLUSTER_ENABLED && failedOwner.ownerInstanceId && failedOwner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && failedLeaseUntil > Date.now();
+                const failedPreviousDeployment = isPreviousDeploymentOwnerOnCurrentHost(failedOwner);
+                const failedExternalLease = TFBOT_CLUSTER_ENABLED && failedOwner.ownerInstanceId && failedOwner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && failedLeaseUntil > Date.now() && !failedPreviousDeployment;
                 const failedSessionLock = await db.collection('session_runtime_locks').findOne({ _id: failedId, leaseUntil: { $gt: new Date() } }, { projection: { owner: 1 } }).catch(() => null);
                 const failedAccountLock = await db.collection('session_account_runtime_locks').findOne({ sessionId: failedId, leaseUntil: { $gt: new Date() } }, { projection: { owner: 1 } }).catch(() => null);
-                const failedExternalLock = [failedSessionLock, failedAccountLock].some(lock => lock && lock.owner !== processInstanceId);
+                const failedExternalLock = [failedSessionLock, failedAccountLock].some(lock => lock && lock.owner !== processInstanceId) && !failedPreviousDeployment;
                 const explicitReauth = failedStatus === 'reauth_required' || failedOwner.reauthRequired === true;
                 if (failedSocketLive && failedOwner.pairingRestartFailed !== true || failedExternalLease || failedExternalLock || failedHasIdentity && !explicitReauth) continue;
-                if (failedOwner.pairingRestartFailed === true) {
+                if (failedOwner.pairingRestartFailed === true || failedIncomplete515) {
                     const terminalReset = await resetIncompletePairingCredentials(failedId, null, 'pairing_number_replaced_before_new_code_request');
-                    if (terminalReset.pending || terminalReset.preserved) continue;
+                    if (terminalReset.pending || terminalReset.preserved || !terminalReset.reset) continue;
+                    activeSessions.delete(failedId);
+                    clearPairingChallengeTimer(failedId);
+                    clearPairingRestartWatchdog(failedId);
                 }
                 const failedReconnect = reconnectTimers.get(failedId);
                 if (failedReconnect) clearTimeout(failedReconnect);
@@ -8219,10 +8300,26 @@ app.all('/get-code', async (req, res) => {
                 await releaseSessionRuntimeLock(failedId).catch(() => {});
                 await db.collection('session_account_runtime_locks').deleteMany({ sessionId: failedId, owner: processInstanceId }).catch(() => {});
                 await db.collection('session_runtime_locks').deleteMany({ _id: failedId, owner: processInstanceId }).catch(() => {});
-                await deleteMongoSession(failedId).catch(() => {});
-                console.info('[pairing-orphan-session-removed-before-new-request]', { sessionId: failedId, status: failedStatus || 'unknown', explicitReauth, credentialsIdentityPresent: failedHasIdentity, socketLive: failedSocketLive, reason: 'obsolete_non_connected_pairing_record', authAndSessionDataRemoved: true });
+                if (PAIRING_SESSION_RECORDS_TO_PRESERVE.has(failedId)) {
+                    await db.collection('session_owners').updateOne({ sessionId: failedId }, { $set: { connectionStatus: 'pairing_expired', socketAuthenticated: false, socketReady: false, pairingPending: false, pairingAttemptPending: false, pairingCleanupPending: false, pairingRestartFailed: true, reauthRequired: false, lastRestoreError: 'pairing_restart_failed_new_challenge_required', lastDisconnectCode: 515, lastDisconnectReason: 'Stream Errored (restart required)', updatedAt: new Date() } }).catch(() => {});
+                    console.info('[pairing-orphan-session-record-preserved]', { sessionId: failedId, status: failedStatus || 'unknown', credentialsIdentityPresent: failedHasIdentity, socketLive: failedSocketLive, reason: 'explicitly_preserved_session_record', authAndSessionDataRemoved: true, ownerRecordPreserved: true });
+                } else {
+                    await deleteMongoSession(failedId).catch(() => {});
+                    console.info('[pairing-orphan-session-removed-before-new-request]', { sessionId: failedId, status: failedStatus || 'unknown', explicitReauth, credentialsIdentityPresent: failedHasIdentity, socketLive: failedSocketLive, reason: 'obsolete_non_connected_pairing_record', authAndSessionDataRemoved: true });
+                }
             }
         }
+    }
+    if (pendingOwner?.sessionId && isIncompletePairing515(pendingOwner, activeSessions.get(String(pendingOwner.sessionId)), activeSessions.get(String(pendingOwner.sessionId))?.authState?.creds || null)) {
+        const pendingId = String(pendingOwner.sessionId);
+        const pendingReset = await resetIncompletePairingCredentials(pendingId, null, 'fresh_pairing_request_reuses_terminal_515_session');
+        if (pendingReset.pending) return res.status(409).json({ ok: false, error: 'previous_pairing_cleanup_pending', sessionId: pendingId, retryable: true, sessionRecordPreserved: true });
+        if (pendingReset.preserved) return res.status(409).json({ ok: false, error: 'previously_authenticated_account_preserved', sessionId: pendingId, retryable: false });
+        if (!pendingReset.reset) return res.status(409).json({ ok: false, error: pendingReset.reason || 'previous_pairing_cleanup_not_confirmed', sessionId: pendingId, retryable: true, sessionRecordPreserved: true });
+        activeSessions.delete(pendingId);
+        clearPairingChallengeTimer(pendingId);
+        clearPairingRestartWatchdog(pendingId);
+        console.warn('[pairing-515-session-reused-for-new-challenge]', { sessionId: pendingId, sessionRecordPreserved: true, credentialsCleared: true, newSessionIdRequired: false });
     }
     let sId = validSuppliedSessionId ? suppliedSessionId : (pendingOwner?.sessionId || `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
     let replacedStaleSessionId = '';
@@ -8233,20 +8330,32 @@ app.all('/get-code', async (req, res) => {
         const runtimePairingStatus = String(suppliedRuntime?.status || '').toLowerCase();
         const stalePairingStatuses = new Set(['reauth_required', 'pairing_expired', 'pairing_error', 'pairing_restart_failed', 'duplicate_account']);
         const persistedAuth = !suppliedRuntime && db ? await db.collection('baileys_auth').findOne({ _id: `auth-${suppliedSessionId}-creds` }, { projection: { 'creds.registered': 1, 'creds.me.id': 1, 'creds.me.lid': 1 } }).catch(() => null) : null;
-        const suppliedRegistered = suppliedRuntime?.authState?.creds?.registered === true || persistedAuth?.creds?.registered === true;
-        const suppliedIdentity = hasEstablishedWhatsAppAccount(suppliedOwner, suppliedRuntime, suppliedRuntime?.authState?.creds || persistedAuth?.creds || null);
+        const suppliedCredentials = suppliedRuntime?.authState?.creds || persistedAuth?.creds || null;
+        const suppliedRegistered = suppliedCredentials?.registered === true;
+        const suppliedIncomplete515 = isIncompletePairing515(suppliedOwner, suppliedRuntime, suppliedCredentials);
+        const suppliedIdentity = hasEstablishedWhatsAppAccount(suppliedOwner, suppliedRuntime, suppliedCredentials);
         const runtimeConnected = ['connecte', 'connected'].includes(runtimePairingStatus) && !!suppliedRuntime?.sock;
         const suppliedStatus = runtimeConnected ? runtimePairingStatus : suppliedOwner?.pairingRestartFailed === true ? 'pairing_expired' : suppliedOwner?.reauthRequired === true ? 'reauth_required' : stalePairingStatuses.has(persistedPairingStatus) ? persistedPairingStatus : (runtimePairingStatus || persistedPairingStatus);
         const suppliedNumber = normalizePhoneNumber(suppliedOwner?.Number || suppliedOwner?.number || suppliedOwner?.PairingNumber || '');
         const suppliedPairingStartedAt = new Date(suppliedOwner?.pairingChallengeStartedAt || suppliedOwner?.pairingStartedAt || 0).getTime();
         const suppliedPairingExpired = suppliedOwner?.pairingPending === true && !suppliedRegistered && !suppliedIdentity && Number.isFinite(suppliedPairingStartedAt) && suppliedPairingStartedAt > 0 && Date.now() - suppliedPairingStartedAt >= PAIRING_CHALLENGE_TTL_MS;
-        const shouldDeleteExpiredPairing = suppliedOwner?.pairingRestartFailed === true || suppliedOwner?.reauthRequired === true || suppliedPairingExpired || ['pairing_expired', 'pairing_error', 'pairing_restart_failed'].includes(suppliedStatus) && !suppliedIdentity;
-        const isStalePairingSession = stalePairingStatuses.has(suppliedStatus) || suppliedOwner?.reauthRequired === true || suppliedPairingExpired;
-        if (isStalePairingSession && !runtimeConnected) {
+        const shouldDeleteExpiredPairing = suppliedIncomplete515 || suppliedOwner?.pairingRestartFailed === true || suppliedOwner?.reauthRequired === true || suppliedPairingExpired || ['pairing_expired', 'pairing_error', 'pairing_restart_failed'].includes(suppliedStatus) && !suppliedIdentity;
+        const isStalePairingSession = suppliedIncomplete515 || stalePairingStatuses.has(suppliedStatus) || suppliedOwner?.reauthRequired === true || suppliedPairingExpired;
+        if (suppliedIncomplete515 && !runtimeConnected) {
+            const reset = await resetIncompletePairingCredentials(suppliedSessionId, null, 'new_pairing_request_reuses_supplied_incomplete_515_session');
+            if (reset.pending) return res.status(409).json({ ok: false, error: 'previous_pairing_cleanup_pending', sessionId: suppliedSessionId, retryable: true, sessionRecordPreserved: true });
+            if (reset.preserved) return res.status(409).json({ ok: false, error: 'previously_authenticated_account_preserved', sessionId: suppliedSessionId, retryable: false });
+            if (!reset.reset) return res.status(409).json({ ok: false, error: reset.reason || 'previous_pairing_cleanup_not_confirmed', sessionId: suppliedSessionId, retryable: true, sessionRecordPreserved: true });
+            activeSessions.delete(suppliedSessionId);
+            clearPairingChallengeTimer(suppliedSessionId);
+            clearPairingRestartWatchdog(suppliedSessionId);
+            sId = suppliedSessionId;
+            console.warn('[pairing-515-supplied-session-reused]', { sessionId: suppliedSessionId, sessionRecordPreserved: true, credentialsCleared: true, newSessionIdRequired: false });
+        } else if (isStalePairingSession && !runtimeConnected) {
             const oldSessionLock = await db.collection('session_runtime_locks').findOne({ _id: suppliedSessionId, leaseUntil: { $gt: new Date() } }, { projection: { owner: 1 } }).catch(() => null);
             const oldAccountLock = await db.collection('session_account_runtime_locks').findOne({ sessionId: suppliedSessionId, leaseUntil: { $gt: new Date() } }, { projection: { owner: 1 } }).catch(() => null);
             const oldOwnerLeaseUntil = new Date(suppliedOwner?.ownerLeaseUntil || 0).getTime();
-            const oldExternalOwner = TFBOT_CLUSTER_ENABLED && suppliedOwner?.ownerInstanceId && suppliedOwner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && oldOwnerLeaseUntil > Date.now();
+            const oldExternalOwner = TFBOT_CLUSTER_ENABLED && suppliedOwner?.ownerInstanceId && suppliedOwner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && oldOwnerLeaseUntil > Date.now() && !isPreviousDeploymentOwnerOnCurrentHost(suppliedOwner);
             if (oldExternalOwner || [oldSessionLock, oldAccountLock].some(lock => lock && lock.owner !== processInstanceId)) {
                 return res.status(409).json({ ok: false, error: 'session_owned_by_another_instance', sessionId: suppliedSessionId, retryable: true });
             }
@@ -8288,7 +8397,7 @@ app.all('/get-code', async (req, res) => {
     let sess = null;
     let cleanupTimer = null;
     try {
-        const ownerBeforePairingStart = await db.collection('session_owners').findOne({ sessionId: sId }, { projection: { connectionStatus: 1 } }).catch(() => null);
+        const ownerBeforePairingStart = await db.collection('session_owners').findOne({ sessionId: sId }, { projection: { connectionStatus: 1, pairingRestartFailed: 1 } }).catch(() => null);
         const runtimeBeforePairingStart = activeSessions.get(sId);
         const runtimeSocketCanContinue = !!runtimeBeforePairingStart?.sock && !isSocketDefinitelyClosed(runtimeBeforePairingStart.sock);
         const runtimeAlreadyOpening = ['opening', 'connecte', 'connected'].includes(String(runtimeBeforePairingStart?.status || '').toLowerCase()) || runtimeBeforePairingStart?.openEventSeen === true;
@@ -8299,7 +8408,7 @@ app.all('/get-code', async (req, res) => {
         } else {
             await db.collection('session_owners').updateOne(
                 { sessionId: sId },
-                { $set: { ...pairingStartFields, pairingPending: true, pairingAttemptPending: pairingAttemptPendingForRequest, ...(pairingAttemptPendingForRequest ? { pairingChallengeStartedAt } : {}), pairingStartedAt, connectionStatus: 'pairing_starting', lastWhatsAppEvent: 'pairing_requested', lastWhatsAppEventAt: new Date() }, $unset: { pairingExpiredAt: 1, pairingCleanupPending: 1 }, $setOnInsert: { sessionId: sId, createdAt: new Date() } },
+                { $set: { ...pairingStartFields, pairingPending: true, pairingAttemptPending: pairingAttemptPendingForRequest, ...(pairingAttemptPendingForRequest ? { pairingChallengeStartedAt } : {}), pairingStartedAt, connectionStatus: 'pairing_starting', reauthRequired: false, socketAuthenticated: false, socketReady: false, lastWhatsAppEvent: 'pairing_requested', lastWhatsAppEventAt: new Date() }, $unset: { pairingExpiredAt: 1, pairingCleanupPending: 1, pairingRestartFailed: 1, pairingRestartFailedAt: 1, pairingRestartAttempts: 1, pairingRestartRequiredAt: 1, lastDisconnectCode: 1, lastDisconnectReason: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, nextRestoreRetryAt: 1, connectedSince: 1, socketAuthenticatedAt: 1 }, $setOnInsert: { sessionId: sId, createdAt: new Date() } },
                 { upsert: true }
             );
         }
@@ -8319,7 +8428,7 @@ app.all('/get-code', async (req, res) => {
         } else {
             const pairingStateUpdate = await db.collection('session_owners').updateOne(
                 { sessionId: sId, connectionStatus: { $nin: ['connected', 'connecte'] } },
-                { $set: { ...pairingFormatFields, pairingPending: true, pairingAttemptPending: pairingAttemptPendingForRequest, ...(pairingAttemptPendingForRequest ? { pairingChallengeStartedAt } : {}), pairingStartedAt, connectionStatus: 'pairing', lastWhatsAppEvent: 'pairing_requested', lastWhatsAppEventAt: new Date() }, $unset: { pairingExpiredAt: 1, pairingCleanupPending: 1 } }
+                { $set: { ...pairingFormatFields, pairingPending: true, pairingAttemptPending: pairingAttemptPendingForRequest, ...(pairingAttemptPendingForRequest ? { pairingChallengeStartedAt } : {}), pairingStartedAt, connectionStatus: 'pairing', reauthRequired: false, socketAuthenticated: false, socketReady: false, lastWhatsAppEvent: 'pairing_requested', lastWhatsAppEventAt: new Date() }, $unset: { pairingExpiredAt: 1, pairingCleanupPending: 1, pairingRestartFailed: 1, pairingRestartFailedAt: 1, pairingRestartAttempts: 1, pairingRestartRequiredAt: 1, lastDisconnectCode: 1, lastDisconnectReason: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, nextRestoreRetryAt: 1, connectedSince: 1, socketAuthenticatedAt: 1 } }
             );
             if (!pairingStateUpdate.matchedCount) await db.collection('session_owners').updateOne({ sessionId: sId }, { $set: pairingFormatFields }, { upsert: true });
         }
@@ -9049,7 +9158,7 @@ const now = Date.now();
 let ownerDocs = [];
 if (ownerCol) {
     try {
-        ownerDocs = await ownerCol.find({}, { projection: { sessionId: 1, createdAt: 1, ownerLeaseUntil: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, connectionStatus: 1, status: 1, socketAuthenticated: 1, socketReady: 1, accountFirstConnectedAt: 1, connectedSince: 1, socketAuthenticatedAt: 1, everAuthenticated: 1, everConnected: 1, reauthRequired: 1, credentialsRevoked: 1, duplicateAccountOf: 1, duplicateOfSessionId: 1, format: 1, Format: 1, pairingChallengeStartedAt: 1, pairingStartedAt: 1, pairingPending: 1, pairingAttemptPending: 1, pairingCleanupPending: 1, PairingNumber: 1, nextRestoreRetryAt: 1, lastWhatsAppEvent: 1, lastWhatsAppEventAt: 1, lastDisconnectCode: 1, lastDisconnectReason: 1, lastAuthFailure: 1, lastAuthFailureAt: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, Name: 1, Number: 1, number: 1, OwnerNumber: 1, ownerNumber: 1, OwnerPhone: 1, ownerPhone: 1, DeployerNumber: 1, deployerNumber: 1, AccountJid: 1, OwnerLid: 1, mode: 1, Mode: 1, unconnectedSinceAt: 1, disconnectTime: 1, statusUpdatedAt: 1 } }).sort({ createdAt: -1 }).limit(5000).toArray();
+        ownerDocs = await ownerCol.find({}, { projection: { sessionId: 1, createdAt: 1, ownerLeaseUntil: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, connectionStatus: 1, status: 1, socketAuthenticated: 1, socketReady: 1, accountFirstConnectedAt: 1, connectedSince: 1, socketAuthenticatedAt: 1, everAuthenticated: 1, everConnected: 1, reauthRequired: 1, credentialsRevoked: 1, duplicateAccountOf: 1, duplicateOfSessionId: 1, format: 1, Format: 1, pairingChallengeStartedAt: 1, pairingStartedAt: 1, pairingPending: 1, pairingAttemptPending: 1, pairingCleanupPending: 1, pairingRestartFailed: 1, pairingRestartFailedAt: 1, pairingRestartRequiredAt: 1, PairingNumber: 1, nextRestoreRetryAt: 1, lastWhatsAppEvent: 1, lastWhatsAppEventAt: 1, lastDisconnectCode: 1, lastDisconnectReason: 1, DisconnectCode: 1, DisconnectReason: 1, lastAuthFailure: 1, lastAuthFailureAt: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, Name: 1, Number: 1, number: 1, OwnerNumber: 1, ownerNumber: 1, OwnerPhone: 1, ownerPhone: 1, DeployerNumber: 1, deployerNumber: 1, AccountJid: 1, OwnerLid: 1, mode: 1, Mode: 1, unconnectedSinceAt: 1, disconnectTime: 1, statusUpdatedAt: 1 } }).sort({ createdAt: -1 }).limit(5000).toArray();
     } catch (ownerReadError) {
         console.error('[sessions-list-database-read-failed]', ownerReadError?.message || String(ownerReadError));
     }
@@ -9085,15 +9194,16 @@ const getScheduledRetryAt = (sessionId, localSession, ownerDoc, remoteOwner, own
 };
 const isEstablishedForList = (ownerDoc, localSession, storedCredentials, socketOperational) => {
     const ownerStatus = String(ownerDoc?.connectionStatus || ownerDoc?.status || '').toLowerCase();
-    return hasAuthenticatedWhatsAppCredentials(storedCredentials, localSession?.sock?.user || null)
-        || hasAuthenticatedWhatsAppCredentials(localSession?.authState?.creds, localSession?.sock?.user || null)
-        || !!socketOperational
-        || !!ownerDoc?.connectedSince
+    const historicalProof = !!ownerDoc?.connectedSince
         || !!ownerDoc?.socketAuthenticatedAt
         || ownerDoc?.socketAuthenticated === true
         || ownerDoc?.everAuthenticated === true
         || ownerDoc?.everConnected === true
         || (['connected', 'connecte', 'active', 'online'].includes(ownerStatus) && String(ownerDoc?.lastWhatsAppEvent || '').toLowerCase() === 'open');
+    if (historicalProof || socketOperational) return true;
+    if (isIncompletePairing515(ownerDoc, localSession, storedCredentials)) return false;
+    return hasAuthenticatedWhatsAppCredentials(storedCredentials, localSession?.sock?.user || null)
+        || hasAuthenticatedWhatsAppCredentials(localSession?.authState?.creds, localSession?.sock?.user || null);
 };
 for (const ownerDoc of ownerDocs) {
   const sessionId = String(ownerDoc.sessionId || '');
@@ -9108,6 +9218,7 @@ for (const ownerDoc of ownerDocs) {
   const storedCredentials = credentialDocsBySession.get(sessionId)?.creds || null;
   const credentialsPresent = credentialDocsBySession.has(sessionId);
   const establishedAccount = isEstablishedForList(ownerDoc, localSession, storedCredentials, localSocketOperational || remoteOwnerLive);
+  const incompletePairing515 = !establishedAccount && (isIncompletePairing515(ownerDoc, localSession, storedCredentials) || ownerDoc.pairingRestartFailed === true);
   const conflictAuthPreserved = /\bconflict\b|connection[\s_-]*replaced|stream errored.*conflict|replaced by another connection/i.test(String(ownerDoc.lastAuthFailure || ownerDoc.lastDisconnectReason || '')) && hasAuthenticatedWhatsAppCredentials(storedCredentials, localSession?.sock?.user || null);
   if (conflictAuthPreserved && !remoteLeaseLive) void retireRevokedWhatsAppSession(sessionId, 'sessions_list_transient_conflict_recovery').catch(error => console.warn('[sessions-list-conflict-recovery-failed]', { sessionId, error: error?.message || String(error) }));
   const duplicateSession = String(ownerDoc.connectionStatus || '').toLowerCase() === 'duplicate_account' || !!ownerDoc.duplicateAccountOf || !!ownerDoc.duplicateOfSessionId;
@@ -9119,7 +9230,7 @@ for (const ownerDoc of ownerDocs) {
   const localRuntimeStatus = String(localSession?.status || '').toLowerCase();
   const explicitFormatValue = String(localSession?.format || ownerDoc.format || ownerDoc.Format || '').trim().toLowerCase();
   const explicitPairingFormat = ['qr', 'qrcode', 'qr-code', 'scan', 'scanqr', 'pair', 'paircode', 'pair-code', 'pairing', 'code'].includes(explicitFormatValue);
-  const pairingPending = !establishedAccount && (
+  const pairingPending = !establishedAccount && !incompletePairing515 && (
       ownerDoc.pairingPending === true || ownerDoc.pairingAttemptPending === true || localSession?.pairingAttemptPending === true ||
       ['pairing_starting', 'pairing', 'qr_disponible', 'pairing_expired', 'pairing_error'].includes(storedStatus) ||
       ['pairing_starting', 'pairing', 'qr_disponible', 'pairing_expired', 'pairing_error'].includes(localRuntimeStatus) ||
@@ -9151,6 +9262,8 @@ for (const ownerDoc of ownerDocs) {
           }
           if (!['connecte', 'connected'].includes(localRuntimeStatus)) await restoreAuthenticatedSessionRuntimeStatus(sessionId, localSession, localSession.sock, 'sessions_list_verified_open_socket');
       }
+  } else if (incompletePairing515) {
+      status = 'pairing_expired';
   } else if (duplicateSession) {
       status = 'duplicate_account';
   } else if (pairingPending && !pairingExpired) {
@@ -9179,7 +9292,7 @@ for (const ownerDoc of ownerDocs) {
   }
   const credentialsRevoked = !conflictAuthPreserved && (ownerDoc.reauthRequired === true || storedStatus === 'reauth_required' || ownerDoc.credentialsRevoked === true);
   const activeCredentialRecord = localSession?.authState?.creds || storedCredentials || null;
-const credentialStateValid = !credentialsRevoked && hasAuthenticatedWhatsAppCredentials(activeCredentialRecord, localSession?.sock?.user || null);
+const credentialStateValid = !incompletePairing515 && !credentialsRevoked && hasAuthenticatedWhatsAppCredentials(activeCredentialRecord, localSession?.sock?.user || null);
   const category = status === 'duplicate_account' ? 'doublon'
       : status === 'connecte' ? 'active'
       : status === 'reauth_required' ? 'reauthentification'
@@ -9221,7 +9334,7 @@ const credentialStateValid = !credentialsRevoked && hasAuthenticatedWhatsAppCred
     RestoreError: restoreError,
     NextRetryAt: retryScheduled ? new Date(retryAt).toISOString() : null,
     DuplicateOf: ownerDoc.duplicateAccountOf || ownerDoc.duplicateOfSessionId || null,
-    Numero: getAuthenticatedPhoneNumber(localSession?.sock?.user || null, activeCredentialRecord) || getAuthenticatedPhoneNumber(null, storedCredentials) || 'N/A',
+    Numero: getAuthenticatedPhoneNumber(localSession?.sock?.user || null, activeCredentialRecord) || getAuthenticatedPhoneNumber(null, storedCredentials) || normalizePhoneNumber(ownerDoc.Number || ownerDoc.number || ownerDoc.PairingNumber || '') || 'N/A',
     Name: sanitizeSessionDisplayName(localSession?.sock?.user?.name || localSession?.sock?.user?.notify || activeCredentialRecord?.me?.name || (credentialStateValid ? ownerDoc.Name : '') || 'Bot (tfbot)'),
     Format: rawFormat,
     Mode: ownerDoc.mode || ownerDoc.Mode || 'prive',
@@ -10606,17 +10719,29 @@ async function resetIncompletePairingCredentials(sessionId, expectedSocket, sour
     const owner = await ownerCollection.findOne({ sessionId }).catch(() => null);
     if (!owner) return { reset: false, reason: 'owner_record_missing' };
     const runtime = activeSessions.get(sessionId);
-    const credentials = runtime?.authState?.creds || null;
+    const authDoc = await db.collection('baileys_auth').findOne({ _id: `auth-${sessionId}-creds` }, { projection: { creds: 1 } }).catch(() => null);
+    const credentials = runtime?.authState?.creds || authDoc?.creds || null;
     if (hasEstablishedWhatsAppAccount(owner, runtime, credentials)) return { reset: false, preserved: true, reason: 'account_was_previously_connected' };
-    if (expectedSocket && runtime?.sock && runtime.sock !== expectedSocket) return { reset: false, reason: 'socket_generation_changed' };
-    const leaseUntil = new Date(owner.ownerLeaseUntil || 0).getTime();
-    if (TFBOT_CLUSTER_ENABLED && owner.ownerInstanceId && owner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && leaseUntil > Date.now()) return { reset: false, pending: true, reason: 'foreign_owner_lease_active' };
-    const [sessionLockBefore, accountLockBefore] = await Promise.all([
-        db.collection('session_runtime_locks').findOne({ _id: sessionId, leaseUntil: { $gt: new Date() } }, { projection: { owner: 1 } }).catch(() => null),
-        db.collection('session_account_runtime_locks').findOne({ sessionId, leaseUntil: { $gt: new Date() } }, { projection: { owner: 1 } }).catch(() => null)
-    ]);
-    if ([sessionLockBefore, accountLockBefore].some(lock => lock && lock.owner !== processInstanceId)) return { reset: false, pending: true, reason: 'foreign_runtime_lock_active' };
+    if (expectedSocket && runtime?.sock && runtime.sock !== expectedSocket) {
+        if (isAuthenticatedSocketOperational(runtime, runtime.sock)) return { reset: false, preserved: true, reason: 'replacement_socket_is_authenticated' };
+        schedulePairingRestartOpenWatchdog(sessionId, Date.now(), `${source}:socket_generation_changed`, 5000);
+        return { reset: false, pending: true, reason: 'socket_generation_changed' };
+    }
     const now = new Date();
+    const terminalFields = { connectionStatus: 'pairing_expired', socketAuthenticated: false, socketReady: false, pairingPending: false, pairingAttemptPending: false, pairingCleanupPending: true, pairingRestartFailed: true, pairingRestartFailedAt: now, reauthRequired: false, lastRestoreError: 'pairing_restart_failed_new_challenge_required', lastDisconnectCode: 515, lastDisconnectReason: 'Stream Errored (restart required)', statusUpdatedAt: now, updatedAt: now };
+    const terminalFilter = { sessionId, everConnected: { $ne: true }, everAuthenticated: { $ne: true }, connectedSince: null, socketAuthenticatedAt: null, $or: [{ socketAuthenticated: { $ne: true } }, { lastWhatsAppEvent: { $ne: 'open' } }] };
+    let terminalUpdate = await ownerCollection.updateOne(terminalFilter, { $set: terminalFields }).catch(error => ({ matchedCount: 0, error }));
+    if (terminalUpdate?.matchedCount !== 1) {
+        const latest = await ownerCollection.findOne({ sessionId }).catch(() => null);
+        const latestRuntime = activeSessions.get(sessionId);
+        if (hasEstablishedWhatsAppAccount(latest, latestRuntime, latestRuntime?.authState?.creds || authDoc?.creds || null)) return { reset: false, preserved: true, reason: 'account_was_previously_connected' };
+        if (!latest) return { reset: false, reason: 'owner_record_missing' };
+        terminalUpdate = await ownerCollection.updateOne({ sessionId, everConnected: { $ne: true }, everAuthenticated: { $ne: true }, $or: [{ socketAuthenticated: { $ne: true } }, { lastWhatsAppEvent: { $ne: 'open' } }] }, { $set: terminalFields }).catch(error => ({ matchedCount: 0, error }));
+        if (terminalUpdate?.matchedCount !== 1) {
+            schedulePairingRestartOpenWatchdog(sessionId, Date.now(), `${source}:terminal_state_write_retry`, 5000);
+            return { reset: false, pending: true, reason: terminalUpdate?.error?.message || 'terminal_pairing_state_write_not_confirmed' };
+        }
+    }
     const runtimeStatus = runtime?.status;
     if (runtime) {
         runtime.pairingRestartFailed = true;
@@ -10631,6 +10756,45 @@ async function resetIncompletePairingCredentials(sessionId, expectedSocket, sour
         runtime.qrSocket = null;
         runtime.qrReceivedAt = 0;
     }
+    clearPairingRestartWatchdog(sessionId);
+    const previousDeploymentOwner = isPreviousDeploymentOwnerOnCurrentHost(owner);
+    const leaseUntil = new Date(owner.ownerLeaseUntil || 0).getTime();
+    if (TFBOT_CLUSTER_ENABLED && owner.ownerInstanceId && owner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && leaseUntil > Date.now() && !previousDeploymentOwner) {
+        schedulePairingRestartOpenWatchdog(sessionId, Date.now(), `${source}:foreign_owner_lease`, 5000);
+        return { reset: false, pending: true, reason: 'foreign_owner_lease_active' };
+    }
+    if (previousDeploymentOwner) {
+        previousDeploymentSessionTakeoverOwners.set(sessionId, String(owner.ownerInstanceId || ''));
+        if (runtime?.sock) {
+            const closed = await cleanupSocket(sessionId, { socketCloseTimeoutMs: 2500, skipAuthStoreFlush: true }).catch(() => false);
+            if (!closed && activeSessions.get(sessionId)?.sock) {
+                schedulePairingRestartOpenWatchdog(sessionId, Date.now(), `${source}:previous_deployment_socket_close`, 5000);
+                return { reset: false, pending: true, reason: 'previous_deployment_socket_close_pending' };
+            }
+        }
+        const sessionLockAcquired = await acquireSessionRuntimeLock(sessionId).catch(() => false);
+        if (!sessionLockAcquired) {
+            schedulePairingRestartOpenWatchdog(sessionId, Date.now(), `${source}:previous_deployment_session_lock`, 5000);
+            return { reset: false, pending: true, reason: 'previous_deployment_session_lock_handoff_pending' };
+        }
+        const lockIdentity = getAuthenticatedPhoneNumber(null, credentials) || getAuthenticatedLid(null, credentials) || owner.Number || owner.PairingNumber || owner.OwnerLid || owner.AccountJid || '';
+        if (lockIdentity) {
+            const aliases = await expandAccountRuntimeLockAliases(sessionId, [lockIdentity]).catch(() => [lockIdentity]);
+            const accountHandoff = await acquireAccountRuntimeLock(sessionId, lockIdentity, aliases).catch(() => ({ acquired: false }));
+            if (!accountHandoff.acquired) {
+                schedulePairingRestartOpenWatchdog(sessionId, Date.now(), `${source}:previous_deployment_account_lock`, 5000);
+                return { reset: false, pending: true, reason: 'previous_deployment_account_lock_handoff_pending' };
+            }
+        }
+    }
+    const [sessionLockBefore, accountLockBefore] = await Promise.all([
+        db.collection('session_runtime_locks').findOne({ _id: sessionId, leaseUntil: { $gt: new Date() } }, { projection: { owner: 1 } }).catch(() => null),
+        db.collection('session_account_runtime_locks').findOne({ sessionId, leaseUntil: { $gt: new Date() } }, { projection: { owner: 1 } }).catch(() => null)
+    ]);
+    if ([sessionLockBefore, accountLockBefore].some(lock => lock && lock.owner !== processInstanceId)) {
+        schedulePairingRestartOpenWatchdog(sessionId, Date.now(), `${source}:foreign_runtime_lock`, 5000);
+        return { reset: false, pending: true, reason: 'foreign_runtime_lock_active' };
+    }
     clearPairingChallengeTimer(sessionId);
     clearSessionOpenReadinessRetry(sessionId);
     const reconnectTimer = reconnectTimers.get(sessionId);
@@ -10643,7 +10807,7 @@ async function resetIncompletePairingCredentials(sessionId, expectedSocket, sour
     sessionLockRetryDueAt.delete(sessionId);
     sessionLockRetryAttempts.delete(sessionId);
     await ownerCollection.updateOne(
-        { sessionId, everConnected: { $ne: true }, everAuthenticated: { $ne: true }, connectedSince: { $exists: false }, socketAuthenticatedAt: { $exists: false } },
+        { sessionId, everConnected: { $ne: true }, everAuthenticated: { $ne: true }, connectedSince: { $in: [null] }, socketAuthenticatedAt: { $in: [null] }, socketAuthenticated: { $ne: true } },
         { $set: { connectionStatus: 'pairing_expired', socketAuthenticated: false, socketReady: false, pairingPending: false, pairingAttemptPending: false, pairingCleanupPending: true, pairingRestartFailed: true, pairingRestartFailedAt: now, reauthRequired: false, lastRestoreError: 'pairing_restart_failed_new_challenge_required', lastDisconnectCode: 515, lastDisconnectReason: 'Stream Errored (restart required)', statusUpdatedAt: now, updatedAt: now }, $unset: { nextRestoreRetryAt: 1 } }
     );
     pairingSessionsBeingExpired.add(sessionId);
@@ -10652,6 +10816,7 @@ async function resetIncompletePairingCredentials(sessionId, expectedSocket, sour
             const socketClosed = await cleanupSocket(sessionId, { socketCloseTimeoutMs: 2500, skipAuthStoreFlush: true });
             if (!socketClosed) {
                 console.warn('[pairing-515-terminal-cleanup-pending]', { sessionId, source, reason: 'socket_close_not_confirmed', reconnectScheduled: false });
+                schedulePairingRestartOpenWatchdog(sessionId, Date.now(), `${source}:socket_close_retry`, 5000);
                 return { reset: false, pending: true, reason: 'socket_close_not_confirmed' };
             }
         }
@@ -10659,6 +10824,7 @@ async function resetIncompletePairingCredentials(sessionId, expectedSocket, sour
         if (!queueSettled) {
             await ownerCollection.updateOne({ sessionId, pairingRestartFailed: true }, { $set: { pairingCleanupPending: true, lastRestoreError: 'pairing_auth_store_not_quiescent_cleanup_pending', updatedAt: new Date() } }).catch(() => {});
             console.warn('[pairing-515-terminal-cleanup-pending]', { sessionId, source, reason: 'credential_or_auth_write_queue_not_quiescent', reconnectScheduled: false });
+            schedulePairingRestartOpenWatchdog(sessionId, Date.now(), `${source}:auth_queue_retry`, 5000);
             return { reset: false, pending: true, reason: 'auth_store_not_quiescent' };
         }
         try {
@@ -10666,18 +10832,25 @@ async function resetIncompletePairingCredentials(sessionId, expectedSocket, sour
         } catch (error) {
             await ownerCollection.updateOne({ sessionId, pairingRestartFailed: true }, { $set: { pairingCleanupPending: true, lastRestoreError: 'pairing_auth_store_not_quiescent_cleanup_pending', updatedAt: new Date() } }).catch(() => {});
             console.warn('[pairing-515-terminal-cleanup-pending]', { sessionId, source, reason: error?.message || 'auth_store_not_quiescent', reconnectScheduled: false });
+            schedulePairingRestartOpenWatchdog(sessionId, Date.now(), `${source}:auth_quiescence_retry`, 5000);
             return { reset: false, pending: true, reason: 'auth_store_not_quiescent' };
         }
         const latestOwner = await ownerCollection.findOne({ sessionId }).catch(() => null);
         const latestRuntime = activeSessions.get(sessionId);
         if (!latestOwner || hasEstablishedWhatsAppAccount(latestOwner, latestRuntime, latestRuntime?.authState?.creds || null)) return { reset: false, preserved: true, reason: 'account_became_established' };
         const latestLeaseUntil = new Date(latestOwner.ownerLeaseUntil || 0).getTime();
-        if (TFBOT_CLUSTER_ENABLED && latestOwner.ownerInstanceId && latestOwner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && latestLeaseUntil > Date.now()) return { reset: false, pending: true, reason: 'foreign_owner_lease_active' };
+        if (TFBOT_CLUSTER_ENABLED && latestOwner.ownerInstanceId && latestOwner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && latestLeaseUntil > Date.now() && !isPreviousDeploymentOwnerOnCurrentHost(latestOwner)) {
+            schedulePairingRestartOpenWatchdog(sessionId, Date.now(), `${source}:latest_owner_lease_retry`, 5000);
+            return { reset: false, pending: true, reason: 'foreign_owner_lease_active' };
+        }
         const [sessionLockAfter, accountLockAfter] = await Promise.all([
             db.collection('session_runtime_locks').findOne({ _id: sessionId, leaseUntil: { $gt: new Date() } }, { projection: { owner: 1 } }).catch(() => null),
             db.collection('session_account_runtime_locks').findOne({ sessionId, leaseUntil: { $gt: new Date() } }, { projection: { owner: 1 } }).catch(() => null)
         ]);
-        if ([sessionLockAfter, accountLockAfter].some(lock => lock && lock.owner !== processInstanceId)) return { reset: false, pending: true, reason: 'foreign_runtime_lock_active' };
+        if ([sessionLockAfter, accountLockAfter].some(lock => lock && lock.owner !== processInstanceId)) {
+            schedulePairingRestartOpenWatchdog(sessionId, Date.now(), `${source}:latest_runtime_lock_retry`, 5000);
+            return { reset: false, pending: true, reason: 'foreign_runtime_lock_active' };
+        }
         const escaped = String(sessionId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const deleted = await db.collection('baileys_auth').deleteMany({ _id: { $regex: `^auth-${escaped}` } });
         await db.collection('lid_phone_mappings').deleteMany({ sessionId }).catch(() => {});
@@ -10702,16 +10875,18 @@ async function resetIncompletePairingCredentials(sessionId, expectedSocket, sour
             current.lastDisconnectCode = 515;
             current.lastDisconnectReason = 'Stream Errored (restart required)';
         }
-        await ownerCollection.updateOne(
-            { sessionId, everConnected: { $ne: true }, everAuthenticated: { $ne: true }, connectedSince: { $exists: false }, socketAuthenticatedAt: { $exists: false } },
-            { $set: { connectionStatus: 'pairing_expired', socketAuthenticated: false, socketReady: false, pairingPending: false, pairingAttemptPending: false, pairingCleanupPending: false, pairingRestartFailed: true, pairingRestartFailedAt: now, reauthRequired: false, lastRestoreError: 'pairing_restart_failed_new_challenge_required', lastDisconnectCode: 515, lastDisconnectReason: 'Stream Errored (restart required)', statusUpdatedAt: now, updatedAt: now }, $unset: { AccountJid: 1, OwnerLid: 1, Number: 1, connectedSince: 1, socketAuthenticatedAt: 1, pairingChallengeStartedAt: 1, pairingRestartRequiredAt: 1, pairingRestartAttempts: 1, nextRestoreRetryAt: 1, lastAuthFailureAt: 1, lastAuthFailure: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, ownerLeaseUntil: 1 } }
+        const finalOwnerUpdate = await ownerCollection.updateOne(
+            { sessionId, everConnected: { $ne: true }, everAuthenticated: { $ne: true }, $or: [{ socketAuthenticated: { $ne: true } }, { lastWhatsAppEvent: { $ne: 'open' } }] },
+            { $set: { connectionStatus: 'pairing_expired', socketAuthenticated: false, socketReady: false, pairingPending: false, pairingAttemptPending: false, pairingCleanupPending: false, pairingRestartFailed: true, pairingRestartFailedAt: now, reauthRequired: false, lastRestoreError: 'pairing_restart_failed_new_challenge_required', lastDisconnectCode: 515, lastDisconnectReason: 'Stream Errored (restart required)', statusUpdatedAt: now, updatedAt: now }, $unset: { AccountJid: 1, OwnerLid: 1, connectedSince: 1, socketAuthenticatedAt: 1, pairingChallengeStartedAt: 1, pairingRestartRequiredAt: 1, pairingRestartAttempts: 1, nextRestoreRetryAt: 1, lastAuthFailureAt: 1, lastAuthFailure: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, ownerLeaseUntil: 1 } }
         );
+        if (finalOwnerUpdate?.matchedCount !== 1) throw new Error('terminal_pairing_owner_final_state_write_not_confirmed');
         await releaseSessionRuntimeLock(sessionId).catch(() => {});
         await db.collection('session_account_runtime_locks').deleteMany({ sessionId, owner: processInstanceId }).catch(() => {});
         await db.collection('session_runtime_locks').deleteMany({ _id: sessionId, owner: processInstanceId }).catch(() => {});
         cleanupSessionVolatileCaches(sessionId);
+        previousDeploymentSessionTakeoverOwners.delete(sessionId);
         scheduleSessionListBroadcast('pairing_515_restart_aborted');
-        console.warn('[pairing-515-partial-auth-reset]', { sessionId, source, authDocumentsDeleted: Number(deleted?.deletedCount || 0), sessionSettingsPreserved: true, ownerRecordPreserved: true, previousRuntimeStatus: runtimeStatus || null, nextAction: 'request_a_new_qr_or_pairing_code_with_a_new_session_id' });
+        console.warn('[pairing-515-partial-auth-reset]', { sessionId, source, authDocumentsDeleted: Number(deleted?.deletedCount || 0), sessionSettingsPreserved: true, ownerRecordPreserved: true, previousRuntimeStatus: runtimeStatus || null, nextAction: 'reuse_the_preserved_session_record_for_a_fresh_qr_or_pairing_code_attempt' });
         return { reset: true, reason: 'partial_pairing_credentials_cleared', authDocumentsDeleted: Number(deleted?.deletedCount || 0) };
     } finally {
         pairingSessionsBeingExpired.delete(sessionId);
@@ -11556,6 +11731,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 confirmedSession.pairingAttemptPending = false;
                 confirmedSession.pairingRestartAttempts = 0;
                 clearPairingChallengeTimer(sessionId);
+                clearPairingRestartWatchdog(sessionId);
                 confirmedSession.connectedAt = Number(confirmedSession.connectedAt || confirmedAt);
                 confirmedSession.readyAt = Number(confirmedSession.readyAt || confirmedAt);
                 confirmedSession.number = openedAccountPhone || confirmedSession.number || null;
@@ -11810,11 +11986,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         currentSession.pairingChallengeStartedAt = closeAt;
                     }
                     await db.collection('session_owners').updateOne(
-                        { sessionId, everConnected: { $ne: true }, everAuthenticated: { $ne: true }, connectedSince: { $exists: false }, socketAuthenticatedAt: { $exists: false } },
+                        { sessionId, everConnected: { $ne: true }, everAuthenticated: { $ne: true }, connectedSince: null, socketAuthenticatedAt: null, $or: [{ socketAuthenticated: { $ne: true } }, { lastWhatsAppEvent: { $ne: 'open' } }] },
                         { $set: { connectionStatus: 'deconnecte', socketAuthenticated: false, socketReady: false, pairingPending: true, pairingAttemptPending: true, pairingRestartAttempts: 1, pairingRestartRequiredAt: restartAt, pairingChallengeStartedAt: restartAt, pairingStartedAt: restartAt, reauthRequired: false, statusUpdatedAt: restartAt, updatedAt: restartAt, lastWhatsAppEvent: 'close', lastWhatsAppEventAt: restartAt, lastDisconnectCode: 515, lastDisconnectReason: disconnectReason } },
                         { upsert: false }
                     ).catch(error => console.warn('[pairing-515-restart-state-save-failed]', { sessionId, error: error?.message || String(error) }));
                     schedulePairingChallengeExpiry(sessionId, restartAt, 'pairing_515_restart');
+                    schedulePairingRestartOpenWatchdog(sessionId, restartAt, 'pairing_515_restart');
                     if (pairing515CredentialsReady) {
                         console.warn('[pairing-515-restart-required]', { sessionId, credentialsRegistered: closeCredentials?.registered === true, identityPresent: !!(closeCredentials?.me?.id || closeCredentials?.me?.lid), restartAttempt: 1, action: 'immediately_reopen_once_after_confirmed_persisted_credentials' });
                         scheduleSessionReconnect(sessionId, autoExpire, connectionFormat, { delayMs: 150 });
@@ -14747,12 +14924,33 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
         if (!staleSessionId) continue;
         const runtime = activeSessions.get(staleSessionId);
         const duplicateTarget = String(owner.duplicateAccountOf || owner.duplicateOfSessionId || owner.mergedIntoSessionId || '').trim();
+        if (owner.pairingRestartFailed === true && owner.pairingCleanupPending !== true) continue;
+        const pairing515Hint = Number(owner.lastDisconnectCode ?? owner.DisconnectCode ?? 0) === 515 || /stream errored.*restart required|restart required/i.test(String(owner.lastDisconnectReason || owner.DisconnectReason || ''));
+        if (pairing515Hint && owner.pairingRestartFailed !== true || owner.pairingRestartFailed === true && owner.pairingCleanupPending === true) {
+            const pairingAuthDoc = await collection.findOne({ _id: `auth-${staleSessionId}-creds` }, { projection: { creds: 1 } }).catch(() => null);
+            const incomplete515 = isIncompletePairing515(owner, runtime, runtime?.authState?.creds || pairingAuthDoc?.creds || null);
+            if (incomplete515 || owner.pairingRestartFailed === true && owner.pairingCleanupPending === true) {
+                const restartTimeValue = owner.pairingRestartRequiredAt || owner.lastWhatsAppEventAt || owner.statusUpdatedAt || owner.updatedAt || owner.createdAt || Date.now();
+                const restartTimestamp = restartTimeValue instanceof Date ? restartTimeValue.getTime() : Number.isFinite(Number(restartTimeValue)) && Number(restartTimeValue) > 0 ? Number(restartTimeValue) : new Date(restartTimeValue).getTime();
+                const restartAgeMs = Number.isFinite(restartTimestamp) && restartTimestamp > 0 ? cleanupNow - restartTimestamp : PAIRING_515_RESTART_OPEN_TIMEOUT_MS;
+                if (incomplete515 && restartAgeMs < PAIRING_515_RESTART_OPEN_TIMEOUT_MS && owner.pairingRestartFailed !== true) {
+                    schedulePairingRestartOpenWatchdog(staleSessionId, new Date(restartTimestamp), 'periodic_pairing_515_restart_watchdog');
+                    console.info('[pairing-515-awaiting-single-restart-open]', { sessionId: staleSessionId, restartAgeMs, timeoutMs: PAIRING_515_RESTART_OPEN_TIMEOUT_MS, ownerRecordPreserved: true, reconnectAttemptsAllowed: 1 });
+                    continue;
+                }
+                const reset = await resetIncompletePairingCredentials(staleSessionId, runtime?.sock || null, 'periodic_terminal_incomplete_515_cleanup');
+                if (reset.reset) staleRemoved++;
+                if (reset.pending && !reset.preserved) schedulePairingRestartOpenWatchdog(staleSessionId, Date.now(), 'periodic_terminal_515_cleanup_retry', 5000);
+                console.warn('[pairing-515-periodic-cleanup-result]', { sessionId: staleSessionId, reset: reset.reset === true, pending: reset.pending === true, preserved: reset.preserved === true, reason: reset.reason || null, ownerRecordPreserved: reset.reset === true, reconnectScheduled: false });
+                continue;
+            }
+        }
         if (duplicateTarget && duplicateTarget !== staleSessionId) {
             const duplicateFormatValue = String(owner.format || owner.Format || runtime?.format || '').trim().toLowerCase();
             const duplicatePairingFormat = ['qr', 'qrcode', 'qr-code', 'scan', 'scanqr', 'pair', 'paircode', 'pair-code', 'pairing', 'code'].includes(duplicateFormatValue) || !!normalizePhoneNumber(owner.PairingNumber || '');
             const duplicateChallengeAt = [owner.pairingChallengeStartedAt, owner.pairingStartedAt, runtime?.pairingChallengeStartedAt, owner.createdAt, runtime?.createdAt, Number(staleSessionId.match(/^session_(\d+)/)?.[1] || 0)].map(value => value instanceof Date ? value.getTime() : Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : new Date(value || 0).getTime()).find(value => Number.isFinite(value) && value > 0) || 0;
-            const duplicateCredentialsDoc = await collection.findOne({ _id: `auth-${staleSessionId}-creds` }, { projection: { 'creds.registered': 1 } }).catch(() => null);
-            const duplicateHasEstablishedAccount = duplicateCredentialsDoc?.creds?.registered === true || !!owner.connectedSince || !!owner.socketAuthenticatedAt || owner.socketAuthenticated === true || owner.everAuthenticated === true || owner.everConnected === true || !!(runtime?.sock && isAuthenticatedSocketOperational(runtime, runtime.sock));
+            const duplicateCredentialsDoc = await collection.findOne({ _id: `auth-${staleSessionId}-creds` }, { projection: { creds: 1 } }).catch(() => null);
+            const duplicateHasEstablishedAccount = hasEstablishedWhatsAppAccount(owner, runtime, duplicateCredentialsDoc?.creds || runtime?.authState?.creds || null);
             if (duplicatePairingFormat && !duplicateHasEstablishedAccount && duplicateChallengeAt > 0 && cleanupNow - duplicateChallengeAt >= PAIRING_CHALLENGE_TTL_MS) {
                 const expiryResult = await expireUnregisteredPairingSession(owner, 'periodic_expired_duplicate_pairing');
                 if (expiryResult?.removed) staleRemoved++;
@@ -14917,6 +15115,19 @@ async function loadExistingSessions() {
         const credentials = fixBuffers(doc?.creds);
         const owner = owners.get(sessionId) || {};
         const runtime = activeSessions.get(sessionId);
+        if (isIncompletePairing515(owner, runtime, credentials) || owner.pairingRestartFailed === true && owner.pairingCleanupPending === true) {
+            const restartTimeValue = owner.pairingRestartRequiredAt || owner.lastWhatsAppEventAt || owner.statusUpdatedAt || owner.updatedAt || owner.createdAt || now;
+            const restartTimestamp = restartTimeValue instanceof Date ? restartTimeValue.getTime() : Number.isFinite(Number(restartTimeValue)) && Number(restartTimeValue) > 0 ? Number(restartTimeValue) : new Date(restartTimeValue).getTime();
+            const restartAgeMs = Number.isFinite(restartTimestamp) && restartTimestamp > 0 ? now - restartTimestamp : PAIRING_515_RESTART_OPEN_TIMEOUT_MS;
+            if (owner.pairingRestartFailed !== true && restartAgeMs < PAIRING_515_RESTART_OPEN_TIMEOUT_MS) schedulePairingRestartOpenWatchdog(sessionId, new Date(restartTimestamp), 'startup_pairing_515_restart_watchdog');
+            else {
+                const reset = await resetIncompletePairingCredentials(sessionId, runtime?.sock || null, 'startup_terminal_incomplete_515_cleanup');
+                if (reset.pending && !reset.preserved) schedulePairingRestartOpenWatchdog(sessionId, Date.now(), 'startup_terminal_515_cleanup_retry', 5000);
+                console.warn('[session-restore-incomplete-515-skipped]', { sessionId, reset: reset.reset === true, pending: reset.pending === true, preserved: reset.preserved === true, reason: reset.reason || null, restartAgeMs, reconnectScheduled: false, ownerRecordPreserved: true });
+            }
+            restoreSkippedCount++;
+            continue;
+        }
         const registered = credentials?.registered === true;
         const operational = !!(runtime?.sock && isAuthenticatedSocketOperational(runtime, runtime.sock));
         const established = registered || operational || establishedOwnerProof(owner);
@@ -15406,12 +15617,16 @@ async function main() {
         authWritesAllowSessionScopedBootstrapUntilIdentity: true,
         pairingAuthPreservedOnTransientFailure: 'established_sessions_only; first_515_requires_one_persisted_restart; incomplete_pairing_aborts_after_second_515_or_store_timeout',
         pairing515FirstCloseAction: 'persist_credentials_then_restart_socket_once',
-        pairing515SecondCloseAction: 'abort_incomplete_pairing_and_require_fresh_session_id',
+        pairing515SecondCloseAction: 'abort_incomplete_pairing_preserve_owner_record_clear_partial_auth_reuse_session_id',
         pairing515AuthStoreTimeoutAction: 'abort_incomplete_pairing_without_lock_retry',
         pairing515RestartLimit: 1,
         pairing515CredentialTimeoutMs: PAIRING_515_CREDENTIAL_TIMEOUT_MS,
         pairing515StoreTimeoutMs: PAIRING_515_STORE_TIMEOUT_MS,
-        pairing515FailurePolicy: 'terminal_pairing_expired_no_socket_reconnect_new_session_id_required',
+        pairing515RestartOpenTimeoutMs: PAIRING_515_RESTART_OPEN_TIMEOUT_MS,
+        pairing515FailurePolicy: 'terminal_pairing_expired_no_socket_reconnect_preserve_owner_record_clear_partial_auth_reuse_session_id',
+        pairing515IncompleteCredentialsRestored: false,
+        pairing515SessionRecordPreserveIds: [...PAIRING_SESSION_RECORDS_TO_PRESERVE],
+        pairing515SimilarZombieLookup: 'same_normalized_phone_across_PairingNumber_Number_number_and_Numero',
         pairingTimeoutMs: PAIRING_SESSION_TTL_MS,
         pairingChallengeTtlMs: PAIRING_CHALLENGE_TTL_MS,
         explicitLogoutCleanupDelayMs: EXPLICIT_LOGOUT_CLEANUP_DELAY_MS,
