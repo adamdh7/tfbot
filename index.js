@@ -4,7 +4,7 @@ const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(2000, Math.min(15000, Number(proces
 const MESSAGE_QUEUE_CLOSE_WAIT_MS = Math.max(2000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_CLOSE_WAIT_MS || 5000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r121-isolated-inbound-receipts-stable-account-alive-mobile-list';
+const TFBOT_CLUSTER_CODE_REVISION = 'r127-session-owner-only-retry-delivery-telemetry-qr-stability';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
@@ -72,10 +72,9 @@ const fs = require('fs');
 const path = require('path');
 const EventEmitter = require('events');
 const { AsyncLocalStorage } = require('async_hooks');
-const TFBOT_DIAGNOSTIC_PHONE = String(process.env.TFBOT_DIAGNOSTIC_PHONE || '18298617960').replace(/\D/g, '');
 const TFBOT_DIAGNOSTIC_SESSION_ID = String(process.env.TFBOT_DIAGNOSTIC_SESSION_ID || '').trim();
 const TFBOT_DIAGNOSTIC_LOG_PATH = path.join(__dirname, 'logs.txt');
-const TFBOT_DIAGNOSTIC_LOG_MAX_BYTES = Math.max(1048576, Math.min(16777216, Number(process.env.TFBOT_DIAGNOSTIC_LOG_MAX_BYTES || 8388608)));
+const TFBOT_DIAGNOSTIC_LOG_MAX_BYTES = Math.max(1048576, Math.min(3145728, Number(process.env.TFBOT_DIAGNOSTIC_LOG_MAX_BYTES || 3145728)));
 const tfbotOriginalConsole = { log: console.log.bind(console), info: console.info.bind(console), warn: console.warn.bind(console), error: console.error.bind(console), debug: console.debug.bind(console) };
 const tfbotDiagnosticSerialize = value => {
     try { return JSON.stringify(value, (key, item) => {
@@ -142,20 +141,20 @@ function getTfbotDiagnosticSession() {
     const now = Date.now();
     if (now - tfbotDiagnosticTargetCacheAt < 750) return tfbotDiagnosticTargetCache;
     try {
+        const getRuntimePhone = runtime => normalizePhoneNumber(getAuthenticatedPhoneNumber(runtime?.sock?.user || null, runtime?.authState?.creds || null) || runtime?.number || runtime?.sock?.user?.phoneNumber || '');
         const preferredRuntime = TFBOT_DIAGNOSTIC_SESSION_ID ? activeSessions.get(TFBOT_DIAGNOSTIC_SESSION_ID) : null;
         if (preferredRuntime) {
-            tfbotDiagnosticTargetCache = { sessionId: TFBOT_DIAGNOSTIC_SESSION_ID, name: String(preferredRuntime?.sock?.user?.name || preferredRuntime?.sock?.user?.notify || preferredRuntime?.ownerName || 'Bot (tfbot)').slice(0, 80), phone: TFBOT_DIAGNOSTIC_PHONE };
+            const phone = getRuntimePhone(preferredRuntime);
+            tfbotDiagnosticTargetCache = { sessionId: TFBOT_DIAGNOSTIC_SESSION_ID, name: String(preferredRuntime?.sock?.user?.name || preferredRuntime?.sock?.user?.notify || preferredRuntime?.ownerName || 'Bot (tfbot)').slice(0, 80), phone };
             tfbotDiagnosticTargetCacheAt = now;
             return tfbotDiagnosticTargetCache;
         }
-        const matches = [...activeSessions.entries()].filter(([sessionId, runtime]) => {
-            const credentials = runtime?.authState?.creds || null;
-            const phone = normalizePhoneNumber(getAuthenticatedPhoneNumber(runtime?.sock?.user || null, credentials) || runtime?.number || runtime?.sock?.user?.phoneNumber || '');
-            return !!TFBOT_DIAGNOSTIC_PHONE && phone === TFBOT_DIAGNOSTIC_PHONE;
-        }).sort((a, b) => {
+        const matches = [...activeSessions.entries()].filter(([, runtime]) => !!runtime?.sock && (runtime?.authState?.creds?.registered === true || runtime?.sock?.user?.id || runtime?.sock?.user?.lid)).sort((a, b) => {
+            const aOpen = a[1]?.sock?.ws?.isOpen === true || Number(a[1]?.sock?.ws?.readyState ?? a[1]?.sock?.ws?._socket?.readyState) === 1 ? 1 : 0;
+            const bOpen = b[1]?.sock?.ws?.isOpen === true || Number(b[1]?.sock?.ws?.readyState ?? b[1]?.sock?.ws?._socket?.readyState) === 1 ? 1 : 0;
             const aConnected = ['connecte', 'connected'].includes(String(a[1]?.status || '').toLowerCase()) ? 1 : 0;
             const bConnected = ['connecte', 'connected'].includes(String(b[1]?.status || '').toLowerCase()) ? 1 : 0;
-            return bConnected - aConnected || Number(b[1]?.connectedAt || b[1]?.readyAt || b[1]?.lastMessageAt || 0) - Number(a[1]?.connectedAt || a[1]?.readyAt || a[1]?.lastMessageAt || 0);
+            return bOpen - aOpen || bConnected - aConnected || Number(b[1]?.connectedAt || b[1]?.readyAt || b[1]?.lastMessageAt || 0) - Number(a[1]?.connectedAt || a[1]?.readyAt || a[1]?.lastMessageAt || 0);
         });
         if (!matches.length) {
             tfbotDiagnosticTargetCache = null;
@@ -163,7 +162,7 @@ function getTfbotDiagnosticSession() {
             return null;
         }
         const [sessionId, runtime] = matches[0];
-        tfbotDiagnosticTargetCache = { sessionId, name: String(runtime?.sock?.user?.name || runtime?.sock?.user?.notify || runtime?.ownerName || 'Bot (tfbot)').slice(0, 80), phone: TFBOT_DIAGNOSTIC_PHONE };
+        tfbotDiagnosticTargetCache = { sessionId, name: String(runtime?.sock?.user?.name || runtime?.sock?.user?.notify || runtime?.ownerName || 'Bot (tfbot)').slice(0, 80), phone: getRuntimePhone(runtime) };
         tfbotDiagnosticTargetCacheAt = now;
         return tfbotDiagnosticTargetCache;
     } catch (error) {
@@ -183,7 +182,8 @@ function sanitizeTfbotDiagnosticLog(value, sessionId) {
     output = output.replace(/\b(\d{7,20}(?::\d+)?)(@s\.whatsapp\.net|@lid|@hosted)\b/gi, (_, id, suffix) => `[jid:${shortLogHash(id)}]${suffix}`);
     output = output.replace(/\b(\d{8,22}-\d{4,22})(@g\.us)\b/gi, (_, id, suffix) => `[group:${shortLogHash(id)}]${suffix}`);
     output = output.replace(/\bsession_\d+_[a-z0-9]+\b/gi, '[session]');
-    output = output.replace(/\b\d{8,15}\b/g, number => number === TFBOT_DIAGNOSTIC_PHONE ? `[phone:${number.slice(-2).padStart(number.length, '*')}]` : `[number:${shortLogHash(number)}]`);
+    const diagnosticPhone = String(tfbotDiagnosticTargetCache?.phone || '');
+    output = output.replace(/\b\d{8,15}\b/g, number => number === diagnosticPhone ? `[phone:${number.slice(-2).padStart(number.length, '*')}]` : `[number:${shortLogHash(number)}]`);
     return output.slice(0, 12000);
 }
 async function sanitizeExistingTfbotPublicLogFile() {
@@ -773,31 +773,6 @@ function applyBaileysOutgoingRetryPreflightPatch() {
     }
 }
 
-function applyBaileysRetryResendDoubleEncryptionPatch() {
-    const marker = '__tfbotRetryResendSingleEncryptionV107';
-    try {
-        const entryPath = require.resolve('@whiskeysockets/baileys');
-        const entryDirectory = path.dirname(entryPath);
-        const roots = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
-        const candidates = [...new Set(roots.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `messages-send.${extension}`)))) )];
-        const filePath = candidates.find(candidate => fs.existsSync(candidate));
-        if (!filePath) return { applied: false, reason: 'messages_send_module_not_found', issue: 'Baileys#2781' };
-        let source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), issue: 'Baileys#2781', skipsSecondEncryptionWhenParticipantNodeExists: true };
-        if (!/\bparticipants\s*\.\s*length\b/.test(source) || !/\bparticipants\s*\.\s*push\s*\(/.test(source)) return { applied: false, reason: 'participant_fanout_array_not_found', file: path.basename(filePath), issue: 'Baileys#2781' };
-        const patterns = [...source.matchAll(/if\s*\(\s*isRetryResend\s*\)\s*\{/g)];
-        if (patterns.length !== 1) return { applied: false, reason: `expected_one_retry_resend_guard_found_${patterns.length}`, file: path.basename(filePath), issue: 'Baileys#2781' };
-        const match = patterns[0];
-        const guard = 'if (isRetryResend && !participants.length) {';
-        const patched = source.slice(0, match.index) + guard + source.slice(match.index + match[0].length);
-        const finalSource = patched.replace(guard, `${guard}\n\t\tconst ${marker} = true;`);
-        if (!finalSource.includes(marker) || !finalSource.includes('if (isRetryResend && !participants.length)')) return { applied: false, reason: 'single_encryption_patch_verification_failed', file: path.basename(filePath), issue: 'Baileys#2781' };
-        fs.writeFileSync(filePath, finalSource, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), issue: 'Baileys#2781', skipsSecondEncryptionWhenParticipantNodeExists: true, preservesParticipantAddress: true };
-    } catch (error) {
-        return { applied: false, reason: String(error?.message || error).slice(0, 180), issue: 'Baileys#2781' };
-    }
-}
 function applyBaileysOwnLidRetryAddressingPatch() {
     const marker = '__tfbotOwnLidRetryIdentityResolvedV116';
     try {
@@ -885,6 +860,24 @@ function applyBaileysGroupLidPnDecryptRetryPatch() {
     }
 }
 
+function injectBaileysRetryRelayTelemetry(source) {
+    const marker = 'const __tfbotRetryRelayStartedAtV126 = Date.now();';
+    if (source.includes(marker)) return { source, applied: false, alreadyApplied: true };
+    const pattern = /await\s+sendMessagesAgain\(key\s*,\s*ids\s*,\s*retryNode(?:\s*,\s*node)?(?:!)?\s*\)\s*;?/;
+    const match = pattern.exec(source);
+    if (!match) return { source, applied: false, reason: 'retry_relay_call_not_found' };
+    const call = match[0].replace(/retryNode(?:\s*,\s*node)?(?:!)?\s*\)/, 'retryNode, node)');
+    const wrapped = `const __tfbotRetryRelayStartedAtV126 = Date.now();
+try {
+    ${call.replace(/\s*;?$/, ';')}
+    logger.info({ messageId: ids?.[0] || null, chatType: String(key?.remoteJid || '').endsWith('@g.us') ? 'group' : 'private', participantType: /@(?:hosted\.)?lid$/i.test(String(key?.participant || '')) ? 'lid' : /@s\.whatsapp\.net$/i.test(String(key?.participant || '')) ? 'pn' : 'unknown', retryCount: Math.max(1, Number(retryNode?.attrs?.count) || 1), durationMs: Date.now() - __tfbotRetryRelayStartedAtV126, deliveryConfirmed: false }, 'WhatsApp retry relay returned; final recipient delivery is not confirmed');
+} catch (__tfbotRetryRelayErrorV126) {
+    logger.warn({ messageId: ids?.[0] || null, chatType: String(key?.remoteJid || '').endsWith('@g.us') ? 'group' : 'private', participantType: /@(?:hosted\.)?lid$/i.test(String(key?.participant || '')) ? 'lid' : /@s\.whatsapp\.net$/i.test(String(key?.participant || '')) ? 'pn' : 'unknown', retryCount: Math.max(1, Number(retryNode?.attrs?.count) || 1), durationMs: Date.now() - __tfbotRetryRelayStartedAtV126, errorName: __tfbotRetryRelayErrorV126?.name || 'Error', error: String(__tfbotRetryRelayErrorV126?.message || __tfbotRetryRelayErrorV126).slice(0, 240) }, 'WhatsApp retry relay failed');
+    throw __tfbotRetryRelayErrorV126;
+}`;
+    return { source: source.slice(0, match.index) + wrapped + source.slice(match.index + match[0].length), applied: true };
+}
+
 function applyBaileysGroupRetrySkdmPatch() {
     const result = { applied: false, version: '6.7.23', issue: 'Baileys#2506', libsignal: { applied: false }, messagesRecv: { applied: false }, messagesSend: { applied: false }, reason: 'not_attempted' };
     try {
@@ -956,7 +949,7 @@ function applyBaileysGroupRetrySkdmPatch() {
             result.libsignal = { applied: true, alreadyApplied: false, file: path.basename(libPath), exposesSkdmMethods: true, exposesSessionInfo: true, transactionScoped: true };
         }
         let receiveSource = fs.readFileSync(receivePath, 'utf8');
-        const receiveMarker = '__tfbotGroupRetryReceiptBundleV115';
+        const receiveMarker = '__tfbotGroupRetryReceiptBundleV126';
         if (receiveSource.includes(receiveMarker)) {
             result.messagesRecv = { applied: true, alreadyApplied: true, file: path.basename(receivePath) };
         } else {
@@ -980,30 +973,6 @@ function applyBaileysGroupRetrySkdmPatch() {
                 return result;
             }
             const helper = `
-const __tfbotRetryBaseKeyCacheV115 = new Map();
-const __tfbotRetryBaseKeyMatchesV115 = (sessionId, messageId, baseKey, retryCount) => {
-    const cacheKey = String(sessionId) + ':' + String(messageId);
-    const current = Buffer.from(baseKey || []);
-    if (!sessionId || !messageId || !current.length) return false;
-    if (retryCount === 2) {
-        if (__tfbotRetryBaseKeyCacheV115.size >= 1024) {
-            const oldestKey = __tfbotRetryBaseKeyCacheV115.keys().next().value;
-            if (oldestKey) __tfbotRetryBaseKeyCacheV115.delete(oldestKey);
-        }
-        __tfbotRetryBaseKeyCacheV115.set(cacheKey, { baseKey: current, at: Date.now() });
-        return false;
-    }
-    if (retryCount < 3) return false;
-    const previous = __tfbotRetryBaseKeyCacheV115.get(cacheKey);
-    __tfbotRetryBaseKeyCacheV115.delete(cacheKey);
-    if (!previous || Date.now() - previous.at > 900000 || previous.baseKey.length !== current.length) return false;
-    let same = true;
-    for (let index = 0; index < current.length; index++) {
-        if (previous.baseKey[index] !== current[index]) { same = false; break; }
-    }
-    previous.baseKey.fill(0);
-    return same;
-};
 const __tfbotReadRetryReceiptUIntV115 = (parent, name, size) => {
     const value = getBinaryNodeChildBuffer(parent, name);
     return value && value.length === size ? value.readUIntBE(0, size) : undefined;
@@ -1053,15 +1022,13 @@ const __tfbotExtractRetryReceiptBundleV115 = receipt => {
             }
             const retrySetup = `${sendToAllMatch[0]}
         const __tfbotSignalSessionIdV115 = signalRepository.jidToSignalProtocolAddress(participant);
-        const __tfbotRetryCountV115 = Math.max(1, Number(retryNode?.attrs?.count) || 1);
-        const __tfbotRetryMessageIdV115 = String(ids?.[0] || '');
         const __tfbotRetryBundleV115 = __tfbotExtractRetryReceiptBundleV115(receiptNode);
         let __tfbotInjectedBundleV115 = false;
         if (__tfbotRetryBundleV115) {
             try {
                 await signalRepository.injectE2ESession({ jid: participant, session: __tfbotRetryBundleV115 });
                 __tfbotInjectedBundleV115 = true;
-                logger.debug({ participant, retryCount: __tfbotRetryCountV115 }, 'injected session from retry receipt key bundle');
+                logger.debug({ participant, retryCount: Math.max(1, Number(retryNode?.attrs?.count) || 1) }, 'injected session from retry receipt key bundle');
             } catch (__tfbotBundleErrorV115) {
                 logger.warn({ err: __tfbotBundleErrorV115, participant }, 'retry receipt key bundle injection failed');
             }
@@ -1076,14 +1043,6 @@ const __tfbotExtractRetryReceiptBundleV115 = receipt => {
                 }
             }
         }
-        if (__tfbotRetryMessageIdV115 && typeof signalRepository.getSessionInfo === 'function') {
-            const __tfbotRetrySessionInfoV115 = await signalRepository.getSessionInfo(participant);
-            if (__tfbotRetrySessionInfoV115?.baseKey && __tfbotRetryBaseKeyMatchesV115(__tfbotSignalSessionIdV115, __tfbotRetryMessageIdV115, __tfbotRetrySessionInfoV115.baseKey, __tfbotRetryCountV115)) {
-                logger.warn({ participant, messageId: __tfbotRetryMessageIdV115, retryCount: __tfbotRetryCountV115 }, 'retry session reused the same base key; replacing only this peer session');
-                await authState.keys.set({ session: { [__tfbotSignalSessionIdV115]: null } });
-                __tfbotInjectedBundleV115 = false;
-            }
-        }
         if (!__tfbotInjectedBundleV115) await assertSessions([participant], true);
 `;
             receiveSource = receiveSource.slice(0, sendToAllMatch.index) + retrySetup + receiveSource.slice(sendToAllMatch.index + sendToAllMatch[0].length);
@@ -1093,14 +1052,19 @@ const __tfbotExtractRetryReceiptBundleV115 = receipt => {
                 result.reason = 'baileys_6_7_23_retry_receipt_call_not_found';
                 return result;
             }
-            receiveSource = receiveSource.slice(0, retryCallMatch.index) + retryCallMatch[0].replace(/retryNode(?:!)?\s*\)/, 'retryNode, node)') + receiveSource.slice(retryCallMatch.index + retryCallMatch[0].length);
+            const retryRelayTelemetry = injectBaileysRetryRelayTelemetry(receiveSource);
+            if (!retryRelayTelemetry.applied && !retryRelayTelemetry.alreadyApplied) {
+                result.reason = retryRelayTelemetry.reason || 'retry_relay_telemetry_patch_failed';
+                return result;
+            }
+            receiveSource = retryRelayTelemetry.source;
             if (!receiveSource.includes(receiveMarker)) receiveSource = receiveSource.replace('const __tfbotReadRetryReceiptUIntV115 =', `const ${receiveMarker} = true;\nconst __tfbotReadRetryReceiptUIntV115 =`);
-            if (!receiveSource.includes(receiveMarker) || !receiveSource.includes('__tfbotExtractRetryReceiptBundleV115') || !receiveSource.includes('retryNode, node)')) {
+            if (!receiveSource.includes(receiveMarker) || !receiveSource.includes('__tfbotExtractRetryReceiptBundleV115') || !receiveSource.includes('retryNode, node)') || !receiveSource.includes('__tfbotRetryRelayStartedAtV126')) {
                 result.reason = 'baileys_6_7_23_receive_patch_verification_failed';
                 return result;
             }
             fs.writeFileSync(receivePath, receiveSource, 'utf8');
-            result.messagesRecv = { applied: true, alreadyApplied: false, file: path.basename(receivePath), parsesRetryReceiptKeys: true, injectsBundleBeforeAssertSessions: true, targetedRegistrationMismatchRecovery: true };
+            result.messagesRecv = { applied: true, alreadyApplied: false, file: path.basename(receivePath), parsesRetryReceiptKeys: true, injectsBundleBeforeAssertSessions: true, targetedRegistrationMismatchRecovery: true, logsRetryRelayOutcomeWithoutClaimingDelivery: true };
         }
         let sendSource = fs.readFileSync(sendPath, 'utf8');
         const sendMarker = '__tfbotGroupRetrySkdmEmbeddedV115';
@@ -1254,69 +1218,55 @@ function applyBaileysPairingCodeProtocolPatch() {
     }
 }
 
-function applyBaileysMessageRetryManagerDeviceJidPatch() {
-    const marker = '__tfbotRetryManagerLookupByMessageIdV101';
+
+function upgradeBaileysRetryHeuristicIfPresent() {
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
-        const roots = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'Utils'), path.join(entryDirectory, 'utils'), path.join(path.dirname(entryDirectory), 'Utils'), path.join(path.dirname(entryDirectory), 'utils')])].filter(directory => fs.existsSync(directory) && fs.statSync(directory).isDirectory());
-        const files = [];
-        const visited = new Set();
-        let scanned = 0;
-        const walk = (directory, depth = 0) => {
-            if (depth > 5 || scanned > 1600 || visited.has(directory)) return;
-            visited.add(directory);
-            let entries = [];
-            try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch (error) { return; }
-            for (const entry of entries) {
-                if (scanned++ > 1600) break;
-                const fullPath = path.join(directory, entry.name);
-                if (entry.isDirectory()) {
-                    if (entry.name !== 'node_modules' && entry.name !== '.git') walk(fullPath, depth + 1);
-                } else if (/\.(?:js|cjs|mjs)$/i.test(entry.name) && !/\.map$/i.test(entry.name)) {
-                    files.push(fullPath);
+        const roots = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'Socket'), path.join(entryDirectory, 'socket')])];
+        const candidates = [...new Set(roots.flatMap(directory => ['messages-recv.js', 'messages-recv.cjs', 'messages-recv.mjs'].map(name => path.join(directory, name))) )];
+        const filePath = candidates.find(candidate => fs.existsSync(candidate));
+        if (!filePath) return { upgraded: false, reason: 'messages_recv_module_not_found' };
+        let source = fs.readFileSync(filePath, 'utf8');
+        let changed = false;
+        const hasExistingGroupRetryPatch = ['const __tfbotGroupRetryReceiptBundleV115 = true;', 'const __tfbotGroupRetryReceiptBundleV122 = true;', 'const __tfbotGroupRetryReceiptBundleV126 = true;'].some(marker => source.includes(marker)) || source.includes('__tfbotExtractRetryReceiptBundleV115');
+        const helperStart = source.indexOf('const __tfbotRetryBaseKeyCacheV115 = new Map();');
+        const helperEnd = source.indexOf('const __tfbotReadRetryReceiptUIntV115 =', helperStart);
+        if (helperStart >= 0 && helperEnd > helperStart) {
+            source = source.slice(0, helperStart) + source.slice(helperEnd);
+            changed = true;
+        }
+        const resetStart = source.indexOf("if (__tfbotRetryMessageIdV115 && typeof signalRepository.getSessionInfo === 'function') {");
+        if (resetStart >= 0) {
+            const resetEnd = source.indexOf('if (!__tfbotInjectedBundleV115) await assertSessions([participant], true);', resetStart);
+            if (resetEnd > resetStart) {
+                source = source.slice(0, resetStart) + source.slice(resetEnd);
+                changed = true;
+            }
+        }
+        source = source.replace(/retryCount: __tfbotRetryCountV115/g, 'retryCount: Math.max(1, Number(retryNode?.attrs?.count) || 1)');
+        source = source.replace(/\s*const __tfbotRetryCountV115 = Math\.max\(1, Number\(retryNode\?\.attrs\?\.count\) \|\| 1\);\s*const __tfbotRetryMessageIdV115 = String\(ids\?\.\[0\] \|\| ''\);/, '');
+        if (hasExistingGroupRetryPatch) {
+            for (const previousMarker of ['const __tfbotGroupRetryReceiptBundleV115 = true;', 'const __tfbotGroupRetryReceiptBundleV122 = true;']) {
+                if (source.includes(previousMarker)) {
+                    source = source.replace(previousMarker, 'const __tfbotGroupRetryReceiptBundleV126 = true;');
+                    changed = true;
                 }
             }
-        };
-        for (const root of roots) walk(root, 0);
-        const uniqueFiles = [...new Set(files)];
-        let filePath = null;
-        let source = '';
-        for (const candidate of uniqueFiles) {
-            try {
-                const stat = fs.statSync(candidate);
-                if (stat.size > 2500000 || stat.size < 100) continue;
-                const candidateSource = fs.readFileSync(candidate, 'utf8');
-                if (candidateSource.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(candidate), issue: 'Baileys#2839', lookupById: true };
-                if (candidateSource.includes('recentMessagesMap') && candidateSource.includes('messageKeyIndex') && candidateSource.includes('getRecentMessage')) {
-                    filePath = candidate;
-                    source = candidateSource;
-                    break;
-                }
-            } catch (error) {}
+            const retryRelayTelemetry = injectBaileysRetryRelayTelemetry(source);
+            if (retryRelayTelemetry.applied) {
+                source = retryRelayTelemetry.source;
+                changed = true;
+            }
         }
-        if (!filePath) return { applied: false, reason: 'retry_manager_implementation_not_found_after_package_scan', scannedFiles: uniqueFiles.length };
-        const methodPattern = /getRecentMessage\s*\(\s*to(?:\s*:\s*[^,]+)?\s*,\s*id(?:\s*:\s*[^)]+)?\s*\)\s*(?::\s*[^{}]+)?\s*\{/g;
-        const methods = [...source.matchAll(methodPattern)];
-        if (methods.length !== 1) return { applied: false, reason: `expected_one_get_recent_message_found_${methods.length}`, file: path.basename(filePath) };
-        const method = methods[0];
-        const openBrace = source.indexOf('{', method.index);
-        const closeBrace = findTfbotMatchingBraceEnd(source, openBrace);
-        if (closeBrace < 0) return { applied: false, reason: 'get_recent_message_body_unbalanced', file: path.basename(filePath) };
-        const body = source.slice(openBrace + 1, closeBrace);
-        const exactLookup = /return\s+this\.recentMessagesMap\.get\(\s*keyStr\s*\)\s*;?/;
-        if (!exactLookup.test(body)) return { applied: false, reason: 'exact_retry_cache_lookup_not_found', file: path.basename(filePath) };
-        const replacement = `const ${marker} = true;\n\t\tconst exactRecentMessage = this.recentMessagesMap.get(keyStr);\n\t\tif (exactRecentMessage) return exactRecentMessage;\n\t\tconst indexedMessageKey = this.messageKeyIndex.get(id);\n\t\treturn indexedMessageKey ? this.recentMessagesMap.get(indexedMessageKey) : undefined;`;
-        const patchedBody = body.replace(exactLookup, replacement);
-        const patched = source.slice(0, openBrace + 1) + patchedBody + source.slice(closeBrace);
-        if (!patched.includes(marker) || !patched.includes('this.messageKeyIndex.get(id)')) return { applied: false, reason: 'retry_manager_fallback_verification_failed', file: path.basename(filePath) };
-        fs.writeFileSync(filePath, patched, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), issue: 'Baileys#2839', action: 'lookup_recent_retry_message_by_message_id_after_device_jid_key_mismatch' };
+        if (changed) fs.writeFileSync(filePath, source, 'utf8');
+        return { upgraded: changed, alreadyClean: !changed, retryRelayTelemetry: source.includes('__tfbotRetryRelayStartedAtV126'), file: path.basename(filePath) };
     } catch (error) {
-        return { applied: false, reason: String(error?.message || error).slice(0, 180) };
+        return { upgraded: false, reason: String(error?.message || error).slice(0, 180) };
     }
 }
 
+const baileysRetryHeuristicUpgradeStatus = upgradeBaileysRetryHeuristicIfPresent();
 const baileysLidPnDecryptPatchStatus = applyBaileysLidPnDecryptRetryPatch();
 const baileysGroupLidPnDecryptPatchStatus = applyBaileysGroupLidPnDecryptRetryPatch();
 const baileysGroupRetrySkdmPatchStatus = applyBaileysGroupRetrySkdmPatch();
@@ -1324,18 +1274,19 @@ const baileysSelfChatPlaceholderResendPatchStatus = applyBaileysSelfChatPlacehol
 const baileysSignalTransactionPatchStatus = applyBaileysSignalTransactionPatch();
 const baileysPerChatInboundProcessingPatchStatus = applyBaileysPerChatInboundProcessingPatch();
 const baileysOutgoingRetryPreflightPatchStatus = applyBaileysOutgoingRetryPreflightPatch();
-const baileysRetryResendDoubleEncryptionPatchStatus = applyBaileysRetryResendDoubleEncryptionPatch();
+const baileysRetryResendDoubleEncryptionPatchStatus = { applied: false, notApplicable: true, reason: 'Baileys_6_7_23_does_not_use_the_v7_retry_resend_guard' };
 const baileysOwnLidRetryAddressingPatchStatus = applyBaileysOwnLidRetryAddressingPatch();
-const baileysMessageRetryManagerDeviceJidPatchStatus = applyBaileysMessageRetryManagerDeviceJidPatch();
+const baileysMessageRetryManagerDeviceJidPatchStatus = { applied: false, notApplicable: true, reason: 'Baileys_6_7_23_uses_getMessage_and_socket_retry_cache_not_MessageRetryManager' };
 const baileysCompanionRegRefreshPatchStatus = applyBaileysCompanionRegRefreshPatch();
 const baileysPairingCodeProtocolPatchStatus = applyBaileysPairingCodeProtocolPatch();
-console.info('[tfbot-local-diagnostics-ready]', { phone: TFBOT_DIAGNOSTIC_PHONE ? `[phone:${TFBOT_DIAGNOSTIC_PHONE.slice(-2).padStart(TFBOT_DIAGNOSTIC_PHONE.length, '*')}]` : null, sessionId: TFBOT_DIAGNOSTIC_SESSION_ID || null, file: 'logs.txt', storage: 'local_filesystem_only', publicRead: true, access: 'public-redacted-log', writer: 'asynchronous' });
+console.info('[tfbot-local-diagnostics-ready]', { sessionId: TFBOT_DIAGNOSTIC_SESSION_ID || null, selector: TFBOT_DIAGNOSTIC_SESSION_ID ? 'configured_session' : 'most_recent_active_session', file: 'logs.txt', storage: 'local_filesystem_only', publicRead: true, access: 'public-redacted-log', writer: 'asynchronous' });
 console.info('[baileys-lid-pn-decrypt-retry-patch]', baileysLidPnDecryptPatchStatus);
 console.info('[baileys-group-lid-pn-decrypt-retry-patch]', baileysGroupLidPnDecryptPatchStatus);
 console.info('[baileys-self-chat-placeholder-resend-patch]', baileysSelfChatPlaceholderResendPatchStatus);
 console.info('[baileys-group-retry-skdm-patch]', baileysGroupRetrySkdmPatchStatus);
+console.info('[baileys-retry-heuristic-upgrade]', baileysRetryHeuristicUpgradeStatus);
 console.info('[baileys-outgoing-retry-preflight-patch]', { ...baileysOutgoingRetryPreflightPatchStatus, action: baileysOutgoingRetryPreflightPatchStatus.applied ? 'preload_internal_retry_manager_and_persist_generated_full_message_before_network_relay' : 'leave_installed_baileys_source_unchanged' });
-console.info('[baileys-retry-resend-double-encryption-patch]', { ...baileysRetryResendDoubleEncryptionPatchStatus, action: baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'avoid_duplicate_pairwise_encryption_on_retry_resend' : 'not_applicable_or_source_shape_not_matched' });
+console.info('[baileys-retry-resend-double-encryption-patch]', { ...baileysRetryResendDoubleEncryptionPatchStatus, action: baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'avoid_duplicate_pairwise_encryption_on_retry_resend' : 'not_applicable_for_installed_baileys_version' });
 console.info('[baileys-own-lid-retry-addressing-patch]', { ...baileysOwnLidRetryAddressingPatchStatus, action: baileysOwnLidRetryAddressingPatchStatus.applied ? 'recognize_own_lid_as_self_for_device_encryption' : 'not_applicable_or_source_shape_not_matched' });
 console.info('[baileys-pairing-code-protocol-patch]', baileysPairingCodeProtocolPatchStatus);
 console.info('[baileys-signal-transaction-patch]', { ...baileysSignalTransactionPatchStatus, action: baileysSignalTransactionPatchStatus.applied ? 'serialize_signal_crypto_methods_by_signal_peer_or_group_inside_session_store_transaction' : 'leave_installed_baileys_source_unchanged' });
@@ -1517,7 +1468,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-02-r121';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-02-r127';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1886,16 +1837,6 @@ function scheduleSessionOpenReadinessRetry(sessionId, sock, delayMs = SESSION_OP
     sessionOpenReadinessTimers.set(id, { sock, timer, startedAt });
     return true;
 }
-const GLOBAL_OWNER_AUTOMATION_CONTROL_ID = 'global-owner-promotion-control';
-const GLOBAL_OWNER_AUTOMATION_RATE_LIMIT_ID = 'global-owner-promotion-rate-limit';
-const GLOBAL_OWNER_AUTOMATION_SCAN_INTERVAL_MS = Math.max(60000, Math.min(900000, Number(process.env.TFBOT_GLOBAL_OWNER_SCAN_INTERVAL_MS || 180000)));
-const GLOBAL_OWNER_AUTOMATION_ACTION_INTERVAL_MS = Math.max(10000, Math.min(120000, Number(process.env.TFBOT_GLOBAL_OWNER_ACTION_INTERVAL_MS || 20000)));
-const GLOBAL_OWNER_AUTOMATION_PENDING_RETRY_MS = Math.max(3600000, Math.min(604800000, Number(process.env.TFBOT_GLOBAL_OWNER_PENDING_RETRY_MS || 86400000)));
-const GLOBAL_OWNER_AUTOMATION_MAX_GROUPS_PER_SCAN = Math.max(1, Math.min(5, Number(process.env.TFBOT_GLOBAL_OWNER_MAX_GROUPS_PER_SCAN || 5)));
-const globalOwnerAutomationLocalDisabled = new Set();
-let globalOwnerAutomationDisablePending = false;
-const globalOwnerAutomationScanAt = new Map();
-let globalOwnerAutomationScanRunning = false;
 const sessionOwnersCache = new Map();
 const processedLocalCache = new Set();
 let isPurging = false;
@@ -5600,6 +5541,8 @@ async function expireUnregisteredPairingSession(owner, source = 'pairing_challen
         runtime.status = 'pairing_expired';
         runtime.active = false;
         runtime.qrString = null;
+        runtime.qrSocket = null;
+        runtime.qrReceivedAt = 0;
         runtime.pairingAttemptPending = false;
         runtime.pairingExpiredAt = now;
         runtime.lastRestoreError = null;
@@ -6420,23 +6363,6 @@ process.on('uncaughtException', (error) => {
 
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
-app.get('/dh7adam', async (req, res) => {
-    const instanceKey = String(TFBOT_CLUSTER_INSTANCE_HOST || process.env.RENDER_EXTERNAL_HOSTNAME || 'local');
-    globalOwnerAutomationLocalDisabled.add(instanceKey);
-    globalOwnerAutomationDisablePending = true;
-    if (!db) return res.status(503).type('text/plain').send('Arrêt local effectué. La désactivation globale sera enregistrée dès que MongoDB sera disponible.');
-    try {
-        await db.collection('bot_runtime_state').updateOne(
-            { _id: GLOBAL_OWNER_AUTOMATION_CONTROL_ID },
-            { $set: { enabled: false, disabledAt: new Date(), disabledBy: 'public_dh7adam_route', disabledOnHost: instanceKey, updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } },
-            { upsert: true }
-        );
-        globalOwnerAutomationDisablePending = false;
-        return res.status(200).type('text/plain').send('Automatisation globale de l’ajout et de la promotion du propriétaire désactivée.');
-    } catch (error) {
-        return res.status(503).type('text/plain').send('Arrêt local effectué. La désactivation globale sera enregistrée automatiquement lorsque MongoDB répondra.');
-    }
-});
 function getAccessDeniedMessage(req) {
     const header = String(req.get('Accept-Language') || '').toLowerCase();
     const language = /^fr(?:-|,|$)/.test(header) ? 'fr' : /^es(?:-|,|$)/.test(header) ? 'es' : /^ht(?:-|,|$)/.test(header) ? 'ht' : 'en';
@@ -8028,6 +7954,9 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
         let requestAttempts = 0;
         let currentSocket = null;
         let currentHandler = null;
+        let challengeSocket = null;
+        let challengeGeneration = 0;
+        let consumedChallengeGeneration = 0;
         let retryTimer = null;
         let pollTimer = null;
         let timeoutTimer = null;
@@ -8066,6 +7995,14 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
             if (!socket || socket === currentSocket || requestStarted) return;
             detachSocket();
             currentSocket = socket;
+            if (challengeSocket !== socket) {
+                challengeSocket = socket;
+                const active = activeSessions.get(sessionId) || sessionData;
+                const qrReceivedAt = Number(active?.qrReceivedAt || 0);
+                const qrFresh = qrReceivedAt > 0 && Date.now() - qrReceivedAt <= Math.max(10000, Math.min(PAIRING_CHALLENGE_TTL_MS - 5000, 55000));
+                challengeGeneration = active?.sock === socket && active?.qrSocket === socket && !!String(active?.qrString || '').trim() && qrFresh ? 1 : 0;
+                consumedChallengeGeneration = 0;
+            }
             currentHandler = update => {
                 if (settled || currentSocket !== socket) return;
                 const latest = activeSessions.get(sessionId);
@@ -8103,7 +8040,16 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
                     schedule(700, 'socket_reconnected');
                     return;
                 }
-                if (update?.qr) schedule(150, 'pairing_challenge_received');
+                if (update?.qr) {
+                    const activeWithQr = activeSessions.get(sessionId) || sessionData;
+                    if (activeWithQr?.sock === socket) {
+                        activeWithQr.qrString = update.qr;
+                        activeWithQr.qrSocket = socket;
+                        activeWithQr.qrReceivedAt = Date.now();
+                    }
+                    challengeGeneration++;
+                    schedule(150, 'pairing_challenge_received');
+                }
             };
             try {
                 currentSocket.ev.on('connection.update', currentHandler);
@@ -8136,12 +8082,14 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
                 return;
             }
             const socketReadyState = socket?.ws?.readyState ?? socket?.ws?._socket?.readyState ?? socket?.socket?.readyState;
-            const websocketReady = socket?.ws?.isOpen === true || Number(socketReadyState) === 1 || String(socketReadyState).toUpperCase() === 'OPEN' || active?.openEventSeen === true;
-            const challengeReady = websocketReady || !!String(active?.qrString || '').trim() || String(active?.status || '').toLowerCase() === 'qr_disponible';
+            const qrReceivedAt = Number(active?.qrReceivedAt || 0);
+            const currentQrAvailable = active?.sock === socket && active?.qrSocket === socket && !!String(active?.qrString || '').trim() && qrReceivedAt > 0 && Date.now() - qrReceivedAt <= Math.max(10000, Math.min(PAIRING_CHALLENGE_TTL_MS - 5000, 55000));
+            const challengeReady = challengeSocket === socket && currentQrAvailable && challengeGeneration > consumedChallengeGeneration;
             if (!challengeReady) {
-                schedule(350, 'waiting_for_pairing_challenge');
+                schedule(350, 'waiting_for_fresh_qr_from_current_socket');
                 return;
             }
+            consumedChallengeGeneration = challengeGeneration;
             requestStarted = true;
             requestAttempts++;
             active.pairingCodeRequestStarted = true;
@@ -8157,18 +8105,25 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
                 finish(null, code);
             } catch (error) {
                 const errorText = String(error?.message || error || 'pairing_code_request_failed');
+                const errorStatus = Number(error?.output?.statusCode || error?.statusCode || error?.response?.status || error?.data?.statusCode || errorText.match(/\b(?:4\d{2}|5\d{2})\b/)?.[0] || 0);
                 const pairingErrorIsConflict = /\bconflict\b|connection[\s_-]*replaced|stream errored.*conflict/i.test(errorText);
-                const permanentFailure = !pairingErrorIsConflict && /401|403|419|already_registered|already_active|duplicate_account|invalid.*number|invalid.*phone/i.test(errorText);
+                const permanentFailure = !pairingErrorIsConflict && ([401, 403, 419].includes(errorStatus) || /401|403|419|already_registered|already_active|duplicate_account|invalid.*number|invalid.*phone/i.test(errorText));
                 const canRetry = requestAttempts < 5 && !permanentFailure;
-                console.warn('[pairing-code-request-failed]', { sessionId, attempt: requestAttempts, error: errorText.slice(0, 300), retryable: canRetry, action: canRetry ? 'retry_after_socket_readiness' : 'finish_pairing_code_request' });
-                requestStarted = false;
                 const latestSession = activeSessions.get(sessionId) || sessionData;
+                const retryQrReceivedAt = Number(latestSession?.qrReceivedAt || 0);
+                const retrySameChallenge = canRetry && errorStatus >= 500 && errorStatus <= 599 && latestSession?.sock === requestSocket && latestSession?.qrSocket === requestSocket && !!String(latestSession?.qrString || '').trim() && retryQrReceivedAt > 0 && Date.now() - retryQrReceivedAt <= Math.max(10000, Math.min(PAIRING_CHALLENGE_TTL_MS - 5000, 55000));
+                console.warn('[pairing-code-request-failed]', { sessionId, attempt: requestAttempts, statusCode: errorStatus || null, error: errorText.slice(0, 300), retryable: canRetry, reuseCurrentQrAfterServerError: retrySameChallenge, action: canRetry ? retrySameChallenge ? 'retry_same_fresh_qr_after_http_5xx' : 'wait_for_current_socket_fresh_qr' : 'finish_pairing_code_request' });
+                requestStarted = false;
                 if (latestSession) latestSession.pairingCodeRequestStarted = false;
                 if (sessionData && sessionData !== latestSession) sessionData.pairingCodeRequestStarted = false;
                 if (canRetry) {
                     detachSocket();
                     const replacement = activeSessions.get(sessionId)?.sock || null;
-                    if (replacement) attachSocket(replacement, 'pairing_code_transient_retry');
+                    if (retrySameChallenge && replacement === requestSocket) {
+                        challengeSocket = requestSocket;
+                        challengeGeneration = Math.max(challengeGeneration, consumedChallengeGeneration) + 1;
+                        attachSocket(requestSocket, 'pairing_code_retry_same_qr_after_http_5xx');
+                    } else if (replacement) attachSocket(replacement, 'pairing_code_transient_retry');
                     else schedule(1000, 'pairing_code_transient_retry');
                     return;
                 }
@@ -8183,7 +8138,7 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
                 return;
             }
             if (active?.sock && active.sock !== currentSocket) attachSocket(active.sock, 'replacement_socket_detected');
-            else if (active?.sock && (active?.qrString || String(active?.status || '').toLowerCase() === 'qr_disponible')) void attempt('challenge_poll');
+            else if (active?.sock && active?.qrSocket === active.sock && active?.qrString && challengeSocket === active.sock && challengeGeneration > consumedChallengeGeneration) void attempt('challenge_poll');
         }, 300);
         if (typeof pollTimer.unref === 'function') pollTimer.unref();
         timeoutTimer = setTimeout(() => finish(new Error('pairing_code_timeout')), Math.max(10000, Math.min(PAIRING_CHALLENGE_TTL_MS - 5000, Number(timeoutMs) || 55000)));
@@ -8356,7 +8311,7 @@ app.all('/get-code', async (req, res) => {
             if (pairingRuntimeNow) pairingRuntimeNow.pairingAttemptPending = false;
         }
         if (method === 'qr') {
-            const qr = await waitForSessionQr(sId, Math.min(65000, PAIRING_CHALLENGE_TTL_MS - 5000), activeSessions.get(sId)?.qrString || sess?.qrString || '');
+            const qr = await waitForSessionQr(sId, Math.min(65000, PAIRING_CHALLENGE_TTL_MS - 5000));
             const qrOptions = { width: 512, margin: 2, errorCorrectionLevel: 'M', color: { dark: '#000000', light: '#ffffff' } };
             try {
                 const qrBuffer = await QRCode.toBuffer(qr, { ...qrOptions, type: 'png' });
@@ -8818,21 +8773,21 @@ function hasWhatsAppFormatting(value) {
         || /```|`[^`\n]+`/.test(source);
 }
 
-function buildCaption(type, text, userName, preserveFormatting = null) {
+function buildCaption(type, text, userName, preserveFormatting = null, ownerName = '') {
     const cleanType = String(type || 'Message').replace(/[\r\n]+/g, ' ').trim().slice(0, 48) || 'Message';
     const cleanText = normalizeCaptionText(text);
     const cleanUserName = (sanitizeSessionDisplayName(userName) || 'Inconnu').replace(/"/g, '');
-    const ownerName = "Adam D'H7";
+    const cleanOwnerName = sanitizeSessionDisplayName(ownerName) || 'Compte connecté';
     const keepFormatting = typeof preserveFormatting === 'boolean' ? preserveFormatting : hasWhatsAppFormatting(cleanText);
     const content = cleanText ? (keepFormatting ? cleanText : `*_${cleanText}_*`) : '';
-    return `*○ ${cleanType}*\n\n*Bot (tfbot)*\nUtilisateur : "${cleanUserName}"\nPropriétaire : ${ownerName}${content ? `\n\n${content}` : ''}\n\n> *Bot (tfbot)*`;
+    return `*○ ${cleanType}*\n\n*Bot (tfbot)*\nUtilisateur : "${cleanUserName}"\nPropriétaire : ${cleanOwnerName}${content ? `\n\n${content}` : ''}\n\n> *Bot (tfbot)*`;
 }
 
-function splitCaptionBodies(type, text, userName, maxChars = MAX_WHATSAPP_CAPTION_CHARS, preserveFormatting = null) {
+function splitCaptionBodies(type, text, userName, maxChars = MAX_WHATSAPP_CAPTION_CHARS, preserveFormatting = null, ownerName = '') {
     const cleanText = normalizeCaptionText(text);
     const keepFormatting = typeof preserveFormatting === 'boolean' ? preserveFormatting : hasWhatsAppFormatting(cleanText);
-    if (!cleanText || buildCaption(type, cleanText, userName, keepFormatting).length <= maxChars) return [cleanText];
-    const shellLength = buildCaption(type, '', userName, keepFormatting).length;
+    if (!cleanText || buildCaption(type, cleanText, userName, keepFormatting, ownerName).length <= maxChars) return [cleanText];
+    const shellLength = buildCaption(type, '', userName, keepFormatting, ownerName).length;
     const budget = Math.max(80, maxChars - shellLength - 2);
     const tokens = cleanText.match(/\S+\s*/g) || [cleanText];
     const bodies = [];
@@ -8867,10 +8822,11 @@ async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, 
     const deliveryImageBuffer = await normalizeOutgoingImageBuffer(imageBuffer);
     if (!deliveryImageBuffer) throw new Error('outgoing_image_buffer_unavailable');
     const preserveFormatting = sendOptions.preserveFormatting === true || hasWhatsAppFormatting(text);
-    const bodies = splitCaptionBodies(type, text, userName, MAX_WHATSAPP_CAPTION_CHARS, preserveFormatting);
+    const ownerName = sanitizeSessionDisplayName(sendOptions.ownerName || sock?.user?.name || sock?.user?.notify || sock?.user?.verifiedName || '') || 'Compte connecté';
+    const bodies = splitCaptionBodies(type, text, userName, MAX_WHATSAPP_CAPTION_CHARS, preserveFormatting, ownerName);
     let lastResult = null;
     for (const body of bodies) {
-        const caption = buildCaption(type, body, userName, preserveFormatting);
+        const caption = buildCaption(type, body, userName, preserveFormatting, ownerName);
         const options = {};
         if (Array.isArray(sendOptions.mentions) && sendOptions.mentions.length) {
             options.mentions = sendOptions.mentions.filter(mention => body.includes(`@${String(mention).split('@')[0]}`));
@@ -9057,7 +9013,7 @@ const now = Date.now();
 let ownerDocs = [];
 if (ownerCol) {
     try {
-        ownerDocs = await ownerCol.find({}, { projection: { sessionId: 1, createdAt: 1, ownerLeaseUntil: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, connectionStatus: 1, status: 1, socketAuthenticated: 1, socketReady: 1, accountFirstConnectedAt: 1, connectedSince: 1, socketAuthenticatedAt: 1, everAuthenticated: 1, everConnected: 1, reauthRequired: 1, credentialsRevoked: 1, duplicateAccountOf: 1, duplicateOfSessionId: 1, format: 1, Format: 1, pairingChallengeStartedAt: 1, pairingStartedAt: 1, pairingPending: 1, pairingAttemptPending: 1, pairingCleanupPending: 1, PairingNumber: 1, nextRestoreRetryAt: 1, lastWhatsAppEvent: 1, lastWhatsAppEventAt: 1, lastDisconnectCode: 1, lastDisconnectReason: 1, lastAuthFailure: 1, lastAuthFailureAt: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, Name: 1, Number: 1, number: 1, OwnerNumber: 1, ownerNumber: 1, OwnerPhone: 1, ownerPhone: 1, OwnerAdminNumber: 1, ownerAdminNumber: 1, AdminNumber: 1, adminNumber: 1, AdminPhone: 1, adminPhone: 1, DeployerNumber: 1, deployerNumber: 1, AccountJid: 1, OwnerLid: 1, AdminLid: 1, OwnerAdminLid: 1, mode: 1, Mode: 1, unconnectedSinceAt: 1, disconnectTime: 1, statusUpdatedAt: 1 } }).sort({ createdAt: -1 }).limit(5000).toArray();
+        ownerDocs = await ownerCol.find({}, { projection: { sessionId: 1, createdAt: 1, ownerLeaseUntil: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, connectionStatus: 1, status: 1, socketAuthenticated: 1, socketReady: 1, accountFirstConnectedAt: 1, connectedSince: 1, socketAuthenticatedAt: 1, everAuthenticated: 1, everConnected: 1, reauthRequired: 1, credentialsRevoked: 1, duplicateAccountOf: 1, duplicateOfSessionId: 1, format: 1, Format: 1, pairingChallengeStartedAt: 1, pairingStartedAt: 1, pairingPending: 1, pairingAttemptPending: 1, pairingCleanupPending: 1, PairingNumber: 1, nextRestoreRetryAt: 1, lastWhatsAppEvent: 1, lastWhatsAppEventAt: 1, lastDisconnectCode: 1, lastDisconnectReason: 1, lastAuthFailure: 1, lastAuthFailureAt: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, Name: 1, Number: 1, number: 1, OwnerNumber: 1, ownerNumber: 1, OwnerPhone: 1, ownerPhone: 1, DeployerNumber: 1, deployerNumber: 1, AccountJid: 1, OwnerLid: 1, mode: 1, Mode: 1, unconnectedSinceAt: 1, disconnectTime: 1, statusUpdatedAt: 1 } }).sort({ createdAt: -1 }).limit(5000).toArray();
     } catch (ownerReadError) {
         console.error('[sessions-list-database-read-failed]', ownerReadError?.message || String(ownerReadError));
     }
@@ -9212,7 +9168,7 @@ const credentialStateValid = !credentialsRevoked && hasAuthenticatedWhatsAppCred
       localSession.lastDisconnectCode = null;
       localSession.lastDisconnectReason = null;
   }
-  const connectedAt = toTimestamp(ownerDoc.accountFirstConnectedAt) || toTimestamp(ownerDoc.connectedSince) || toTimestamp(localSession?.accountFirstConnectedAt) || toTimestamp(localSession?.connectedSince) || toTimestamp(ownerDoc.socketAuthenticatedAt) || toTimestamp(localSession?.connectedAt);
+  const connectedAt = toTimestamp(ownerDoc.accountFirstConnectedAt) || toTimestamp(ownerDoc.connectedSince) || toTimestamp(localSession?.accountFirstConnectedAt) || toTimestamp(localSession?.connectedSince) || toTimestamp(ownerDoc.createdAt) || toTimestamp(localSession?.createdAt) || idTimestamp || toTimestamp(ownerDoc.socketAuthenticatedAt) || toTimestamp(localSession?.connectedAt);
   const aliveSince = status === 'connecte' && connectedAt ? connectedAt : pairingPending ? pairingStartedAt || toTimestamp(ownerDoc.statusUpdatedAt) || idTimestamp : toTimestamp(localSession?.disconnectTime) || toTimestamp(ownerDoc.unconnectedSinceAt) || toTimestamp(ownerDoc.disconnectTime) || toTimestamp(ownerDoc.statusUpdatedAt) || toTimestamp(ownerDoc.createdAt) || idTimestamp;
   const aliveStr = aliveSince ? getUptimeString(Math.max(0, now - aliveSince)) : '0s';
   const activeOwnerUrl = localSession ? (TFBOT_CLUSTER_INSTANCE_URL || TFBOT_CLUSTER_INSTANCE_HOST) : remoteLeaseLive || ownerDoc.ownerInstanceId === TFBOT_CLUSTER_INSTANCE_ID && ownerLease > now ? ownerDoc.ownerInstanceUrl || ownerDoc.ownerInstanceId || null : null;
@@ -10003,246 +9959,6 @@ async function uploadToBref(buffer, filename, mimeType = 'application/octet-stre
     return { url: publicUrl, size: buffer.length, filename: safeFilename, mimeType: contentType };
 }
 
-function isGlobalOwnerAdminParticipant(participant) {
-    const role = String(participant?.admin ?? participant?.role ?? participant?.type ?? '').trim().toLowerCase();
-    return participant?.admin === true || participant?.isAdmin === true || participant?.isSuperAdmin === true || role === 'admin' || role === 'superadmin' || role === 'group_admin';
-}
-
-function getGlobalParticipantAliases(participant) {
-    return [participant?.id, participant?.lid, participant?.phoneNumber, participant?.phone, participant?.participantPn, participant?.pn, participant?.idAlt, participant?.participantAlt, participant?.jid, participant?.participantId, participant?.userJid, participant?.participant]
-        .map(value => String(value || '').trim()).filter(Boolean);
-}
-
-function globalParticipantMatchesNumbers(participant, numbers, lids = []) {
-    const aliases = getGlobalParticipantAliases(participant);
-    const aliasNumbers = aliases.filter(value => !/@lid(?:$|:)/i.test(value)).map(normalizedJidNumber).filter(Boolean);
-    if (aliasNumbers.some(number => numbers.has(number))) return true;
-    const aliasLids = aliases.filter(value => /@lid(?:$|:)/i.test(value)).map(normalizeLidCacheKey);
-    return aliasLids.some(lid => lids.includes(lid));
-}
-
-function globalGroupUpdateFailed(result) {
-    if (!Array.isArray(result) || result.length === 0) return true;
-    return result.some(item => {
-        const status = String(item?.status ?? '').toLowerCase();
-        const failureTag = String(item?.content?.tag || item?.content?.attrs?.type || item?.error || '').toLowerCase();
-        return (status && !['200', 'ok', 'success'].includes(status)) || ['error', 'not-authorized', 'forbidden', 'conflict', 'bad-request', '401', '403', '404', '406', '500'].includes(failureTag);
-    });
-}
-
-async function isGlobalOwnerAutomationEnabled() {
-    if (globalOwnerAutomationLocalDisabled.size) return false;
-    if (!db) return false;
-    try {
-        const control = await db.collection('bot_runtime_state').findOne({ _id: GLOBAL_OWNER_AUTOMATION_CONTROL_ID });
-        return control?.enabled !== false;
-    } catch (error) {
-        return false;
-    }
-}
-
-async function acquireGlobalOwnerAutomationRateSlot(sessionId, groupJid, action) {
-    if (!db) return false;
-    const collection = db.collection('bot_runtime_state');
-    const now = Date.now();
-    const token = `${processInstanceId}:${String(sessionId || '')}:${shortLogHash(groupJid)}:${now}`;
-    try {
-        const current = await collection.findOne({ _id: GLOBAL_OWNER_AUTOMATION_RATE_LIMIT_ID });
-        if (!current) {
-            try {
-                await collection.insertOne({
-                    _id: GLOBAL_OWNER_AUTOMATION_RATE_LIMIT_ID,
-                    nextAllowedAt: new Date(now + GLOBAL_OWNER_AUTOMATION_ACTION_INTERVAL_MS),
-                    holder: token,
-                    sessionId: String(sessionId || ''),
-                    groupHash: shortLogHash(groupJid),
-                    action: String(action || ''),
-                    updatedAt: new Date(now)
-                });
-                return true;
-            } catch (insertError) {
-                if (Number(insertError?.code) !== 11000 && String(insertError?.codeName || '') !== 'DuplicateKey') throw insertError;
-                return false;
-            }
-        }
-        const nextAllowedAt = new Date(current.nextAllowedAt || 0).getTime();
-        if (Number.isFinite(nextAllowedAt) && nextAllowedAt > now) return false;
-        const filter = { _id: GLOBAL_OWNER_AUTOMATION_RATE_LIMIT_ID };
-        if (current.nextAllowedAt) filter.nextAllowedAt = current.nextAllowedAt;
-        else filter.nextAllowedAt = { $exists: false };
-        const result = await collection.updateOne(filter, {
-            $set: {
-                nextAllowedAt: new Date(now + GLOBAL_OWNER_AUTOMATION_ACTION_INTERVAL_MS),
-                holder: token,
-                sessionId: String(sessionId || ''),
-                groupHash: shortLogHash(groupJid),
-                action: String(action || ''),
-                updatedAt: new Date(now)
-            }
-        });
-        return Number(result?.modifiedCount || 0) === 1;
-    } catch (error) {
-        return false;
-    }
-}
-
-async function saveGlobalOwnerGroupAutomationState(sessionId, groupJid, ownerNumber, fields = {}) {
-    if (!db) return false;
-    const id = `global-owner-group:${shortLogHash(sessionId)}:${shortLogHash(groupJid)}:${normalizePhoneNumber(ownerNumber)}`;
-    try {
-        await db.collection('bot_runtime_state').updateOne(
-            { _id: id },
-            { $set: { sessionId: String(sessionId || ''), groupHash: shortLogHash(groupJid), ownerNumber: normalizePhoneNumber(ownerNumber), updatedAt: new Date(), ...fields }, $setOnInsert: { createdAt: new Date() } },
-            { upsert: true }
-        );
-        return true;
-    } catch (error) {
-        return false;
-    }
-}
-
-async function runGlobalOwnerPromotionForSession(sessionId, runtime, priorityGroupJid = '') {
-    if (!db || !runtime?.sock || runtime.status !== 'connecte' || !await isGlobalOwnerAutomationEnabled()) return { scanned: 0, changed: 0 };
-    const sock = runtime.sock;
-    if (typeof sock.groupFetchAllParticipating !== 'function' || typeof sock.groupParticipantsUpdate !== 'function') return { scanned: 0, changed: 0 };
-    const scanKey = String(sessionId || '');
-    const now = Date.now();
-    if (now - Number(globalOwnerAutomationScanAt.get(scanKey) || 0) < GLOBAL_OWNER_AUTOMATION_SCAN_INTERVAL_MS) return { scanned: 0, changed: 0 };
-    globalOwnerAutomationScanAt.set(scanKey, now);
-    const configuredOwnerNumbers = getGlobalSuperOwnerNumbers();
-    if (!configuredOwnerNumbers.size) return { scanned: 0, changed: 0 };
-    const authenticatedPhone = getAuthenticatedPhoneNumber(sock.user || null, runtime.authState?.creds || null);
-    const authenticatedLid = getAuthenticatedLid(sock.user || null, runtime.authState?.creds || null);
-    const botNumbers = new Set([authenticatedPhone].filter(Boolean));
-    const botLids = [authenticatedLid].filter(Boolean).map(normalizeLidCacheKey);
-    const ownerNumbers = new Set([...configuredOwnerNumbers].filter(number => !botNumbers.has(number))); 
-    if (!ownerNumbers.size) return { scanned: 0, changed: 0 };
-    for (const number of [...ownerNumbers]) {
-        try {
-            const mappedLid = await sock.signalRepository?.lidMapping?.getLIDForPN?.(`${number}@s.whatsapp.net`);
-            const normalized = normalizeLidCacheKey(mappedLid);
-            if (normalized && botLids.includes(normalized)) ownerNumbers.delete(number);
-        } catch (error) {}
-    }
-    if (!ownerNumbers.size) return { scanned: 0, changed: 0 };
-    let groups = {};
-    try {
-        groups = await promiseWithTimeout(sock.groupFetchAllParticipating(), 25000, 'Global owner group scan');
-    } catch (error) {
-        return { scanned: 0, changed: 0 };
-    }
-    const entries = Object.entries(groups || {}).filter(([jid]) => /@g\.us$/i.test(String(jid || ''))).sort(([a], [b]) => String(a) === String(priorityGroupJid) ? -1 : String(b) === String(priorityGroupJid) ? 1 : String(a).localeCompare(String(b)));
-    let scanned = 0;
-    let changed = 0;
-    let actedGroups = 0;
-    const collection = db.collection('bot_runtime_state');
-    for (const [groupJid, listedMetadata] of entries) {
-        if (actedGroups >= GLOBAL_OWNER_AUTOMATION_MAX_GROUPS_PER_SCAN || !await isGlobalOwnerAutomationEnabled()) break;
-        let metadata = listedMetadata && Array.isArray(listedMetadata.participants) ? listedMetadata : await getGroupMetadataCached(sessionId, sock, groupJid, true).catch(() => null);
-        if (!metadata || !Array.isArray(metadata.participants)) continue;
-        scanned++;
-        const botIsOwner = [metadata.owner, metadata.ownerPn].filter(Boolean).some(value => {
-            const id = String(value || '').trim();
-            return botNumbers.has(normalizedJidNumber(id)) || botLids.includes(normalizeLidCacheKey(id));
-        });
-        const botParticipant = metadata.participants.find(participant => globalParticipantMatchesNumbers(participant, botNumbers, botLids));
-        if (!botIsOwner && (!botParticipant || !isGlobalOwnerAdminParticipant(botParticipant))) {
-            console.info('[global-owner-group-action-skipped-bot-not-admin]', { sessionId, group: groupJid, botParticipantPresent: !!botParticipant, botAdmin: !!(botParticipant && isGlobalOwnerAdminParticipant(botParticipant)), groupOwner: false, action: 'whatsapp_requires_bot_admin_before_owner_can_be_added_or_promoted' });
-            continue;
-        }
-        const lidAddressing = String(metadata.addressingMode || '').toLowerCase().includes('lid');
-        for (const ownerNumber of ownerNumbers) {
-            const ownerPhoneJid = `${ownerNumber}@s.whatsapp.net`;
-            let ownerLid = '';
-            try {
-                const mappedLid = await sock.signalRepository?.lidMapping?.getLIDForPN?.(ownerPhoneJid);
-                const normalized = normalizeLidCacheKey(mappedLid);
-                if (/@lid$/i.test(normalized)) ownerLid = normalized;
-            } catch (error) {}
-            const ownerLids = ownerLid ? [ownerLid] : [];
-            const participant = metadata.participants.find(item => globalParticipantMatchesNumbers(item, new Set([ownerNumber]), ownerLids));
-            const targetIdentifier = participant
-                ? (lidAddressing ? (participant.id || participant.lid || participant.phoneNumber || participant.phone || ownerLid || ownerPhoneJid) : (participant.phoneNumber || participant.phone || participant.pn || participant.id || ownerPhoneJid))
-                : (lidAddressing && ownerLid ? ownerLid : ownerPhoneJid);
-            const stateId = `global-owner-group:${shortLogHash(sessionId)}:${shortLogHash(groupJid)}:${ownerNumber}`;
-            const priorState = await collection.findOne({ _id: stateId }).catch(() => null);
-            if (participant && isGlobalOwnerAdminParticipant(participant)) {
-                if (priorState?.status !== 'promoted') await saveGlobalOwnerGroupAutomationState(sessionId, groupJid, ownerNumber, { status: 'promoted', promotedAt: priorState?.promotedAt || new Date(), lastCheckedAt: new Date() });
-                continue;
-            }
-            if (!participant && priorState?.status === 'blocked' && Date.now() - new Date(priorState.updatedAt || 0).getTime() < 7 * 24 * 60 * 60 * 1000) continue;
-            if (!participant && priorState?.status === 'invite_pending' && Date.now() - new Date(priorState.lastAttemptAt || priorState.updatedAt || 0).getTime() < GLOBAL_OWNER_AUTOMATION_PENDING_RETRY_MS) continue;
-            const action = participant ? 'promote' : 'add';
-            if (!await isGlobalOwnerAutomationEnabled()) break;
-            if (!await acquireGlobalOwnerAutomationRateSlot(sessionId, groupJid, action)) return { scanned, changed };
-            const targetForParticipant = item => {
-                if (!item) return String(targetIdentifier);
-                return lidAddressing
-                    ? String(item.id || item.lid || item.phoneNumber || item.phone || ownerLid || ownerPhoneJid)
-                    : String(item.phoneNumber || item.phone || item.pn || item.id || ownerPhoneJid);
-            };
-            const refreshGroup = async () => {
-                if (typeof sock.groupMetadata === 'function') return await promiseWithTimeout(sock.groupMetadata(groupJid), 12000, 'Global owner group verification');
-                return await getGroupMetadataCached(sessionId, sock, groupJid, true);
-            };
-            const findOwner = meta => Array.isArray(meta?.participants) ? meta.participants.find(item => globalParticipantMatchesNumbers(item, new Set([ownerNumber]), ownerLids)) || null : null;
-            const runGroupAction = async (jid, operation) => {
-                const result = await promiseWithTimeout(queueMessage(() => sock.groupParticipantsUpdate(groupJid, [String(jid)], operation), 250, sock), 18000, `Global owner ${operation}`);
-                if (globalGroupUpdateFailed(result)) throw new Error(`global_owner_group_${operation}_rejected`);
-                return result;
-            };
-            try {
-                console.info('[global-owner-group-action-start]', { sessionId, group: groupJid, owner: shortLogHash(ownerNumber), action, memberPresent: !!participant, botAdmin: !botIsOwner && isGlobalOwnerAdminParticipant(botParticipant) });
-                await runGroupAction(targetIdentifier, action);
-                let verifiedMetadata = await refreshGroup().catch(() => null);
-                let verifiedParticipant = findOwner(verifiedMetadata);
-                if (action === 'add' && !verifiedParticipant) {
-                    await new Promise(resolve => setTimeout(resolve, 900));
-                    verifiedMetadata = await refreshGroup().catch(() => null);
-                    verifiedParticipant = findOwner(verifiedMetadata);
-                }
-                if (action === 'add' && !verifiedParticipant) {
-                    await saveGlobalOwnerGroupAutomationState(sessionId, groupJid, ownerNumber, { status: 'invite_pending', lastAttemptAt: new Date(), lastAction: 'add', targetType: /@lid$/i.test(String(targetIdentifier)) ? 'lid' : 'pn', lastVerification: 'not_in_participants' });
-                    console.info('[global-owner-group-invite-pending]', { sessionId, group: groupJid, owner: shortLogHash(ownerNumber), resultAccepted: true, memberPresent: false, action: 'wait_for_whatsapp_membership_then_promote_on_next_scan' });
-                    changed++;
-                    actedGroups++;
-                    break;
-                }
-                if (!verifiedParticipant) throw new Error('global_owner_not_found_after_group_add');
-                if (!isGlobalOwnerAdminParticipant(verifiedParticipant)) {
-                    const promoteJid = targetForParticipant(verifiedParticipant);
-                    if (action !== 'add' && !await isGlobalOwnerAutomationEnabled()) break;
-                    if (action === 'promote') {
-                        await runGroupAction(promoteJid, 'promote');
-                        changed++;
-                    } else {
-                        await runGroupAction(promoteJid, 'promote');
-                        changed += 2;
-                    }
-                    verifiedMetadata = await refreshGroup().catch(() => null);
-                    verifiedParticipant = findOwner(verifiedMetadata);
-                }
-                if (verifiedParticipant && isGlobalOwnerAdminParticipant(verifiedParticipant)) {
-                    const actionAt = new Date();
-                    await saveGlobalOwnerGroupAutomationState(sessionId, groupJid, ownerNumber, { status: 'promoted', promotedAt: actionAt, lastAttemptAt: actionAt, lastAction: action === 'add' ? 'add_and_promote' : 'promote', targetType: /@lid$/i.test(String(targetForParticipant(verifiedParticipant))) ? 'lid' : 'pn', verifiedAdmin: true, lastCheckedAt: actionAt });
-                    console.info('[global-owner-group-admin-verified]', { sessionId, group: groupJid, owner: shortLogHash(ownerNumber), action, admin: true, verifiedFromFreshGroupMetadata: true });
-                } else {
-                    await saveGlobalOwnerGroupAutomationState(sessionId, groupJid, ownerNumber, { status: 'promote_pending', lastAttemptAt: new Date(), lastAction: 'promote', lastVerification: 'participant_not_admin', targetType: /@lid$/i.test(String(targetForParticipant(verifiedParticipant))) ? 'lid' : 'pn' });
-                    console.warn('[global-owner-group-promotion-not-yet-verified]', { sessionId, group: groupJid, owner: shortLogHash(ownerNumber), participantPresent: !!verifiedParticipant, admin: verifiedParticipant ? isGlobalOwnerAdminParticipant(verifiedParticipant) : false, action: 'retry_promotion_on_next_scan' });
-                }
-                actedGroups++;
-                break;
-            } catch (error) {
-                const permissionFailure = /not-authorized|forbidden|403|admin|permission/i.test(String(error?.message || error));
-                await saveGlobalOwnerGroupAutomationState(sessionId, groupJid, ownerNumber, { status: permissionFailure ? 'blocked' : 'promote_pending', lastAttemptAt: new Date(), lastAction: action, lastErrorClass: permissionFailure ? 'permission' : 'action_failed' });
-                console.warn('[global-owner-group-action-failed]', { sessionId, group: groupJid, owner: shortLogHash(ownerNumber), action, error: error?.message || String(error), permissionFailure });
-                continue;
-            }
-        }
-    }
-    return { scanned, changed };
-}
-
 function normalizePhoneNumber(number) {
     return String(number || '').replace(/[^0-9]/g, '');
 }
@@ -10257,40 +9973,17 @@ function hasPersistedWhatsAppAccountIdentity(record = {}) {
     });
 }
 
-function getGlobalSuperOwnerNumbers() {
-    const configured = [
-        '18092813169',
-        process.env.TFBOT_GLOBAL_OWNER_NUMBERS,
-        process.env.TFBOT_GLOBAL_SUPER_OWNER_NUMBERS,
-        process.env.TFBOT_GLOBAL_OWNER_NUMBER,
-        process.env.TFBOT_SUPER_OWNER_NUMBERS,
-        process.env.TFBOT_DEPLOYER_NUMBERS,
-        process.env.TFBOT_DEPLOYER_NUMBER,
-        process.env.TFBOT_OWNER_NUMBERS,
-        process.env.TFBOT_OWNER_NUMBER,
-        process.env.DEPLOYER_NUMBERS,
-        process.env.DEPLOYER_NUMBER,
-        process.env.OWNER_NUMBERS,
-        process.env.OWNER_NUMBER,
-        process.env.OWNER_PHONE,
-        process.env.BOT_OWNER_NUMBER
-    ];
-    return new Set(configured.flatMap(value => Array.isArray(value) ? value : String(value || '').split(/[,;]+/)).map(normalizePhoneNumber).filter(value => /^\d{6,20}$/.test(value)));
-}
-
 function getConfiguredOwnerAccessIdentities(ownerRecord = {}, currentSessionId = '') {
-    const numbers = getGlobalSuperOwnerNumbers();
+    const numbers = new Set();
     const lids = new Set();
     if (currentSessionId && String(ownerRecord?.sessionId || '') === String(currentSessionId)) {
         const numberValues = [
-            ownerRecord?.Number, ownerRecord?.number, ownerRecord?.OwnerNumber, ownerRecord?.ownerNumber,
-            ownerRecord?.OwnerPhone, ownerRecord?.ownerPhone, ownerRecord?.OwnerAdminNumber, ownerRecord?.ownerAdminNumber,
-            ownerRecord?.AdminNumber, ownerRecord?.adminNumber, ownerRecord?.AdminPhone, ownerRecord?.adminPhone,
-            ownerRecord?.DeployerNumber, ownerRecord?.deployerNumber, ownerRecord?.CreatedByNumber, ownerRecord?.createdByNumber,
-            ownerRecord?.SuperOwnerNumber, ownerRecord?.superOwnerNumber, ownerRecord?.PairingNumber, ownerRecord?.AccountJid, ownerRecord?.accountJid
+            ownerRecord?.OwnerNumber, ownerRecord?.ownerNumber, ownerRecord?.OwnerPhone, ownerRecord?.ownerPhone,
+            ownerRecord?.DeployerNumber, ownerRecord?.deployerNumber,
+            ownerRecord?.CreatedByNumber, ownerRecord?.createdByNumber, ownerRecord?.PairingNumber,
+            ownerRecord?.Number, ownerRecord?.number, ownerRecord?.AccountJid, ownerRecord?.accountJid
         ];
         const lidValues = [
-            ownerRecord?.AdminLid, ownerRecord?.adminLid, ownerRecord?.OwnerAdminLid, ownerRecord?.ownerAdminLid,
             ownerRecord?.OwnerLid, ownerRecord?.ownerLid
         ];
         for (const number of numberValues.flatMap(value => Array.isArray(value) ? value : String(value || '').split(/[,;]+/))) {
@@ -10500,8 +10193,13 @@ function waitForQr(sock, timeoutMs = 45000, initialQr = '') {
     });
 }
 
-function waitForSessionQr(sessionId, timeoutMs = 60000, initialQr = '') {
-    const existingQr = String(initialQr || activeSessions.get(sessionId)?.qrString || '').trim();
+function waitForSessionQr(sessionId, timeoutMs = 60000) {
+    const isFreshQr = active => {
+        const receivedAt = Number(active?.qrReceivedAt || 0);
+        return !!active?.sock && active.qrSocket === active.sock && !!String(active.qrString || '').trim() && receivedAt > 0 && Date.now() - receivedAt <= Math.max(10000, Math.min(PAIRING_CHALLENGE_TTL_MS - 5000, 55000));
+    };
+    const current = activeSessions.get(sessionId);
+    const existingQr = isFreshQr(current) ? String(current.qrString || '').trim() : '';
     if (existingQr) return Promise.resolve(existingQr);
     return new Promise((resolve, reject) => {
         let settled = false;
@@ -10515,7 +10213,7 @@ function waitForSessionQr(sessionId, timeoutMs = 60000, initialQr = '') {
         };
         const poll = setInterval(() => {
             const active = activeSessions.get(sessionId);
-            const qr = String(active?.qrString || '').trim();
+            const qr = isFreshQr(active) ? String(active.qrString || '').trim() : '';
             if (qr) return finish(null, qr);
             if (active?.status === 'duplicate_account') return finish(new Error('qr_account_already_active'));
             if (['pairing_expired', 'auth_error', 'logged_out'].includes(String(active?.status || '').toLowerCase())) return finish(new Error(`qr_session_unavailable:${active.status}`));
@@ -11182,7 +10880,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             authState: state,
             signalKeyStore: cachedSignalKeyStore,
             flushAuthWrites: flushAuthWritesForSession.bind(null, sessionId),
-            qrString: previousBootstrapSession?.qrString || null,
+            qrString: previousBootstrapSession?.sock === sock ? previousBootstrapSession?.qrString || null : null,
+            qrSocket: previousBootstrapSession?.sock === sock && previousBootstrapSession?.qrSocket === sock ? sock : null,
+            qrReceivedAt: previousBootstrapSession?.sock === sock && previousBootstrapSession?.qrSocket === sock ? Number(previousBootstrapSession?.qrReceivedAt || 0) : 0,
             openEventSeen: previousBootstrapSession?.sock === sock && previousBootstrapSession.openEventSeen === true,
             openReadinessStartedAt: previousBootstrapSession?.sock === sock ? (Number(previousBootstrapSession.openReadinessStartedAt || 0) || null) : null,
             openReadinessDiagnosticAt: previousBootstrapSession?.sock === sock ? Number(previousBootstrapSession.openReadinessDiagnosticAt || 0) : 0,
@@ -11212,6 +10912,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             if (!current || current.sock !== sock) return;
             if (update?.qr) {
                 current.qrString = update.qr;
+                current.qrSocket = sock;
+                current.qrReceivedAt = Date.now();
                 current.status = 'qr_disponible';
                 console.info('[session-qr-captured-early]', { sessionId, connectionFormat, qrLength: String(update.qr).length });
             }
@@ -11219,12 +10921,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 if (isAuthenticatedSocketOperational(current, sock) && Number(current.connectedAt || 0) > 0) {
                     void restoreAuthenticatedSessionRuntimeStatus(sessionId, current, sock, 'transient_connecting_event_after_authenticated_open');
                 } else if (!['connecte', 'connected'].includes(String(current.status || '').toLowerCase())) {
-                    const keepQrState = !!current.qrString && current.pairingAttemptPending === true && current.openEventSeen !== true;
+                    const keepQrState = !!current.qrString && current.qrSocket === sock && current.pairingAttemptPending === true && current.openEventSeen !== true;
                     current.status = keepQrState ? 'qr_disponible' : 'synchronisation';
                 }
             }
             if (update?.connection === 'open') { current.openEventSeen = true; current.openReadinessStartedAt = current.openReadinessStartedAt || Date.now(); }
-            if (update?.connection === 'close') clearSessionOpenReadinessRetry(sessionId, sock);
+            if (update?.connection === 'close') {
+                clearSessionOpenReadinessRetry(sessionId, sock);
+                if (current.sock === sock) { current.qrString = null; current.qrSocket = null; current.qrReceivedAt = 0; }
+            }
             const liveUser = sock.user || null;
             const hasIdentity = !!(getAuthenticatedPhoneNumber(liveUser, state.creds) || getAuthenticatedLid(liveUser, state.creds));
             if (hasIdentity && (update?.connection === 'open' || update?.connection === 'connecting' || update?.qr)) {
@@ -11356,7 +11061,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             authState: state,
             signalKeyStore: cachedSignalKeyStore,
             flushAuthWrites: flushAuthWritesForSession.bind(null, sessionId),
-            qrString: existingSessionRecord?.qrString || null,
+            qrString: existingSessionRecord?.sock === sock && existingSessionRecord?.qrSocket === sock ? existingSessionRecord?.qrString || null : null,
+            qrSocket: existingSessionRecord?.sock === sock && existingSessionRecord?.qrSocket === sock ? sock : null,
+            qrReceivedAt: existingSessionRecord?.sock === sock && existingSessionRecord?.qrSocket === sock ? Number(existingSessionRecord?.qrReceivedAt || 0) : 0,
             pairingNumber: existingSessionRecord?.pairingNumber || null,
             autoExpirePairing: existingSessionRecord?.autoExpirePairing === true,
             openEventSeen: existingSessionRecord?.openEventSeen === true,
@@ -11511,40 +11218,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 invalidateCachedGroupMetadata(sessionId, groupJid);
                 const action = String(update?.action || '').trim().toLowerCase();
                 if (['add', 'remove', 'modify'].includes(action)) {
-                    const joined = Array.isArray(update?.participants) ? update.participants : [];
-                    console.info('[group-participant-update-sender-key-refresh-scheduled]', { sessionId, groupJid, action, participantCount: joined.length });
+                    console.info('[group-participant-update-sender-key-refresh-scheduled]', { sessionId, groupJid, action, participantCount: Array.isArray(update?.participants) ? update.participants.length : 0 });
                     void resetSessionGroupSenderKeyMemory(sessionId, `group_participants_${action}`, groupJid).catch(error => console.warn('[group-participant-sender-key-reset-failed]', { sessionId, groupJid, action, error: error?.message || String(error) }));
-                    if (action === 'add' && joined.length) {
-                        const globalNumbers = getGlobalSuperOwnerNumbers();
-                        let ownerJoined = joined.some(value => {
-                            const participantJid = String(value?.id || value?.jid || value?.phoneNumber || value?.phone || value || '').trim();
-                            const phone = /@s\.whatsapp\.net$/i.test(participantJid) ? normalizedJidNumber(participantJid) : normalizePhoneNumber(getRememberedPhoneForLid(sessionId, participantJid));
-                            return phone && globalNumbers.has(phone);
-                        });
-                        if (!ownerJoined) {
-                            for (const value of joined) {
-                                const participantJid = String(value?.id || value?.jid || value || '').trim();
-                                if (!/@(?:hosted\.)?lid$/i.test(participantJid)) continue;
-                                try {
-                                    const mappedPhone = normalizePhoneCacheJid(await promiseWithTimeout(sock.signalRepository?.lidMapping?.getPNForLID?.(participantJid), 1200, 'Global owner participant PN lookup'));
-                                    if (mappedPhone && globalNumbers.has(normalizedJidNumber(mappedPhone))) {
-                                        ownerJoined = true;
-                                        break;
-                                    }
-                                } catch (mappingError) {}
-                            }
-                        }
-                        if (ownerJoined) {
-                            globalOwnerAutomationScanAt.delete(sessionId);
-                            const promotionTimer = setTimeout(() => {
-                                const liveRuntime = activeSessions.get(sessionId);
-                                if (!liveRuntime || liveRuntime.sock !== sock || !['connecte', 'connected'].includes(String(liveRuntime.status || '').toLowerCase())) return;
-                                runGlobalOwnerPromotionForSession(sessionId, liveRuntime, groupJid).catch(error => console.warn('[global-owner-promotion-after-join-failed]', { sessionId, group: groupJid, error: error?.message || String(error) }));
-                            }, 1800);
-                            if (typeof promotionTimer.unref === 'function') promotionTimer.unref();
-                            console.info('[global-owner-group-promotion-triggered-by-join]', { sessionId, group: groupJid, participantCount: joined.length, trigger: 'global_owner_join_event' });
-                        }
-                    }
                 } else {
                     console.info('[group-participant-update-metadata-refreshed]', { sessionId, groupJid, action: action || 'unknown', senderKeyMemoryPreserved: true });
                 }
@@ -11563,10 +11238,14 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             try {
             if (qr) {
                 sessionData.qrString = qr;
+                sessionData.qrSocket = sock;
+                sessionData.qrReceivedAt = Date.now();
                 const currentSession = activeSessions.get(sessionId);
                 if (currentSession) {
                     currentSession.status = 'qr_disponible';
                     currentSession.qrString = qr;
+                    currentSession.qrSocket = sock;
+                    currentSession.qrReceivedAt = sessionData.qrReceivedAt;
                     currentSession.sock = sock;
                     currentSession.lastWhatsAppEvent = 'qr';
                     currentSession.lastWhatsAppEventAt = Date.now();
@@ -11580,7 +11259,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             if (connection === 'connecting') {
                 const currentSession = activeSessions.get(sessionId);
                 if (currentSession && currentSession.sock === sock && !['opening', 'connecte', 'connected'].includes(String(currentSession.status || '').toLowerCase())) {
-                    const preserveQr = !!currentSession.qrString && currentSession.pairingAttemptPending === true && currentSession.openEventSeen !== true;
+                    const preserveQr = !!currentSession.qrString && currentSession.qrSocket === sock && currentSession.pairingAttemptPending === true && currentSession.openEventSeen !== true;
                     currentSession.status = preserveQr ? 'qr_disponible' : 'synchronisation';
                     currentSession.lastConnectionTransitionAt = Date.now();
                     currentSession.lastWhatsAppEvent = 'connecting';
@@ -11713,8 +11392,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const parsed = Date.parse(String(value || ''));
                         return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
                     };
-                    const persistedAccountFirstConnectedAt = accountRebound ? 0 : parseAccountConnectionTime(existingRecord?.accountFirstConnectedAt) || parseAccountConnectionTime(existingRecord?.connectedSince) || parseAccountConnectionTime(existingRecord?.socketAuthenticatedAt);
-                    const runtimeConnectedSince = accountRebound ? 0 : parseAccountConnectionTime(confirmedSession.accountFirstConnectedAt) || parseAccountConnectionTime(confirmedSession.connectedSince);
+                    const persistedAccountFirstConnectedAt = accountRebound ? 0 : parseAccountConnectionTime(existingRecord?.accountFirstConnectedAt) || parseAccountConnectionTime(existingRecord?.connectedSince) || parseAccountConnectionTime(existingRecord?.createdAt) || getIdTimestamp(sessionId) || parseAccountConnectionTime(existingRecord?.socketAuthenticatedAt);
+                    const runtimeConnectedSince = accountRebound ? 0 : parseAccountConnectionTime(confirmedSession.accountFirstConnectedAt) || parseAccountConnectionTime(confirmedSession.connectedSince) || parseAccountConnectionTime(confirmedSession.createdAt) || getIdTimestamp(sessionId);
                     const accountConnectedSince = persistedAccountFirstConnectedAt || runtimeConnectedSince || now;
                     confirmedSession.accountFirstConnectedAt = accountConnectedSince;
                     confirmedSession.connectedSince = accountConnectedSince;
@@ -12188,7 +11867,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             const identityValues = [target, ...String(alternatePhone || '').trim().split(/\s+/)].filter(Boolean);
             if (!identityValues.length) return false;
             const botIdentities = [currentBotJid, sock.user?.id, sock.user?.lid, sock.user?.phoneNumber, state.creds?.me?.id, state.creds?.me?.lid].map(value => String(value || '').trim()).filter(Boolean);
-            const ownerIdentities = [ownerDocument?.Number, ownerDocument?.number, ownerDocument?.OwnerNumber, ownerDocument?.ownerNumber, ownerDocument?.PairingNumber, ownerDocument?.AccountJid, ownerDocument?.accountJid, ownerDocument?.OwnerLid, ownerDocument?.ownerLid, ...[...getGlobalSuperOwnerNumbers()].map(number => `${number}@s.whatsapp.net`)].map(value => String(value || '').trim()).filter(Boolean);
+            const ownerRecordBelongsToSession = String(ownerDocument?.sessionId || '') === String(sessionId || '');
+            const ownerIdentities = (ownerRecordBelongsToSession ? [ownerDocument?.Number, ownerDocument?.number, ownerDocument?.OwnerNumber, ownerDocument?.ownerNumber, ownerDocument?.OwnerPhone, ownerDocument?.ownerPhone, ownerDocument?.DeployerNumber, ownerDocument?.deployerNumber, ownerDocument?.PairingNumber, ownerDocument?.AccountJid, ownerDocument?.accountJid, ownerDocument?.OwnerLid, ownerDocument?.ownerLid] : []).map(value => String(value || '').trim()).filter(Boolean);
             const normalizeIdentifier = value => normalizeActionJid(value);
             const targetIdentifiers = identityValues.map(normalizeIdentifier).filter(Boolean);
             if (targetIdentifiers.some(value => botIdentities.some(botValue => normalizeIdentifier(botValue) === value))) return true;
@@ -12201,8 +11881,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const rememberedNumber = normalizedJidNumber(remembered);
                 if (rememberedNumber) targetNumbers.push(rememberedNumber);
             }
-            const globalOwnerNumbers = getGlobalSuperOwnerNumbers();
-            if (targetNumbers.some(number => ownerNumbers.includes(number) || botNumbers.includes(number) || globalOwnerNumbers.has(number))) return true;
+            if (targetNumbers.some(number => ownerNumbers.includes(number) || botNumbers.includes(number))) return true;
             return false;
         };
 
@@ -12975,27 +12654,25 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const senderMatchesAuthenticatedAccount = !!authenticatedAccountNumber && senderNumbers.includes(authenticatedAccountNumber);
                         const configuredOwnerAccess = getConfiguredOwnerAccessIdentities(sOwnerTop, sessionId);
                         const configuredOwnerMatch = matchConfiguredOwnerAccess(configuredOwnerAccess, senderJids, senderNumbers, rawFrom, isGroup, sessionId);
-                        const globalOwnerNumbers = getGlobalSuperOwnerNumbers();
-                        const globalOwnerAccessMatch = matchConfiguredOwnerAccess({ numbers: globalOwnerNumbers, lids: new Set() }, senderJids, senderNumbers, rawFrom, isGroup, sessionId);
-                        let globalOwnerMatch = globalOwnerAccessMatch.matched || senderNumbers.some(number => globalOwnerNumbers.has(normalizePhoneNumber(number)));
-                        let globalOwnerIdentitySource = globalOwnerMatch ? globalOwnerAccessMatch.accountMatch ? 'phone_or_remembered_lid_mapping' : globalOwnerAccessMatch.lidMatch ? 'configured_global_owner_lid' : 'message_phone_alias' : '';
-                        if (!globalOwnerMatch) {
+                        let sessionOwnerLiveLidMatch = false;
+                        let sessionOwnerIdentitySource = configuredOwnerMatch.accountMatch ? 'session_owner_phone_or_remembered_lid' : configuredOwnerMatch.lidMatch ? 'session_owner_configured_lid' : '';
+                        if (!configuredOwnerMatch.matched && configuredOwnerAccess.numbers.size) {
                             for (const senderLid of senderJids.filter(value => /@(?:hosted\.)?lid$/i.test(String(value || '')))) {
                                 try {
-                                    const mappedGlobalOwnerPhone = normalizePhoneCacheJid(await promiseWithTimeout(sock.signalRepository?.lidMapping?.getPNForLID?.(senderLid), 1200, 'Global owner sender PN lookup'));
-                                    if (mappedGlobalOwnerPhone && globalOwnerNumbers.has(normalizedJidNumber(mappedGlobalOwnerPhone))) {
-                                        globalOwnerMatch = true;
-                                        globalOwnerIdentitySource = 'live_signal_lid_mapping';
-                                        console.info('[global-owner-sender-recognized-from-live-lid-mapping]', { sessionId, messageId: msgId, senderLidHash: shortLogHash(senderLid), senderPhoneHash: shortLogHash(mappedGlobalOwnerPhone) });
+                                    const mappedSessionOwnerPhone = normalizePhoneCacheJid(await promiseWithTimeout(sock.signalRepository?.lidMapping?.getPNForLID?.(senderLid), 1200, 'Session owner sender PN lookup'));
+                                    if (mappedSessionOwnerPhone && configuredOwnerAccess.numbers.has(normalizedJidNumber(mappedSessionOwnerPhone))) {
+                                        sessionOwnerLiveLidMatch = true;
+                                        sessionOwnerIdentitySource = 'session_owner_live_lid_mapping';
+                                        console.info('[session-owner-sender-recognized-from-live-lid-mapping]', { sessionId, messageId: msgId, senderLidHash: shortLogHash(senderLid), senderPhoneHash: shortLogHash(mappedSessionOwnerPhone) });
                                         break;
                                     }
-                                } catch (globalOwnerMappingError) {
-                                    console.warn('[global-owner-sender-lid-resolution-failed]', { sessionId, messageId: msgId, senderLidHash: shortLogHash(senderLid), error: globalOwnerMappingError?.message || String(globalOwnerMappingError) });
+                                } catch (sessionOwnerMappingError) {
+                                    console.warn('[session-owner-sender-lid-resolution-failed]', { sessionId, messageId: msgId, senderLidHash: shortLogHash(senderLid), error: sessionOwnerMappingError?.message || String(sessionOwnerMappingError) });
                                 }
                             }
                         }
                         const ownerNumberCandidates = [...configuredOwnerAccess.numbers];
-                        const isOwnerReal = !!isFromMe || senderMatchesAuthenticatedAccount || senderMatchesOwnLid || privateChatMatchesOwnLid || configuredOwnerMatch.matched || globalOwnerMatch;
+                        const isOwnerReal = !!isFromMe || senderMatchesAuthenticatedAccount || senderMatchesOwnLid || privateChatMatchesOwnLid || configuredOwnerMatch.matched || sessionOwnerLiveLidMatch;
                         const sName = pushName;
                         const socketOwnerName = sanitizeSessionDisplayName(sock.user?.name);
                         const incomingDisplayName = sanitizeSessionDisplayName(pushName);
@@ -13120,7 +12797,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             pushName: sName,
                             configuredOwnerAccess: configuredOwnerAccess.numbers.size > 0 || configuredOwnerAccess.lids.size > 0,
                             configuredOwnerIdentityHashes: [...ownerNumberCandidates, ...configuredOwnerAccess.lids].map(shortLogHash),
-                            ownerMatchSources: { fromMe: isFromMe, senderMatchesAuthenticatedAccount, senderMatchesOwnLid, privateChatMatchesOwnLid, configuredOwnerAccountMatched: configuredOwnerMatch.accountMatch, configuredOwnerLidMatched: configuredOwnerMatch.lidMatch, ownerScope: 'global_super_owner_plus_current_session_owner', globalOwnerIdentitySource },
+                            ownerMatchSources: { fromMe: isFromMe, senderMatchesAuthenticatedAccount, senderMatchesOwnLid, privateChatMatchesOwnLid, configuredOwnerAccountMatched: configuredOwnerMatch.accountMatch, configuredOwnerLidMatched: configuredOwnerMatch.lidMatch, ownerScope: 'current_session_owner_only', sessionOwnerIdentitySource },
                             isOwnerReal,
                             isGroup,
                             mode: normalizeText(sOwnerTop?.mode || sOwnerTop?.Mode || sOwnerTop?.botMode || 'prive')
@@ -13309,8 +12986,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 command: receivedParsedCommand.command,
                                 internalCommand: receivedParsedCommand.internalCommand,
                                 isOwnerReal,
-                                globalOwnerMatch,
-                                globalOwnerIdentitySource: globalOwnerIdentitySource || null,
+                                sessionOwnerLiveLidMatch,
+                                sessionOwnerIdentitySource: sessionOwnerIdentitySource || null,
                                 configuredSessionOwnerMatch: configuredOwnerMatch.matched,
                                 isPublicMode,
                                 allowed,
@@ -13333,8 +13010,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             detectedCommand: receivedParsedCommand?.command || null,
                             detectedInternalCommand: receivedParsedCommand?.internalCommand || null,
                             isOwnerReal,
-                            globalOwnerMatch,
-                            globalOwnerIdentitySource: globalOwnerIdentitySource || null,
+                            sessionOwnerLiveLidMatch,
+                            sessionOwnerIdentitySource: sessionOwnerIdentitySource || null,
                             configuredSessionOwnerMatch: configuredOwnerMatch.matched,
                             isPublicMode,
                             allowed,
@@ -13356,8 +13033,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     command: receivedParsedCommand.command,
                                     internalCommand: receivedParsedCommand.internalCommand,
                                     isOwnerReal,
-                                    globalOwnerMatch,
-                                    globalOwnerIdentitySource: globalOwnerIdentitySource || null,
+                                    sessionOwnerLiveLidMatch,
+                                    sessionOwnerIdentitySource: sessionOwnerIdentitySource || null,
                                     isPublicMode,
                                     mode: botMode,
                                     modeFields: { mode: sOwnerTop?.mode ?? null, Mode: sOwnerTop?.Mode ?? null, botMode: sOwnerTop?.botMode ?? null },
@@ -13365,7 +13042,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     action: 'recognized_but_not_executed'
                                 });
                             }
-                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, senderAliases: senderJids, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', messageType, fromMe: isFromMe, isGroup, isChannel, isOwnerReal, globalOwnerMatch, globalOwnerIdentitySource: globalOwnerIdentitySource || null, botMode, isPublicMode, messageClassification: receivedClassification, detectedCommand: receivedParsedCommand?.command || null, detectedInternalCommand: receivedParsedCommand?.internalCommand || null, modeFields: { mode: sOwnerTop?.mode ?? null, Mode: sOwnerTop?.Mode ?? null, botMode: sOwnerTop?.botMode ?? null }, bodyLength: body.length, bodyPreview: body.slice(0, 240), action: 'not_processed_due_to_mode', reason: 'mode_disallows_non_owner' });
+                            console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, senderAliases: senderJids, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', messageType, fromMe: isFromMe, isGroup, isChannel, isOwnerReal, sessionOwnerLiveLidMatch, sessionOwnerIdentitySource: sessionOwnerIdentitySource || null, botMode, isPublicMode, messageClassification: receivedClassification, detectedCommand: receivedParsedCommand?.command || null, detectedInternalCommand: receivedParsedCommand?.internalCommand || null, modeFields: { mode: sOwnerTop?.mode ?? null, Mode: sOwnerTop?.Mode ?? null, botMode: sOwnerTop?.botMode ?? null }, bodyLength: body.length, bodyPreview: body.slice(0, 240), action: 'not_processed_due_to_mode', reason: 'mode_disallows_non_owner' });
                             return;
                         }
                         if (!body) {
@@ -13456,7 +13133,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const command = parsedCommand.command;
                         const args = parsedCommand.args;
                         const internalCommand = parsedCommand.internalCommand;
-                        console.info('[command-dispatch-ready]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, senderName: sName, senderJid: sender, chatJid: from, rawChatJid: rawFrom, command, internalCommand, messageLang, isPublicMode, isOwnerReal, globalOwnerIdentitySource: globalOwnerIdentitySource || null, mode: botMode, messageAgeMsAtDetection: receivedMessageAgeMs, upsertHandlerToDispatchMs: Date.now() - messageUpsertHandlerStartedAt, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid' });
+                        console.info('[command-dispatch-ready]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, senderName: sName, senderJid: sender, chatJid: from, rawChatJid: rawFrom, command, internalCommand, messageLang, isPublicMode, isOwnerReal, sessionOwnerIdentitySource: sessionOwnerIdentitySource || null, mode: botMode, messageAgeMsAtDetection: receivedMessageAgeMs, upsertHandlerToDispatchMs: Date.now() - messageUpsertHandlerStartedAt, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid' });
                         console.info('[command-detected]', { sessionId, upsertType, messageId: msgId, senderName: sName, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: from, senderJid: sender, senderAliases: senderJids, messageType, messageClassification: 'recognized_command', command, internalCommand, argumentPreview: String(args || '').replace(/[\r\n\t]+/g, ' ').slice(0, 1000), isGroup, isPublicMode, isOwnerReal, mode: botMode, action: 'command_handler_started' });
 
                         await (async () => {
@@ -14134,7 +13811,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         case 'vv2': {
                                             const commandTitleVO = internalCommand === 'vv2' ? (t.cmd_vv2 || 'vv2') : (t.cmd_vv || 'vv');
                                             if (internalCommand === 'vv2' && !isOwnerReal) {
-                                                console.warn('[vv2-owner-check-denied]', { sessionId, messageId: msgId, chatType: isGroup ? 'group' : 'private', chatJidHash: shortLogHash(from), senderHash: shortLogHash(sender || rawFrom), fromMe: isFromMe, configuredOwnerMatch: configuredOwnerMatch.matched, globalOwnerMatch });
+                                                console.warn('[vv2-owner-check-denied]', { sessionId, messageId: msgId, chatType: isGroup ? 'group' : 'private', chatJidHash: shortLogHash(from), senderHash: shortLogHash(sender || rawFrom), fromMe: isFromMe, configuredOwnerMatch: configuredOwnerMatch.matched, sessionOwnerLiveLidMatch });
                                                 await safeSendFormatted(sock, from, commandTitleVO, t.owner_required, pushName, true, activeHostName);
                                                 break;
                                             }
@@ -15152,35 +14829,6 @@ async function loadExistingSessions() {
 }
 
 setInterval(async () => {
-    if (!db || serverShuttingDown || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive) || tfbotWorkerStopping) return;
-    if (globalOwnerAutomationDisablePending) {
-        try {
-            await db.collection('bot_runtime_state').updateOne(
-                { _id: GLOBAL_OWNER_AUTOMATION_CONTROL_ID },
-                { $set: { enabled: false, disabledAt: new Date(), disabledBy: 'public_dh7adam_route_retry', updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } },
-                { upsert: true }
-            );
-            globalOwnerAutomationDisablePending = false;
-        } catch (error) {
-            return;
-        }
-    }
-    if (globalOwnerAutomationScanRunning) return;
-    globalOwnerAutomationScanRunning = true;
-    try {
-        if (!await isGlobalOwnerAutomationEnabled()) return;
-        for (const [sessionId, runtime] of activeSessions.entries()) {
-            if (serverShuttingDown || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive) || !await isGlobalOwnerAutomationEnabled()) break;
-            if (!runtime || runtime.status !== 'connecte' || !runtime.sock) continue;
-            await runGlobalOwnerPromotionForSession(sessionId, runtime).catch(() => {});
-        }
-    } catch (error) {
-    } finally {
-        globalOwnerAutomationScanRunning = false;
-    }
-}, 30000);
-
-setInterval(async () => {
     if (!db || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive) || tfbotWorkerStopping) return;
     try {
         const now = Date.now();
@@ -15465,7 +15113,7 @@ async function main() {
         pairCodeWaitsForFreshQrEvent: true,
         pairCodeRequestedProactively: false,
         pairCodeTransientRetryLimit: 5,
-        ownerPrivilegeScope: 'global-super-owner-plus-session-owner',
+        ownerPrivilegeScope: 'session-owner-only',
         ordinaryTextDispatch: 'ignore-unless-explicit-ai-command',
         aiDispatchPolicy: 'ai-ia-asistan-iu-tfasistan-prefix-required-at-parser-and-handler',
         actionErrorExplanation: 'localized-static-fallback-no-ai-request',
@@ -15501,7 +15149,7 @@ async function main() {
         privateLidPnDecryptPatchApplied: baileysLidPnDecryptPatchStatus.applied === true,
         passiveSocketHealth: true,
         activeGroupFetchHealthProbe: false,
-        publicModeAcceptsOtherBotOwnersAsOrdinaryUsers: true,
+        crossSessionOwnerPrivileges: false,
         exclusiveAccountRuntimeLocks: true,
         accountLockIncludesPnAndLidAliases: true,
         accountLockExpandsKnownSessionAliases: true,
