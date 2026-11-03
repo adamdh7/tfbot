@@ -3,7 +3,7 @@ const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(10000, Math.min(120000, Number(pr
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(1000, Math.min(10000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 3000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r139-paircode-ws-open-per-sender-group-queues';
+const TFBOT_CLUSTER_CODE_REVISION = 'r140-credential-snapshot-group-pn-send-queue-owner-typing';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
@@ -203,7 +203,7 @@ for (const level of Object.keys(tfbotOriginalConsole)) {
     console[level] = (...args) => {
         try {
             const serialized = args.map(value => typeof value === 'string' ? value : tfbotDiagnosticSerialize(value)).join(' ');
-            const operationalLog = /tfbot-router|tfbot-worker|cluster-|session-(?:restore|orphan|expired|duplicate|runtime-lock|account-runtime-lock|reconnect|open|health|runtime-status)|signal-|whatsapp-signal|pairing-challenge|worker-handoff|send-failure|mongo-(?:connect|close)|storage-layout|messages-upsert|message-|command-|whatsapp-presence-update|group-metadata|group-sender-key|sender-key-memory|group-participant|baileys-|message-receipt|message-status/i.test(serialized);
+            const operationalLog = /tfbot-router|tfbot-worker|cluster-|session-(?:restore|orphan|expired|duplicate|runtime-lock|account-runtime-lock|reconnect|open|health|runtime-status)|signal-|whatsapp-signal|pairing-challenge|worker-handoff|send-failure|whatsapp-send|mongo-(?:connect|close)|storage-layout|messages-upsert|message-|command-|whatsapp-presence-update|group-metadata|group-sender-key|sender-key-memory|group-participant|baileys-|message-receipt|message-status/i.test(serialized);
             if (operationalLog) {
                 const sessionMatch = serialized.match(/session(?:Id|_id)?["'=:\s]+([A-Za-z0-9_-]{8,120})/i);
                 const sessionHash = sessionMatch ? shortLogHash(sessionMatch[1]) : null;
@@ -217,8 +217,8 @@ for (const level of Object.keys(tfbotOriginalConsole)) {
 enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'diagnostic-log-start', content: 'Journal opérationnel du cluster démarré; les identifiants, codes, numéros et contenus privés sont masqués.' });
 
 function applyBaileysLidPnDecryptRetryPatch() {
-    const marker = '__tfbotPrivateLidPnDecryptFallbackV114';
-    const previousMarkers = ['__tfbotPrivateLidPnDecryptFallbackV113', '__tfbotPrivateLidPnDecryptFallbackV112', '__tfbotSelfChatPnDecryptFallbackV107'];
+    const marker = '__tfbotPrivateLidPnDecryptFallbackV115';
+    const previousMarkers = ['__tfbotPrivateLidPnDecryptFallbackV114', '__tfbotPrivateLidPnDecryptFallbackV113', '__tfbotPrivateLidPnDecryptFallbackV112', '__tfbotSelfChatPnDecryptFallbackV107'];
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
@@ -262,7 +262,7 @@ function applyBaileysLidPnDecryptRetryPatch() {
                 try {
                     const __tfbotMappingLookup = Promise.resolve().then(() => repository.lidMapping.getPNForLID(__tfbotLid, __tfbotRemoteJid));
                     const __tfbotMappingTimeout = new Promise(resolve => {
-                        __tfbotMappingTimer = setTimeout(() => resolve(''), 3000);
+                        __tfbotMappingTimer = setTimeout(() => resolve(''), 1500);
                         if (typeof __tfbotMappingTimer.unref === 'function') __tfbotMappingTimer.unref();
                     });
                     const __tfbotMappedPn = __tfbotNormalizeJid(await Promise.race([__tfbotMappingLookup, __tfbotMappingTimeout]));
@@ -286,11 +286,9 @@ function applyBaileysLidPnDecryptRetryPatch() {
             if (__tfbotIsPrivateLidChat && /^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotCandidateJid)) {
                 const __tfbotLid = __tfbotLidCandidates[0] || '';
                 if (__tfbotLid && typeof repository?.lidMapping?.storeLIDPNMappings === 'function') {
-                    try {
-                        await repository.lidMapping.storeLIDPNMappings([{ lid: __tfbotLid, pn: __tfbotCandidateJid }]);
-                    } catch (mappingStoreError) {
+                    void Promise.resolve().then(() => repository.lidMapping.storeLIDPNMappings([{ lid: __tfbotLid, pn: __tfbotCandidateJid }])).catch(mappingStoreError => {
                         logger?.debug?.({ mappingStoreErrorName: mappingStoreError?.name || 'Error' }, 'private LID/PN mapping persistence skipped after successful alternate decrypt');
-                    }
+                    });
                 }
                 logger?.debug?.({ remoteJid: __tfbotRemoteJid, primaryJid: __tfbotPrimaryJid, decryptAddressType: 'phone_number', selfChat: __tfbotIsSelfLidChat, mappingAvailable: __tfbotPnCandidates.length > 0 }, 'private LID PN decrypt fallback succeeded');
             }
@@ -309,16 +307,19 @@ function applyBaileysLidPnDecryptRetryPatch() {
         const previousMarker = previousMarkers.find(value => source.includes(`const ${value} = true;`)) || '';
         const oldMarkerIndex = previousMarker ? source.indexOf(`const ${previousMarker} = true;`) : -1;
         if (oldMarkerIndex >= 0) {
+            const wrapperStart = source.lastIndexOf('await (async () => {', oldMarkerIndex);
             const oldIifeEnd = source.indexOf('})();', oldMarkerIndex);
-            if (oldIifeEnd < 0) return { applied: false, reason: 'previous_private_lid_patch_wrapper_not_found', file: path.basename(filePath) };
-            const originalJidMatch = source.slice(Math.max(0, oldMarkerIndex - 10000), oldMarkerIndex).match(/__tfbotPrimaryJid = String\(([\s\S]*?)\s*\|\|\s*''\)\.trim\(\);/);
+            if (wrapperStart < 0 || oldIifeEnd < 0) return { applied: false, reason: 'previous_private_lid_patch_wrapper_boundaries_not_found', file: path.basename(filePath) };
+            const previousBody = source.slice(oldMarkerIndex, oldIifeEnd);
+            const originalJidMatch = previousBody.match(/__tfbotPrimaryJid = String\(([\s\S]*?)\s*\|\|\s*''\)\.trim\(\);/);
             if (!originalJidMatch) return { applied: false, reason: 'previous_private_lid_patch_original_jid_not_found', file: path.basename(filePath) };
-            const previousBodyStart = source.lastIndexOf('const __tfbotPrimaryJid = String(', oldMarkerIndex);
-            if (previousBodyStart < 0) return { applied: false, reason: 'previous_private_lid_patch_body_not_found', file: path.basename(filePath) };
-            source = source.slice(0, previousBodyStart) + buildInjectedBody(originalJidMatch[1].trim()) + '\n' + source.slice(oldIifeEnd);
+            const assignmentPrefix = source.slice(0, wrapperStart);
+            if (!/((?:(?:const|let|var)\s+)?[A-Za-z_$][\w$]*\s*=\s*)$/.test(assignmentPrefix)) return { applied: false, reason: 'previous_private_lid_patch_assignment_prefix_not_found', file: path.basename(filePath) };
+            const replacement = `await (async () => {\n    ${buildInjectedBody(originalJidMatch[1].trim())}\n})();`;
+            source = source.slice(0, wrapperStart) + replacement + source.slice(oldIifeEnd + 5);
             if (!source.includes(marker) || source.includes(previousMarker)) return { applied: false, reason: 'previous_private_lid_patch_upgrade_verification_failed', file: path.basename(filePath) };
             fs.writeFileSync(filePath, source, 'utf8');
-            return { applied: true, alreadyApplied: false, upgradedPreviousPatch: true, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, preservesOriginalLidFallback: true, noAutomaticSessionMigration: true };
+            return { applied: true, alreadyApplied: false, upgradedPreviousPatch: true, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, mappingLookupTimeoutMs: 1500, preservesOriginalLidFallback: true, noAutomaticSessionMigration: true };
         }
         const callPattern = /((?:(?:const|let|var)\s+)?[A-Za-z_$][\w$]*\s*=\s*)await\s+repository\.decryptMessage\s*\(\s*\{\s*jid\s*:\s*([^,\n]+?)\s*,\s*type\s*:\s*e2eType\s*,\s*ciphertext\s*:\s*content\s*\}\s*\)\s*;?/g;
         const matches = [...source.matchAll(callPattern)];
@@ -328,7 +329,7 @@ function applyBaileysLidPnDecryptRetryPatch() {
         const patchedSource = source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
         if (!patchedSource.includes(marker) || !patchedSource.includes('getPNForLID') || !patchedSource.includes('storeLIDPNMappings') || patchedSource.includes('migrateSession(__tfbotCandidateJid')) return { applied: false, reason: 'private_lid_decrypt_patch_verification_failed', file: path.basename(filePath) };
         fs.writeFileSync(filePath, patchedSource, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, mappingLookupTimeoutMs: 3000, groupMetadataFallback: true, preservesOriginalLidFallback: true, storesMappingOnlyAfterSuccessfulPnDecrypt: true, noAutomaticSessionMigration: true };
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, mappingLookupTimeoutMs: 1500, groupMetadataFallback: true, preservesOriginalLidFallback: true, storesMappingOnlyAfterSuccessfulPnDecrypt: true, noAutomaticSessionMigration: true };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
@@ -815,8 +816,8 @@ const ${marker} = true;`;
     }
 }
 function applyBaileysGroupLidPnDecryptRetryPatch() {
-    const marker = '__tfbotGroupLidPnDecryptFallbackV115';
-    const previousMarkers = ['__tfbotGroupLidPnDecryptFallbackV114', '__tfbotGroupLidPnDecryptFallbackV113', '__tfbotGroupLidPnDecryptFallbackV112'];
+    const marker = '__tfbotGroupLidPnDecryptFallbackV116';
+    const previousMarkers = ['__tfbotGroupLidPnDecryptFallbackV115', '__tfbotGroupLidPnDecryptFallbackV114', '__tfbotGroupLidPnDecryptFallbackV113', '__tfbotGroupLidPnDecryptFallbackV112'];
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
@@ -825,68 +826,84 @@ function applyBaileysGroupLidPnDecryptRetryPatch() {
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
         if (!filePath) return { applied: false, reason: 'decrypt_module_not_found' };
         let source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), groupAuthorLidFallback: true, usesTrustedPnMapping: true, passesGroupContextToMapping: true, waitsForGroupMetadataMapping: true, triesOriginalLidFirst: true, mappingLookupTimeoutMs: 13000, noSenderKeyReset: true };
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), groupAuthorLidFallback: true, prefersExplicitParticipantPn: true, usesCachedOrDatabaseMappingOnly: true, groupMetadataNetworkFetchDuringDecrypt: false, mappingLookupTimeoutMs: 500, originalLidAttemptPreserved: true };
+        const buildInjectedBody = (groupExpression, authorExpression) => `const ${marker} = true;
+    const __tfbotGroupJid = String(${groupExpression} || '').trim();
+    const __tfbotAuthorJid = String(${authorExpression} || '').trim();
+    const __tfbotNormalizedAuthorLid = __tfbotAuthorJid.replace(/:\\d+(?=@(?:hosted\\.)?lid$)/i, '');
+    const __tfbotIsAuthorLid = /@(?:hosted\\.)?lid$/i.test(__tfbotNormalizedAuthorLid);
+    const __tfbotExplicitPnCandidates = [...new Set([
+        fullMessage?.key?.participantPn,
+        fullMessage?.key?.senderPn,
+        fullMessage?.key?.participantAlt,
+        stanza?.attrs?.participant_pn,
+        stanza?.attrs?.sender_pn
+    ].map(value => String(value || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '')).filter(value => /^\\d{6,20}@s\\.whatsapp\\.net$/i.test(value)))];
+    const __tfbotRememberGroupPn = pn => {
+        if (!__tfbotIsAuthorLid || typeof repository?.lidMapping?.storeLIDPNMappings !== 'function') return;
+        void Promise.resolve().then(() => repository.lidMapping.storeLIDPNMappings([{ lid: __tfbotNormalizedAuthorLid, pn }])).catch(mappingStoreError => {
+            logger?.debug?.({ mappingStoreErrorName: mappingStoreError?.name || 'Error' }, 'group LID/PN mapping persistence skipped after successful alternate decrypt');
+        });
+    };
+    try {
+        return await repository.decryptGroupMessage({ group: __tfbotGroupJid, authorJid: __tfbotAuthorJid, msg: content });
+    } catch (__tfbotOriginalGroupDecryptError) {
+        for (const __tfbotExplicitPn of __tfbotExplicitPnCandidates) {
+            try {
+                const __tfbotDecryptedExplicitPn = await repository.decryptGroupMessage({ group: __tfbotGroupJid, authorJid: __tfbotExplicitPn, msg: content });
+                __tfbotRememberGroupPn(__tfbotExplicitPn);
+                logger?.debug?.({ groupJid: __tfbotGroupJid, authorJid: __tfbotNormalizedAuthorLid || __tfbotAuthorJid, decryptAuthorType: 'explicit_participant_pn' }, 'group LID PN decrypt fallback succeeded from WhatsApp message aliases');
+                return __tfbotDecryptedExplicitPn;
+            } catch (explicitPnDecryptError) {}
+        }
+        if (!__tfbotIsAuthorLid || typeof repository?.lidMapping?.getPNForLID !== 'function') throw __tfbotOriginalGroupDecryptError;
+        let __tfbotMappingTimer = null;
+        try {
+            const __tfbotMappingLookup = Promise.resolve().then(() => repository.lidMapping.getPNForLID(__tfbotNormalizedAuthorLid, __tfbotGroupJid));
+            const __tfbotMappingTimeout = new Promise(resolve => {
+                __tfbotMappingTimer = setTimeout(() => resolve(''), 500);
+                if (typeof __tfbotMappingTimer.unref === 'function') __tfbotMappingTimer.unref();
+            });
+            const __tfbotMappedAuthorPn = String(await Promise.race([__tfbotMappingLookup, __tfbotMappingTimeout]) || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
+            if (!/^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotMappedAuthorPn) || __tfbotExplicitPnCandidates.includes(__tfbotMappedAuthorPn)) throw __tfbotOriginalGroupDecryptError;
+            const __tfbotDecryptedMappedPn = await repository.decryptGroupMessage({ group: __tfbotGroupJid, authorJid: __tfbotMappedAuthorPn, msg: content });
+            __tfbotRememberGroupPn(__tfbotMappedAuthorPn);
+            logger?.debug?.({ groupJid: __tfbotGroupJid, authorJid: __tfbotNormalizedAuthorLid, decryptAuthorType: 'cached_or_database_phone_number' }, 'group LID PN decrypt fallback succeeded');
+            return __tfbotDecryptedMappedPn;
+        } catch (__tfbotGroupFallbackError) {
+            logger?.warn?.({ groupJid: __tfbotGroupJid, authorJid: __tfbotNormalizedAuthorLid, explicitPnCandidateCount: __tfbotExplicitPnCandidates.length, mappingAvailable: typeof repository?.lidMapping?.getPNForLID === 'function', errorName: __tfbotGroupFallbackError?.name || 'Error' }, 'group LID PN decrypt fallback failed; original LID decrypt error preserved');
+            throw __tfbotOriginalGroupDecryptError;
+        } finally {
+            if (__tfbotMappingTimer) clearTimeout(__tfbotMappingTimer);
+        }
+    }`;
         const previousMarker = previousMarkers.find(value => source.includes(`const ${value} = true;`)) || '';
         if (previousMarker) {
-            const previousLookup = 'repository.lidMapping.getPNForLID(__tfbotNormalizedAuthorLid)';
-            if (previousMarker.endsWith('V112')) {
-                const previousLookupCount = source.split(previousLookup).length - 1;
-                if (previousLookupCount !== 1) return { applied: false, reason: `previous_group_mapping_lookup_count_${previousLookupCount}`, file: path.basename(filePath) };
-                source = source.replace(previousLookup, 'repository.lidMapping.getPNForLID(__tfbotNormalizedAuthorLid, __tfbotGroupJid)');
-            }
-            const timeoutAnchors = ["setTimeout(() => resolve(''), 1200);", "setTimeout(() => resolve(''), 10000);"];
-            const timeoutAnchor = timeoutAnchors.find(value => source.split(value).length - 1 === 1) || '';
-            if (!timeoutAnchor) return { applied: false, reason: 'previous_group_mapping_timeout_anchor_not_found_or_ambiguous', file: path.basename(filePath) };
-            source = source.replace(timeoutAnchor, "setTimeout(() => resolve(''), 13000);");
-            source = source.replace(`const ${previousMarker} = true;`, `const ${marker} = true;`);
-            if (!source.includes(marker) || source.includes(previousMarker) || !source.includes('getPNForLID(__tfbotNormalizedAuthorLid, __tfbotGroupJid)') || !source.includes("setTimeout(() => resolve(''), 13000);")) return { applied: false, reason: 'previous_group_lid_mapping_context_upgrade_verification_failed', file: path.basename(filePath) };
+            const markerIndex = source.indexOf(`const ${previousMarker} = true;`);
+            const wrapperStart = source.lastIndexOf('await (async () => {', markerIndex);
+            const wrapperEnd = source.indexOf('})();', markerIndex);
+            if (wrapperStart < 0 || wrapperEnd < 0) return { applied: false, reason: 'previous_group_lid_patch_wrapper_boundaries_not_found', file: path.basename(filePath) };
+            const previousBody = source.slice(markerIndex, wrapperEnd);
+            const groupMatch = previousBody.match(/const __tfbotGroupJid = String\(([\s\S]*?)\s*\|\|\s*''\)\.trim\(\);/);
+            const authorMatch = previousBody.match(/const __tfbotAuthorJid = String\(([\s\S]*?)\s*\|\|\s*''\)\.trim\(\);/);
+            if (!groupMatch || !authorMatch) return { applied: false, reason: 'previous_group_lid_patch_original_jid_expressions_not_found', file: path.basename(filePath) };
+            const assignmentPrefix = source.slice(0, wrapperStart);
+            if (!/((?:(?:const|let|var)\s+)?[A-Za-z_$][\w$]*\s*=\s*)$/.test(assignmentPrefix)) return { applied: false, reason: 'previous_group_lid_patch_assignment_prefix_not_found', file: path.basename(filePath) };
+            const replacement = `await (async () => {\n${buildInjectedBody(groupMatch[1].trim(), authorMatch[1].trim())}\n})();`;
+            source = source.slice(0, wrapperStart) + replacement + source.slice(wrapperEnd + 5);
+            if (!source.includes(marker) || source.includes(previousMarker) || !source.includes('fullMessage?.key?.participantPn') || !source.includes('fullMessage?.key?.senderPn') || !source.includes('setTimeout(() => resolve(\'\'), 500);')) return { applied: false, reason: 'previous_group_lid_patch_upgrade_verification_failed', file: path.basename(filePath) };
             fs.writeFileSync(filePath, source, 'utf8');
-            return { applied: true, alreadyApplied: false, upgradedPreviousPatch: true, file: path.basename(filePath), groupAuthorLidFallback: true, usesTrustedPnMapping: true, passesGroupContextToMapping: true, waitsForGroupMetadataMapping: true, triesOriginalLidFirst: true, mappingLookupTimeoutMs: 13000, noSenderKeyReset: true, noAutomaticSessionMigration: true };
+            return { applied: true, alreadyApplied: false, upgradedPreviousPatch: true, file: path.basename(filePath), prefersExplicitParticipantPn: true, mappingLookupTimeoutMs: 500, groupMetadataNetworkFetchDuringDecrypt: false, originalLidAttemptPreserved: true };
         }
         const callPattern = /((?:(?:const|let|var)\s+)?[A-Za-z_$][\w$]*\s*=\s*)await\s+repository\.decryptGroupMessage\s*\(\s*\{\s*group\s*:\s*([^,\n]+?)\s*,\s*authorJid\s*:\s*([^,\n]+?)\s*,\s*msg\s*:\s*content\s*\}\s*\)\s*;?/g;
         const matches = [...source.matchAll(callPattern)];
         if (matches.length !== 1) return { applied: false, reason: `expected_one_group_decrypt_call_found_${matches.length}`, file: path.basename(filePath) };
         const match = matches[0];
-        const replacement = `${match[1]}await (async () => {
-    const ${marker} = true;
-    const __tfbotGroupJid = String(${match[2].trim()} || '').trim();
-    const __tfbotAuthorJid = String(${match[3].trim()} || '').trim();
-    try {
-        return await repository.decryptGroupMessage({ group: __tfbotGroupJid, authorJid: __tfbotAuthorJid, msg: content });
-    } catch (__tfbotOriginalGroupDecryptError) {
-        const __tfbotNormalizedAuthorLid = __tfbotAuthorJid.replace(/:\\d+(?=@(?:hosted\\.)?lid$)/i, '');
-        if (!/@(?:hosted\\.)?lid$/i.test(__tfbotNormalizedAuthorLid) || typeof repository?.lidMapping?.getPNForLID !== 'function') throw __tfbotOriginalGroupDecryptError;
-        let __tfbotMappingTimer = null;
-        try {
-            const __tfbotMappingLookup = Promise.resolve().then(() => repository.lidMapping.getPNForLID(__tfbotNormalizedAuthorLid, __tfbotGroupJid));
-            const __tfbotMappingTimeout = new Promise(resolve => {
-                __tfbotMappingTimer = setTimeout(() => resolve(''), 13000);
-                if (typeof __tfbotMappingTimer.unref === 'function') __tfbotMappingTimer.unref();
-            });
-            const __tfbotMappedAuthorPn = String(await Promise.race([__tfbotMappingLookup, __tfbotMappingTimeout]) || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
-            if (!/^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotMappedAuthorPn)) throw __tfbotOriginalGroupDecryptError;
-            const __tfbotDecryptedGroupMessage = await repository.decryptGroupMessage({ group: __tfbotGroupJid, authorJid: __tfbotMappedAuthorPn, msg: content });
-            if (typeof repository?.lidMapping?.storeLIDPNMappings === 'function') {
-                try {
-                    await repository.lidMapping.storeLIDPNMappings([{ lid: __tfbotNormalizedAuthorLid, pn: __tfbotMappedAuthorPn }]);
-                } catch (mappingStoreError) {
-                    logger?.debug?.({ mappingStoreErrorName: mappingStoreError?.name || 'Error' }, 'group LID/PN mapping persistence skipped after successful alternate decrypt');
-                }
-            }
-            logger?.debug?.({ groupJid: __tfbotGroupJid, authorJid: __tfbotNormalizedAuthorLid, decryptAuthorType: 'phone_number' }, 'group LID PN decrypt fallback succeeded');
-            return __tfbotDecryptedGroupMessage;
-        } catch (__tfbotGroupFallbackError) {
-            logger?.warn?.({ groupJid: __tfbotGroupJid, authorJid: __tfbotNormalizedAuthorLid, mappingAvailable: typeof repository?.lidMapping?.getPNForLID === 'function', errorName: __tfbotGroupFallbackError?.name || 'Error' }, 'group LID PN decrypt fallback failed; original LID decrypt error preserved');
-            throw __tfbotOriginalGroupDecryptError;
-        } finally {
-            if (__tfbotMappingTimer) clearTimeout(__tfbotMappingTimer);
-        }
-    }
-})();`;
+        const replacement = `${match[1]}await (async () => {\n${buildInjectedBody(match[2].trim(), match[3].trim())}\n})();`;
         const patchedSource = source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
-        if (!patchedSource.includes(marker) || !patchedSource.includes('getPNForLID(__tfbotNormalizedAuthorLid, __tfbotGroupJid)') || !patchedSource.includes('decryptGroupMessage({ group: __tfbotGroupJid, authorJid: __tfbotMappedAuthorPn, msg: content })')) return { applied: false, reason: 'group_lid_decrypt_patch_verification_failed', file: path.basename(filePath) };
+        if (!patchedSource.includes(marker) || !patchedSource.includes('fullMessage?.key?.participantPn') || !patchedSource.includes('fullMessage?.key?.senderPn') || !patchedSource.includes('decryptGroupMessage({ group: __tfbotGroupJid, authorJid: __tfbotExplicitPn, msg: content })')) return { applied: false, reason: 'group_lid_decrypt_patch_verification_failed', file: path.basename(filePath) };
         fs.writeFileSync(filePath, patchedSource, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), groupAuthorLidFallback: true, usesTrustedPnMapping: true, passesGroupContextToMapping: true, triesOriginalLidFirst: true, waitsForGroupMetadataMapping: true, mappingLookupTimeoutMs: 13000, noSenderKeyReset: true, noAutomaticSessionMigration: true };
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), prefersExplicitParticipantPn: true, usesCachedOrDatabaseMappingOnly: true, mappingLookupTimeoutMs: 500, groupMetadataNetworkFetchDuringDecrypt: false, originalLidAttemptPreserved: true };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
@@ -1499,7 +1516,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-03-r139';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-03-r140';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -2395,7 +2412,7 @@ function attachTfbotSignalLidMappingAdapter(sessionId, sock) {
     const readNative = async (method, value) => {
         if (typeof nativeMapping?.[method] !== 'function') return '';
         try {
-            return await nativeMapping[method].call(nativeMapping, value);
+            return await promiseWithTimeout(Promise.resolve().then(() => nativeMapping[method].call(nativeMapping, value)), 500, 'native Signal LID mapping lookup');
         } catch (error) {
             console.warn('[signal-lid-native-mapping-read-failed]', { sessionId: scopedSessionId, method, errorName: error?.name || 'Error' });
             return '';
@@ -2451,16 +2468,6 @@ function attachTfbotSignalLidMappingAdapter(sessionId, sock) {
         if (cached) return cached;
         const groupMapping = phoneFromCachedGroupMetadata(scopedSessionId, lid);
         if (groupMapping?.phone) return validPhone(groupMapping.phone);
-        const groupJid = String(rawGroupJid || '').trim();
-        if (/@g\.us$/i.test(groupJid)) {
-            try {
-                await getGroupMetadataCached(scopedSessionId, sock, groupJid);
-                const refreshedGroupMapping = phoneFromCachedGroupMetadata(scopedSessionId, lid);
-                if (refreshedGroupMapping?.phone) return validPhone(refreshedGroupMapping.phone);
-            } catch (groupMappingError) {
-                console.warn('[signal-lid-group-metadata-lookup-failed]', { sessionId: scopedSessionId, groupJid, error: groupMappingError?.message || String(groupMappingError) });
-            }
-        }
         return await readDatabasePhone(lid);
     };
     adapter.getLIDForPN = async rawPhone => {
@@ -2723,39 +2730,48 @@ async function processMessageQueue(queue) {
             if (outcome.type === 'resolved') {
                 task.resolve(outcome.result);
             } else if (outcome.type === 'timeout') {
-                const timeoutError = new Error('whatsapp_message_queue_task_timeout');
-                task.reject(timeoutError);
                 queue.blockedOperation = operation;
+                const lateSocketCloseWaiter = createQueueSocketCloseWaiter(queue.socket);
                 let lateReleaseTimer = setTimeout(() => {
                     if (queue.blockedOperation !== operation) return;
                     queue.blockedOperation = null;
-                    console.warn('[message-queue-stuck-operation-isolated]', { taskId: task.id, partition: queue.partitionKey || '__session__', durationMs: Date.now() - startedAt, graceMs: MESSAGE_QUEUE_LATE_GRACE_MS, nextTaskReleased: true, lateOperationMayStillSettle: true });
+                    console.warn('[message-queue-slow-operation-isolated]', { taskId: task.id, partition: queue.partitionKey || '__session__', durationMs: Date.now() - startedAt, thresholdMs: MESSAGE_QUEUE_TASK_TIMEOUT_MS, graceMs: MESSAGE_QUEUE_LATE_GRACE_MS, callerStillWaitingForActualResult: true, nextTaskReleased: true, lateOperationMayStillSettle: true });
                     if (queue.tasks.length) setImmediate(() => processMessageQueue(queue));
                 }, MESSAGE_QUEUE_LATE_GRACE_MS);
                 if (typeof lateReleaseTimer.unref === 'function') lateReleaseTimer.unref();
+                const clearBlockedOperation = result => {
+                    if (queue.blockedOperation !== operation) return false;
+                    clearTimeout(lateReleaseTimer);
+                    queue.blockedOperation = null;
+                    if (queue.tasks.length) setImmediate(() => processMessageQueue(queue));
+                    return true;
+                };
                 operation.then(
-                    () => {
-                        if (queue.blockedOperation !== operation) return;
-                        clearTimeout(lateReleaseTimer);
-                        queue.blockedOperation = null;
-                        console.warn('[message-queue-late-operation-settled]', { taskId: task.id, partition: queue.partitionKey || '__session__', durationMs: Date.now() - startedAt, result: 'resolved_after_timeout', nextTaskReleased: true });
-                        if (queue.tasks.length) setImmediate(() => processMessageQueue(queue));
+                    result => {
+                        task.resolve(result);
+                        lateSocketCloseWaiter.cancel();
+                        const released = clearBlockedOperation();
+                        console.warn('[message-queue-late-operation-settled]', { taskId: task.id, partition: queue.partitionKey || '__session__', durationMs: Date.now() - startedAt, result: 'resolved', queueWasReleasedEarlier: !released, nextTaskReleased: true });
                     },
                     lateError => {
-                        if (queue.blockedOperation !== operation) return;
-                        clearTimeout(lateReleaseTimer);
-                        queue.blockedOperation = null;
-                        console.warn('[message-queue-late-operation-settled]', { taskId: task.id, partition: queue.partitionKey || '__session__', durationMs: Date.now() - startedAt, result: 'rejected_after_timeout', error: lateError?.message || String(lateError), nextTaskReleased: true });
-                        if (queue.tasks.length) setImmediate(() => processMessageQueue(queue));
+                        task.reject(lateError);
+                        lateSocketCloseWaiter.cancel();
+                        const released = clearBlockedOperation();
+                        console.warn('[message-queue-late-operation-settled]', { taskId: task.id, partition: queue.partitionKey || '__session__', durationMs: Date.now() - startedAt, result: 'rejected', error: lateError?.message || String(lateError), queueWasReleasedEarlier: !released, nextTaskReleased: true });
                     }
                 );
-                console.error('[message-queue-task-timeout]', {
+                lateSocketCloseWaiter.promise.then(closed => {
+                    if (!closed) return;
+                    task.reject(new Error('whatsapp_socket_closed_during_late_queued_operation'));
+                    if (clearBlockedOperation()) console.warn('[message-queue-late-operation-cancelled-by-socket-close]', { taskId: task.id, partition: queue.partitionKey || '__session__', durationMs: Date.now() - startedAt, action: 'release_destination_queue_and_reject_old_socket_operation' });
+                });
+                console.warn('[message-queue-task-slow]', {
                     taskId: task.id,
                     durationMs: Date.now() - startedAt,
-                    timeoutMs: MESSAGE_QUEUE_TASK_TIMEOUT_MS,
+                    thresholdMs: MESSAGE_QUEUE_TASK_TIMEOUT_MS,
                     remainingTasks: queue.tasks.length,
                     partition: queue.partitionKey || '__session__',
-                    action: 'isolate_only_this_destination_partition_without_closing_the_shared_whatsapp_socket'
+                    action: 'keep_caller_pending_until_actual_send_result_and_release_only_this_destination_after_grace'
                 });
                 break;
             } else if (outcome.type === 'socket_closed') {
@@ -2783,7 +2799,6 @@ async function processMessageQueue(queue) {
         if (queue.tasks.length > 0 && !queue.blockedOperation) setImmediate(() => processMessageQueue(queue));
     }
 }
-
 function queueMessage(executeFn, delayMs = 150, queueKey = null, partitionKey = '') {
     const queue = getMessageQueue(queueKey, partitionKey);
     return new Promise((resolve, reject) => {
@@ -3596,7 +3611,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         const authenticatedPhone = getAuthenticatedPhoneNumber(sock.user || null, ownAuthCreds) || normalizePhoneNumber(sock.user?.phoneNumber || '') || normalizedJidNumber(activeSession?.ownPhoneJid || '');
         let ownPhoneJid = authenticatedPhone ? normalizePhoneCacheJid(`${authenticatedPhone}@s.whatsapp.net`) : normalizePhoneCacheJid(activeSession?.ownPhoneJid || '');
         let ownLidJid = normalizeLidCacheKey(getAuthenticatedLid(sock.user || null, ownAuthCreds) || activeSession?.ownLidJid || getRememberedLidForPhone(sessionId, ownPhoneJid));
-        if (/@lid$/i.test(ownLidJid)) {
+        if (/@lid$/i.test(ownLidJid) && !ownPhoneJid) {
             try {
                 const liveOwnPhoneJid = normalizePhoneCacheJid(await promiseWithTimeout(sock.signalRepository?.lidMapping?.getPNForLID?.(ownLidJid), 1500, 'Self chat PN lookup'));
                 if (liveOwnPhoneJid) {
@@ -10823,12 +10838,9 @@ async function sendActionError(sock, jid, actionName, error, language, userName,
     const rawError = redactActionError(error);
     console.error('[action-error]', { action: String(actionName || 'Action'), error: rawError.slice(0, 1200) });
     const explanation = await explainActionError(error, language, actionName, userName, messageTimestamp);
-    try {
-        await sendImageCaptioned(sock, jid, adamLogoBuffer, actionName || 'Action', explanation, userName || 'Inconnu', sendOptions);
-    } catch (sendError) {
-        console.error('[action-error-send]', sendError?.message || sendError);
-    }
-    return explanation;
+    const sentResult = await sendImageCaptioned(sock, jid, adamLogoBuffer, actionName || 'Action', explanation, userName || 'Inconnu', sendOptions);
+    if (!sentResult?.key?.id) throw new Error('whatsapp_action_error_message_id_missing');
+    return sentResult;
 }
 
 const canonicalCommandAliases = {
@@ -11476,6 +11488,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             authState: state,
             signalKeyStore: cachedSignalKeyStore,
             flushAuthWrites: flushAuthWritesForSession.bind(null, sessionId),
+            persistCredentials: saveCreds,
             qrString: activeSessions.get(sessionId)?.qrString || null,
             ownerJid: null,
             active: true,
@@ -11527,6 +11540,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             authState: state,
             signalKeyStore: cachedSignalKeyStore,
             flushAuthWrites: flushAuthWritesForSession.bind(null, sessionId),
+            persistCredentials: saveCreds,
             qrString: existingSessionRecord?.sock === sock && existingSessionRecord?.qrSocket === sock ? existingSessionRecord?.qrString || null : null,
             qrSocket: existingSessionRecord?.sock === sock && existingSessionRecord?.qrSocket === sock ? sock : null,
             qrReceivedAt: existingSessionRecord?.sock === sock && existingSessionRecord?.qrSocket === sock ? Number(existingSessionRecord?.qrReceivedAt || 0) : 0,
@@ -11993,7 +12007,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             if (credentialsSaved !== true) throw new Error('fresh_pairing_credentials_snapshot_not_confirmed');
                             await flushAuthWritesForSession(sessionId, PAIRING_515_STORE_TIMEOUT_MS);
                             const pairing515IdentityPresent = !!(state.creds?.me?.id || state.creds?.me?.lid || getAuthenticatedPhoneNumber(sock.user || null, state.creds) || getAuthenticatedLid(sock.user || null, state.creds));
-                            pairing515CredentialsReady = state.creds?.registered === true && pairing515IdentityPresent;
+                            pairing515CredentialsReady = pairing515IdentityPresent;
                             if (!pairing515CredentialsReady) throw new Error('fresh_pairing_credentials_identity_incomplete');
                         } catch (credentialBarrierError) {
                             pairing515CredentialsReady = false;
@@ -12001,7 +12015,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         }
                     }
                     if (!pairing515CredentialsReady) console.error('[pairing-515-credential-write-not-confirmed]', { sessionId, action: 'abort_incomplete_pairing_without_reconnecting_with_partial_credentials' });
-                    else console.info('[pairing-515-credential-write-barrier-passed]', { sessionId, registered: state.creds?.registered === true, identityPresent: !!(state.creds?.me?.id || state.creds?.me?.lid), action: 'restart_once_with_confirmed_persisted_authenticated_credentials' });
+                    else console.info('[pairing-515-credential-write-barrier-passed]', { sessionId, registered: state.creds?.registered === true, identityPresent: !!(state.creds?.me?.id || state.creds?.me?.lid), action: 'restart_once_with_confirmed_persisted_account_identity' });
                 }
                 const numericDisconnectCode = Number(statusCode || 0);
                 const disconnectIsConflict = /\bconflict\b|connection[\s_-]*replaced|stream errored.*conflict|replaced by another connection/i.test(disconnectReason);
@@ -12970,11 +12984,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     continue;
                 }
                 processedLocalCache.add(msgCacheKey);
-                let commandTypingPreflight = null;
-                if (receivedParsedCommand) {
-                    console.info('[command-typing-preflight]', { sessionId, messageId: msgId, chatJid: receivedChat, chatType: receivedIsGroup ? 'group' : receivedIsChannel ? 'channel' : 'private', command: receivedParsedCommand.command || null, messageAgeMsAtDetection: receivedMessageAgeMs, upsertHandlerToTypingMs: Date.now() - messageUpsertHandlerStartedAt, action: 'start_composing_before_database_claim_and_profile_lookup' });
-                    commandTypingPreflight = sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', receivedChat, msgId).catch(() => false);
-                }
+                
                 console.info('[message-pre-dispatch-checks-passed]', {
                     sessionId,
                     messageId: msgId,
@@ -13016,7 +13026,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     durationMs: Date.now() - claimStartedAt
                 });
                 if (!messageClaimed) {
-                    if (commandTypingPreflight) void commandTypingPreflight.then(() => sendPresenceUpdateWithDiagnostics(sock, sessionId, 'paused', receivedChat, msgId));
                     console.warn('[recognized-command-deduplicated]', { sessionId, messageId: msgId, chatJid: receivedChat, command: receivedParsedCommand?.command || null, internalCommand: receivedParsedCommand?.internalCommand || null, reason: 'already_claimed_in_database' });
                     console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'already_claimed_in_database' });
                     continue;
@@ -13112,14 +13121,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             const mappingIsFresh = !!(mappingRecord?.phone && Date.now() - Number(mappingRecord.updatedAt || 0) <= LID_PHONE_MAPPING_FRESH_MS);
                             const cachedPhoneIdentity = mappingIsFresh ? normalizePhoneCacheJid(mappingRecord.phone) : '';
                             const isCurrentPrivateChatLid = !rawChatIsGroup && !rawChatIsChannel && normalizedSenderIdentity === normalizedRawChatForMapping;
-                            const explicitPhoneAlias = isCurrentPrivateChatLid ? senderJids.map(normalizePhoneCacheJid).find(Boolean) || '' : '';
+                            const explicitPhoneAlias = senderJids.map(normalizePhoneCacheJid).find(Boolean) || '';
                             const knownPhoneIdentity = explicitPhoneAlias || cachedPhoneIdentity;
+                            if (explicitPhoneAlias && !cachedPhoneIdentity) rememberLidPhonePair(sessionId, normalizedSenderIdentity, explicitPhoneAlias, 'whatsapp_message_explicit_pn_alias');
                             if (cachedPhoneIdentity && !(isFromMe && normalizedSenderIdentity === normalizedRawChatForMapping)) senderJids.push(cachedPhoneIdentity);
                             if (isCurrentPrivateChatLid && knownPhoneIdentity) {
                                 mappedPrivateChatPhoneJid = knownPhoneIdentity;
                                 mappedPrivateChatPhoneResolution = cachedPhoneIdentity ? 'lid_phone_cache' : 'message_phone_alias';
                             }
-                            if (cachedPhoneIdentity || isCurrentPrivateChatLid && explicitPhoneAlias) {
+                            if (cachedPhoneIdentity || explicitPhoneAlias) {
                                 console.info('[lid-phone-resolution-reused]', {
                                     sessionId,
                                     messageId: msgId,
@@ -13223,7 +13233,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         if (!configuredOwnerMatch.matched && configuredOwnerAccess.numbers.size) {
                             for (const senderLid of senderJids.filter(value => /@(?:hosted\.)?lid$/i.test(String(value || '')))) {
                                 try {
-                                    const mappedSessionOwnerPhone = normalizePhoneCacheJid(await promiseWithTimeout(sock.signalRepository?.lidMapping?.getPNForLID?.(senderLid), 1200, 'Session owner sender PN lookup'));
+                                    const rememberedOwnerPhone = normalizePhoneCacheJid(getRememberedPhoneForLid(sessionId, senderLid));
+                                    const mappingPromise = rememberedOwnerPhone ? Promise.resolve(rememberedOwnerPhone) : Promise.resolve().then(() => sock.signalRepository?.lidMapping?.getPNForLID?.(senderLid));
+                                    mappingPromise.then(mappedValue => {
+                                        const normalizedMapped = normalizePhoneCacheJid(mappedValue);
+                                        if (normalizedMapped) rememberLidPhonePair(sessionId, senderLid, normalizedMapped, 'background_owner_lid_resolution');
+                                    }).catch(() => {});
+                                    const mappedSessionOwnerPhone = normalizePhoneCacheJid(await promiseWithTimeout(mappingPromise, 250, 'Session owner sender PN lookup'));
                                     if (mappedSessionOwnerPhone && configuredOwnerAccess.numbers.has(normalizedJidNumber(mappedSessionOwnerPhone))) {
                                         sessionOwnerLiveLidMatch = true;
                                         sessionOwnerIdentitySource = 'session_owner_live_lid_mapping';
@@ -13231,7 +13247,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         break;
                                     }
                                 } catch (sessionOwnerMappingError) {
-                                    console.warn('[session-owner-sender-lid-resolution-failed]', { sessionId, messageId: msgId, senderLidHash: shortLogHash(senderLid), error: sessionOwnerMappingError?.message || String(sessionOwnerMappingError) });
+                                    console.warn('[session-owner-sender-lid-resolution-failed]', { sessionId, messageId: msgId, senderLidHash: shortLogHash(senderLid), durationBoundMs: 250, error: sessionOwnerMappingError?.message || String(sessionOwnerMappingError) });
                                 }
                             }
                         }
@@ -13702,16 +13718,16 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
                         await (async () => {
                             try {
-                                let isTyping = true;
+                                const shouldSendTyping = isGroup || isOwnerReal;
+                                let isTyping = shouldSendTyping;
                                 let typingUpdateInFlight = false;
-                                const typingInterval = setInterval(async () => {
+                                const typingInterval = shouldSendTyping ? setInterval(async () => {
                                     if (!isTyping || typingUpdateInFlight) return;
                                     typingUpdateInFlight = true;
                                     try { await sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', from, msgId); }
                                     finally { typingUpdateInFlight = false; }
-                                }, 8000);
-
-                                if (!commandTypingPreflight) void sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', from, msgId);
+                                }, 8000) : null;
+                                if (shouldSendTyping) void sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', from, msgId);
 
                                 const messageContentForContext = unwrapMessageContent(m.message);
                                 const quoted = getMessageContextInfo(m.message);
@@ -13742,6 +13758,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     if (isCancelled || terminalResponseSent) return null;
                                     try {
                                         const result = await sendFormatted(...sendArgs);
+                                        if (!result?.key?.id) throw new Error('whatsapp_send_result_message_id_missing');
                                         terminalResponseSent = true;
                                         responseSentForLog = true;
                                         terminalResponsePromise = Promise.resolve(result);
@@ -13756,6 +13773,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     if (isCancelled || terminalResponseSent) return null;
                                     try {
                                         const result = await sendPlainFormatted(...sendArgs);
+                                        if (!result?.key?.id) throw new Error('whatsapp_send_result_message_id_missing');
                                         terminalResponseSent = true;
                                         responseSentForLog = true;
                                         terminalResponsePromise = Promise.resolve(result);
@@ -13768,15 +13786,26 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 };
                                 const safeSendActionError = async (...errorArgs) => {
                                     if (terminalResponseSent) return terminalResponsePromise;
-                                    terminalResponseSent = true;
                                     terminalResponsePromise = Promise.resolve().then(() => sendActionError(...errorArgs));
-                                    return terminalResponsePromise;
+                                    try {
+                                        const result = await terminalResponsePromise;
+                                        if (!result?.key?.id) throw new Error('whatsapp_action_error_message_id_missing');
+                                        terminalResponseSent = true;
+                                        responseSentForLog = true;
+                                        return result;
+                                    } catch (sendError) {
+                                        terminalResponsePromise = null;
+                                        terminalResponseSent = false;
+                                        console.error('[command-action-error-response-not-confirmed]', { sessionId, messageId: msgId, command: internalCommand, error: sendError?.message || String(sendError) });
+                                        throw sendError;
+                                    }
                                 };
                                 const trackedSendImageCaptioned = async (...sendArgs) => {
                                     const sendStartedAt = Date.now();
                                     try {
                                         const result = await sendImageCaptioned(...sendArgs);
-                                        responseSentForLog = !!result?.key?.id || responseSentForLog;
+                                        if (!result?.key?.id) throw new Error('whatsapp_send_result_message_id_missing');
+                                        responseSentForLog = true;
                                         console.info('[command-response-sent]', {
                                             sessionId,
                                             messageId: msgId,
@@ -13856,10 +13885,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             await safeSendFormatted(sock, from, t.alive_title, aliveMsg, pushName, false, activeHostName);
                                             break;
                                         case 'ping':
-                                            const pingReceivedAt = messageUpsertHandlerStartedAt;
-                                            const pingMs = Math.max(0, Date.now() - pingReceivedAt);
+                                            const pingMessageAt = Number(receivedTimestampSeconds || 0) * 1000;
+                                            const pingMs = pingMessageAt > 0 ? Math.max(0, Date.now() - pingMessageAt) : Math.max(0, Date.now() - messageUpsertHandlerStartedAt);
                                             const pingStr = `*${pingMs} ms*`;
-                                            await safeSendPlainFormatted(sock, from, "Ping", pingStr, pushName);
+                                            await trackedSendImageCaptioned(sock, from, adamLogoBuffer, "Ping", pingStr, pushName);
                                             break;
                                         case 'qr':
                                             if (!args) {
@@ -13985,7 +14014,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 break;
                                             }
                                             try {
-                                                const metadataLien = await getGroupMetadataCached(sessionId, sock, from, true);
+                                                const metadataLien = await promiseWithTimeout(getGroupMetadataCached(sessionId, sock, from), 2500, 'cached group metadata for link command').catch(error => {
+                                                    console.warn('[link-group-metadata-optional-timeout]', { sessionId, error: error?.message || String(error) });
+                                                    return null;
+                                                });
                                                 const c = await sock.groupInviteCode(from);
                                                 const link = `https://chat.whatsapp.com/${c}`;
                                                 
@@ -13995,15 +14027,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 if (metadataLien && metadataLien.desc) lienTextForm += `\n\n${String(metadataLien.desc)}`;
 
                                                 const lienCapTitle = t.cmd_lien.charAt(0).toUpperCase() + t.cmd_lien.slice(1);
-                                                let linkImage = adamLogoBuffer;
-                                                try {
-                                                    const ppUrl = await sock.profilePictureUrl(from, 'image');
-                                                    const response = await fetch(ppUrl);
-                                                    if (response.ok) linkImage = Buffer.from(await response.arrayBuffer());
-                                                } catch (profileError) {
-                                                    console.warn('[link-profile-image]', profileError?.message || profileError);
-                                                }
-                                                await trackedSendImageCaptioned(sock, from, linkImage, lienCapTitle, lienTextForm, pushName);
+                                                await trackedSendImageCaptioned(sock, from, adamLogoBuffer, lienCapTitle, lienTextForm, pushName);
                                             } catch (e) {
                                                 await safeSendActionError(sock, from, t.cmd_lien, e, messageLang, pushName, m.messageTimestamp);
                                             }
@@ -14896,8 +14920,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 } finally {
                                     if (timeoutId) clearTimeout(timeoutId);
                                     isTyping = false;
-                                    clearInterval(typingInterval);
-                                    await sendPresenceUpdateWithDiagnostics(sock, sessionId, 'paused', from, msgId);
+                                    if (typingInterval) clearInterval(typingInterval);
+                                    if (shouldSendTyping) await sendPresenceUpdateWithDiagnostics(sock, sessionId, 'paused', from, msgId);
                                 }
                             } catch (cmdError) {
                                 console.error('[command-handler]', { command: internalCommand, error: cmdError?.message || String(cmdError) });
