@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r173-lid-aware-private-and-group-outbound-addressing';
+const TFBOT_CLUSTER_CODE_REVISION = 'r174-deferred-session-restore-retry-standby-safe';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -1601,7 +1601,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-04-r173';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-04-r174';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -5742,21 +5742,28 @@ async function clearSessionRestoreFailure(sessionId, runtime = activeSessions.ge
     await db.collection('session_owners').updateOne({ sessionId }, { $unset: { lastRestoreError: 1, lastRestoreErrorHash: 1, nextRestoreRetryAt: 1 } }).catch(() => {});
 }
 
-function scheduleSessionLockRetry(sessionId, autoExpire, format) {
+function scheduleSessionLockRetry(sessionId, autoExpire, format, notBeforeAt = 0) {
     const liveSession = activeSessions.get(sessionId);
     if (liveSession?.pairingRestartFailed === true || String(liveSession?.status || '').toLowerCase() === 'pairing_expired') return 0;
-    if (serverShuttingDown || tfbotWorkerStopping || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive) || sessionLockRetryTimers.has(sessionId)) return 0;
+    if (serverShuttingDown || tfbotWorkerStopping || sessionLockRetryTimers.has(sessionId)) return 0;
     const retryAttempt = Math.min(10, Number(sessionLockRetryAttempts.get(sessionId) || 0) + 1);
     sessionLockRetryAttempts.set(sessionId, retryAttempt);
-    const delay = Math.min(120000, 1000 * (2 ** (retryAttempt - 1))) + Math.floor(Math.random() * 1000);
+    const exponentialDelay = Math.min(120000, 1000 * (2 ** (retryAttempt - 1))) + Math.floor(Math.random() * 1000);
+    const leaseDelay = Math.max(0, Math.min(300000, Number(notBeforeAt || 0) - Date.now() + 500));
+    const delay = Math.max(exponentialDelay, leaseDelay);
     const timer = setTimeout(async () => {
         sessionLockRetryTimers.delete(sessionId);
         sessionLockRetryDueAt.delete(sessionId);
+        if (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) {
+            const retryInMs = scheduleSessionLockRetry(sessionId, autoExpire, format, notBeforeAt);
+            console.info('[session-restore-retry-waiting-for-active-worker]', { sessionId, attempt: retryAttempt, retryInMs: retryInMs || null, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping });
+            return;
+        }
         try {
             await startAdamBot(sessionId, autoExpire, format, true);
         } catch (error) {
             console.warn('[session-restore-retry-failed]', { sessionId, attempt: retryAttempt, retryInMs: delay, error: error?.message || String(error) });
-            scheduleSessionLockRetry(sessionId, autoExpire, format);
+            scheduleSessionLockRetry(sessionId, autoExpire, format, notBeforeAt);
         }
     }, delay);
     if (typeof timer.unref === 'function') timer.unref();
@@ -6978,10 +6985,22 @@ async function consolidateDuplicateSessionsForAccount(targetSessionId, user, cre
         console.warn('[session-account-duplicate-scan-skipped]', { targetSessionId, authenticatedPhoneAvailable: false, authenticatedLidAvailable: false, reason: 'no_verified_account_identity' });
         return 0;
     }
-    const [indexedOwners, scannedOwners] = await Promise.all([
-        db.collection('session_owners').find({ sessionId: { $ne: targetSessionId }, $or: clauses }).limit(5000).toArray(),
-        db.collection('session_owners').find({ sessionId: { $ne: targetSessionId } }, { projection: { sessionId: 1, Number: 1, number: 1, PairingNumber: 1, Numero: 1, OwnerNumber: 1, ownerNumber: 1, OwnerPhone: 1, ownerPhone: 1, DeployerNumber: 1, deployerNumber: 1, phoneNumber: 1, PhoneNumber: 1, AccountJid: 1, accountJid: 1, OwnerLid: 1, ownerLid: 1, AccountLid: 1, accountLid: 1, Lid: 1, lid: 1 } }).limit(5000).toArray()
-    ]);
+    const indexedOwners = await promiseWithTimeout(
+        db.collection('session_owners').find({ sessionId: { $ne: targetSessionId }, $or: clauses }).limit(5000).maxTimeMS(8000).toArray(),
+        10000,
+        'session_duplicate_indexed_owner_scan_timeout'
+    );
+    let scannedOwners = [];
+    if (!indexedOwners.length) {
+        scannedOwners = await promiseWithTimeout(
+            db.collection('session_owners').find(
+                { sessionId: { $ne: targetSessionId } },
+                { projection: { sessionId: 1, Number: 1, number: 1, PairingNumber: 1, Numero: 1, OwnerNumber: 1, ownerNumber: 1, OwnerPhone: 1, ownerPhone: 1, DeployerNumber: 1, deployerNumber: 1, phoneNumber: 1, PhoneNumber: 1, AccountJid: 1, accountJid: 1, OwnerLid: 1, ownerLid: 1, AccountLid: 1, accountLid: 1, Lid: 1, lid: 1 } }
+            ).limit(5000).maxTimeMS(8000).toArray(),
+            10000,
+            'session_duplicate_legacy_owner_scan_timeout'
+        );
+    }
     const ownerBySession = new Map();
     for (const owner of [...indexedOwners, ...scannedOwners]) {
         const ownerSessionId = String(owner?.sessionId || '');
@@ -17132,8 +17151,17 @@ async function loadExistingSessions() {
         return !owner.reauthRequired && !owner.duplicateAccountOf && status !== 'duplicate_account' && status !== 'reauth_required' && status !== 'pairing_expired';
     });
     for (const deferred of deferredLivePeerCandidates) {
-        const retryDelay = scheduleSessionLockRetry(deferred.candidate.sessionId, false, normalizeConnectionFormat(deferred.owner.format || deferred.owner.Format || 'pair'));
-        console.info('[session-restore-deferred-live-owner]', { sessionId: deferred.candidate.sessionId, previousOwner: deferred.owner.ownerInstanceUrl || deferred.owner.ownerInstanceId || null, currentOwner: TFBOT_CLUSTER_INSTANCE_HOST, ownerLeaseUntil: deferred.owner.ownerLeaseUntil || null, retryInMs: retryDelay || null, action: 'retry_after_previous_worker_releases_runtime_and_account_locks' });
+        const ownerLeaseUntilAt = new Date(deferred.owner.ownerLeaseUntil || 0).getTime();
+        const retryNotBeforeAt = Number.isFinite(ownerLeaseUntilAt) && ownerLeaseUntilAt > now ? ownerLeaseUntilAt : 0;
+        const retryDelay = scheduleSessionLockRetry(deferred.candidate.sessionId, false, normalizeConnectionFormat(deferred.owner.format || deferred.owner.Format || 'pair'), retryNotBeforeAt);
+        const nextRestoreRetryAt = retryDelay ? new Date(Date.now() + retryDelay) : null;
+        if (retryDelay && db) {
+            await db.collection('session_owners').updateOne(
+                { sessionId: deferred.candidate.sessionId, ownerInstanceId: deferred.owner.ownerInstanceId, ownerLeaseUntil: deferred.owner.ownerLeaseUntil },
+                { $set: { nextRestoreRetryAt, lastRestoreError: 'waiting_for_previous_owner_lease_to_expire', statusUpdatedAt: new Date(), updatedAt: new Date() } }
+            ).catch(error => console.warn('[session-restore-deferred-retry-state-save-failed]', { sessionId: deferred.candidate.sessionId, error: error?.message || String(error) }));
+        }
+        console.info('[session-restore-deferred-live-owner]', { sessionId: deferred.candidate.sessionId, previousOwner: deferred.owner.ownerInstanceUrl || deferred.owner.ownerInstanceId || null, currentOwner: TFBOT_CLUSTER_INSTANCE_HOST, ownerLeaseUntil: deferred.owner.ownerLeaseUntil || null, retryInMs: retryDelay || null, nextRestoreRetryAt: nextRestoreRetryAt?.toISOString() || null, retryScheduledBeforeWorkerActivation: !!retryDelay, action: 'retry_after_previous_worker_releases_runtime_and_account_locks' });
     }
     const parent = identityCandidates.map((_, index) => index);
     const findRoot = index => {
@@ -17563,6 +17591,10 @@ async function main() {
         pairingProxyTimeoutMs: TFBOT_PAIRING_PROXY_TIMEOUT_MS,
         sameHostPreviousDeploymentSessionHandoff: true,
         sessionRestoreParallel: true,
+        restoreDeferredRetriesRemainScheduledDuringWorkerStandby: true,
+        restoreDeferredRetriesRespectPreviousOwnerLeaseUntil: true,
+        duplicateSessionPromotionUsesIndexedOwnerLookupFirst: true,
+        duplicateSessionPromotionOwnerScanBoundedByMaxTimeMs: 8000,
         messageProcessingClaimsAreExclusive: true,
         messageProcessingClaimsReclaimOnlyExpiredOrPreviousDeployment: true,
         messageProcessingLeaseMs: MESSAGE_PROCESSING_LEASE_MS,
