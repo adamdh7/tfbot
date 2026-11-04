@@ -3,7 +3,7 @@ const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(5000, Math.min(120000, Number(pro
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(500, Math.min(10000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 2500)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r156-no-socket-auth-bootstrap-recovery';
+const TFBOT_CLUSTER_CODE_REVISION = 'r157-beta-pairing-fallback-515-preservation-lock-recovery';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
@@ -1549,7 +1549,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-04-r156';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-04-r157';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -5567,10 +5567,13 @@ async function releaseSessionRuntimeLock(sessionId, options = {}) {
     sessionRuntimeLockTokens.delete(sessionId);
     sessionRuntimeLockLeaseUntil.delete(sessionId);
     if (!db) return;
-    if (!lockToken) return;
     try {
-        const filter = { _id: sessionId, owner: processInstanceId, lockToken };
-        await db.collection('session_runtime_locks').deleteOne(filter);
+        if (lockToken) {
+            await db.collection('session_runtime_locks').deleteOne({ _id: sessionId, owner: processInstanceId, lockToken });
+        } else {
+            const fallback = await db.collection('session_runtime_locks').deleteOne({ _id: sessionId, owner: processInstanceId });
+            if (fallback.deletedCount) console.warn('[session-runtime-lock-release-recovered-without-local-token]', { sessionId, deleted: fallback.deletedCount, processInstanceMatched: true });
+        }
     } catch (error) {
         console.warn('[session-runtime-lock-release-failed]', { sessionId, error: error?.message || String(error) });
     }
@@ -6124,6 +6127,17 @@ async function expireUnregisteredPairingSession(owner, source = 'pairing_challen
         const liveOwner = owner || await ownerCol.findOne({ sessionId }).catch(() => null);
         if (!liveOwner) return { removed: false, reason: 'owner_record_missing' };
         const runtime = activeSessions.get(sessionId);
+        const restartCode = Number(liveOwner.lastDisconnectCode ?? liveOwner.DisconnectCode ?? runtime?.lastDisconnectCode ?? 0);
+        const restartReason = String(liveOwner.lastDisconnectReason || liveOwner.DisconnectReason || runtime?.lastDisconnectReason || '');
+        const restartRequired = restartCode === 515 || /stream errored.*restart required|restart required/i.test(restartReason) || Number(liveOwner.pairingRestartAttempts || runtime?.pairingRestartAttempts || 0) > 0 || !!liveOwner.pairingRestartRequiredAt;
+        if (restartRequired) {
+            clearPairingChallengeTimer(sessionId);
+            clearPairingRestartWatchdog(sessionId);
+            await ownerCol.updateOne({ sessionId }, { $set: { pairingPending: true, pairingAttemptPending: true, pairingCleanupPending: false, pairingRestartFailed: false, reauthRequired: false, connectionStatus: 'reconnexion', statusUpdatedAt: new Date(), updatedAt: new Date() }, $unset: { pairingExpiredAt: 1 } }, { upsert: false }).catch(() => {});
+            scheduleSessionLockRetry(sessionId, false, runtime?.format || liveOwner.format || liveOwner.Format || 'pair');
+            console.warn('[pairing-515-expiry-suppressed]', { sessionId, source, restartCode: restartCode || null, restartAttempts: Number(liveOwner.pairingRestartAttempts || runtime?.pairingRestartAttempts || 0), credentialsPreserved: true, action: 'never_expire_or_delete_credentials_after_restart_required_515' });
+            return { removed: false, preserved: true, reason: 'restart_required_credentials_preserved' };
+        }
         if (liveOwner.connectionEverOpened !== false || runtime?.connectionEverOpened === true) {
             clearPairingChallengeTimer(sessionId);
             clearPairingRestartWatchdog(sessionId);
@@ -8770,6 +8784,9 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
             const lastEventAt = Number(runtime?.lastWhatsAppEventAt || snapshot?.lastWhatsAppEventAt || startSignalAt || 0);
             if (['connecting', 'qr'].includes(lastEvent) && (!socketCreatedAt || !lastEventAt || lastEventAt >= socketCreatedAt)) {
                 markConnectionReady(runtime, socket, lastEvent, lastEventAt || Date.now());
+            } else {
+                const betaStartAt = socketCreatedAt || Date.now();
+                markConnectionReady(runtime, socket, 'socket_created_beta_fallback', betaStartAt);
             }
         };
         const invokePairingCode = async () => {
@@ -15780,6 +15797,26 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             return;
         }
         let currentSession = activeSessions.get(sessionId);
+        if (/signal_auth_store_not_quiescent/.test(String(err?.message || '')) && !currentSession) {
+            const pendingOwner = await db?.collection('session_owners').findOne({ sessionId }, { projection: { format: 1, Format: 1, pairingAttemptPending: 1, pairingReplacementPending: 1, pairingChallengeStartedAt: 1, pairingStartedAt: 1, connectionEverOpened: 1 } }).catch(() => null);
+            if (pendingOwner?.pairingAttemptPending === true || pendingOwner?.pairingReplacementPending === true) {
+                currentSession = {
+                    id: sessionId,
+                    sock: null,
+                    authState: null,
+                    status: 'reconnexion',
+                    active: false,
+                    format: normalizeConnectionFormat(pendingOwner.format || pendingOwner.Format || format, format),
+                    pairingAttemptPending: true,
+                    pairingReplacementPending: pendingOwner.pairingReplacementPending === true,
+                    connectionEverOpened: pendingOwner.connectionEverOpened === true,
+                    pairingChallengeStartedAt: new Date(pendingOwner.pairingChallengeStartedAt || pendingOwner.pairingStartedAt || Date.now()).getTime(),
+                    lastAuthStoreCleanupError: String(err?.message || 'signal_auth_store_not_quiescent').slice(0, 220)
+                };
+                activeSessions.set(sessionId, currentSession);
+                console.warn('[pairing-runtime-placeholder-restored-for-auth-store-retry]', { sessionId, format: currentSession.format, action: 'retain_pairing_attempt_and_retry_store_recovery_without_creating_duplicate_socket' });
+            }
+        }
         if (/signal_auth_store_not_quiescent/.test(String(err?.message || ''))) {
             const pairingOwner = await db?.collection('session_owners').findOne({ sessionId }, { projection: { connectionEverOpened: 1, pairingAttemptPending: 1, pairingRestartAttempts: 1, pairingRestartFailed: 1, pairingCredentialsConfirmedAt: 1, pairingProofPersisted: 1, pairingAuthStoreFlushedAt: 1, everConnected: 1, everAuthenticated: 1, connectedSince: 1, socketAuthenticatedAt: 1 } }).catch(() => null);
             const pairingAttemptStillPending = pairingOwner?.pairingAttemptPending === true || currentSession?.pairingAttemptPending === true;
@@ -16541,10 +16578,10 @@ async function main() {
         sharedLogicalLeaseTtlIndex: 'leaseUntil_single_field',
         pairCodeWaitsForFreshQrEvent: false,
         pairCodeWaitsForConnectingOrQrEvent: true,
-        pairCodeWaitsForWebSocketOpen: true,
+        pairCodeWaitsForWebSocketOpen: false,
         pairCodeWebSocketOpenEventListener: true,
-        pairCodeRequestedProactively: false,
-        pairCodeTrigger: 'baileys_connecting_or_qr_event',
+        pairCodeRequestedProactively: true,
+        pairCodeTrigger: 'socket_created_beta_delay_3000ms_with_connecting_qr_event_fast_path',
         routineGroupSenderKeyReset: GROUP_SENDER_KEY_RESET_ON_SEND,
         messageQueueLateGraceMs: MESSAGE_QUEUE_LATE_GRACE_MS,
         inboundCommandConcurrencyPerSession: INBOUND_COMMAND_MAX_CONCURRENCY_PER_SESSION,
@@ -16565,17 +16602,17 @@ async function main() {
         messageProcessingClaimsReclaimOnlyExpiredOrPreviousDeployment: true,
         messageProcessingLeaseMs: MESSAGE_PROCESSING_LEASE_MS,
         authWritesAllowSessionScopedBootstrapUntilIdentity: true,
-        pairingAuthPreservedOnTransientFailure: 'established_sessions_only; first_515_requires_one_persisted_restart; incomplete_pairing_aborts_after_second_515_or_store_timeout',
+        pairingAuthPreservedOnTransientFailure: 'all_515_restart_required_events_reconnect_with_same_credentials_without_pairing_expiry_or_auth_deletion',
         pairing515FirstCloseAction: 'persist_credentials_then_restart_socket_once',
-        pairing515SecondCloseAction: 'abort_incomplete_pairing_delete_terminal_owner_record_and_partial_auth',
-        pairing515AuthStoreTimeoutAction: 'abort_incomplete_pairing_without_lock_retry',
+        pairing515SecondCloseAction: 'preserve_credentials_and_reconnect_with_same_auth_state',
+        pairing515AuthStoreTimeoutAction: 'preserve_credentials_and_retry_store_recovery_without_deleting_auth',
         pairing515RestartLimit: 0,
         pairing515CredentialTimeoutMs: PAIRING_515_CREDENTIAL_TIMEOUT_MS,
         pairing515StoreTimeoutMs: PAIRING_515_STORE_TIMEOUT_MS,
         pairing515RestartOpenTimeoutMs: PAIRING_515_RESTART_OPEN_TIMEOUT_MS,
         pairing515FailurePolicy: 'preserve_credentials_and_reconnect_after_restart_required_when_registered_identity_is_present',
-        pairing515IncompleteCredentialsRestored: false,
-        pairing515TerminalOrphansDeleted: true,
+        pairing515IncompleteCredentialsRestored: true,
+        pairing515TerminalOrphansDeleted: false,
         pairing515SimilarZombieLookup: 'same_normalized_phone_across_PairingNumber_Number_number_and_Numero',
         pairingTimeoutMs: PAIRING_SESSION_TTL_MS,
         pairingChallengeTtlMs: PAIRING_CHALLENGE_TTL_MS,
