@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r167-session-expiry-grace-status-enforcement';
+const TFBOT_CLUSTER_CODE_REVISION = 'r169-private-retry-command-lifecycle-del3-owner-add-restore';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -2066,6 +2066,8 @@ const fallbackMessageQueue = { tasks: [], isSendingQueue: false };
 const inboundCommandQueues = new Map();
 const INBOUND_COMMAND_MAX_CONCURRENCY_PER_SESSION = Math.max(4, Math.min(48, Number(process.env.INBOUND_COMMAND_MAX_CONCURRENCY_PER_SESSION) || 24));
 const INBOUND_COMMAND_MAX_PENDING_PER_SESSION = Math.max(50, Math.min(500, Number(process.env.INBOUND_COMMAND_MAX_PENDING_PER_SESSION) || 250));
+const INBOUND_COMMAND_MAX_PENDING_PER_CHAT = Math.max(20, Math.min(200, Number(process.env.INBOUND_COMMAND_MAX_PENDING_PER_CHAT) || 80));
+const INBOUND_COMMAND_PRIORITY_RESERVE_PER_CHAT = Math.max(5, Math.min(40, Number(process.env.INBOUND_COMMAND_PRIORITY_RESERVE_PER_CHAT) || 20));
 
 function pumpInboundCommandQueue(sessionId, queueState) {
     if (!queueState || queueState.closed) return;
@@ -2077,6 +2079,8 @@ function pumpInboundCommandQueue(sessionId, queueState) {
         queueState.pending = Math.max(0, queueState.pending - 1);
         queueState.active++;
         partition.running = true;
+        const queueWaitMs = Math.max(0, Date.now() - Number(task.enqueuedAt || Date.now()));
+        if (queueWaitMs >= 2000) console.warn('[inbound-chat-queue-delay]', { sessionId, chatJid: task.chatJid || null, queuePartition: partition.key, queueWaitMs, pendingInChat: partition.tasks.length, action: 'delay_is_confined_to_this_chat_partition' });
         Promise.resolve().then(task.execute).then(task.resolve, task.reject).finally(() => {
             queueState.active = Math.max(0, queueState.active - 1);
             partition.running = false;
@@ -2095,7 +2099,7 @@ function pumpInboundCommandQueue(sessionId, queueState) {
     }
 }
 
-function enqueueInboundCommand(sessionId, chatJid, execute, messageId = '', senderJid = '', independentCommand = false) {
+function enqueueInboundCommand(sessionId, chatJid, execute, messageId = '', senderJid = '', independentCommand = false, priorityCommand = false) {
     const id = String(sessionId || '').trim();
     if (!id || typeof execute !== 'function') return Promise.reject(new Error('inbound_command_queue_invalid_task'));
     let queueState = inboundCommandQueues.get(id);
@@ -2104,22 +2108,33 @@ function enqueueInboundCommand(sessionId, chatJid, execute, messageId = '', send
         inboundCommandQueues.set(id, queueState);
     }
     if (queueState.closed) return Promise.reject(new Error('inbound_command_queue_closed'));
-    if (queueState.active + queueState.pending >= INBOUND_COMMAND_MAX_PENDING_PER_SESSION) return Promise.reject(new Error('inbound_command_queue_overloaded'));
     const runtime = activeSessions.get(id);
-    const chatPartition = String(getMessageQueuePartitionKey(id, chatJid, runtime) || chatJid || 'unknown-chat');
+    const chatValue = String(chatJid || 'unknown-chat').trim();
+    const chatPartition = String(getMessageQueuePartitionKey(id, chatValue, runtime) || chatValue);
     const senderValue = String(senderJid || '').trim();
-    const senderPartition = /@g\.us$/i.test(String(chatJid || '')) && senderValue
-        ? String(getMessageQueuePartitionKey(id, senderValue, runtime) || senderValue)
-        : '';
-    const basePartitionKey = senderPartition ? `${chatPartition}|sender:${senderPartition}` : chatPartition;
-    const partitionKey = independentCommand && messageId ? `${basePartitionKey}|command:${String(messageId)}` : basePartitionKey;
+    const partitionKey = independentCommand && messageId ? `${chatPartition}|command:${String(messageId)}` : chatPartition;
     let partition = queueState.partitions.get(partitionKey);
+    let pendingForChat = 0;
+    for (const currentPartition of queueState.partitions.values()) {
+        if (currentPartition.chatPartition === chatPartition) pendingForChat += currentPartition.tasks.length + (currentPartition.running ? 1 : 0);
+    }
+    const perChatPendingLimit = INBOUND_COMMAND_MAX_PENDING_PER_CHAT + (priorityCommand ? INBOUND_COMMAND_PRIORITY_RESERVE_PER_CHAT : 0);
+    if (pendingForChat >= perChatPendingLimit) {
+        console.warn('[inbound-chat-queue-overloaded]', { sessionId: id, chatJid: chatValue, queuePartition: chatPartition, pendingForChat, limit: perChatPendingLimit, priorityCommand: priorityCommand === true, action: 'reject_only_this_chat_without_blocking_other_chats' });
+        return Promise.reject(new Error('inbound_chat_queue_overloaded'));
+    }
+    if (queueState.active + queueState.pending >= INBOUND_COMMAND_MAX_PENDING_PER_SESSION) return Promise.reject(new Error('inbound_command_queue_overloaded'));
     if (!partition) {
-        partition = { key: partitionKey, tasks: [], running: false, ready: false };
+        partition = { key: partitionKey, chatPartition, chatJid: chatValue, tasks: [], running: false, ready: false };
         queueState.partitions.set(partitionKey, partition);
     }
     return new Promise((resolve, reject) => {
-        partition.tasks.push({ execute, resolve, reject, messageId: String(messageId || ''), senderJid: senderValue || null });
+        const queuedTask = { execute, resolve, reject, messageId: String(messageId || ''), senderJid: senderValue || null, chatJid: chatValue, enqueuedAt: Date.now(), priorityCommand: priorityCommand === true };
+        if (queuedTask.priorityCommand) {
+            const firstNormalTask = partition.tasks.findIndex(task => task.priorityCommand !== true);
+            if (firstNormalTask < 0) partition.tasks.push(queuedTask);
+            else partition.tasks.splice(firstNormalTask, 0, queuedTask);
+        } else partition.tasks.push(queuedTask);
         queueState.pending++;
         if (!partition.running && !partition.ready) {
             partition.ready = true;
@@ -3269,10 +3284,13 @@ async function persistOutgoingRetryMessage(sessionId, jid, message, jidAliases =
     const accountLidJid = normalizeLidCacheKey(accountLid || '');
     const phoneAliases = [...new Set(remoteJidAliases.map(normalizePhoneCacheJid).filter(Boolean))];
     const lidAliases = [...new Set(remoteJidAliases.map(normalizeLidCacheKey).filter(value => /@lid$/i.test(value)))];
-    const isSelfChatRetry = !!((accountPhoneJid && phoneAliases.includes(accountPhoneJid)) || (/@lid$/i.test(accountLidJid) && lidAliases.includes(accountLidJid)));
+    const destinationAliases = [...new Set([message?.key?.remoteJid, message?.key?.remoteJidAlt, jid].map(value => String(value || '').trim()).filter(Boolean))];
+    const destinationPhoneAliases = destinationAliases.map(normalizePhoneCacheJid).filter(Boolean);
+    const destinationLidAliases = destinationAliases.map(normalizeLidCacheKey).filter(value => /@lid$/i.test(value));
+    const isSelfChatRetry = !!((accountPhoneJid && destinationPhoneAliases.includes(accountPhoneJid)) || (/@lid$/i.test(accountLidJid) && destinationLidAliases.includes(accountLidJid)));
     const rememberedOwnLid = accountPhoneJid ? getRememberedLidForPhone(sessionId, accountPhoneJid) : '';
     const mappedLidAlias = accountPhoneJid ? lidAliases.find(value => getRememberedPhoneForLid(sessionId, value) === accountPhoneJid) || '' : '';
-    const retryPhoneJid = isSelfChatRetry ? (accountPhoneJid || phoneAliases[0] || '') : '';
+    const retryPhoneJid = isSelfChatRetry ? accountPhoneJid : '';
     const retryLidJid = isSelfChatRetry ? (/@lid$/i.test(accountLidJid) ? accountLidJid : rememberedOwnLid || mappedLidAlias || (/@lid$/i.test(normalizeLidCacheKey(remoteJidAlt)) ? normalizeLidCacheKey(remoteJidAlt) : '')) : '';
     const selfRetryAliases = isSelfChatRetry ? [retryPhoneJid, retryLidJid].filter(Boolean) : [];
     const retryLookupKeys = buildOutgoingRetryLookupKeys(sessionId, messageId, selfRetryAliases);
@@ -7088,6 +7106,28 @@ async function removeDel3Rule(sessionId, gjid, messageFormat) {
     return getDel3Rules(sessionId, gjid);
 }
 
+async function resolveDel3ParticipantIdentity(sock, sessionId, groupJid, identityValues) {
+    const aliases = [...new Set((Array.isArray(identityValues) ? identityValues : [identityValues]).map(value => String(value || '').trim()).filter(Boolean))];
+    const unresolvedLids = [];
+    for (const value of [...aliases]) {
+        const lid = normalizeLidCacheKey(value);
+        if (!/@lid$/i.test(lid)) continue;
+        let phone = normalizePhoneCacheJid(getRememberedPhoneForLid(sessionId, lid));
+        if (!phone) phone = normalizePhoneCacheJid(phoneFromCachedGroupMetadata(sessionId, lid)?.phone || '');
+        if (!phone && typeof sock?.signalRepository?.lidMapping?.getPNForLID === 'function') {
+            try {
+                phone = normalizePhoneCacheJid(await promiseWithTimeout(sock.signalRepository.lidMapping.getPNForLID(lid), 1800, 'Del3 participant PN lookup'));
+                if (phone) rememberLidPhonePair(sessionId, lid, phone, 'signal_lid_mapping');
+            } catch (error) {
+                console.warn('[del3-lid-identity-resolution-failed]', { sessionId, group: groupJid, identityHash: shortLogHash(lid), error: error?.message || String(error) });
+            }
+        }
+        if (phone) aliases.push(phone);
+        else unresolvedLids.push(lid);
+    }
+    return { aliases: [...new Set(aliases)], unresolvedLids: [...new Set(unresolvedLids)], hasPhoneIdentity: aliases.some(value => !!normalizePhoneCacheJid(value)) };
+}
+
 async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, senderJid, senderAliases, ownerRecord, canBotModerateGroupFn, isProtectedWhatsAppTargetFn) {
     const chat = String(groupJid || message?.key?.remoteJid || '').trim();
     const messageId = String(message?.key?.id || '').trim();
@@ -7106,9 +7146,16 @@ async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, se
         console.warn('[del3-message-protected]', { sessionId, group: chat, messageId, format, reason: 'owner_identity_record_unavailable_fail_closed' });
         return false;
     }
-    const aliasText = (Array.isArray(senderAliases) ? senderAliases : []).map(String).join(' ');
-    if (typeof isProtectedWhatsAppTargetFn === 'function' && isProtectedWhatsAppTargetFn(senderJid, ownerRecord, sock?.user?.id || '', aliasText)) {
+    const sourceKey = message?.key || {};
+    const senderIdentityResolution = await resolveDel3ParticipantIdentity(sock, sessionId, chat, [senderJid, ...(Array.isArray(senderAliases) ? senderAliases : []), sourceKey.participant, sourceKey.participantAlt, sourceKey.participantPn, sourceKey.senderPn]);
+    const aliasText = senderIdentityResolution.aliases.join(' ');
+    const senderIsProtected = typeof isProtectedWhatsAppTargetFn === 'function' && isProtectedWhatsAppTargetFn(senderJid, ownerRecord, sock?.user?.id || '', aliasText);
+    if (senderIsProtected) {
         console.info('[del3-message-protected]', { sessionId, group: chat, messageId, format, reason: 'host_or_bot' });
+        return false;
+    }
+    if (senderIdentityResolution.unresolvedLids.length && !senderIdentityResolution.hasPhoneIdentity) {
+        console.warn('[del3-message-protected]', { sessionId, group: chat, messageId, format, reason: 'unresolved_lid_identity_fail_closed', unresolvedLidCount: senderIdentityResolution.unresolvedLids.length });
         return false;
     }
     const timestampRaw = message?.messageTimestamp && typeof message.messageTimestamp.toNumber === 'function' ? message.messageTimestamp.toNumber() : message?.messageTimestamp;
@@ -9713,7 +9760,15 @@ async function normalizeOutgoingImageBuffer(imageBuffer) {
 
 async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, sendOptions = {}) {
     if (sendOptions.commandFormat === true) {
-        const deliveryImageBuffer = Buffer.isBuffer(imageBuffer) ? imageBuffer : imageBuffer instanceof Uint8Array ? Buffer.from(imageBuffer.buffer, imageBuffer.byteOffset, imageBuffer.byteLength) : null;
+        let deliveryImageBuffer = Buffer.isBuffer(imageBuffer) ? imageBuffer : imageBuffer instanceof Uint8Array ? Buffer.from(imageBuffer.buffer, imageBuffer.byteOffset, imageBuffer.byteLength) : null;
+        if (deliveryImageBuffer?.length) {
+            try {
+                deliveryImageBuffer = await normalizeOutgoingImageBuffer(deliveryImageBuffer);
+            } catch (imageNormalizationError) {
+                console.error('[whatsapp-command-image-normalization-failed]', { action: String(type || 'Message'), errorName: imageNormalizationError?.name || 'Error', error: String(imageNormalizationError?.message || imageNormalizationError).slice(0, 220), fallback: 'send_text_without_image' });
+                deliveryImageBuffer = null;
+            }
+        }
         const ownerName = sanitizeSessionDisplayName(sendOptions.ownerName || sock?.user?.name || sock?.user?.notify || sock?.user?.verifiedName || '') || 'Inconnu';
         const preserveFormatting = sendOptions.preserveFormatting === true || hasWhatsAppFormatting(text);
         const caption = buildCaption(type, text, userName, preserveFormatting, ownerName, sendOptions.language || 'ht');
@@ -11561,7 +11616,7 @@ function getCommandParsingContext(message) {
 const commandsWithoutArguments = new Set([
     'prive', 'public', 'menu', 'info', 'alive', 'ping', 'qrbot', 'lien', 'tagall',
     'kickall', 'kickall2', 'ferme', 'ouvert', 'bienvenue', 'nolien', 'nolien2',
-    'del', 'del3', 'vv', 'vv2', 'hidetag', 'url', 'sites'
+    'del', 'del3', 'vv', 'vv2', 'url', 'sites'
 ]);
 
 function hasExplicitAiCommandPrefix(body) {
@@ -11585,7 +11640,6 @@ function parseIncomingCommand(body, language, context = {}) {
     if (commandsWithoutArguments.has(internalCommand) && args) return null;
     if ((internalCommand === 'del' || internalCommand === 'del3') && !context.hasQuotedMessage) return null;
     if ((internalCommand === 'vv' || internalCommand === 'vv2') && !context.hasQuotedMedia) return null;
-    if (internalCommand === 'hidetag' && !context.hasQuotedHidetagTarget) return null;
     if (internalCommand === 'del2' && !args && !context.hasQuotedMessage) return null;
     if (internalCommand === 'code') {
         if (!/^\+?[0-9][0-9()]*$/u.test(args)) return null;
@@ -13381,8 +13435,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         const safeGroupUpdate = async (jid, participants, action, knownMetadata = null, preferPhoneNumbers = false, batchOnly = false) => {
             let metadataForAction = null;
             let planned = [];
+            const groupQueuePartitionKey = getMessageQueuePartitionKey(sessionId, jid, activeSessions.get(sessionId));
             try {
-                metadataForAction = await getGroupMetadataCached(sessionId, sock, jid, true).catch(() => null) || knownMetadata;
+                metadataForAction = knownMetadata || getCachedGroupMetadata(sessionId, jid) || await getGroupMetadataCached(sessionId, sock, jid).catch(() => null);
                 if (metadataForAction) setCachedGroupMetadata(sessionId, jid, metadataForAction);
                 const inputValues = [...new Set((participants || []).map(value => String(value || '').trim()).filter(Boolean))];
                 for (const raw of inputValues) {
@@ -13398,18 +13453,22 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     const existing = planned.find(record => record.candidates.some(candidate => candidates.includes(candidate)) || record.primary === primary);
                     if (!existing) planned.push({ raw, participant, candidates, primary });
                 }
-                if (!planned.length) return true;
+                if (!planned.length) return action !== 'add';
                 if (action === 'remove') {
                     const protectedRecords = planned.filter(record => isBotGroupParticipant(record.participant) || record.candidates.some(candidate => getBotIdentityAliases().map(normalizeActionJid).filter(Boolean).includes(normalizeActionJid(candidate))));
                     if (protectedRecords.length) console.info('[group-remove-protected-bot]', { group: jid, skipped: protectedRecords.length });
                     planned = planned.filter(record => !isBotGroupParticipant(record.participant) && !record.candidates.some(candidate => getBotIdentityAliases().map(normalizeActionJid).filter(Boolean).includes(normalizeActionJid(candidate))));
                 }
-                if (!planned.length) return true;
+                if (!planned.length) return action !== 'add';
                 const primaryIds = planned.map(record => record.primary);
                 let result;
                 try {
-                    result = await queueMessage(() => sock.groupParticipantsUpdate(jid, primaryIds, action), 150, sock);
+                    result = await queueMessage(() => sock.groupParticipantsUpdate(jid, primaryIds, action), 150, sock, groupQueuePartitionKey);
                 } catch (batchError) {
+                    if (action === 'add') {
+                        console.error('[group-add-result-unknown]', { sessionId, group: jid, requested: primaryIds.length, error: batchError?.message || String(batchError), automaticRetry: false, manualVerificationRequired: true, queuePartition: groupQueuePartitionKey });
+                        return false;
+                    }
                     if (batchOnly) {
                         console.error('[group-participants-update-batch-failed]', { group: jid, action, requested: primaryIds.length, error: batchError?.message || String(batchError) });
                         return false;
@@ -13420,7 +13479,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         let succeeded = false;
                         for (const candidate of record.candidates) {
                             try {
-                                const singleResult = await queueMessage(() => sock.groupParticipantsUpdate(jid, [candidate], action), 180, sock);
+                                const singleResult = await queueMessage(() => sock.groupParticipantsUpdate(jid, [candidate], action), 180, sock, groupQueuePartitionKey);
                                 if (!groupUpdateFailures(singleResult).length) {
                                     succeeded = true;
                                     break;
@@ -13435,9 +13494,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     return unresolved.length === 0;
                 }
                 const failures = groupUpdateFailures(result);
-                if (!failures.length) return true;
-                console.error('[group-participants-update-rejected]', { group: jid, action, requested: primaryIds.length, failed: failures.map(item => ({ jid: item?.jid, status: item?.status, content: item?.content?.tag || null, phoneNumber: item?.content?.attrs?.phone_number || null })) });
-                if (batchOnly) return false;
+                if (!failures.length) {
+                    if (action === 'add') console.info('[group-add-request-confirmed]', { sessionId, group: jid, requested: primaryIds.length, queuePartition: groupQueuePartitionKey, automaticRetry: false });
+                    return true;
+                }
+                console.error('[group-participants-update-rejected]', { sessionId, group: jid, action, requested: primaryIds.length, failed: failures.map(item => ({ jid: item?.jid, status: item?.status, content: item?.content?.tag || null, phoneNumber: item?.content?.attrs?.phone_number || null })) });
+                if (action === 'add' || batchOnly) return false;
                 const failedRecords = [];
                 for (const failure of failures) {
                     const failureIds = [failure?.jid, failure?.content?.attrs?.jid, failure?.content?.attrs?.phone_number].filter(Boolean).map(value => normalizeActionJid(value));
@@ -13452,7 +13514,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     let succeeded = false;
                     for (const candidate of record.candidates.filter(value => normalizeActionJid(value) !== normalizeActionJid(record.primary))) {
                         try {
-                            const singleResult = await queueMessage(() => sock.groupParticipantsUpdate(jid, [candidate], action), 180, sock);
+                            const singleResult = await queueMessage(() => sock.groupParticipantsUpdate(jid, [candidate], action), 180, sock, groupQueuePartitionKey);
                             if (!groupUpdateFailures(singleResult).length) {
                                 succeeded = true;
                                 break;
@@ -13631,8 +13693,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             const initialUpsertType = String(up?.type || '');
             const initialBatchCount = Array.isArray(up?.messages) ? up.messages.length : 0;
             if (initialUpsertType === 'append') {
-                console.info('[message-upsert-historical-append-ignored]', { sessionId, messageCount: initialBatchCount, receivedAt: messageUpsertEventStartedAt, action: 'ignore_historical_sync_before_session_lock_validation_and_command_dispatch' });
-                return;
+                console.info('[message-upsert-historical-append-cache-only]', { sessionId, messageCount: initialBatchCount, receivedAt: messageUpsertEventStartedAt, action: 'validate_session_ownership_then_cache_outgoing_private_retry_copies_without_command_dispatch' });
             }
             if (workerDrainingSessionIds.has(sessionId) || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping))) {
                 console.info('[message-upsert-ignored-during-worker-handoff]', { sessionId, upsertType: String(up?.type || ''), messageCount: Array.isArray(up?.messages) ? up.messages.length : 0, action: 'leave_whatsapp_offline_sync_for_selected_worker' });
@@ -13779,25 +13840,36 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const activeMessageIdentity = getAuthenticatedPhoneNumber(sock.user, activeMessageCredentials) || getAuthenticatedLid(sock.user, activeMessageCredentials);
                 const activeMessageReadyState = sock?.ws?.readyState ?? sock?.ws?._socket?.readyState ?? sock?.socket?.readyState;
                 const activeMessageSocketReady = activeMessageSession?.sock === sock && (sock?.ws?.isOpen === true || Number(activeMessageReadyState) === 1 || String(activeMessageReadyState).toUpperCase() === 'OPEN' || activeMessageSession?.openEventSeen === true && !isSocketDefinitelyClosed(sock));
-                const earlyReceivedChat = String(m?.key?.remoteJid || m?.key?.remoteJidAlt || 'unknown-chat');
+                const earlyReceivedRemoteJid = String(m?.key?.remoteJid || m?.key?.remoteJidAlt || '').trim();
+                const earlyReceivedPrivateIdentity = [m?.key?.participant, m?.key?.participantAlt, m?.key?.participantPn, m?.key?.senderPn].map(value => String(value || '').trim()).find(value => ['private_pn', 'private_lid'].includes(getWhatsAppDestinationType(value))) || '';
                 const earlyReceivedId = String(m?.key?.id || 'missing-id');
                 const earlyReceivedOwnPhone = getAuthenticatedPhoneNumber(sock.user, activeMessageCredentials || state.creds) || normalizedJidNumber(activeMessageSession?.ownPhoneJid || '');
-                const earlyReceivedOwnLid = getAuthenticatedLid(sock.user, activeMessageCredentials || state.creds) || activeMessageSession?.ownLidJid || getRememberedLidForPhone(sessionId, earlyReceivedOwnPhone ? `${earlyReceivedOwnPhone}@s.whatsapp.net` : '');
+                const earlyReceivedOwnPhoneJid = earlyReceivedOwnPhone ? normalizePhoneCacheJid(`${earlyReceivedOwnPhone}@s.whatsapp.net`) : normalizePhoneCacheJid(activeMessageSession?.ownPhoneJid || '');
+                const earlyReceivedOwnLid = getAuthenticatedLid(sock.user, activeMessageCredentials || state.creds) || activeMessageSession?.ownLidJid || getRememberedLidForPhone(sessionId, earlyReceivedOwnPhoneJid || '');
+                const earlyReceivedOwnLidJid = normalizeLidCacheKey(earlyReceivedOwnLid || '');
+                const earlyReceivedChat = earlyReceivedRemoteJid || (m?.key?.fromMe === true && earlyReceivedPrivateIdentity ? earlyReceivedPrivateIdentity : 'unknown-chat');
+                if (/@g\.us$/i.test(earlyReceivedChat) && !getCachedGroupMetadata(sessionId, earlyReceivedChat)) {
+                    void getGroupMetadataCached(sessionId, sock, earlyReceivedChat).then(metadata => {
+                        if (metadata) console.info('[group-metadata-prewarmed]', { sessionId, group: earlyReceivedChat, participantCount: Array.isArray(metadata.participants) ? metadata.participants.length : 0, source: 'background_inbound_message_cache' });
+                    }).catch(metadataWarmError => console.warn('[group-metadata-prewarm-failed]', { sessionId, group: earlyReceivedChat, error: metadataWarmError?.message || String(metadataWarmError) }));
+                }
                 const activeMessageOperational = activeMessageSession?.sock === sock && isAuthenticatedSocketOperational(activeMessageSession, sock);
                 if (activeMessageOperational && !['connecte', 'connected'].includes(String(activeMessageSession.status || '').toLowerCase())) {
                     await restoreAuthenticatedSessionRuntimeStatus(sessionId, activeMessageSession, sock, 'incoming_message_verified_open_socket');
                 }
                 if (m?.key?.fromMe === true && m?.message && earlyReceivedId !== 'missing-id') {
-                    cacheRecentMessage(sessionId, m);
+                    const outgoingCacheAliases = [...new Set([earlyReceivedRemoteJid, m?.key?.remoteJidAlt, earlyReceivedPrivateIdentity, ...(!earlyReceivedRemoteJid && earlyReceivedPrivateIdentity ? [earlyReceivedOwnPhoneJid, earlyReceivedOwnLidJid] : [])].filter(Boolean))];
+                    const outgoingPrivateRetryMessage = ['private_pn', 'private_lid'].includes(getWhatsAppDestinationType(earlyReceivedRemoteJid || earlyReceivedPrivateIdentity));
+                    cacheRecentMessage(sessionId, m, outgoingCacheAliases);
                     const alreadyPersistedOutgoing = outgoingMessageCache.has(`${sessionId}:id:${earlyReceivedId}`)
                         || outgoingMessageCache.has(`${sessionId}:${earlyReceivedChat}:${earlyReceivedId}`)
                         || isRecentOutgoingMessageId(sessionId, earlyReceivedId);
-                    if (!alreadyPersistedOutgoing) {
-                        void persistOutgoingRetryMessage(sessionId, earlyReceivedChat, m, [earlyReceivedChat, m?.key?.remoteJidAlt].filter(Boolean), earlyReceivedOwnPhone, sock.user?.id || '', earlyReceivedOwnLid, 'background_without_blocking_message_dispatch')
+                    if (outgoingPrivateRetryMessage && !alreadyPersistedOutgoing) {
+                        void persistOutgoingRetryMessage(sessionId, earlyReceivedChat, m, outgoingCacheAliases, earlyReceivedOwnPhone, sock.user?.id || '', earlyReceivedOwnLid, upsertType === 'append' ? 'historical_private_device_sync_retry_copy' : 'background_private_device_retry_copy')
                             .then(savedOwnerMessage => {
-                                if (savedOwnerMessage) console.info('[owner-outgoing-message-retry-copy-saved]', { sessionId, messageId: earlyReceivedId, chatJid: earlyReceivedChat, sessionStatus: activeMessageSession?.status || null, persistenceMode: 'background_without_blocking_message_dispatch' });
+                                if (savedOwnerMessage) console.info('[private-device-outgoing-retry-copy-saved]', { sessionId, messageId: earlyReceivedId, chatType: getWhatsAppDestinationType(earlyReceivedRemoteJid || earlyReceivedPrivateIdentity), fallbackChatIdentityUsed: !earlyReceivedRemoteJid, upsertType, sessionStatus: activeMessageSession?.status || null, persistenceMode: upsertType === 'append' ? 'historical_private_device_sync_retry_copy' : 'background_private_device_retry_copy' });
                             })
-                            .catch(ownerMessageSaveError => console.warn('[owner-outgoing-message-retry-copy-save-failed]', { sessionId, messageId: earlyReceivedId, error: ownerMessageSaveError?.message || String(ownerMessageSaveError) }));
+                            .catch(ownerMessageSaveError => console.warn('[private-device-outgoing-retry-copy-save-failed]', { sessionId, messageId: earlyReceivedId, upsertType, error: ownerMessageSaveError?.message || String(ownerMessageSaveError) }));
                     }
                 }
                 const earlyMessageTimestampSeconds = Number(m?.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m?.messageTimestamp) || 0;
@@ -13854,7 +13926,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const receivedBody = extractBody(m);
                 const receivedContent = unwrapMessageContent(m?.message);
                 const receivedType = Object.keys(receivedContent || {})[0] || 'unknown';
-                const receivedChat = String(m?.key?.remoteJid || m?.key?.remoteJidAlt || 'unknown-chat');
+                const receivedChat = String(m?.key?.remoteJid || m?.key?.remoteJidAlt || (m?.key?.fromMe === true ? earlyReceivedChat : earlyReceivedPrivateIdentity) || 'unknown-chat');
                 const receivedId = String(m?.key?.id || 'missing-id');
                 const receivedExplicitParsedCommand = String(receivedBody || '').trim()
                     ? parseIncomingCommand(receivedBody, globalLang, getCommandParsingContext(m?.message))
@@ -14139,7 +14211,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     distributedClaimKnown = true;
                     distributedClaimValue = claimed === true;
                 }).catch(() => {});
-                const messageClaimTimedOut = true;
+                const messageClaimTimedOut = false;
                 const messageClaimed = true;
                 console.info('[message-processing-claim-result]', {
                     sessionId,
@@ -14826,6 +14898,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const internalCommand = parsedCommand.internalCommand;
                         console.info('[command-dispatch-ready]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, senderName: sName, senderJid: sender, chatJid: from, rawChatJid: rawFrom, command, internalCommand, messageLang, isPublicMode, isOwnerReal, sessionOwnerIdentitySource: sessionOwnerIdentitySource || null, mode: botMode, messageAgeMsAtDetection: receivedMessageAgeMs, upsertHandlerToDispatchMs: Date.now() - messageUpsertHandlerStartedAt, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid' });
                         console.info('[command-detected]', { sessionId, upsertType, messageId: msgId, senderName: sName, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: from, senderJid: sender, senderAliases: senderJids, messageType, messageClassification: 'recognized_command', command, internalCommand, argumentPreview: String(args || '').replace(/[\r\n\t]+/g, ' ').slice(0, 1000), isGroup, isPublicMode, isOwnerReal, mode: botMode, action: 'command_handler_started' });
+                        console.info('[command-lifecycle]', { sessionId, messageId: msgId, command: internalCommand, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', phase: 'detected', state: 'running', stage: 'detection' });
 
                         await (async () => {
                             try {
@@ -14850,6 +14923,21 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 let terminalResponseSent = false;
                                 let terminalResponsePromise = null;
                                 let responseSentForLog = false;
+                                let commandOperationFailed = false;
+                                let commandSendAttempt = 0;
+                                const commandLifecycleStartedAt = Date.now();
+                                const logCommandLifecycle = (phase, extra = {}) => {
+                                    const details = { sessionId, messageId: msgId, command: internalCommand, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', phase, elapsedMs: Date.now() - commandLifecycleStartedAt, ...extra };
+                                    if (phase === 'failure') console.warn('[command-lifecycle]', details);
+                                    else console.info('[command-lifecycle]', details);
+                                };
+                                const markCommandSending = (transport, responseType = 'message') => {
+                                    commandSendAttempt++;
+                                    logCommandLifecycle('sending', { transport, responseType, attempt: commandSendAttempt, state: 'in_progress' });
+                                };
+                                const markCommandSendFailure = (transport, error) => {
+                                    logCommandLifecycle('failure', { stage: 'sending', transport, attempt: commandSendAttempt, error: String(error?.message || error).slice(0, 500) });
+                                };
                                 let timeoutId = null;
                                 const commandTimeoutMs = internalCommand === 'cheche'
                                     ? Math.max(120000, SEARCH_TOTAL_TIMEOUT_MS + Number(process.env.AI_TOTAL_TIMEOUT_MS || 260000) + 15000)
@@ -14872,10 +14960,31 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     const payload = { text: String(targetText ?? '') };
                                     if (Array.isArray(sendOptions.mentions) && sendOptions.mentions.length) payload.mentions = sendOptions.mentions;
                                     const messageOptions = { ...(sendOptions.messageOptions || {}), quoted: m };
-                                    return targetSocket.sendMessage(targetJid, payload, messageOptions);
+                                    markCommandSending('direct_send_message', 'text');
+                                    try {
+                                        return await targetSocket.sendMessage(targetJid, payload, messageOptions);
+                                    } catch (error) {
+                                        markCommandSendFailure('direct_send_message', error);
+                                        throw error;
+                                    }
+                                };
+                                const trackedQueuedSendMessage = async (...sendArgs) => {
+                                    const destination = String(sendArgs[1] || from || '');
+                                    const payloadType = Object.keys(sendArgs[2] || {}).filter(key => !['mentions', 'quoted', 'contextInfo', 'messageContextInfo'].includes(key)).join(',') || 'message';
+                                    markCommandSending('queued_send_message', payloadType);
+                                    try {
+                                        const result = await queuedSendMessage(...sendArgs);
+                                        if (result?.key?.id) responseSentForLog = true;
+                                        console.info('[command-lifecycle]', { sessionId, messageId: msgId, command: internalCommand, chatJid: destination, phase: 'response-sent', transport: 'queued_send_message', responseMessageId: result?.key?.id || null, payloadType, attempt: commandSendAttempt, elapsedMs: Date.now() - commandLifecycleStartedAt });
+                                        return result;
+                                    } catch (error) {
+                                        markCommandSendFailure('queued_send_message', error);
+                                        throw error;
+                                    }
                                 };
                                 const completeCommandResponse = (result, transport) => {
                                     if (!result?.key?.id) throw new Error('whatsapp_send_result_message_id_missing');
+                                    logCommandLifecycle('response-sent', { transport, responseMessageId: result.key.id, attempt: commandSendAttempt || null });
                                     terminalResponseSent = true;
                                     responseSentForLog = true;
                                     terminalResponsePromise = Promise.resolve(result);
@@ -14904,16 +15013,19 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         commandSendOptions(suppliedOptions, directSend)
                                     );
                                     if (isSessionMessagingFallbackActive(sessionId)) {
+                                        markCommandSending('formatted_session_recovery_fallback', 'text_or_media');
                                         const result = await send(false);
                                         return completeCommandResponse(result, 'formatted_session_recovery_fallback');
                                     }
                                     try {
+                                        markCommandSending('formatted_direct_send', 'text_or_media');
                                         const result = await send(true);
                                         return completeCommandResponse(result, 'formatted_direct_send');
                                     } catch (sendError) {
                                         if (isSignalDecryptionFailure([sendError]) || /signal|decrypt|bad mac|no sessions|chain closed|session error|message counter/i.test(String(sendError?.message || sendError))) {
                                             markSessionMessagingFallback(sessionId, 'signal_transport_degraded', msgId);
                                             console.warn('[command-response-switching-to-rich-fallback]', { sessionId, messageId: msgId, command: internalCommand, error: sendError?.message || String(sendError) });
+                                            markCommandSending('formatted_send_after_signal_degradation', 'text_or_media');
                                             const result = await send(false);
                                             return completeCommandResponse(result, 'formatted_send_after_signal_degradation');
                                         }
@@ -14934,15 +15046,18 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         commandSendOptions(suppliedOptions, directSend)
                                     );
                                     if (isSessionMessagingFallbackActive(sessionId)) {
+                                        markCommandSending('formatted_session_recovery_fallback', 'text');
                                         const result = await send(false);
                                         return completeCommandResponse(result, 'formatted_session_recovery_fallback');
                                     }
                                     try {
+                                        markCommandSending('formatted_direct_send', 'text');
                                         const result = await send(true);
                                         return completeCommandResponse(result, 'formatted_direct_send');
                                     } catch (sendError) {
                                         if (isSignalDecryptionFailure([sendError]) || /signal|decrypt|bad mac|no sessions|chain closed|session error|message counter/i.test(String(sendError?.message || sendError))) {
                                             markSessionMessagingFallback(sessionId, 'signal_transport_degraded', msgId);
+                                            markCommandSending('formatted_send_after_signal_degradation', 'text');
                                             const result = await send(false);
                                             return completeCommandResponse(result, 'formatted_send_after_signal_degradation');
                                         }
@@ -14951,6 +15066,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 };
                                 const safeSendActionError = async (...errorArgs) => {
                                     if (terminalResponseSent) return terminalResponsePromise;
+                                    commandOperationFailed = true;
+                                    logCommandLifecycle('failure', { stage: 'action', error: String(errorArgs[3]?.message || errorArgs[3] || 'action_failed').slice(0, 500) });
                                     const rawActionError = redactActionError(errorArgs[3]);
                                     const errorClass = /(?:not-authorized|forbidden|permission|admin|403)/i.test(rawActionError) ? 'permission_or_admin' : /(?:timeout|timed out|abort)/i.test(rawActionError) ? 'timeout' : /(?:signal|decrypt|bad mac|websocket)/i.test(rawActionError) ? 'connection_or_encryption' : 'action_failure';
                                     const localText = errorFallbackText(errorArgs[2], errorArgs[4], errorClass);
@@ -14966,12 +15083,14 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         commandSendOptions(suppliedOptions, directSend)
                                     );
                                     try {
+                                        markCommandSending(isSessionMessagingFallbackActive(sessionId) ? 'formatted_session_recovery_fallback' : 'formatted_direct_error', 'error_reply');
                                         const result = await send(!isSessionMessagingFallbackActive(sessionId));
                                         return completeCommandResponse(result, isSessionMessagingFallbackActive(sessionId) ? 'formatted_session_recovery_fallback' : 'formatted_direct_error');
                                     } catch (sendError) {
                                         if (isSignalDecryptionFailure([sendError]) || /signal|decrypt|bad mac|no sessions|chain closed|session error|message counter/i.test(String(sendError?.message || sendError))) {
                                             markSessionMessagingFallback(sessionId, 'signal_transport_degraded', msgId);
                                             console.warn('[command-error-switching-to-rich-fallback]', { sessionId, messageId: msgId, command: internalCommand, error: sendError?.message || String(sendError) });
+                                            markCommandSending('formatted_error_after_signal_degradation', 'error_reply');
                                             const result = await send(false);
                                             return completeCommandResponse(result, 'formatted_error_after_signal_degradation');
                                         }
@@ -14987,6 +15106,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     const directSend = !isSessionMessagingFallbackActive(sessionId);
                                     const preparedArgs = [...sendArgs];
                                     preparedArgs[6] = commandSendOptions(suppliedOptions, directSend);
+                                    markCommandSending(directSend ? 'image_captioned_direct' : 'image_captioned_fallback', 'image_or_text');
                                     try {
                                         const result = await sendImageCaptioned(...preparedArgs);
                                         if (!result?.key?.id) throw new Error('whatsapp_send_result_message_id_missing');
@@ -15005,6 +15125,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         });
                                         return result;
                                     } catch (sendError) {
+                                        commandOperationFailed = true;
+                                        markCommandSendFailure('image_captioned', sendError);
                                         console.error('[command-response-send-failed]', {
                                             sessionId,
                                             messageId: msgId,
@@ -15173,8 +15295,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 break;
                                             }
                                             try {
-                                                const metadataLien = getCachedGroupMetadata(sessionId, from) || null;
-                                                const c = await sock.groupInviteCode(from);
+                                                const [metadataLien, c] = await Promise.all([
+                                                    promiseWithTimeout(sock.groupMetadata(from), GROUP_METADATA_FETCH_TIMEOUT_MS, 'Live WhatsApp group link metadata lookup'),
+                                                    sock.groupInviteCode(from)
+                                                ]);
+                                                console.info('[group-link-metadata-refreshed]', { sessionId, group: from, subjectAvailable: !!metadataLien?.subject, descriptionAvailable: !!metadataLien?.desc, metadataSource: 'live_group_metadata_not_cached_or_persisted' });
                                                 const link = `https://chat.whatsapp.com/${c}`;
                                                 let lienTextForm = '';
                                                 if (metadataLien && metadataLien.subject) lienTextForm += `*${metadataLien.subject}*\n`;
@@ -15222,20 +15347,28 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, t.cmd_add, t.target_usage.replace('{command}', t.cmd_add), pushName, true, activeHostName);
                                                 break;
                                             }
-                                            const filteredTargetsAdd = targetsAdd.filter(target => !isProtectedWhatsAppTarget(target, sOwnerTop, botId, findActionParticipant(target, metadataAdd)?.phoneNumber || findActionParticipant(target, metadataAdd)?.phone || ''));
+                                            const filteredTargetsAdd = [...new Set(targetsAdd.filter(target => !isProtectedWhatsAppTarget(target, sOwnerTop, botId, findActionParticipant(target, metadataAdd)?.phoneNumber || findActionParticipant(target, metadataAdd)?.phone || '')).map(normalizeActionJid).filter(Boolean))];
                                             if (filteredTargetsAdd.length === 0) {
                                                 console.info('[protected-group-target-ignored]', { sessionId, group: from, command: 'add', action: 'ignore_owner_or_bot_target' });
                                                 break;
                                             }
-                                            for (const target of filteredTargetsAdd) {
-                                                try {
-                                                    const added = await safeGroupUpdate(from, [target], 'add');
-                                                    if (!added) throw new Error('group_add_failed');
-                                                    await new Promise(resolve => setTimeout(resolve, 2500));
-                                                } catch (e) {
-                                                    await safeSendActionError(sock, from, t.cmd_add, e, messageLang, pushName, m.messageTimestamp);
-                                                    break;
+                                            try {
+                                                for (let targetIndex = 0; targetIndex < filteredTargetsAdd.length; targetIndex++) {
+                                                    const target = filteredTargetsAdd[targetIndex];
+                                                    try {
+                                                        markCommandSending('group_participants_update', 'add');
+                                                        const added = await safeGroupUpdate(from, [target], 'add', metadataAdd, false, true);
+                                                        if (!added) throw new Error('group_add_result_not_confirmed_no_automatic_retry');
+                                                        console.info('[group-add-target-confirmed]', { sessionId, group: from, targetHash: shortLogHash(target), action: 'single_target_add_confirmed', automaticRetry: false });
+                                                        if (targetIndex < filteredTargetsAdd.length - 1) await new Promise(resolve => setTimeout(resolve, 2500));
+                                                    } catch (addTargetError) {
+                                                        await safeSendActionError(sock, from, t.cmd_add, addTargetError, messageLang, pushName, m.messageTimestamp);
+                                                        console.error('[group-add-target-failed]', { sessionId, group: from, targetHash: shortLogHash(target), requestedTargets: filteredTargetsAdd.length, automaticRetry: false, error: addTargetError?.message || String(addTargetError) });
+                                                        break;
+                                                    }
                                                 }
+                                            } catch (e) {
+                                                await safeSendActionError(sock, from, t.cmd_add, e, messageLang, pushName, m.messageTimestamp);
                                             }
                                             break;
                                         case 'kick':
@@ -15271,6 +15404,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 break;
                                             }
                                             const actionMap = { kick: 'remove', promote: 'promote', demote: 'demote' };
+                                            markCommandSending('group_participants_update', actionMap[internalCommand]);
                                             if (!await safeGroupUpdate(from, filteredTargets, actionMap[internalCommand], metadataTargets)) throw new Error(`group_${actionMap[internalCommand]}_failed`);
                                             break;
                                         case 'kickall':
@@ -15321,8 +15455,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 break;
                                             }
                                             if (internalCommand === 'kickall') {
+                                                markCommandSending('group_participants_update', 'kickall_remove');
                                                 const completed = await safeGroupUpdate(from, toKick, 'remove', metadataKA, true, true);
                                                 if (!completed) {
+                                                    commandOperationFailed = true;
+                                                    logCommandLifecycle('failure', { stage: 'action', action: 'kickall_partial_failure', requested: toKick.length });
                                                     console.error('[kickall-partial-failure]', { group: from, requested: toKick.length, excludedCreatorCount: creatorRecordsKA.length, excludedBotCount: botRecordsKA.length });
                                                 } else {
                                                     console.info('[kickall-complete]', { group: from, requested: toKick.length, excludedCreatorCount: creatorRecordsKA.length, excludedBotCount: botRecordsKA.length });
@@ -15337,11 +15474,14 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                         break;
                                                     }
                                                     const batch = toKick.slice(index, index + batchSize);
+                                                    markCommandSending('group_participants_update', 'kickall2_remove_batch');
                                                     const completed = await safeGroupUpdate(from, batch, 'remove', metadataKA, true, true);
                                                     if (!completed) failedBatches.push(index + 1);
                                                     if (index + batchSize < toKick.length) await sleep(batchDelay);
                                                 }
                                                 if (failedBatches.length) {
+                                                    commandOperationFailed = true;
+                                                    logCommandLifecycle('failure', { stage: 'action', action: 'kickall2_partial_failure', requested: toKick.length, failedBatchStarts: failedBatches });
                                                     console.error('[kickall2-partial-failure]', { group: from, requested: toKick.length, failedBatchStarts: failedBatches, excludedCreatorCount: creatorRecordsKA.length, excludedBotCount: botRecordsKA.length });
                                                 } else {
                                                     console.info('[kickall2-complete]', { group: from, requested: toKick.length, excludedCreatorCount: creatorRecordsKA.length, excludedBotCount: botRecordsKA.length });
@@ -15354,6 +15494,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, t.cmd_ferme, isGroup ? t.admin_required : t.group_required, pushName, true, activeHostName);
                                                 break;
                                             }
+                                            markCommandSending('group_setting_update', 'announcement');
                                             await sock.groupSettingUpdate(from, 'announcement');
                                             break;
                                         case 'ouvert':
@@ -15362,6 +15503,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, t.cmd_ouvert, isGroup ? t.admin_required : t.group_required, pushName, true, activeHostName);
                                                 break;
                                             }
+                                            markCommandSending('group_setting_update', 'not_announcement');
                                             await sock.groupSettingUpdate(from, 'not_announcement');
                                             break;
                                         case 'bienvenue':
@@ -15429,7 +15571,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             const quotedTimestamp = Number(cachedQuotedMessage?.ts || m.messageTimestamp || Math.floor(Date.now() / 1000));
                                             let deletionCompleted = false;
                                             try {
-                                                await queuedSendMessage(sock, from, { delete: delKey }, {}, 180);
+                                                await trackedQueuedSendMessage(sock, from, { delete: delKey }, {}, 180);
                                                 deletionCompleted = true;
                                             } catch (deleteEveryoneError) {
                                                 try {
@@ -15523,6 +15665,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             } : {});
                                             const quotedDel3FromMe = storedDel3Quote ? storedDel3Quote.fromMe === true || quotedDel3KeySource.fromMe === true : quoted.fromMe === true || quotedDel3KeySource.fromMe === true;
                                             const quotedDel3Participant = quotedDel3KeySource.participant || quoted.participant || quoted.participantPn || quoted.participantAlt || quoted.senderPn || '';
+                                            const quotedDel3IdentityResolution = await resolveDel3ParticipantIdentity(sock, sessionId, from, [quotedDel3Participant, quotedDel3KeySource.participantAlt, quotedDel3KeySource.participantPn, quotedDel3KeySource.senderPn, quoted.participantAlt, quoted.participantPn, quoted.senderPn]);
                                             const quotedDel3Key = {
                                                 ...quotedDel3KeySource,
                                                 remoteJid: quotedDel3KeySource.remoteJid || quoted.remoteJid || from,
@@ -15534,49 +15677,68 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             if (quoted.participantAlt) quotedDel3Key.participantAlt = quoted.participantAlt;
                                             if (quoted.participantPn) quotedDel3Key.participantPn = quoted.participantPn;
                                             if (quoted.senderPn) quotedDel3Key.senderPn = quoted.senderPn;
-                                            const quotedDel3OwnerProtected = quotedDel3FromMe || !!(sOwnerTop && isProtectedWhatsAppTarget(quotedDel3Participant, sOwnerTop, sock.user?.id || botId, [quotedDel3Key.remoteJid, quotedDel3Key.remoteJidAlt, quotedDel3Key.participant, quotedDel3Key.participantAlt, quotedDel3Key.participantPn, quotedDel3Key.senderPn].filter(Boolean).join(' ')));
-                                            if (quotedDel3OwnerProtected) {
-                                                console.info('[protected-group-target-ignored]', { sessionId, group: from, command: 'del3', quotedMessageId: quotedDel3Id, action: 'ignore_owner_or_bot_message' });
+                                            const quotedDel3ResolvedParticipant = quotedDel3IdentityResolution.aliases.find(value => /@(?:s\.whatsapp\.net|lid)$/i.test(value)) || quotedDel3Participant;
+                                            const quotedDel3OwnerProtected = quotedDel3FromMe || !!(sOwnerTop && isProtectedWhatsAppTarget(quotedDel3ResolvedParticipant, sOwnerTop, sock.user?.id || botId, quotedDel3IdentityResolution.aliases.join(' ')));
+                                            const quotedDel3IdentityUnresolved = quotedDel3IdentityResolution.unresolvedLids.length > 0 && !quotedDel3IdentityResolution.hasPhoneIdentity;
+                                            const quotedDel3OwnerSampleAuthorized = isOwnerReal && quotedDel3OwnerProtected;
+                                            if ((quotedDel3OwnerProtected && !quotedDel3OwnerSampleAuthorized) || (quotedDel3IdentityUnresolved && !isOwnerReal)) {
+                                                console.info('[protected-group-target-ignored]', { sessionId, group: from, command: 'del3', quotedMessageId: quotedDel3Id, action: 'preserve_owner_or_unresolved_lid_message', ownerSampleAuthorization: quotedDel3OwnerSampleAuthorized, reason: quotedDel3OwnerProtected ? 'owner_or_bot_sample_requires_owner_command' : 'unresolved_lid_identity_fail_closed' });
                                                 break;
                                             }
                                             const currentDel3Rules = await getDel3Rules(sessionId, from);
                                             const del3AlreadyEnabled = !!del3Format && currentDel3Rules.some(rule => rule.format === del3Format);
-                                            const botCanModerateDel3 = await canBotModerateGroup(from, true);
+                                            const botCanModerateDel3 = await canBotModerateGroup(from, false);
                                             if (!botCanModerateDel3) {
                                                 await safeSendFormatted(sock, from, t.cmd_del3, t.del3_bot_admin_required, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            console.info('[del3-selected-message-kept-as-format-sample]', { sessionId, group: from, messageId: quotedDel3Id, format: del3Format || 'unknown', ownerProtected: quotedDel3OwnerProtected, fromMe: quotedDel3FromMe, action: 'do_not_delete_the_selected_sample; only_future_matching_messages_are_subject_to_the_rule' });
+                                            console.info('[del3-format-sample-selected]', { sessionId, group: from, messageId: quotedDel3Id, format: del3Format || 'unknown', ownerProtected: quotedDel3OwnerProtected, ownerSampleAuthorized: quotedDel3OwnerSampleAuthorized, fromMe: quotedDel3FromMe, action: 'store_whatsapp_message_format_and_apply_rule_only_to_future_matching_messages_except_owner_and_bot' });
                                             if (!del3Format) {
-                                                console.info('[del3-selected-message-format-unknown]', { sessionId, group: from, messageId: quotedDel3Id, messageContentAvailable: !!quotedDel3Message, automaticRuleChanged: false });
+                                                console.info('[del3-selected-message-format-unknown]', { sessionId, group: from, messageId: quotedDel3Id, messageContentAvailable: !!quotedDel3Message, automaticRuleChanged: false, selectedSampleDeleted: false });
                                                 break;
                                             }
+                                            let del3RuleChanged = false;
+                                            let del3ActionText = '';
                                             if (del3AlreadyEnabled) {
                                                 await removeDel3Rule(sessionId, from, del3Format);
-                                                console.info('[del3-rule-deactivated]', { sessionId, group: from, format: del3Format, selectedSamplePreserved: true });
-                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_deactivated, pushName, false, activeHostName);
-                                                break;
-                                            }
-                                            await stageDel3Rule(sessionId, from, del3Format, extractBody({ message: quotedDel3Message }));
-                                            console.info('[del3-rule-staged]', { sessionId, group: from, format: del3Format, selectedSamplePreserved: true, activationRequiresDeliveredConfirmation: false });
-                                            try {
-                                                const activatedAt = await activateDel3Rule(sessionId, from, del3Format);
-                                                console.info('[del3-rule-activated]', { sessionId, group: from, format: del3Format, activatedAt, futureMessages: 'same_group_same_whatsapp_format_except_host_and_bot' });
-                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_activated, pushName, false, activeHostName);
-                                            } catch (del3ActivationError) {
-                                                await discardPendingDel3Rule(sessionId, from, del3Format).catch(() => {});
-                                                console.error('[del3-rule-activation-failed]', { sessionId, group: from, format: del3Format, error: del3ActivationError?.message || String(del3ActivationError), selectedSamplePreserved: true });
-                                                break;
-                                            }
-                                            if (!quotedDel3OwnerProtected && !quotedDel3FromMe) {
-                                                try {
-                                                    const del3SampleDeletion = await queuedDeleteMessageWithAck(sock, from, quotedDel3Key, 180, 6500);
-                                                    console.info('[del3-selected-sample-deleted]', { sessionId, group: from, sampleMessageId: quotedDel3Id, format: del3Format, acknowledgementStatus: del3SampleDeletion?.acknowledgementStatus || null });
-                                                } catch (del3SampleDeleteError) {
-                                                    console.warn('[del3-selected-sample-delete-failed]', { sessionId, group: from, sampleMessageId: quotedDel3Id, format: del3Format, error: del3SampleDeleteError?.message || String(del3SampleDeleteError), ruleRemainsActive: true });
-                                                }
+                                                del3RuleChanged = true;
+                                                del3ActionText = t.del3_deactivated;
+                                                console.info('[del3-rule-deactivated]', { sessionId, group: from, format: del3Format, selectedSampleWillBeDeleted: true });
                                             } else {
-                                                console.info('[del3-selected-sample-protected]', { sessionId, group: from, sampleMessageId: quotedDel3Id, ownerProtected: quotedDel3OwnerProtected, fromMe: quotedDel3FromMe, action: 'preserve_selected_sample' });
+                                                await stageDel3Rule(sessionId, from, del3Format, extractBody({ message: quotedDel3Message }));
+                                                console.info('[del3-rule-staged]', { sessionId, group: from, format: del3Format, sampleTextStored: true, activationRequiresDeliveredConfirmation: false });
+                                                try {
+                                                    const activatedAt = await activateDel3Rule(sessionId, from, del3Format);
+                                                    del3RuleChanged = true;
+                                                    del3ActionText = t.del3_activated;
+                                                    console.info('[del3-rule-activated]', { sessionId, group: from, format: del3Format, activatedAt, futureMessages: 'same_group_same_whatsapp_format_except_host_and_bot' });
+                                                } catch (del3ActivationError) {
+                                                    await discardPendingDel3Rule(sessionId, from, del3Format).catch(() => {});
+                                                    console.error('[del3-rule-activation-failed]', { sessionId, group: from, format: del3Format, error: del3ActivationError?.message || String(del3ActivationError), selectedSampleDeleted: false });
+                                                    break;
+                                                }
+                                            }
+                                            if (del3RuleChanged) {
+                                                let sampleDeleted = false;
+                                                try {
+                                                    console.info('[del3-sample-delete-started]', { sessionId, group: from, messageId: quotedDel3Id, fromMe: quotedDel3FromMe, ownerSampleAuthorized: quotedDel3OwnerSampleAuthorized });
+                                                    markCommandSending('queued_delete_message', 'del3_sample');
+                                                    const deletion = await queuedDeleteMessageWithAck(sock, from, quotedDel3Key, 180, 6500);
+                                                    sampleDeleted = !!deletion?.acknowledgementStatus;
+                                                    if (sampleDeleted) {
+                                                        console.info('[del3-sample-deleted]', { sessionId, group: from, messageId: quotedDel3Id, acknowledgementStatus: deletion?.acknowledgementStatus ?? null, formatRuleRetained: true });
+                                                    } else {
+                                                        commandOperationFailed = true;
+                                                        logCommandLifecycle('failure', { stage: 'sample_delete', action: 'del3_sample_delete_not_confirmed', formatRuleRetained: true });
+                                                        console.warn('[del3-sample-delete-unconfirmed]', { sessionId, group: from, messageId: quotedDel3Id, acknowledgementStatus: deletion?.acknowledgementStatus ?? null, formatRuleRetained: true });
+                                                    }
+                                                } catch (del3SampleDeleteError) {
+                                                    commandOperationFailed = true;
+                                                    logCommandLifecycle('failure', { stage: 'sample_delete', action: 'del3_sample_delete_failed', error: String(del3SampleDeleteError?.message || del3SampleDeleteError).slice(0, 500), formatRuleRetained: true });
+                                                    console.error('[del3-sample-delete-failed]', { sessionId, group: from, messageId: quotedDel3Id, formatRuleRetained: true, error: del3SampleDeleteError?.message || String(del3SampleDeleteError) });
+                                                }
+                                                await safeSendFormatted(sock, from, t.cmd_del3, del3ActionText, pushName, false, activeHostName);
+                                                console.info('[del3-toggle-completed]', { sessionId, group: from, format: del3Format, ruleActive: !del3AlreadyEnabled, sampleDeleted, sampleFormatRetainedForFutureMatches: true, ownerMessagesExempt: true, botMessagesExempt: true });
                                             }
                                             break;
                                         case 'vv':
@@ -15653,7 +15815,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             }
                                             console.info('[quoted-media-download-completed]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, mediaType: mediaInfoVO.sourceType, bytes: bufferVO.length, viewOnceUnwrapped: mediaInfoVO.viewOnce === true, destinationType: internalCommand === 'vv2' ? 'self_chat_pn' : isGroup ? 'group' : 'private' });
                                             try {
-                                                const resentVO = await queuedSendMessage(sock, resendTargetVO, sendOptsVO, {}, 180);
+                                                const resentVO = await trackedQueuedSendMessage(sock, resendTargetVO, sendOptsVO, {}, 180);
                                                 if (!resentVO?.key?.id) throw new Error('quoted_media_send_unconfirmed');
                                                 console.info('[quoted-media-resent]', { sessionId, messageId: msgId, command: internalCommand, sourceChatHash: shortLogHash(from), destinationType: internalCommand === 'vv2' ? 'self_chat_pn' : isGroup ? 'group' : 'private', responseMessageId: resentVO.key.id, responseChatHash: shortLogHash(resentVO?.key?.remoteJid || resendTargetVO), mediaType: mediaInfoVO.sourceType, bytes: bufferVO.length, viewOnceUnwrapped: mediaInfoVO.viewOnce === true });
                                             } catch (sendErrorVO) {
@@ -15839,9 +16001,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 break;
                                             }
                                             const metadataHT = await getMeta();
-                                            if (!metadataHT) throw new Error('group_metadata_unavailable');
-                                            const allMentions = metadataHT.participants.map(participant => participant.id).filter(Boolean);
+                                            if (!metadataHT || !Array.isArray(metadataHT.participants)) throw new Error('group_metadata_unavailable');
+                                            const hidetagUsesLidAddressing = String(metadataHT.addressingMode || '').toLowerCase().includes('lid');
+                                            const allMentions = [...new Set(metadataHT.participants.flatMap(participant => actionParticipantCandidates(participant, !hidetagUsesLidAddressing, metadataHT.addressingMode).filter(value => /@(?:s\.whatsapp\.net|lid)$/i.test(value)).slice(0, 1)))];
+                                            if (!allMentions.length) throw new Error('hidetag_valid_participant_mentions_unavailable');
                                             const msgOpts = { mentions: allMentions };
+                                            const hiddenText = String(args || '').trim() || String(t.hidetag_default || '').trim() || '\u200B';
+                                            console.info('[hidetag-send-started]', { sessionId, group: from, participantCount: metadataHT.participants.length, mentionCount: allMentions.length, addressingMode: metadataHT.addressingMode || 'unknown', replyHasMedia: !!quotedMessage });
                                             const inspectHidetagMedia = source => {
                                                 let value = source || {};
                                                 let viewOnce = false;
@@ -15908,8 +16074,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             const quotedTextHT = sourceWrapperHT ? String(extractBody({ message: sourceWrapperHT }) || '').trim() : '';
                                             const primaryMediaHT = inspectHidetagMedia(sourceWrapperHT);
                                             if (!primaryMediaHT.type) {
-                                                const hiddenText = String(args || quotedTextHT || t.hidetag_default || '').trim();
-                                                if (hiddenText) await queuedSendMessage(sock, from, { text: hiddenText, ...msgOpts }, {}, 220);
+                                                const textHidetagResult = await trackedQueuedSendMessage(sock, from, { text: String(args || quotedTextHT || t.hidetag_default || '').trim() || '\u200B', ...msgOpts }, {}, 220);
+                                                if (!textHidetagResult?.key?.id) throw new Error('hidetag_text_message_not_confirmed');
+                                                console.info('[hidetag-send-confirmed]', { sessionId, group: from, messageId: textHidetagResult.key.id, mentionCount: allMentions.length, messageType: 'text' });
                                                 break;
                                             }
                                             let mediaSourcesHT = [];
@@ -15946,7 +16113,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                     for await (const chunkHT of streamHT) chunksHT.push(Buffer.from(chunkHT));
                                                     const bufferHT = Buffer.concat(chunksHT);
                                                     if (!bufferHT.length) continue;
-                                                    const itemCaptionHT = mediaIndexHT === 0 && args ? String(args).trim() : String(itemHT.value.caption || '').trim();
+                                                    const itemCaptionHT = (mediaIndexHT === 0 && args ? String(args).trim() : String(itemHT.value.caption || '').trim()) || hiddenText;
                                                     preparedMediaHT.push({
                                                         type: itemHT.type,
                                                         buffer: bufferHT,
@@ -15966,6 +16133,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 break;
                                             }
                                             let albumSentHT = false;
+                                            const separateMentionMessageHT = preparedMediaHT.length > 1 || preparedMediaHT.some(item => ['audio', 'sticker'].includes(item.type));
+                                            if (separateMentionMessageHT) {
+                                                const mentionMessageHT = await trackedQueuedSendMessage(sock, from, { text: hiddenText, ...msgOpts }, {}, 220);
+                                                if (!mentionMessageHT?.key?.id) throw new Error('hidetag_media_mention_message_not_confirmed');
+                                                console.info('[hidetag-send-confirmed]', { sessionId, group: from, messageId: mentionMessageHT.key.id, mentionCount: allMentions.length, messageType: 'text_before_media' });
+                                            }
                                             if (preparedMediaHT.length > 1 && preparedMediaHT.every(item => ['image', 'video'].includes(item.type) && !item.viewOnce)) {
                                                 const albumContentHT = preparedMediaHT.map(item => ({
                                                     [item.type]: item.buffer,
@@ -15973,11 +16146,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 }));
                                                 try {
                                                     try {
-                                                        const albumResultHT = await queuedSendMessage(sock, from, { albumMessage: albumContentHT, ...msgOpts }, {}, 220);
+                                                        const albumResultHT = await trackedQueuedSendMessage(sock, from, { albumMessage: albumContentHT, ...msgOpts }, {}, 220);
                                                         if (!albumResultHT?.key?.id) throw new Error('album_message_not_confirmed');
                                                         albumSentHT = true;
                                                     } catch (newAlbumErrorHT) {
-                                                        const legacyAlbumResultHT = await queuedSendMessage(sock, from, { album: albumContentHT, ...msgOpts }, {}, 220);
+                                                        const legacyAlbumResultHT = await trackedQueuedSendMessage(sock, from, { album: albumContentHT, ...msgOpts }, {}, 220);
                                                         if (!legacyAlbumResultHT?.key?.id) throw new Error('legacy_album_message_not_confirmed');
                                                         albumSentHT = true;
                                                     }
@@ -15988,17 +16161,20 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             if (!albumSentHT) {
                                                 for (const itemHT of preparedMediaHT) {
                                                     const singleViewOptsHT = itemHT.viewOnce && ['image', 'video', 'audio'].includes(itemHT.type) ? { viewOnce: true } : {};
+                                                    let mediaSendResultHT = null;
                                                     if (itemHT.type === 'image') {
-                                                        await queuedSendMessage(sock, from, { image: itemHT.buffer, ...(itemHT.caption ? { caption: itemHT.caption } : {}), ...singleViewOptsHT, ...msgOpts }, {}, 220);
+                                                        mediaSendResultHT = await trackedQueuedSendMessage(sock, from, { image: itemHT.buffer, caption: itemHT.caption || hiddenText, ...singleViewOptsHT, ...msgOpts }, {}, 220);
                                                     } else if (itemHT.type === 'video') {
-                                                        await queuedSendMessage(sock, from, { video: itemHT.buffer, ...(itemHT.caption ? { caption: itemHT.caption } : {}), ...singleViewOptsHT, ...msgOpts }, {}, 220);
+                                                        mediaSendResultHT = await trackedQueuedSendMessage(sock, from, { video: itemHT.buffer, caption: itemHT.caption || hiddenText, ...singleViewOptsHT, ...msgOpts }, {}, 220);
                                                     } else if (itemHT.type === 'audio') {
-                                                        await queuedSendMessage(sock, from, { audio: itemHT.buffer, mimetype: itemHT.mimetype, ptt: itemHT.ptt, ...singleViewOptsHT, ...msgOpts }, {}, 220);
+                                                        mediaSendResultHT = await trackedQueuedSendMessage(sock, from, { audio: itemHT.buffer, mimetype: itemHT.mimetype, ptt: itemHT.ptt, ...singleViewOptsHT, ...msgOpts }, {}, 220);
                                                     } else if (itemHT.type === 'sticker') {
-                                                        await queuedSendMessage(sock, from, { sticker: itemHT.buffer, ...msgOpts }, {}, 220);
+                                                        mediaSendResultHT = await trackedQueuedSendMessage(sock, from, { sticker: itemHT.buffer, ...msgOpts }, {}, 220);
                                                     } else if (itemHT.type === 'document') {
-                                                        await queuedSendMessage(sock, from, { document: itemHT.buffer, mimetype: itemHT.mimetype, fileName: itemHT.fileName, ...(itemHT.caption ? { caption: itemHT.caption } : {}), ...singleViewOptsHT, ...msgOpts }, {}, 220);
+                                                        mediaSendResultHT = await trackedQueuedSendMessage(sock, from, { document: itemHT.buffer, mimetype: itemHT.mimetype, fileName: itemHT.fileName, caption: itemHT.caption || hiddenText, ...singleViewOptsHT, ...msgOpts }, {}, 220);
                                                     }
+                                                    if (!mediaSendResultHT?.key?.id) throw new Error(`hidetag_${itemHT.type}_message_not_confirmed`);
+                                                    console.info('[hidetag-send-confirmed]', { sessionId, group: from, messageId: mediaSendResultHT.key.id, mentionCount: allMentions.length, messageType: itemHT.type });
                                                 }
                                             }
                                             break;
@@ -16048,9 +16224,14 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
                                 const commandStartedAt = Date.now();
                                 try {
+                                    logCommandLifecycle('preparing', { state: 'in_progress', preparation: 'command_handler_start' });
                                     await commandExecute();
+                                    if (commandOperationFailed) logCommandLifecycle('failure', { stage: 'operation', action: 'command_handler_completed_with_action_error', responseSent: !!(terminalResponseSent || responseSentForLog) });
+                                    else logCommandLifecycle('success', { stage: 'operation', action: 'command_handler_completed', responseSent: !!(terminalResponseSent || responseSentForLog) });
                                     console.info('[command-completed]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, senderName: sName, senderJid: sender, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid', command: internalCommand, durationMs: Date.now() - commandStartedAt, messageAgeMsAtCompletion: receivedMessageAgeMs === null ? null : Math.max(0, Date.now() - receivedTimestampSeconds * 1000), upsertHandlerToCompletionMs: Date.now() - messageUpsertHandlerStartedAt, action: terminalResponseSent || responseSentForLog ? 'command_completed_response_sent' : 'command_completed_without_confirmed_response', responseSent: !!(terminalResponseSent || responseSentForLog) });
                                 } catch (e) {
+                                    commandOperationFailed = true;
+                                    logCommandLifecycle('failure', { stage: 'operation', action: 'command_handler_failed', error: String(e?.message || e).slice(0, 500), durationMs: Date.now() - commandStartedAt });
                                     console.error('[command-failed]', { sessionId, messageId: msgId, senderName: sName, senderJid: sender, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: from, command: internalCommand, durationMs: Date.now() - commandStartedAt, action: 'command_handler_failed', error: e?.message || String(e) });
                                     await safeSendActionError(sock, from, getCommandActionTitle(t, internalCommand), e, messageLang, pushName, m.messageTimestamp);
                                 } finally {
@@ -16076,7 +16257,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         if (distributedClaimKnown) await finalizeMessageClaim(distributedClaimValue);
                         else void distributedClaimPromise.then(claimed => finalizeMessageClaim(claimed)).catch(() => {});
                     }
-                    }, msgId, receivedSenderJid, false).catch(async dispatchQueueError => {
+                    }, msgId, receivedSenderJid, false, receivedClassification === 'recognized_command').catch(async dispatchQueueError => {
                         messageProcessingCompleted = true;
                         messageProcessingSucceeded = false;
                         messageProcessingError = dispatchQueueError?.message || String(dispatchQueueError);
