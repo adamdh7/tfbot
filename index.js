@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r171-private-message-retry-promotion-queue-multi-session-merge';
+const TFBOT_CLUSTER_CODE_REVISION = 'r172-strict-session-data-whitelist-and-logout-before-retirement';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -6671,149 +6671,122 @@ async function mergeSessionScopedData(sourceSessionId, targetSessionId, accountI
     const ownerCollection = db.collection('session_owners');
     const sourceOwner = await ownerCollection.findOne({ sessionId: sourceSessionId });
     const targetOwner = await ownerCollection.findOne({ sessionId: targetSessionId });
-    if (sourceOwner) {
-        const ownerUpdates = {};
-        const sourceMode = [sourceOwner.mode, sourceOwner.Mode, sourceOwner.botMode].map(value => String(value || '').trim()).find(Boolean);
-        if (sourceMode) {
-            ownerUpdates.mode = sourceMode;
-            ownerUpdates.Mode = sourceMode;
-            ownerUpdates.botMode = sourceMode;
-        }
-        const sourceLanguage = [sourceOwner.lang, sourceOwner.language, sourceOwner.Lang].map(value => String(value || '').trim()).find(Boolean);
-        if (sourceLanguage) {
-            ownerUpdates.lang = sourceLanguage;
-            ownerUpdates.language = sourceLanguage;
-        }
-        for (const field of ['Name', 'name', 'ownerName', 'OwnerLid', 'ownerLid', 'AccountJid', 'accountJid', 'Number', 'number']) {
-            const previous = sourceOwner[field];
-            const current = targetOwner?.[field];
-            if ((current === undefined || current === null || current === '') && previous !== undefined && previous !== null && previous !== '') ownerUpdates[field] = previous;
-        }
-        if (Object.keys(ownerUpdates).length) {
-            await ownerCollection.updateOne(
-                { sessionId: targetSessionId },
-                { $set: ownerUpdates, $setOnInsert: { sessionId: targetSessionId, createdAt: sourceOwner.createdAt || new Date() } },
-                { upsert: true }
-            );
-        }
+    const ownerUpdates = {};
+    const sourceName = [sourceOwner?.Name, sourceOwner?.name, sourceOwner?.ownerName].map(value => String(value || '').trim()).find(Boolean);
+    const targetName = [targetOwner?.Name, targetOwner?.name, targetOwner?.ownerName].map(value => String(value || '').trim()).find(Boolean);
+    const sourceLanguage = [sourceOwner?.lang, sourceOwner?.language, sourceOwner?.Lang].map(value => String(value || '').trim()).find(Boolean);
+    const targetLanguage = [targetOwner?.lang, targetOwner?.language, targetOwner?.Lang].map(value => String(value || '').trim()).find(Boolean);
+    if (!targetName && sourceName) {
+        ownerUpdates.Name = sourceName;
+        ownerUpdates.name = sourceName;
     }
-    const groupSettings = await db.collection('group_settings').find({ sessionId: sourceSessionId }).toArray();
-    for (const source of groupSettings) {
+    if (!targetLanguage && sourceLanguage) {
+        ownerUpdates.lang = sourceLanguage;
+        ownerUpdates.language = sourceLanguage;
+    }
+    if (Object.keys(ownerUpdates).length) {
+        await ownerCollection.updateOne(
+            { sessionId: targetSessionId },
+            { $set: ownerUpdates, $setOnInsert: { sessionId: targetSessionId, createdAt: sourceOwner?.createdAt || new Date() } },
+            { upsert: true }
+        );
+    }
+    const allowedGroupSettingKeys = ['bienvenue', 'noLien'];
+    const sourceGroupSettings = await db.collection('group_settings').find({ sessionId: sourceSessionId }).toArray();
+    let migratedGroupSettings = 0;
+    for (const source of sourceGroupSettings) {
+        const fields = Object.fromEntries(allowedGroupSettingKeys.filter(key => Object.prototype.hasOwnProperty.call(source, key)).map(key => [key, source[key]]));
+        if (!Object.keys(fields).length || !source.gjid) continue;
         const selector = { sessionId: targetSessionId, gjid: source.gjid };
-        const fields = Object.fromEntries(Object.entries(source).filter(([key]) => !['_id', 'sessionId', 'gjid', 'createdAt'].includes(key)));
-        if (!Object.keys(fields).length) continue;
+        const target = await db.collection('group_settings').findOne(selector, { projection: Object.fromEntries(allowedGroupSettingKeys.map(key => [key, 1])) });
+        const missingFields = Object.fromEntries(Object.entries(fields).filter(([key]) => target?.[key] === undefined));
+        if (!Object.keys(missingFields).length) continue;
         await db.collection('group_settings').updateOne(
             selector,
-            { $set: { ...fields, migratedFromSessionId: sourceSessionId }, $setOnInsert: { createdAt: source.createdAt || new Date() } },
+            { $set: missingFields, $setOnInsert: { createdAt: source.createdAt || new Date() } },
             { upsert: true }
         );
+        migratedGroupSettings++;
     }
     const del2Targets = await db.collection('group_del2').find({ sessionId: sourceSessionId }).toArray();
+    let migratedDel2Targets = 0;
     for (const source of del2Targets) {
+        if (!source.gjid || !source.targetJid) continue;
         const selector = { sessionId: targetSessionId, gjid: source.gjid, targetJid: source.targetJid };
-        const fields = Object.fromEntries(Object.entries(source).filter(([key]) => !['_id', 'sessionId', 'gjid', 'targetJid', 'createdAt'].includes(key)));
+        const fields = Object.fromEntries(Object.entries(source).filter(([key]) => !['_id', 'sessionId', 'gjid', 'targetJid', 'createdAt', 'migratedFromSessionId'].includes(key)));
         await db.collection('group_del2').updateOne(
             selector,
-            { $set: { ...fields, migratedFromSessionId: sourceSessionId }, $setOnInsert: { createdAt: source.createdAt || new Date() } },
+            { $setOnInsert: { ...fields, createdAt: source.createdAt || new Date(), migratedFromSessionId: sourceSessionId } },
             { upsert: true }
         );
+        migratedDel2Targets++;
     }
     const del3Rules = await db.collection('group_del3').find({ sessionId: sourceSessionId }).toArray();
+    let migratedDel3Rules = 0;
     for (const source of del3Rules) {
+        if (!source.gjid || !source.messageFormat) continue;
         const selector = { sessionId: targetSessionId, gjid: source.gjid, messageFormat: source.messageFormat };
-        const fields = Object.fromEntries(Object.entries(source).filter(([key]) => !['_id', 'sessionId', 'gjid', 'messageFormat', 'createdAt'].includes(key)));
+        const fields = Object.fromEntries(Object.entries(source).filter(([key]) => !['_id', 'sessionId', 'gjid', 'messageFormat', 'createdAt', 'migratedFromSessionId'].includes(key)));
         await db.collection('group_del3').updateOne(
             selector,
-            { $set: { ...fields, migratedFromSessionId: sourceSessionId }, $setOnInsert: { createdAt: source.createdAt || new Date() } },
+            { $setOnInsert: { ...fields, createdAt: source.createdAt || new Date(), migratedFromSessionId: sourceSessionId } },
             { upsert: true }
         );
+        migratedDel3Rules++;
     }
     const preferences = await db.collection('user_preferences').find({ sessionId: sourceSessionId }).toArray();
+    let migratedUserPreferences = 0;
     for (const source of preferences) {
         if (!source.sender) continue;
+        const allowedPreferenceFields = ['Name', 'name', 'pushName', 'displayName', 'lang', 'language'];
+        const fields = Object.fromEntries(allowedPreferenceFields.filter(key => Object.prototype.hasOwnProperty.call(source, key)).map(key => [key, source[key]]));
+        if (!Object.keys(fields).length) continue;
         const selector = { sessionId: targetSessionId, sender: source.sender };
-        const fields = Object.fromEntries(Object.entries(source).filter(([key]) => !['_id', 'sessionId', 'sender', 'createdAt'].includes(key)));
+        const target = await db.collection('user_preferences').findOne(selector, { projection: Object.fromEntries(allowedPreferenceFields.map(key => [key, 1])) });
+        const missingFields = Object.fromEntries(Object.entries(fields).filter(([key]) => target?.[key] === undefined || target?.[key] === null || target?.[key] === ''));
+        if (!Object.keys(missingFields).length) continue;
         await db.collection('user_preferences').updateOne(
             selector,
-            { $set: { ...fields, migratedFromSessionId: sourceSessionId }, $setOnInsert: { createdAt: source.createdAt || new Date() } },
+            { $set: missingFields, $setOnInsert: { createdAt: source.createdAt || new Date() } },
             { upsert: true }
         );
-    }
-    const quotedCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    const quotedMessages = await db.collection('baileys_quoted_messages').find({ sessionId: sourceSessionId, $or: [{ createdAt: { $gte: quotedCutoff } }, { createdAt: { $exists: false } }] }).sort({ createdAt: -1 }).limit(5000).toArray();
-    let migratedQuotedMessages = 0;
-    for (const source of quotedMessages) {
-        const messageId = String(source.messageId || source.key?.id || '').trim();
-        if (!messageId) continue;
-        const migratedId = `quoted:${targetSessionId}:${messageId}`;
-        const migratedRecord = { ...source, _id: migratedId, sessionId: targetSessionId, messageId, migratedFromSessionId: sourceSessionId };
-        await db.collection('baileys_quoted_messages').updateOne(
-            { _id: migratedId },
-            { $setOnInsert: migratedRecord },
-            { upsert: true, writeConcern: { w: 'majority', wtimeout: 10000 } }
-        );
-        migratedQuotedMessages++;
-    }
-    const mappings = await db.collection('lid_phone_mappings').find({ sessionId: sourceSessionId }).toArray();
-    for (const source of mappings) {
-        const oldPrefix = `${sourceSessionId}:`;
-        const oldId = String(source._id || '');
-        const newId = oldId.startsWith(oldPrefix) ? `${targetSessionId}:${oldId.slice(oldPrefix.length)}` : `${targetSessionId}:${oldId.split(':').pop()}`;
-        const existing = await db.collection('lid_phone_mappings').findOne({ _id: newId }, { projection: { updatedAt: 1 } });
-        const sourceTime = new Date(source.updatedAt || source.createdAt || 0).getTime() || 0;
-        const targetTime = new Date(existing?.updatedAt || 0).getTime() || 0;
-        if (!existing || sourceTime >= targetTime) {
-            const fields = Object.fromEntries(Object.entries(source).filter(([key]) => !['_id', 'createdAt'].includes(key)));
-            await db.collection('lid_phone_mappings').updateOne(
-                { _id: newId },
-                { $set: { ...fields, sessionId: targetSessionId, lastSessionId: targetSessionId, migratedFromSessionId: sourceSessionId }, $setOnInsert: { createdAt: source.createdAt || new Date() } },
-                { upsert: true }
-            );
-        }
-    }
-    const sourcePhone = normalizePhoneNumber(accountIdentity.phone || getStoredSessionOwnerPhone(sourceOwner));
-    const sourceLid = normalizeLidCacheKey(accountIdentity.lid || getStoredSessionOwnerLid(sourceOwner));
-    const retryCutoff = new Date(Date.now() - BAILEYS_RETRY_MESSAGE_TTL_SECONDS * 1000);
-    const outgoingRetries = await db.collection('baileys_outgoing_messages').find({ sessionId: sourceSessionId, fromMe: true, $or: [{ createdAt: { $gte: retryCutoff } }, { createdAt: { $exists: false } }] }).sort({ createdAt: -1 }).limit(5000).toArray();
-    let migratedOutgoingRetryMessages = 0;
-    let skippedOutgoingRetryMessages = 0;
-    for (const source of outgoingRetries) {
-        const messageId = String(source.messageId || source.messageKey?.id || '').trim();
-        if (!messageId || !source.message) {
-            skippedOutgoingRetryMessages++;
-            continue;
-        }
-        const rowPhone = normalizePhoneNumber(source.accountPhone) || getAuthenticatedPhoneNumber({ id: source.accountJid || '' }, null);
-        const rowLid = normalizeLidCacheKey(source.accountLid || (/@lid$/i.test(String(source.accountJid || '')) ? source.accountJid : ''));
-        const hasRowIdentity = !!(rowPhone || /@lid$/i.test(rowLid));
-        const rowIdentityMatches = !hasRowIdentity || !!((sourcePhone && rowPhone === sourcePhone) || (sourceLid && rowLid === sourceLid));
-        if (!rowIdentityMatches) {
-            skippedOutgoingRetryMessages++;
-            continue;
-        }
-        const migratedRecord = {
-            ...source,
-            _id: `${targetSessionId}:${messageId}`,
-            sessionId: targetSessionId,
-            messageId,
-            migratedFromSessionId: sourceSessionId,
-            accountPhone: source.accountPhone || sourcePhone || '',
-            accountLid: source.accountLid || sourceLid || ''
-        };
-        delete migratedRecord.__tfbotExpiresAt;
-        await db.collection('baileys_outgoing_messages').updateOne(
-            { _id: migratedRecord._id },
-            { $setOnInsert: migratedRecord },
-            { upsert: true, writeConcern: { w: 'majority', wtimeout: 15000 } }
-        );
-        migratedOutgoingRetryMessages++;
+        migratedUserPreferences++;
     }
     cleanupSessionVolatileCaches(sourceSessionId);
     cleanupSessionVolatileCaches(targetSessionId);
     sessionOwnersCache.delete(sourceSessionId);
     sessionOwnersCache.delete(targetSessionId);
-    console.info('[session-account-data-migrated]', { sourceSessionId, targetSessionId, groupSettings: groupSettings.length, del2Targets: del2Targets.length, del3Rules: del3Rules.length, userPreferences: preferences.length, quotedMessages: migratedQuotedMessages, lidPhoneMappings: mappings.length, outgoingRetryMessages: migratedOutgoingRetryMessages, skippedOutgoingRetryMessages, sourceAccountSettingsPreferred: true, outgoingRetryMigrationScope: 'same_verified_account_recent_from_me_messages_only', quotedMessageMigrationScope: 'same_verified_account_recent_seven_days_only', signalAuthKeysCopied: false, authStoreStrategy: 'keep_only_target_session_signal_keys' });
-    return { migrated: true, groupSettings: groupSettings.length, del2Targets: del2Targets.length, del3Rules: del3Rules.length, userPreferences: preferences.length, quotedMessages: migratedQuotedMessages, lidPhoneMappings: mappings.length, outgoingRetryMessages: migratedOutgoingRetryMessages, skippedOutgoingRetryMessages };
+    const migrated = {
+        groupSettings: migratedGroupSettings,
+        del2Targets: migratedDel2Targets,
+        del3Rules: migratedDel3Rules,
+        userPreferences: migratedUserPreferences,
+        quotedMessages: 0,
+        lidPhoneMappings: 0,
+        outgoingRetryMessages: 0
+    };
+    console.info('[session-account-data-migrated]', {
+        sourceSessionId,
+        targetSessionId,
+        migrated,
+        allowedGroupSettings: allowedGroupSettingKeys,
+        allowedUserPreferenceFields: ['Name', 'name', 'pushName', 'displayName', 'lang', 'language'],
+        excludedCollections: ['baileys_auth', 'baileys_quoted_messages', 'lid_phone_mappings', 'baileys_outgoing_messages', 'processed_messages'],
+        sourceAccountSettingsPreferred: false,
+        signalAuthKeysCopied: false,
+        authStoreStrategy: 'keep_only_target_session_signal_keys',
+        migrationPolicy: 'strict_whitelist_del2_del3_welcome_nolink_user_name_and_language_only'
+    });
+    return {
+        migrated: true,
+        groupSettings: migratedGroupSettings,
+        del2Targets: migratedDel2Targets,
+        del3Rules: migratedDel3Rules,
+        userPreferences: migratedUserPreferences,
+        quotedMessages: 0,
+        lidPhoneMappings: 0,
+        outgoingRetryMessages: 0
+    };
 }
 
 async function retireDuplicateAccountSession(sourceSessionId, targetSessionId, reason = 'same_authenticated_account_reconnected') {
