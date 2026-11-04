@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r169-private-retry-command-lifecycle-del3-owner-add-restore';
+const TFBOT_CLUSTER_CODE_REVISION = 'r171-private-message-retry-promotion-queue-multi-session-merge';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -1555,7 +1555,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-04-r167';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-04-r171';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1742,6 +1742,7 @@ const CLOUDFLARE_ROTATION_DOCUMENT_ID = 'cloudflare_ai_account_rotation';
 const reconnectTimers = new Map();
 const sessionStartPromises = new Map();
 const pendingPairingReplacementSessions = new Set();
+const pendingAccountPromotionUpserts = new Map();
 const accountReplacementPromotionPromises = new Map();
 const SESSION_HEALTH_CHECK_INTERVAL_MS = Math.max(10000, Math.min(30000, Number(process.env.SESSION_HEALTH_CHECK_INTERVAL_MS) || 15000));
 const SESSION_WS_PONG_TIMEOUT_MS = Math.max(30000, Math.min(180000, Number(process.env.SESSION_WS_PONG_TIMEOUT_MS) || 45000));
@@ -1924,7 +1925,7 @@ function isWhatsAppSocketReady(session, sock) {
     const lastEvent = String(session?.lastWhatsAppEvent || '').toLowerCase();
     const disconnectCode = Number(session?.lastDisconnectCode || 0);
     const disconnectReason = String(session?.lastDisconnectReason || '');
-    if (!session || !sock || session.sock !== sock || session.openEventSeen !== true || isSocketDefinitelyClosed(sock)) return false;
+    if (!session || session.retiringDuplicateAccount === true || String(session.status || '').toLowerCase() === 'duplicate_account' || !sock || session.sock !== sock || session.openEventSeen !== true || isSocketDefinitelyClosed(sock)) return false;
     if (lastEvent === 'close' || disconnectCode === 515 || disconnectCode === 401 && /conflict|device[_ -]?removed/i.test(disconnectReason)) return false;
     if (/device[_ -]?removed/i.test(disconnectReason)) return false;
     if (sock?.ws?.isOpen === true) return true;
@@ -5289,6 +5290,66 @@ function isPendingPairingReplacementSession(sessionId) {
     return pendingPairingReplacementSessions.has(String(sessionId || '')) || runtime?.pairingReplacementPending === true;
 }
 
+function queuePendingAccountPromotionUpsert(sessionId, sock, upsert) {
+    const id = String(sessionId || '').trim();
+    const messages = Array.isArray(upsert?.messages) ? upsert.messages : [];
+    if (!id || !sock || !messages.length) return false;
+    const now = Date.now();
+    let state = pendingAccountPromotionUpserts.get(id);
+    if (state && state.sock !== sock) {
+        if (state.expiryTimer) clearTimeout(state.expiryTimer);
+        pendingAccountPromotionUpserts.delete(id);
+        state = null;
+    }
+    if (!state) {
+        state = { sock, events: [], messageCount: 0, firstQueuedAt: now, expiryTimer: null };
+        state.expiryTimer = setTimeout(() => {
+            if (pendingAccountPromotionUpserts.get(id) !== state) return;
+            pendingAccountPromotionUpserts.delete(id);
+            console.warn('[message-upsert-promotion-queue-expired]', { sessionId: id, queuedBatches: state.events.length, queuedMessages: state.messageCount, ageMs: Date.now() - state.firstQueuedAt, action: 'discard_expired_replay_batch_and_allow_whatsapp_history_sync_to_refill' });
+        }, 300000);
+        if (typeof state.expiryTimer.unref === 'function') state.expiryTimer.unref();
+    }
+    state.events = state.events.filter(item => now - item.queuedAt <= 300000);
+    state.messageCount = state.events.reduce((total, item) => total + item.messages.length, 0);
+    const event = { type: String(upsert?.type || 'notify'), messages: messages.slice(), queuedAt: now };
+    state.events.push(event);
+    state.messageCount += event.messages.length;
+    while (state.events.length > 200 || state.messageCount > 2000) {
+        const removed = state.events.shift();
+        if (removed) state.messageCount = Math.max(0, state.messageCount - removed.messages.length);
+    }
+    pendingAccountPromotionUpserts.set(id, state);
+    return true;
+}
+
+function flushPendingAccountPromotionUpserts(sessionId, sock) {
+    const id = String(sessionId || '').trim();
+    const state = pendingAccountPromotionUpserts.get(id);
+    if (!state) return 0;
+    pendingAccountPromotionUpserts.delete(id);
+    if (state.expiryTimer) clearTimeout(state.expiryTimer);
+    const runtime = activeSessions.get(id);
+    if (state.sock !== sock || runtime?.sock !== sock || isSocketDefinitelyClosed(sock)) {
+        console.warn('[message-upsert-promotion-queue-discarded]', { sessionId: id, queuedBatches: state.events.length, queuedMessages: state.messageCount, reason: 'session_socket_replaced_or_closed_before_promotion_completed' });
+        return 0;
+    }
+    const events = state.events.filter(item => Date.now() - item.queuedAt <= 300000);
+    for (const item of events) {
+        setImmediate(() => {
+            const current = activeSessions.get(id);
+            if (!current || current.sock !== sock || isSocketDefinitelyClosed(sock) || current.retiringDuplicateAccount === true || String(current.status || '').toLowerCase() === 'duplicate_account') return;
+            try {
+                sock.ev.emit('messages.upsert', { type: item.type, messages: item.messages });
+            } catch (error) {
+                console.warn('[message-upsert-promotion-replay-failed]', { sessionId: id, messageCount: item.messages.length, error: error?.message || String(error) });
+            }
+        });
+    }
+    console.info('[message-upsert-promotion-queue-flushed]', { sessionId: id, queuedBatches: events.length, queuedMessages: events.reduce((total, item) => total + item.messages.length, 0), replayOrderPreserved: true, exclusiveSessionOwnershipRequired: true });
+    return events.length;
+}
+
 function stopAccountRuntimeLockHeartbeat(sessionId) {
     const timer = accountRuntimeLockTimers.get(sessionId);
     if (timer) clearInterval(timer);
@@ -6584,7 +6645,28 @@ async function renameMongoSession(oldSessionId, newSessionId) {
     }
 }
 
-async function mergeSessionScopedData(sourceSessionId, targetSessionId) {
+function getStoredSessionOwnerPhone(owner = {}) {
+    const candidates = [owner.Number, owner.number, owner.Numero, owner.OwnerNumber, owner.ownerNumber, owner.OwnerPhone, owner.ownerPhone, owner.DeployerNumber, owner.deployerNumber, owner.phoneNumber, owner.PhoneNumber, owner.AccountJid, owner.accountJid];
+    for (const candidate of candidates) {
+        const raw = String(candidate || '').trim();
+        if (!raw || /@lid$/i.test(raw)) continue;
+        const jidNumber = getAuthenticatedPhoneNumber({ id: raw }, null);
+        const number = jidNumber || normalizePhoneNumber(raw);
+        if (/^\d{6,20}$/.test(number) && !/^0+$/.test(number)) return number;
+    }
+    return '';
+}
+
+function getStoredSessionOwnerLid(owner = {}) {
+    const candidates = [owner.OwnerLid, owner.ownerLid, owner.AccountLid, owner.accountLid, owner.Lid, owner.lid, owner.AccountJid, owner.accountJid];
+    for (const candidate of candidates) {
+        const lid = normalizeLidCacheKey(candidate);
+        if (/^\d{3,20}@lid$/i.test(lid)) return lid;
+    }
+    return '';
+}
+
+async function mergeSessionScopedData(sourceSessionId, targetSessionId, accountIdentity = {}) {
     if (!db || !sourceSessionId || !targetSessionId || sourceSessionId === targetSessionId) return { migrated: false, reason: 'invalid_session_pair' };
     const ownerCollection = db.collection('session_owners');
     const sourceOwner = await ownerCollection.findOne({ sessionId: sourceSessionId });
@@ -6657,6 +6739,21 @@ async function mergeSessionScopedData(sourceSessionId, targetSessionId) {
             { upsert: true }
         );
     }
+    const quotedCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const quotedMessages = await db.collection('baileys_quoted_messages').find({ sessionId: sourceSessionId, $or: [{ createdAt: { $gte: quotedCutoff } }, { createdAt: { $exists: false } }] }).sort({ createdAt: -1 }).limit(5000).toArray();
+    let migratedQuotedMessages = 0;
+    for (const source of quotedMessages) {
+        const messageId = String(source.messageId || source.key?.id || '').trim();
+        if (!messageId) continue;
+        const migratedId = `quoted:${targetSessionId}:${messageId}`;
+        const migratedRecord = { ...source, _id: migratedId, sessionId: targetSessionId, messageId, migratedFromSessionId: sourceSessionId };
+        await db.collection('baileys_quoted_messages').updateOne(
+            { _id: migratedId },
+            { $setOnInsert: migratedRecord },
+            { upsert: true, writeConcern: { w: 'majority', wtimeout: 10000 } }
+        );
+        migratedQuotedMessages++;
+    }
     const mappings = await db.collection('lid_phone_mappings').find({ sessionId: sourceSessionId }).toArray();
     for (const source of mappings) {
         const oldPrefix = `${sourceSessionId}:`;
@@ -6674,12 +6771,49 @@ async function mergeSessionScopedData(sourceSessionId, targetSessionId) {
             );
         }
     }
+    const sourcePhone = normalizePhoneNumber(accountIdentity.phone || getStoredSessionOwnerPhone(sourceOwner));
+    const sourceLid = normalizeLidCacheKey(accountIdentity.lid || getStoredSessionOwnerLid(sourceOwner));
+    const retryCutoff = new Date(Date.now() - BAILEYS_RETRY_MESSAGE_TTL_SECONDS * 1000);
+    const outgoingRetries = await db.collection('baileys_outgoing_messages').find({ sessionId: sourceSessionId, fromMe: true, $or: [{ createdAt: { $gte: retryCutoff } }, { createdAt: { $exists: false } }] }).sort({ createdAt: -1 }).limit(5000).toArray();
+    let migratedOutgoingRetryMessages = 0;
+    let skippedOutgoingRetryMessages = 0;
+    for (const source of outgoingRetries) {
+        const messageId = String(source.messageId || source.messageKey?.id || '').trim();
+        if (!messageId || !source.message) {
+            skippedOutgoingRetryMessages++;
+            continue;
+        }
+        const rowPhone = normalizePhoneNumber(source.accountPhone) || getAuthenticatedPhoneNumber({ id: source.accountJid || '' }, null);
+        const rowLid = normalizeLidCacheKey(source.accountLid || (/@lid$/i.test(String(source.accountJid || '')) ? source.accountJid : ''));
+        const hasRowIdentity = !!(rowPhone || /@lid$/i.test(rowLid));
+        const rowIdentityMatches = !hasRowIdentity || !!((sourcePhone && rowPhone === sourcePhone) || (sourceLid && rowLid === sourceLid));
+        if (!rowIdentityMatches) {
+            skippedOutgoingRetryMessages++;
+            continue;
+        }
+        const migratedRecord = {
+            ...source,
+            _id: `${targetSessionId}:${messageId}`,
+            sessionId: targetSessionId,
+            messageId,
+            migratedFromSessionId: sourceSessionId,
+            accountPhone: source.accountPhone || sourcePhone || '',
+            accountLid: source.accountLid || sourceLid || ''
+        };
+        delete migratedRecord.__tfbotExpiresAt;
+        await db.collection('baileys_outgoing_messages').updateOne(
+            { _id: migratedRecord._id },
+            { $setOnInsert: migratedRecord },
+            { upsert: true, writeConcern: { w: 'majority', wtimeout: 15000 } }
+        );
+        migratedOutgoingRetryMessages++;
+    }
     cleanupSessionVolatileCaches(sourceSessionId);
     cleanupSessionVolatileCaches(targetSessionId);
     sessionOwnersCache.delete(sourceSessionId);
     sessionOwnersCache.delete(targetSessionId);
-    console.info('[session-account-data-migrated]', { sourceSessionId, targetSessionId, groupSettings: groupSettings.length, del2Targets: del2Targets.length, del3Rules: del3Rules.length, userPreferences: preferences.length, lidPhoneMappings: mappings.length, sourceAccountSettingsPreferred: true, signalAuthKeysCopied: false, authStoreStrategy: 'keep_only_target_session_signal_keys' });
-    return { migrated: true, groupSettings: groupSettings.length, del2Targets: del2Targets.length, del3Rules: del3Rules.length, userPreferences: preferences.length, lidPhoneMappings: mappings.length };
+    console.info('[session-account-data-migrated]', { sourceSessionId, targetSessionId, groupSettings: groupSettings.length, del2Targets: del2Targets.length, del3Rules: del3Rules.length, userPreferences: preferences.length, quotedMessages: migratedQuotedMessages, lidPhoneMappings: mappings.length, outgoingRetryMessages: migratedOutgoingRetryMessages, skippedOutgoingRetryMessages, sourceAccountSettingsPreferred: true, outgoingRetryMigrationScope: 'same_verified_account_recent_from_me_messages_only', quotedMessageMigrationScope: 'same_verified_account_recent_seven_days_only', signalAuthKeysCopied: false, authStoreStrategy: 'keep_only_target_session_signal_keys' });
+    return { migrated: true, groupSettings: groupSettings.length, del2Targets: del2Targets.length, del3Rules: del3Rules.length, userPreferences: preferences.length, quotedMessages: migratedQuotedMessages, lidPhoneMappings: mappings.length, outgoingRetryMessages: migratedOutgoingRetryMessages, skippedOutgoingRetryMessages };
 }
 
 async function retireDuplicateAccountSession(sourceSessionId, targetSessionId, reason = 'same_authenticated_account_reconnected') {
@@ -6696,10 +6830,10 @@ async function retireDuplicateAccountSession(sourceSessionId, targetSessionId, r
     const targetCreds = targetCredsDoc?.creds ? fixBuffers(targetCredsDoc.creds) : null;
     const sourceRuntime = activeSessions.get(sourceSessionId) || null;
     const targetRuntime = activeSessions.get(targetSessionId) || null;
-    const sourcePhone = getAuthenticatedPhoneNumber(sourceRuntime?.sock?.user || null, sourceCreds) || normalizePhoneNumber(sourceOwner.Number || sourceOwner.number || sourceOwner.PairingNumber || '') || getAuthenticatedPhoneNumber({ id: sourceOwner.AccountJid || sourceOwner.accountJid || '' }, null);
-    const targetPhone = getAuthenticatedPhoneNumber(targetRuntime?.sock?.user || null, targetCreds) || normalizePhoneNumber(targetOwner.Number || targetOwner.number || targetOwner.PairingNumber || '') || getAuthenticatedPhoneNumber({ id: targetOwner.AccountJid || targetOwner.accountJid || '' }, null);
-    const sourceLid = getAuthenticatedLid(sourceRuntime?.sock?.user || null, sourceCreds) || normalizeLidCacheKey(sourceOwner.OwnerLid || sourceOwner.ownerLid || sourceOwner.AccountJid || sourceOwner.accountJid || '');
-    const targetLid = getAuthenticatedLid(targetRuntime?.sock?.user || null, targetCreds) || normalizeLidCacheKey(targetOwner.OwnerLid || targetOwner.ownerLid || targetOwner.AccountJid || targetOwner.accountJid || '');
+    const sourcePhone = getAuthenticatedPhoneNumber(sourceRuntime?.sock?.user || null, sourceCreds) || getStoredSessionOwnerPhone(sourceOwner);
+    const targetPhone = getAuthenticatedPhoneNumber(targetRuntime?.sock?.user || null, targetCreds) || getStoredSessionOwnerPhone(targetOwner);
+    const sourceLid = getAuthenticatedLid(sourceRuntime?.sock?.user || null, sourceCreds) || getStoredSessionOwnerLid(sourceOwner);
+    const targetLid = getAuthenticatedLid(targetRuntime?.sock?.user || null, targetCreds) || getStoredSessionOwnerLid(targetOwner);
     if (targetCreds?.registered !== true || (!targetPhone && !targetLid) || !targetRuntime?.sock || !targetRuntime.openEventSeen || !isAuthenticatedSocketOperational(targetRuntime, targetRuntime.sock)) return { retired: false, reason: 'target_account_not_fully_connected' };
     const samePhone = !!(sourcePhone && targetPhone && sourcePhone === targetPhone);
     const sameLid = !!(sourceLid && targetLid && /@lid$/i.test(sourceLid) && sourceLid === targetLid);
@@ -6719,17 +6853,40 @@ async function retireDuplicateAccountSession(sourceSessionId, targetSessionId, r
         const runtimeMatches = !!((samePhone && runtimePhone === targetPhone) || (sameLid && runtimeLid === targetLid));
         if (!runtimeMatches) return { retired: false, reason: 'source_live_socket_identity_unverified' };
     }
-    let accountLocksTransferred = false;
+    const duplicateAt = sourceOwner.duplicateAccountDetectedAt || new Date();
+    if (sourceRuntime) {
+        sourceRuntime.retiringDuplicateAccount = true;
+        sourceRuntime.status = 'duplicate_account';
+        sourceRuntime.active = false;
+    }
+    await ownerCollection.updateOne(
+        { sessionId: sourceSessionId },
+        { $set: { connectionStatus: 'duplicate_account', duplicateAccountOf: targetSessionId, duplicateAccountDetectedAt: duplicateAt, duplicateAccountIdentityHash: shortLogHash(targetPhone || targetLid), duplicateAuthPreserved: true, retiringDuplicateAccount: true, reauthRequired: false, socketAuthenticated: false, socketReady: false, pairingPending: false, unconnectedSinceAt: duplicateAt, statusUpdatedAt: new Date(), updatedAt: new Date() } }
+    );
+    sessionOwnersCache.delete(sourceSessionId);
+    let whatsappLogoutRequested = false;
+    let whatsappLogoutResolved = false;
+    let sourceSocketWasAlreadyClosed = true;
+    let logoutError = null;
     if (sourceRuntime?.sock) {
-        const sourceSocketClosed = await cleanupSocket(sourceSessionId, { credentialPersistenceTimeoutMs: 30000, authStoreTimeoutMs: 45000, authStoreQuietMs: 800, socketCloseTimeoutMs: 5000 });
-        if (!sourceSocketClosed) {
-            if (!sourceRuntime.sock) {
-                sourceRuntime.status = 'reconnexion';
-                sourceRuntime.active = false;
-                if (!reconnectTimers.has(sourceSessionId)) scheduleSessionReconnect(sourceSessionId, false, sourceRuntime.format || sourceOwner.format || 'pair');
+        const oldSocket = sourceRuntime.sock;
+        sourceSocketWasAlreadyClosed = isSocketDefinitelyClosed(oldSocket) || String(sourceRuntime.lastWhatsAppEvent || '').toLowerCase() === 'close';
+        if (!sourceSocketWasAlreadyClosed) {
+            if (typeof oldSocket.logout !== 'function') return { retired: false, reason: 'source_socket_logout_method_unavailable' };
+            whatsappLogoutRequested = true;
+            try {
+                await promiseWithTimeout(Promise.resolve(oldSocket.logout()), 10000, 'duplicate_account_whatsapp_logout');
+                whatsappLogoutResolved = true;
+            } catch (error) {
+                logoutError = String(error?.message || error).slice(0, 220);
             }
-            return { retired: false, reason: sourceRuntime.lastAuthStoreCleanupError || 'source_auth_store_or_socket_close_not_confirmed' };
+            if (!whatsappLogoutResolved && !isSocketDefinitelyClosed(oldSocket)) {
+                console.warn('[session-account-duplicate-logout-deferred]', { sourceSessionId, targetSessionId, logoutError: logoutError || 'logout_not_confirmed', sourceSocketStillOpen: true, targetSessionKeptActive: true, action: 'retain_source_record_for_retry_without_deleting_its_saved_device_data' });
+                return { retired: false, reason: 'source_whatsapp_logout_not_confirmed' };
+            }
         }
+        const sourceSocketClosed = await cleanupSocket(sourceSessionId, { credentialPersistenceTimeoutMs: 30000, authStoreTimeoutMs: 45000, authStoreQuietMs: 800, socketCloseTimeoutMs: 5000 });
+        if (!sourceSocketClosed) return { retired: false, reason: 'source_socket_close_not_confirmed_after_logout' };
         if (!targetAccountLock) stopAccountRuntimeLockHeartbeat(sourceSessionId);
         await releaseSessionRuntimeLock(sourceSessionId, { preserveAccountRuntimeLock: !targetAccountLock });
     } else {
@@ -6739,6 +6896,7 @@ async function retireDuplicateAccountSession(sourceSessionId, targetSessionId, r
         if (!targetAccountLock) stopAccountRuntimeLockHeartbeat(sourceSessionId);
         await releaseSessionRuntimeLock(sourceSessionId, { preserveAccountRuntimeLock: !targetAccountLock });
     }
+    let accountLocksTransferred = false;
     if (!targetAccountLock) {
         const promotionKey = targetLockKey || targetPhone || targetLid;
         const priorPromotion = accountReplacementPromotionPromises.get(promotionKey);
@@ -6752,14 +6910,7 @@ async function retireDuplicateAccountSession(sourceSessionId, targetSessionId, r
             if (accountReplacementPromotionPromises.get(promotionKey) === promotion) accountReplacementPromotionPromises.delete(promotionKey);
         }
         if (!transferResult?.transferred && !transferResult?.alreadyHeld) {
-            const sourceEntries = sessionAccountRuntimeLockEntries.get(sourceSessionId) || [];
-            if (sourceEntries.length && !accountRuntimeLockTimers.has(sourceSessionId)) activateAccountRuntimeLockState(sourceSessionId, sourceEntries, sourceEntries.map(entry => entry.key), Math.min(...sourceEntries.map(entry => entry.leaseUntil || 0)));
-            const sourceRuntimeAfter = activeSessions.get(sourceSessionId);
-            if (sourceRuntimeAfter) {
-                sourceRuntimeAfter.status = 'reconnexion';
-                sourceRuntimeAfter.active = false;
-            }
-            if (!reconnectTimers.has(sourceSessionId)) scheduleSessionReconnect(sourceSessionId, false, sourceRuntimeAfter?.format || sourceOwner.format || 'pair');
+            console.error('[session-account-lock-promotion-failed]', { sourceSessionId, targetSessionId, error: transferResult?.reason || 'account_runtime_lock_transfer_failed', sourceSocketLoggedOut: whatsappLogoutResolved, targetAuthenticated: true, oldSessionReconnectSuppressed: true });
             return { retired: false, reason: transferResult?.reason || 'account_runtime_lock_transfer_failed' };
         }
         accountLocksTransferred = transferResult?.transferred === true;
@@ -6774,17 +6925,11 @@ async function retireDuplicateAccountSession(sourceSessionId, targetSessionId, r
             return { retired: false, reason: 'target_account_runtime_lock_not_ready' };
         }
     }
-    const duplicateAt = sourceOwner.duplicateAccountDetectedAt || new Date();
-    await ownerCollection.updateOne(
-        { sessionId: sourceSessionId },
-        { $set: { connectionStatus: 'duplicate_account', duplicateAccountOf: targetSessionId, duplicateAccountDetectedAt: duplicateAt, duplicateAccountIdentityHash: shortLogHash(targetPhone || targetLid), duplicateAuthPreserved: true, reauthRequired: false, socketAuthenticated: false, socketReady: false, pairingPending: false, unconnectedSinceAt: duplicateAt, statusUpdatedAt: duplicateAt, updatedAt: duplicateAt } }
-    );
-    sessionOwnersCache.delete(sourceSessionId);
-    const migrated = await mergeSessionScopedData(sourceSessionId, targetSessionId);
+    const migrated = await mergeSessionScopedData(sourceSessionId, targetSessionId, { phone: targetPhone, lid: targetLid });
     if (!migrated?.migrated) return { retired: false, reason: migrated?.reason || 'session_settings_migration_failed' };
     await deleteMongoSession(sourceSessionId);
-    console.warn('[session-account-duplicate-retired]', { sourceSessionId, targetSessionId, reason, samePhone, sameLid, accountLocksTransferred, migratedGroupSettings: migrated.groupSettings, migratedDel2Targets: migrated.del2Targets, migratedDel3Rules: migrated.del3Rules, migratedLidPhoneMappings: migrated.lidPhoneMappings, oldAuthDocumentsDeleted: true, targetSignalCredentialsPreserved: true });
-    return { retired: true, migrated, accountLocksTransferred };
+    console.warn('[session-account-duplicate-retired]', { sourceSessionId, targetSessionId, reason, samePhone, sameLid, accountLocksTransferred, migratedGroupSettings: migrated.groupSettings, migratedDel2Targets: migrated.del2Targets, migratedDel3Rules: migrated.del3Rules, migratedUserPreferences: migrated.userPreferences, migratedQuotedMessages: migrated.quotedMessages, migratedLidPhoneMappings: migrated.lidPhoneMappings, migratedOutgoingRetryMessages: migrated.outgoingRetryMessages, whatsappLogoutRequested, whatsappLogoutResolved, sourceSocketWasAlreadyClosed, logoutError, oldAuthDocumentsDeleted: true, targetSignalCredentialsPreserved: true, oldSessionRuntimeRemoved: true });
+    return { retired: true, migrated, accountLocksTransferred, whatsappLogoutRequested, whatsappLogoutResolved, sourceSocketWasAlreadyClosed };
 }
 
 async function consolidateDuplicateSessionsForAccount(targetSessionId, user, creds) {
@@ -6792,25 +6937,44 @@ async function consolidateDuplicateSessionsForAccount(targetSessionId, user, cre
     const phone = getAuthenticatedPhoneNumber(user, creds);
     const lid = getAuthenticatedLid(user, creds);
     const clauses = [];
-    if (phone) clauses.push({ Number: phone }, { number: phone }, { PairingNumber: phone }, { AccountJid: `${phone}@s.whatsapp.net` }, { accountJid: `${phone}@s.whatsapp.net` });
-    if (lid) clauses.push({ OwnerLid: lid }, { ownerLid: lid }, { AccountJid: lid }, { accountJid: lid });
-    if (!clauses.length) return 0;
-    const owners = await db.collection('session_owners').find({ sessionId: { $ne: targetSessionId }, $or: clauses }).limit(100).toArray();
+    const phoneFields = ['Number', 'number', 'PairingNumber', 'Numero', 'OwnerNumber', 'ownerNumber', 'OwnerPhone', 'ownerPhone', 'DeployerNumber', 'deployerNumber', 'phoneNumber', 'PhoneNumber', 'AccountJid', 'accountJid'];
+    const lidFields = ['OwnerLid', 'ownerLid', 'AccountLid', 'accountLid', 'Lid', 'lid', 'AccountJid', 'accountJid'];
+    if (phone) {
+        const phoneJid = `${phone}@s.whatsapp.net`;
+        for (const field of phoneFields) clauses.push({ [field]: phone }, { [field]: phoneJid });
+    }
+    if (lid) for (const field of lidFields) clauses.push({ [field]: lid });
+    if (!clauses.length) {
+        console.warn('[session-account-duplicate-scan-skipped]', { targetSessionId, authenticatedPhoneAvailable: false, authenticatedLidAvailable: false, reason: 'no_verified_account_identity' });
+        return 0;
+    }
+    const [indexedOwners, scannedOwners] = await Promise.all([
+        db.collection('session_owners').find({ sessionId: { $ne: targetSessionId }, $or: clauses }).limit(5000).toArray(),
+        db.collection('session_owners').find({ sessionId: { $ne: targetSessionId } }, { projection: { sessionId: 1, Number: 1, number: 1, PairingNumber: 1, Numero: 1, OwnerNumber: 1, ownerNumber: 1, OwnerPhone: 1, ownerPhone: 1, DeployerNumber: 1, deployerNumber: 1, phoneNumber: 1, PhoneNumber: 1, AccountJid: 1, accountJid: 1, OwnerLid: 1, ownerLid: 1, AccountLid: 1, accountLid: 1, Lid: 1, lid: 1 } }).limit(5000).toArray()
+    ]);
+    const ownerBySession = new Map();
+    for (const owner of [...indexedOwners, ...scannedOwners]) {
+        const ownerSessionId = String(owner?.sessionId || '');
+        if (ownerSessionId && !ownerBySession.has(ownerSessionId)) ownerBySession.set(ownerSessionId, owner);
+    }
+    const owners = [...ownerBySession.values()];
+    const matches = owners.filter(owner => {
+        const sourceNumber = getStoredSessionOwnerPhone(owner);
+        const sourceLid = getStoredSessionOwnerLid(owner);
+        return !!((phone && sourceNumber === phone) || (lid && sourceLid === lid));
+    });
+    const scanFallbackUsed = scannedOwners.length > 0;
+    console.info('[session-account-duplicate-scan]', { targetSessionId, candidateOwnerCount: owners.length, indexedCandidateCount: indexedOwners.length, scannedOwnerCount: scannedOwners.length, sameAccountCandidateCount: matches.length, phoneIdentityAvailable: !!phone, lidIdentityAvailable: !!lid, scanFallbackUsed, matchScope: 'normalized_authenticated_phone_or_lid_only_across_indexed_and_scanned_owner_records' });
     let retired = 0;
-    for (const owner of owners) {
+    for (const owner of matches) {
         const sourceSessionId = String(owner.sessionId || '');
         if (!sourceSessionId || sourceSessionId === targetSessionId) continue;
-        const sourceNumber = normalizePhoneNumber(owner.Number || owner.number || owner.PairingNumber || '') || getAuthenticatedPhoneNumber({ id: owner.AccountJid || owner.accountJid || '' }, null);
-        const sourceJid = String(owner.AccountJid || owner.accountJid || '').trim();
-        const sourceLid = normalizeLidCacheKey(owner.OwnerLid || owner.ownerLid || sourceJid);
-        const sameIdentity = !!((phone && sourceNumber === phone) || (lid && sourceLid === lid));
-        if (!sameIdentity) continue;
         const result = await retireDuplicateAccountSession(sourceSessionId, targetSessionId, 'authenticated_connection_open_replaced_previous_session').catch(error => {
             console.error('[session-account-duplicate-retirement-failed]', { sourceSessionId, targetSessionId, error: error?.message || String(error) });
             return { retired: false, reason: error?.message || 'retirement_failed' };
         });
         if (result?.retired) retired++;
-        else console.warn('[session-account-duplicate-retirement-deferred]', { sourceSessionId, targetSessionId, reason: result?.reason || 'unknown' });
+        else console.warn('[session-account-duplicate-retirement-deferred]', { sourceSessionId, targetSessionId, reason: result?.reason || 'unknown', targetSessionKeptActive: true });
     }
     return retired;
 }
@@ -10882,7 +11046,7 @@ async function generateCloudflareImage(prompt) {
 function scheduleSessionReconnect(sessionId, autoExpire, format, options = {}) {
     if (serverShuttingDown || tfbotWorkerStopping || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive)) return;
     const session = activeSessions.get(sessionId);
-    if (!session || reconnectTimers.has(sessionId) || String(session.status || '').toLowerCase() === 'pairing_expired' || session.reauthRequired === true || session.deviceRemoved === true) return;
+    if (!session || session.retiringDuplicateAccount === true || String(session.status || '').toLowerCase() === 'duplicate_account' || reconnectTimers.has(sessionId) || String(session.status || '').toLowerCase() === 'pairing_expired' || session.reauthRequired === true || session.deviceRemoved === true) return;
     const disconnectCode = Number(session.lastDisconnectCode || 0);
     const isRestartRequired = disconnectCode === 515 || /stream errored.*restart required|restart required/i.test(String(session.lastDisconnectReason || ''));
     if (session.pairingRestartFailed === true && !isRestartRequired) return;
@@ -12148,9 +12312,27 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const requestedAliases = [...new Set([requestedChatJid, key?.remoteJidAlt, key?.participant, key?.participantAlt, key?.participantPn, key?.senderPn].map(value => String(value || '').trim()).filter(Boolean))];
                 const retryFromMe = key?.fromMe === true;
                 const retryRuntimeIdentity = activeSessions.get(sessionId);
-                const ownPhone = getAuthenticatedPhoneNumber(sock.user, state.creds) || normalizedJidNumber(retryRuntimeIdentity?.ownPhoneJid || '');
-                const ownPhoneJid = ownPhone ? normalizePhoneCacheJid(`${ownPhone}@s.whatsapp.net`) : normalizePhoneCacheJid(retryRuntimeIdentity?.ownPhoneJid || '');
-                const ownLid = normalizeLidCacheKey(getAuthenticatedLid(sock.user, state.creds) || retryRuntimeIdentity?.ownLidJid || getRememberedLidForPhone(sessionId, ownPhoneJid));
+                let ownPhone = getAuthenticatedPhoneNumber(sock.user, state.creds) || normalizedJidNumber(retryRuntimeIdentity?.ownPhoneJid || '');
+                let ownPhoneJid = ownPhone ? normalizePhoneCacheJid(`${ownPhone}@s.whatsapp.net`) : normalizePhoneCacheJid(retryRuntimeIdentity?.ownPhoneJid || '');
+                let ownLid = normalizeLidCacheKey(getAuthenticatedLid(sock.user, state.creds) || retryRuntimeIdentity?.ownLidJid || getRememberedLidForPhone(sessionId, ownPhoneJid));
+                if (!ownPhone && !/@lid$/i.test(ownLid) && db) {
+                    try {
+                        let ownerIdentity = sessionOwnersCache.get(sessionId);
+                        if (!getStoredSessionOwnerPhone(ownerIdentity || {}) && !getStoredSessionOwnerLid(ownerIdentity || {})) {
+                            ownerIdentity = await db.collection('session_owners').findOne({ sessionId }, { projection: { Number: 1, number: 1, Numero: 1, OwnerNumber: 1, ownerNumber: 1, OwnerPhone: 1, ownerPhone: 1, DeployerNumber: 1, deployerNumber: 1, phoneNumber: 1, PhoneNumber: 1, AccountJid: 1, accountJid: 1, OwnerLid: 1, ownerLid: 1, AccountLid: 1, accountLid: 1, Lid: 1, lid: 1 } });
+                            if (ownerIdentity) sessionOwnersCache.set(sessionId, ownerIdentity);
+                        }
+                        ownPhone = getStoredSessionOwnerPhone(ownerIdentity || {});
+                        ownPhoneJid = ownPhone ? normalizePhoneCacheJid(`${ownPhone}@s.whatsapp.net`) : ownPhoneJid;
+                        ownLid = getStoredSessionOwnerLid(ownerIdentity || {}) || ownLid;
+                        if (retryRuntimeIdentity?.sock === sock) {
+                            retryRuntimeIdentity.ownPhoneJid = ownPhoneJid || retryRuntimeIdentity.ownPhoneJid || '';
+                            retryRuntimeIdentity.ownLidJid = ownLid || retryRuntimeIdentity.ownLidJid || '';
+                        }
+                    } catch (identityReadError) {
+                        console.warn('[message-retry-account-identity-fallback-failed]', { sessionId, error: identityReadError?.message || String(identityReadError) });
+                    }
+                }
                 const requestMatchesOwnIdentity = requestedAliases.some(alias => {
                     if (ownPhoneJid && (normalizePhoneCacheJid(alias) === ownPhoneJid || areEquivalentWhatsAppChatJids(sessionId, alias, ownPhoneJid))) return true;
                     return !!ownLid && normalizeLidCacheKey(alias) === normalizeLidCacheKey(ownLid);
@@ -12215,16 +12397,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             if (stored?.message) lookupScope = 'same_session_pn_lid_message_id_alias_key';
                         }
                     }
-                    const retryMayReferToOwnMessage = retryFromMe || key?.fromMe === undefined || key?.fromMe === null || outgoingIdKnown;
-                    const allowCrossSessionLookup = retryMayReferToOwnMessage && !retryFromMe && !requestMatchesOwnIdentity;
+                    const retryMayReferToOwnMessage = retryFromMe || requestMatchesOwnIdentity || key?.fromMe === undefined || key?.fromMe === null || outgoingIdKnown;
+                    const retryAccountIdentityVerified = !!(ownPhone || /@lid$/i.test(ownLid));
+                    const allowCrossSessionLookup = retryMayReferToOwnMessage && retryAccountIdentityVerified;
                     if (!stored?.message && allowCrossSessionLookup) {
                         const retryAccountPhone = ownPhone;
                         const retryAccountLid = ownLid;
-                        const retryAccountJid = String(sock.user?.id || state.creds?.me?.id || '').trim();
                         const sameAccountClauses = [];
                         if (retryAccountPhone) sameAccountClauses.push({ accountPhone: retryAccountPhone });
                         if (retryAccountLid) sameAccountClauses.push({ accountLid: normalizeLidCacheKey(retryAccountLid) });
-                        if (!sameAccountClauses.length && retryAccountJid) sameAccountClauses.push({ accountJid: retryAccountJid });
                         if (sameAccountClauses.length) {
                             stored = await retryCollection.findOne({ sessionId: { $ne: sessionId }, messageId, fromMe: true, $or: sameAccountClauses }, { projection, sort: { createdAt: -1 } });
                             if (stored?.message) lookupScope = 'same_authenticated_account_other_session';
@@ -12232,16 +12413,21 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     }
                     const storedAliases = [...new Set([stored?.remoteJid, stored?.remoteJidAlt, ...(Array.isArray(stored?.remoteJidAliases) ? stored.remoteJidAliases : [])].map(value => String(value || '').trim()).filter(Boolean))];
                     const storedChatMatches = !requestedChatJid || storedAliases.some(alias => areEquivalentWhatsAppChatJids(sessionId, alias, requestedChatJid));
-                    if (stored?.message && stored.fromMe === true && (stored.sessionId === sessionId || lookupScope === 'same_authenticated_account_other_session') && (sameSessionOutgoingAllowed || storedChatMatches)) {
+                    const storedAccountPhone = normalizePhoneNumber(stored?.accountPhone) || getAuthenticatedPhoneNumber({ id: stored?.accountJid || '' }, null);
+                    const storedAccountLid = normalizeLidCacheKey(stored?.accountLid || (/@lid$/i.test(String(stored?.accountJid || '')) ? stored.accountJid : ''));
+                    const storedVerifiedSameAccount = !!((ownPhone && storedAccountPhone === ownPhone) || (/@lid$/i.test(ownLid) && storedAccountLid === ownLid));
+                    const sameSessionRetryMatch = stored?.sessionId === sessionId && sameSessionOutgoingAllowed && storedChatMatches;
+                    const crossSessionRetryMatch = lookupScope === 'same_authenticated_account_other_session' && storedVerifiedSameAccount && storedChatMatches;
+                    if (stored?.message && stored.fromMe === true && (sameSessionRetryMatch || crossSessionRetryMatch)) {
                         const restoredMessage = fixBuffers(stored.message);
                         const restoredKey = { ...(stored.messageKey || {}), id: messageId, remoteJid: String(stored.remoteJid || requestedChatJid || ''), remoteJidAlt: String(stored.remoteJidAlt || ''), fromMe: true };
                         cacheRecentMessage(sessionId, { key: restoredKey, message: restoredMessage, messageTimestamp: stored.messageTimestamp || Math.floor(Date.now() / 1000) }, storedAliases);
                         cacheOutgoingRetryMessageMemory(sessionId, { key: restoredKey, message: restoredMessage }, storedAliases);
-                        console.info('[message-retry-store-hit]', { sessionId, messageId, chatMatch: storedChatMatches, lookupScope, storedSessionMatch: stored.sessionId === sessionId, fromMe: true, requestedChatJidPresent: !!requestedChatJid, participantType, crossSessionLookup: lookupScope === 'same_authenticated_account_other_session' });
+                        console.info('[message-retry-store-hit]', { sessionId, messageId, chatMatch: storedChatMatches, lookupScope, storedSessionMatch: stored.sessionId === sessionId, storedVerifiedSameAccount, fromMe: true, requestedChatJidPresent: !!requestedChatJid, participantType, crossSessionLookup: lookupScope === 'same_authenticated_account_other_session' });
                         return restoredMessage;
                     }
                     if (stored?.message) console.warn('[message-retry-chat-mismatch]', { sessionId, messageId, requestedChatJidPresent: !!requestedChatJid, storedChatAliasesCount: storedAliases.length, lookupScope, storedSessionMatch: stored.sessionId === sessionId, storedFromMe: stored.fromMe === true, sameSessionOutgoingAllowed });
-                    logRetryCacheMiss(true, retryFromMe ? 'from_me_message_not_found_in_same_session_by_id' : 'message_not_found_in_session_or_verified_account_scope');
+                    logRetryCacheMiss(true, retryFromMe ? 'from_me_message_not_found_in_same_session_or_verified_account_scope' : 'message_not_found_in_session_or_verified_account_scope');
                     console.warn('[message-retry-lookup-exhausted]', { sessionId, messageId, requestedChatJidPresent: !!requestedChatJid, requestedChatType: diagnosticChatType, requestedParticipantType: participantType, fromMe: retryFromMe, sameSessionOutgoingAllowed, crossSessionLookupAllowed: allowCrossSessionLookup, storeDocumentFound: !!stored?.message, lookupScope });
                 } catch (error) {
                     console.warn('[message-retry-store-read-failed]', { sessionId, messageId, requestedChatJidPresent: !!requestedChatJid, requestedParticipantType: participantType, error: error?.message || String(error) });
@@ -12716,6 +12902,20 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 return;
             }
             const { connection, lastDisconnect, qr } = update;
+            if (connection === 'close' && currentSocketSession.retiringDuplicateAccount === true) {
+                clearPairing515SocketOpenWatchdog(sessionId);
+                const duplicateCloseAt = new Date();
+                const duplicateCode = lastDisconnect?.error?.output?.statusCode ?? lastDisconnect?.error?.statusCode ?? null;
+                currentSocketSession.lastWhatsAppEvent = 'close';
+                currentSocketSession.lastWhatsAppEventAt = duplicateCloseAt.getTime();
+                currentSocketSession.lastDisconnectCode = duplicateCode;
+                currentSocketSession.lastDisconnectReason = String(lastDisconnect?.error?.message || lastDisconnect?.error?.output?.payload?.message || 'duplicate_account_retirement').slice(0, 180);
+                currentSocketSession.status = 'duplicate_account';
+                currentSocketSession.active = false;
+                void db.collection('session_owners').updateOne({ sessionId }, { $set: { connectionStatus: 'duplicate_account', retiringDuplicateAccount: true, socketAuthenticated: false, socketReady: false, lastWhatsAppEvent: 'close', lastWhatsAppEventAt: duplicateCloseAt, lastDisconnectCode: duplicateCode, lastDisconnectReason: currentSocketSession.lastDisconnectReason, statusUpdatedAt: duplicateCloseAt, updatedAt: duplicateCloseAt } }).catch(error => console.warn('[session-duplicate-retirement-close-state-failed]', { sessionId, error: error?.message || String(error) }));
+                console.info('[session-duplicate-retirement-socket-closed]', { sessionId, statusCode: duplicateCode, reconnectSuppressed: true, targetSessionUnaffected: true });
+                return;
+            }
             if (connection === 'open' || connection === 'close') clearPairing515SocketOpenWatchdog(sessionId);
             if (typeof update?.receivedPendingNotifications === 'boolean') {
                 const syncEvent = update.receivedPendingNotifications ? 'receivedPendingNotifications' : 'synchronisation';
@@ -12876,6 +13076,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 confirmedSession.pairingReplacementPending = false;
                 clearFreshPairingCleanupRetry(sessionId);
                 pendingPairingReplacementSessions.delete(sessionId);
+                flushPendingAccountPromotionUpserts(sessionId, sock);
                 confirmedSession.status = 'connecte';
                 confirmedSession.active = true;
                 confirmedSession.lastDisconnectCode = null;
@@ -13689,6 +13890,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         });
 
         sock.ev.on('messages.upsert', async (up) => {
+            if (activeSessions.get(sessionId)?.retiringDuplicateAccount === true || String(activeSessions.get(sessionId)?.status || '').toLowerCase() === 'duplicate_account') return;
             const messageUpsertEventStartedAt = Date.now();
             const initialUpsertType = String(up?.type || '');
             const initialBatchCount = Array.isArray(up?.messages) ? up.messages.length : 0;
@@ -13700,14 +13902,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 return;
             }
             if (isPendingPairingReplacementSession(sessionId)) {
-                const promotionWaitStartedAt = Date.now();
-                while (isPendingPairingReplacementSession(sessionId) && activeSessions.get(sessionId)?.sock === sock && !isSocketDefinitelyClosed(sock) && Date.now() - promotionWaitStartedAt < 45000) {
-                    await new Promise(resolve => setTimeout(resolve, 100));
-                }
-                if (isPendingPairingReplacementSession(sessionId)) {
-                    console.info('[message-upsert-deferred-during-account-promotion]', { sessionId, upsertType: initialUpsertType, messageCount: initialBatchCount, promotionWaitMs: Date.now() - promotionWaitStartedAt, action: 'preserve_candidate_socket_and_wait_for_authenticated_account_lock_transfer' });
+                const promotionAccountPhone = getAuthenticatedPhoneNumber(sock.user, state.creds);
+                const promotionAccountLid = getAuthenticatedLid(sock.user, state.creds);
+                const promotionOwnershipReady = hasFreshLocalExclusiveRuntimeOwnership(sessionId, sock, [promotionAccountPhone, promotionAccountLid]);
+                if (!promotionOwnershipReady) {
+                    const queued = queuePendingAccountPromotionUpsert(sessionId, sock, up);
+                    console.info('[message-upsert-queued-during-account-promotion]', { sessionId, upsertType: initialUpsertType, messageCount: initialBatchCount, queued, action: 'preserve_event_for_replay_after_verified_exclusive_account_lock_transfer_without_blocking_other_sessions' });
                     return;
                 }
+                console.info('[message-upsert-promotion-marker-bypassed-with-exclusive-lock]', { sessionId, upsertType: initialUpsertType, messageCount: initialBatchCount, action: 'continue_normal_message_processing_after_exclusive_session_and_account_lease_verification' });
             }
             let liveAccountPhone = '';
             let liveAccountLid = '';
@@ -17390,6 +17593,10 @@ async function main() {
         authWritesFencedByRuntimeLock: true,
         retryStoreExactSessionIdFallback: true,
         retryStoreSameAuthenticatedAccountFallback: true,
+        retryStoreFromMeCrossSessionExactMessageIdWhenAccountVerified: true,
+        duplicateAccountGroupSettingsAndDelRulesMigration: true,
+        duplicateAccountRecentOutgoingRetryMessageMigration: true,
+        duplicateAccountOldDeviceLogoutBeforeLocalCredentialDeletion: true,
         baileysCompanionRegRefreshPatch: baileysCompanionRegRefreshPatchStatus,
         outgoingRetryMessagePreloadedInMemoryBeforeRelay: true,
         privateQueueAliasesCanonicalizedWithinSession: true,
