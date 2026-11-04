@@ -1,9 +1,11 @@
 try { require('dotenv').config(); } catch (e) {}
 const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(5000, Math.min(120000, Number(process.env.MESSAGE_QUEUE_TASK_TIMEOUT_MS || 14000)));
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(500, Math.min(10000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 2500)));
+const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(process.env.MEDIA_SEND_TASK_TIMEOUT_MS || 600000)));
+const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r161-beta-515-force-dispose-same-auth-stage-watchdog';
+const TFBOT_CLUSTER_CODE_REVISION = 'r167-session-expiry-grace-status-enforcement';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -1553,7 +1555,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-04-r161';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-04-r167';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1744,6 +1746,8 @@ const accountReplacementPromotionPromises = new Map();
 const SESSION_HEALTH_CHECK_INTERVAL_MS = Math.max(10000, Math.min(30000, Number(process.env.SESSION_HEALTH_CHECK_INTERVAL_MS) || 15000));
 const SESSION_WS_PONG_TIMEOUT_MS = Math.max(30000, Math.min(180000, Number(process.env.SESSION_WS_PONG_TIMEOUT_MS) || 45000));
 const SESSION_UNCONNECTED_TTL_MS = Math.max(24 * 60 * 60 * 1000, Math.min(7 * 24 * 60 * 60 * 1000, Number(process.env.SESSION_UNCONNECTED_TTL_MS) || 24 * 60 * 60 * 1000));
+const SESSION_INVALID_STATUS_TTL_MS = 220000;
+const invalidStatusCleanupTimers = new Map();
 const PAIRING_CHALLENGE_TTL_MS = Math.max(5 * 60 * 1000, Math.min(60 * 60 * 1000, Number(process.env.PAIRING_CHALLENGE_TTL_MS) || 15 * 60 * 1000));
 const PAIRING_SESSION_TTL_MS = PAIRING_CHALLENGE_TTL_MS;
 const PAIRING_CODE_REQUEST_TIMEOUT_MS = 0;
@@ -1751,7 +1755,7 @@ const PAIRING_CODE_REQUEST_INITIAL_DELAY_MS = 3000;
 const PAIRING_515_CREDENTIAL_TIMEOUT_MS = Math.max(15000, Math.min(90000, Number(process.env.PAIRING_515_CREDENTIAL_TIMEOUT_MS) || 60000));
 const PAIRING_515_STORE_TIMEOUT_MS = Math.max(15000, Math.min(120000, Number(process.env.PAIRING_515_STORE_TIMEOUT_MS) || 90000));
 const PAIRING_515_RESTART_OPEN_TIMEOUT_MS = Math.max(30000, Math.min(600000, Number(process.env.PAIRING_515_RESTART_OPEN_TIMEOUT_MS) || 90000));
-const EXPLICIT_LOGOUT_CLEANUP_DELAY_MS = 17000;
+const EXPLICIT_LOGOUT_CLEANUP_DELAY_MS = 220000;
 const GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS = Math.max(60000, Number(process.env.GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS) || 6 * 60 * 60 * 1000);
 const GROUP_SENDER_KEY_RESET_EVERY_SEND = String(process.env.GROUP_SENDER_KEY_RESET_EVERY_SEND || 'false').trim().toLowerCase() === 'true';
 const GROUP_SENDER_KEY_RESET_ON_SEND = String(process.env.GROUP_SENDER_KEY_RESET_ON_SEND || 'false').trim().toLowerCase() === 'true';
@@ -1914,7 +1918,7 @@ const SESSION_OPEN_READINESS_RETRY_MS = Math.max(1000, Math.min(15000, Number(pr
 const groupMetadataCache = new Map();
 function isSocketDefinitelyClosed(sock) {
     const readyState = sock?.ws?.readyState ?? sock?.ws?._socket?.readyState ?? sock?.socket?.readyState;
-    return Number(readyState) === 3 || String(readyState).toUpperCase() === 'CLOSED';
+    return sock?.ws?.isOpen === false || sock?.ws?._socket?.destroyed === true || Number(readyState) === 3 || String(readyState).toUpperCase() === 'CLOSED';
 }
 function isWhatsAppSocketReady(session, sock) {
     const lastEvent = String(session?.lastWhatsAppEvent || '').toLowerCase();
@@ -1959,6 +1963,8 @@ async function restoreAuthenticatedSessionRuntimeStatus(sessionId, session, sock
     const accountFirstConnectedAt = parseAliveDate(session.accountFirstConnectedAt) || parseAliveDate(session.connectedSince) || parseAliveDate(persistedOwner?.accountFirstConnectedAt) || parseAliveDate(persistedOwner?.connectedSince) || (priorConnectionProof ? parseAliveDate(persistedOwner?.createdAt) || Number(String(sessionId).match(/^session_(\d+)/)?.[1] || 0) || parseAliveDate(session.createdAt) : 0) || now.getTime();
     session.accountFirstConnectedAt = accountFirstConnectedAt;
     session.connectedSince = accountFirstConnectedAt;
+    session.invalidStatusSinceAt = null;
+    clearInvalidStatusCleanupTimer(sessionId);
     session.everConnected = true;
     session.everAuthenticated = true;
     session.status = 'connecte';
@@ -1971,7 +1977,7 @@ async function restoreAuthenticatedSessionRuntimeStatus(sessionId, session, sock
     if (db) {
         await db.collection('session_owners').updateOne(
             { sessionId },
-            { $set: { connectionStatus: 'connected', socketAuthenticated: true, socketReady: true, socketAuthenticatedAt: now, accountFirstConnectedAt, connectedSince: accountFirstConnectedAt, everAuthenticated: true, everConnected: true, statusUpdatedAt: now, updatedAt: now, lastSessionHealthAt: now, pairingPending: false, reauthRequired: false }, $unset: { unconnectedSinceAt: 1, disconnectTime: 1, pairingChallengeStartedAt: 1 } },
+            { $set: { connectionStatus: 'connected', socketAuthenticated: true, socketReady: true, invalidStatusSinceAt: null, invalidStatusExpiresAt: null, socketAuthenticatedAt: now, accountFirstConnectedAt, connectedSince: accountFirstConnectedAt, everAuthenticated: true, everConnected: true, statusUpdatedAt: now, updatedAt: now, lastSessionHealthAt: now, pairingPending: false, reauthRequired: false }, $unset: { unconnectedSinceAt: 1, disconnectTime: 1, pairingChallengeStartedAt: 1 } },
             { upsert: false }
         ).catch(error => console.warn('[session-runtime-status-restore-persist-failed]', { sessionId, error: error?.message || String(error) }));
     }
@@ -2193,6 +2199,9 @@ function setSessionChatHistory(historyKey, history) {
 function cleanupSessionVolatileCaches(sessionId) {
     const id = String(sessionId || '');
     if (!id) return;
+    const invalidTimer = invalidStatusCleanupTimers.get(id);
+    if (invalidTimer) clearTimeout(invalidTimer);
+    invalidStatusCleanupTimers.delete(id);
     closeInboundCommandQueue(id);
     const sessionPrefix = `${id}:`;
     const groupPrefix = `${id}:`;
@@ -2903,7 +2912,7 @@ async function processMessageQueue(queue) {
             let outcome;
             try {
                 outcome = await Promise.race([
-                    promiseWithTimeout(operation, MESSAGE_QUEUE_TASK_TIMEOUT_MS, 'WhatsApp queued operation').then(
+                    promiseWithTimeout(operation, Number(task.timeoutMs) > 0 ? task.timeoutMs : MESSAGE_QUEUE_TASK_TIMEOUT_MS, 'WhatsApp queued operation').then(
                         result => ({ type: 'resolved', result }),
                         error => ({ type: /timed out/i.test(String(error?.message || error)) ? 'timeout' : 'rejected', error })
                     ),
@@ -2920,9 +2929,9 @@ async function processMessageQueue(queue) {
                 let lateReleaseTimer = setTimeout(() => {
                     if (queue.blockedOperation !== operation) return;
                     queue.blockedOperation = null;
-                    console.warn('[message-queue-slow-operation-isolated]', { taskId: task.id, partition: queue.partitionKey || '__session__', durationMs: Date.now() - startedAt, thresholdMs: MESSAGE_QUEUE_TASK_TIMEOUT_MS, graceMs: MESSAGE_QUEUE_LATE_GRACE_MS, callerStillWaitingForActualResult: true, nextTaskReleased: true, lateOperationMayStillSettle: true });
+                    console.warn('[message-queue-slow-operation-isolated]', { taskId: task.id, partition: queue.partitionKey || '__session__', durationMs: Date.now() - startedAt, thresholdMs: MESSAGE_QUEUE_TASK_TIMEOUT_MS, graceMs: Number(task.lateGraceMs) > 0 ? task.lateGraceMs : MESSAGE_QUEUE_LATE_GRACE_MS, callerStillWaitingForActualResult: true, nextTaskReleased: true, lateOperationMayStillSettle: true });
                     if (queue.tasks.length) setImmediate(() => processMessageQueue(queue));
-                }, MESSAGE_QUEUE_LATE_GRACE_MS);
+                }, Number(task.lateGraceMs) > 0 ? task.lateGraceMs : MESSAGE_QUEUE_LATE_GRACE_MS);
                 if (typeof lateReleaseTimer.unref === 'function') lateReleaseTimer.unref();
                 const clearBlockedOperation = result => {
                     if (queue.blockedOperation !== operation) return false;
@@ -2953,7 +2962,7 @@ async function processMessageQueue(queue) {
                 console.warn('[message-queue-task-slow]', {
                     taskId: task.id,
                     durationMs: Date.now() - startedAt,
-                    thresholdMs: MESSAGE_QUEUE_TASK_TIMEOUT_MS,
+                    thresholdMs: Number(task.timeoutMs) > 0 ? task.timeoutMs : MESSAGE_QUEUE_TASK_TIMEOUT_MS,
                     remainingTasks: queue.tasks.length,
                     partition: queue.partitionKey || '__session__',
                     action: 'keep_caller_pending_until_actual_send_result_and_release_only_this_destination_after_grace'
@@ -2984,7 +2993,7 @@ async function processMessageQueue(queue) {
         if (queue.tasks.length > 0 && !queue.blockedOperation) setImmediate(() => processMessageQueue(queue));
     }
 }
-function queueMessage(executeFn, delayMs = 150, queueKey = null, partitionKey = '') {
+function queueMessage(executeFn, delayMs = 150, queueKey = null, partitionKey = '', taskOptions = {}) {
     const queue = getMessageQueue(queueKey, partitionKey);
     return new Promise((resolve, reject) => {
         if (queue.tasks.length >= 300) {
@@ -2993,7 +3002,7 @@ function queueMessage(executeFn, delayMs = 150, queueKey = null, partitionKey = 
             reject(error);
             return;
         }
-        queue.tasks.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, execute: executeFn, delay: delayMs, resolve, reject });
+        queue.tasks.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, execute: executeFn, delay: delayMs, timeoutMs: Number(taskOptions.timeoutMs) || 0, lateGraceMs: Number(taskOptions.lateGraceMs) || 0, resolve, reject });
         void processMessageQueue(queue);
     });
 }
@@ -3770,6 +3779,8 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
     const legacyPrivateMatch = requestedDestinationJid.match(/^(\+?\d{6,20})(?::\d+)?@c\.us$/i);
     const originalDestinationJid = normalizePhoneCacheJid(requestedDestinationJid) || (legacyPrivateMatch ? `${normalizePhoneNumber(legacyPrivateMatch[1])}@s.whatsapp.net` : normalizeNativeLidJid(requestedDestinationJid) || requestedDestinationJid);
     const queuePartitionKey = getMessageQueuePartitionKey(expectedSessionId, originalDestinationJid, expectedSession);
+    const outgoingMediaBytes = ['image', 'video', 'audio', 'document', 'sticker'].reduce((total, key) => { const value = content?.[key]; return total + (Buffer.isBuffer(value) ? value.length : value instanceof Uint8Array ? value.byteLength : 0); }, 0);
+    const outgoingContainsMedia = outgoingMediaBytes > 0 || !!(content?.album || content?.albumMessage);
     const queueEnqueuedAt = Date.now();
     console.info('[whatsapp-send-queued]', { sessionId: expectedSessionId, destinationType: /@g\.us$/i.test(originalDestinationJid) ? 'group' : /@newsletter$/i.test(originalDestinationJid) ? 'channel' : /@lid$/i.test(originalDestinationJid) ? 'private_lid' : 'private_or_other', messageType: Object.keys(content || {}).join(',') || 'unknown', queuePartition: queuePartitionKey, pendingTasks: getMessageQueue(sock, queuePartitionKey).tasks.length });
     return queueMessage(async () => {
@@ -4003,7 +4014,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             }
         }
         return result;
-    }, delayMs, sock, queuePartitionKey).catch(sendError => {
+    }, delayMs, sock, queuePartitionKey, outgoingContainsMedia ? { timeoutMs: MEDIA_SEND_TASK_TIMEOUT_MS, lateGraceMs: MEDIA_SEND_LATE_GRACE_MS } : {}).catch(sendError => {
         if (actualSendFailure) {
             void reportTfbotWorkerSendFailure(expectedSessionId, sendError).catch(() => false);
         }
@@ -5932,6 +5943,9 @@ async function deleteMongoSession(sessionId) {
         if (foreignSessionLock || foreignAccountLock) throw new Error('session_delete_blocked_by_foreign_runtime_lock');
         const currentRuntime = activeSessions.get(sessionId);
         if (currentRuntime?.sock && isAuthenticatedSocketOperational(currentRuntime, currentRuntime.sock) && !['reauth_required', 'duplicate_account', 'deconnecte'].includes(String(currentRuntime.status || '').toLowerCase())) throw new Error('session_delete_blocked_while_socket_authenticated');
+        const invalidTimer = invalidStatusCleanupTimers.get(sessionId);
+        if (invalidTimer) clearTimeout(invalidTimer);
+        invalidStatusCleanupTimers.delete(sessionId);
         await releaseSessionRuntimeLock(sessionId);
         const collection = db.collection('baileys_auth');
         const escapedSessionId = String(sessionId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -6171,9 +6185,25 @@ async function expireUnregisteredPairingSession(owner, source = 'pairing_challen
         scheduleFreshPairingCleanupRetry(sessionId, `${source}:cleanup_retry:${detail}`, 2500);
     };
     try {
-        const liveOwner = owner || await ownerCol.findOne({ sessionId }).catch(() => null);
+        const liveOwner = await ownerCol.findOne({ sessionId }).catch(() => null) || owner;
         if (!liveOwner) return { removed: false, reason: 'owner_record_missing' };
         const runtime = activeSessions.get(sessionId);
+        const currentExpiryStatus = resolveInvalidExpirySessionStatus(liveOwner, runtime, sessionId);
+        if (isNonExpiringSessionStatus(currentExpiryStatus)) {
+            clearPairingChallengeTimer(sessionId);
+            clearPairingRestartWatchdog(sessionId);
+            return { removed: false, preserved: true, reason: 'session_status_is_active_or_synchronizing' };
+        }
+        const existingInvalidSinceAt = parseSessionStatusTimestamp(liveOwner.invalidStatusSinceAt) || parseSessionStatusTimestamp(runtime?.invalidStatusSinceAt);
+        if (!existingInvalidSinceAt) {
+            await reconcileInvalidStatusCleanup(liveOwner, runtime);
+            return { removed: false, preserved: true, reason: 'invalid_status_grace_period_started' };
+        }
+        const invalidRemainingMs = existingInvalidSinceAt + SESSION_INVALID_STATUS_TTL_MS - Date.now();
+        if (invalidRemainingMs > 0) {
+            scheduleInvalidStatusCleanup(sessionId, existingInvalidSinceAt, invalidRemainingMs);
+            return { removed: false, preserved: true, reason: 'invalid_status_grace_period_active', remainingMs: invalidRemainingMs };
+        }
         const restartCode = Number(liveOwner.lastDisconnectCode ?? liveOwner.DisconnectCode ?? runtime?.lastDisconnectCode ?? 0);
         const restartReason = String(liveOwner.lastDisconnectReason || liveOwner.DisconnectReason || runtime?.lastDisconnectReason || '');
         const restartRequired = restartCode === 515 || /stream errored.*restart required|restart required/i.test(restartReason) || Number(liveOwner.pairingRestartAttempts || runtime?.pairingRestartAttempts || 0) > 0 || !!liveOwner.pairingRestartRequiredAt;
@@ -6297,7 +6327,7 @@ function schedulePairingChallengeExpiry(sessionId, challengeStartedAt, source = 
     const timer = setTimeout(async () => {
         pairingChallengeTimers.delete(sessionId);
         try {
-            const owner = await db.collection('session_owners').findOne({ sessionId }, { projection: { createdAt: 1, pairingPending: 1, pairingAttemptPending: 1, pairingChallengeStartedAt: 1, pairingStartedAt: 1, pairingCleanupPending: 1, pairingRestartFailed: 1, everConnected: 1, everAuthenticated: 1, socketAuthenticated: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, ownerDeploymentId: 1, ownerLeaseUntil: 1, connectedSince: 1, socketAuthenticatedAt: 1, pairingProofPersisted: 1, pairingCredentialsConfirmedAt: 1, AccountJid: 1, OwnerLid: 1, Number: 1, PairingNumber: 1, format: 1, Format: 1 } }).catch(() => null);
+            const owner = await db.collection('session_owners').findOne({ sessionId }, { projection: { createdAt: 1, pairingPending: 1, pairingAttemptPending: 1, pairingChallengeStartedAt: 1, pairingStartedAt: 1, pairingCleanupPending: 1, pairingRestartFailed: 1, everConnected: 1, everAuthenticated: 1, socketAuthenticated: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, ownerDeploymentId: 1, ownerLeaseUntil: 1, connectionStatus: 1, status: 1, invalidStatusSinceAt: 1, invalidStatusExpiresAt: 1, nextRestoreRetryAt: 1, lastWhatsAppEvent: 1, connectedSince: 1, socketAuthenticatedAt: 1, pairingProofPersisted: 1, pairingCredentialsConfirmedAt: 1, AccountJid: 1, OwnerLid: 1, Number: 1, PairingNumber: 1, format: 1, Format: 1 } }).catch(() => null);
             if (!owner) return;
             const runtime = activeSessions.get(sessionId);
             if (hasEstablishedWhatsAppAccount(owner, runtime, runtime?.authState?.creds || null)) return;
@@ -6810,6 +6840,7 @@ async function addDel2Target(sessionId, gjid, targetJid) {
     try {
         const col = db.collection('group_del2');
         await col.updateOne({ sessionId, gjid, targetJid }, { $set: { active: true } }, { upsert: true });
+        activeDel2UsersCache.delete(`${sessionId}_${gjid}`);
         const current = await getDel2Targets(sessionId, gjid);
         if (!current.includes(targetJid)) {
             current.push(targetJid);
@@ -6825,6 +6856,7 @@ async function removeDel2Target(sessionId, gjid, targetJid) {
     try {
         const col = db.collection('group_del2');
         await col.deleteMany({ sessionId, gjid, targetJid });
+        activeDel2UsersCache.delete(`${sessionId}_${gjid}`);
         const current = await getDel2Targets(sessionId, gjid);
         const index = current.indexOf(targetJid);
         if (index > -1) {
@@ -9107,6 +9139,8 @@ app.all('/get-code', async (req, res) => {
                     pairingChallengeStartedAt: pairingStartedAt,
                     autoExpirePairing: autoExpire,
                     connectionStatus: 'pairing_starting',
+                    invalidStatusSinceAt: pairingStartedAt,
+                    invalidStatusExpiresAt: new Date(pairingStartedAt.getTime() + SESSION_INVALID_STATUS_TTL_MS),
                     socketAuthenticated: false,
                     socketReady: false,
                     everAuthenticated: false,
@@ -9139,6 +9173,7 @@ app.all('/get-code', async (req, res) => {
             },
             { upsert: true }
         );
+        scheduleInvalidStatusCleanup(sId, pairingStartedAt.getTime(), SESSION_INVALID_STATUS_TTL_MS);
         schedulePairingChallengeExpiry(sId, pairingStartedAt, `${connectionFormat}_fresh_challenge`);
         pairingStage = 'socket_starting';
         enqueuePairingHttpDiagnostic(sId, 'session-preallocated', { format: connectionFormat, replacementSessionPresent: !!replacementOfSessionId });
@@ -9596,14 +9631,16 @@ function hasWhatsAppFormatting(value) {
         || /```|`[^`\n]+`/.test(source);
 }
 
-function buildCaption(type, text, userName, preserveFormatting = null, ownerName = '') {
+function buildCaption(type, text, userName, preserveFormatting = null, ownerName = '', language = 'ht') {
     const cleanType = String(type || 'Message').replace(/[\r\n]+/g, ' ').trim().slice(0, 48) || 'Message';
     const cleanText = normalizeCaptionText(text);
     const cleanUserName = (sanitizeSessionDisplayName(userName) || 'Inconnu').replace(/"/g, '');
-    const cleanOwnerName = sanitizeSessionDisplayName(ownerName) || 'Compte connecté';
+    const cleanOwnerName = sanitizeSessionDisplayName(ownerName) || 'Inconnu';
+    const labels = { fr: ['Utilisateur', 'Propriétaire'], en: ['User', 'Owner'], es: ['Usuario', 'Propietario'], ht: ['Itilizatè', 'Pwopriyetè'] };
+    const [userLabel, ownerLabel] = labels[['fr', 'en', 'es', 'ht'].includes(language) ? language : 'ht'];
     const keepFormatting = typeof preserveFormatting === 'boolean' ? preserveFormatting : hasWhatsAppFormatting(cleanText);
     const content = cleanText ? (keepFormatting ? cleanText : `*_${cleanText}_*`) : '';
-    return `*○ ${cleanType}*\n\n*Bot (tfbot)*\nUtilisateur : "${cleanUserName}"\nPropriétaire : ${cleanOwnerName}${content ? `\n\n${content}` : ''}\n\n> *Bot (tfbot)*`;
+    return `*○ ${cleanType}*\n\n*Bot (tfbot)*\n${userLabel} : "${cleanUserName}"\n${ownerLabel} : ${cleanOwnerName}${content ? `\n\n${content}` : ''}\n\n> *_Bot (tfbot)_*`;
 }
 
 function splitCaptionBodies(type, text, userName, maxChars = MAX_WHATSAPP_CAPTION_CHARS, preserveFormatting = null, ownerName = '') {
@@ -9675,6 +9712,25 @@ async function normalizeOutgoingImageBuffer(imageBuffer) {
 }
 
 async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, sendOptions = {}) {
+    if (sendOptions.commandFormat === true) {
+        const deliveryImageBuffer = Buffer.isBuffer(imageBuffer) ? imageBuffer : imageBuffer instanceof Uint8Array ? Buffer.from(imageBuffer.buffer, imageBuffer.byteOffset, imageBuffer.byteLength) : null;
+        const ownerName = sanitizeSessionDisplayName(sendOptions.ownerName || sock?.user?.name || sock?.user?.notify || sock?.user?.verifiedName || '') || 'Inconnu';
+        const preserveFormatting = sendOptions.preserveFormatting === true || hasWhatsAppFormatting(text);
+        const caption = buildCaption(type, text, userName, preserveFormatting, ownerName, sendOptions.language || 'ht');
+        const outgoingOptions = {};
+        if (Array.isArray(sendOptions.mentions) && sendOptions.mentions.length) outgoingOptions.mentions = sendOptions.mentions;
+        const messageOptions = { ...(sendOptions.messageOptions || {}) };
+        delete messageOptions.quoted;
+        const canUseImageCaption = !!(deliveryImageBuffer?.length && caption.length <= MAX_WHATSAPP_CAPTION_CHARS);
+        const payload = canUseImageCaption ? { image: deliveryImageBuffer, caption, ...outgoingOptions } : { text: caption, ...outgoingOptions };
+        if (sendOptions.directSend === true) {
+            const startedAt = Date.now();
+            const result = await sock.sendMessage(jid, payload, messageOptions);
+            console.info('[command-response-direct-send]', { action: String(type || 'Message'), usedImage: canUseImageCaption, imageBytes: canUseImageCaption ? deliveryImageBuffer.length : 0, textLength: caption.length, durationMs: Date.now() - startedAt, responseAccepted: !!result?.key?.id });
+            return result;
+        }
+        return queuedSendMessage(sock, jid, payload, messageOptions, 0);
+    }
     let deliveryImageBuffer = null;
     try {
         deliveryImageBuffer = await normalizeOutgoingImageBuffer(imageBuffer);
@@ -9751,17 +9807,13 @@ async function inspectAdamLogo() {
         console.warn('[logo-image-source-unavailable]');
         return false;
     }
-    const originalBytes = adamLogoBuffer.length;
-    try {
-        const normalizedLogo = await normalizeOutgoingImageBuffer(adamLogoBuffer);
-        if (!normalizedLogo) throw new Error('logo_image_empty_after_normalization');
-        adamLogoBuffer = normalizedLogo;
-        console.info('[logo-image-normalized]', { originalBytes, finalBytes: normalizedLogo.length, format: 'jpeg', fileExtension: path.extname(logoPath).toLowerCase() });
-        return true;
-    } catch (error) {
-        console.error('[logo-image-normalization-failed]', { originalBytes, reason: String(error?.message || error).slice(0, 180) });
+    const isPng = adamLogoBuffer.length >= 8 && adamLogoBuffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    if (!isPng) {
+        console.warn('[logo-image-source-invalid]', { bytes: adamLogoBuffer.length, expectedFormat: 'png' });
         return false;
     }
+    console.info('[logo-image-source-ready]', { bytes: adamLogoBuffer.length, format: 'png', sourcePreserved: true });
+    return true;
 }
 
 app.get('/sitemap.xml', (req, res) => res.sendFile(path.join(__dirname, 'sitemap.xml')));
@@ -9928,7 +9980,7 @@ const now = Date.now();
 let ownerDocs = [];
 if (ownerCol) {
     try {
-        ownerDocs = await ownerCol.find({}, { projection: { sessionId: 1, createdAt: 1, ownerLeaseUntil: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, connectionStatus: 1, status: 1, socketAuthenticated: 1, socketReady: 1, accountFirstConnectedAt: 1, connectedSince: 1, socketAuthenticatedAt: 1, everAuthenticated: 1, everConnected: 1, pairingProofPersisted: 1, pairingCredentialsConfirmedAt: 1, reauthRequired: 1, credentialsRevoked: 1, duplicateAccountOf: 1, duplicateOfSessionId: 1, format: 1, Format: 1, pairingChallengeStartedAt: 1, pairingStartedAt: 1, pairingPending: 1, pairingAttemptPending: 1, pairingCleanupPending: 1, pairingRestartFailed: 1, pairingRestartFailedAt: 1, pairingRestartRequiredAt: 1, PairingNumber: 1, nextRestoreRetryAt: 1, lastWhatsAppEvent: 1, lastWhatsAppEventAt: 1, lastDisconnectCode: 1, lastDisconnectReason: 1, DisconnectCode: 1, DisconnectReason: 1, lastAuthFailure: 1, lastAuthFailureAt: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, Name: 1, Number: 1, number: 1, OwnerNumber: 1, ownerNumber: 1, OwnerPhone: 1, ownerPhone: 1, DeployerNumber: 1, deployerNumber: 1, AccountJid: 1, OwnerLid: 1, mode: 1, Mode: 1, unconnectedSinceAt: 1, disconnectTime: 1, statusUpdatedAt: 1 } }).sort({ createdAt: -1 }).limit(5000).toArray();
+        ownerDocs = await ownerCol.find({}, { projection: { sessionId: 1, createdAt: 1, ownerLeaseUntil: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, connectionStatus: 1, status: 1, invalidStatusSinceAt: 1, invalidStatusExpiresAt: 1, socketAuthenticated: 1, socketReady: 1, accountFirstConnectedAt: 1, connectedSince: 1, socketAuthenticatedAt: 1, everAuthenticated: 1, everConnected: 1, pairingProofPersisted: 1, pairingCredentialsConfirmedAt: 1, reauthRequired: 1, credentialsRevoked: 1, duplicateAccountOf: 1, duplicateOfSessionId: 1, format: 1, Format: 1, pairingChallengeStartedAt: 1, pairingStartedAt: 1, pairingPending: 1, pairingAttemptPending: 1, pairingCleanupPending: 1, pairingRestartFailed: 1, pairingRestartFailedAt: 1, pairingRestartRequiredAt: 1, PairingNumber: 1, nextRestoreRetryAt: 1, lastWhatsAppEvent: 1, lastWhatsAppEventAt: 1, lastDisconnectCode: 1, lastDisconnectReason: 1, DisconnectCode: 1, DisconnectReason: 1, lastAuthFailure: 1, lastAuthFailureAt: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, Name: 1, Number: 1, number: 1, OwnerNumber: 1, ownerNumber: 1, OwnerPhone: 1, ownerPhone: 1, DeployerNumber: 1, deployerNumber: 1, AccountJid: 1, OwnerLid: 1, mode: 1, Mode: 1, unconnectedSinceAt: 1, disconnectTime: 1, statusUpdatedAt: 1 } }).sort({ createdAt: -1 }).limit(5000).toArray();
     } catch (ownerReadError) {
         console.error('[sessions-list-database-read-failed]', ownerReadError?.message || String(ownerReadError));
     }
@@ -10129,11 +10181,13 @@ const credentialStateValid = !incompletePairing515 && !credentialsRevoked && (lo
     NextRetryAt: retryScheduled ? new Date(retryAt).toISOString() : null,
     DuplicateOf: ownerDoc.duplicateAccountOf || ownerDoc.duplicateOfSessionId || null,
     Numero: getAuthenticatedPhoneNumber(localSession?.sock?.user || null, activeCredentialRecord) || getAuthenticatedPhoneNumber(null, storedCredentials) || normalizePhoneNumber(ownerDoc.Number || ownerDoc.number || ownerDoc.PairingNumber || '') || 'N/A',
-    Name: sanitizeSessionDisplayName(localSession?.sock?.user?.name || localSession?.sock?.user?.notify || activeCredentialRecord?.me?.name || (credentialStateValid ? ownerDoc.Name : '') || 'Bot (tfbot)'),
+    Name: sanitizeSessionDisplayName(localSession?.sock?.user?.name || localSession?.sock?.user?.notify || localSession?.sock?.user?.verifiedName || activeCredentialRecord?.me?.name || ownerDoc.Name || ownerDoc.name || 'Inconnu'),
     Format: rawFormat,
     Mode: ownerDoc.mode || ownerDoc.Mode || 'prive',
     WhatsAppEvent: eventName,
     WhatsAppStateAt: eventAt,
+    InvalidStatusSinceAt: isNonExpiringSessionStatus(status) ? null : ownerDoc.invalidStatusSinceAt || localSession?.invalidStatusSinceAt || null,
+    InvalidStatusExpiresAt: isNonExpiringSessionStatus(status) ? null : ownerDoc.invalidStatusExpiresAt || null,
     DisconnectCode: currentClose && !socketAuthenticated ? localSession?.lastDisconnectCode || ownerDoc.lastDisconnectCode || null : null,
     DisconnectReason: currentClose && !socketAuthenticated ? localSession?.lastDisconnectReason || ownerDoc.lastDisconnectReason || null : null,
     Alive: aliveStr
@@ -10188,6 +10242,8 @@ for (const [sessionId, authDoc] of credentialDocsBySession.entries()) {
       Mode: 'prive',
       WhatsAppEvent: eventName,
       WhatsAppStateAt: localSession?.lastWhatsAppEventAt || null,
+      InvalidStatusSinceAt: isNonExpiringSessionStatus(status) ? null : localSession?.invalidStatusSinceAt || null,
+      InvalidStatusExpiresAt: isNonExpiringSessionStatus(status) ? null : localSession?.invalidStatusSinceAt ? new Date(parseSessionStatusTimestamp(localSession.invalidStatusSinceAt) + SESSION_INVALID_STATUS_TTL_MS).toISOString() : null,
       DisconnectCode: currentClose && !socketAuthenticated ? localSession?.lastDisconnectCode || null : null,
       DisconnectReason: currentClose && !socketAuthenticated ? localSession?.lastDisconnectReason || null : null,
       Alive: socketAuthenticated ? getUptimeString(Math.max(1000, aliveSince ? now - aliveSince : 1000)) : null
@@ -10222,7 +10278,7 @@ for (const localSession of activeSessions.values()) {
   if (!restoreError && localSession.lastRestoreError) localSession.lastRestoreError = null;
   const currentClose = String(localSession.lastWhatsAppEvent || '').toLowerCase() === 'close';
   const aliveSince = getAccountAliveTimestamp(null, localSession, isAuthenticated);
-  sessionsList.push({ ID: localSession.id, Sessions: localDisplayStatus, Categorie: isAuthenticated ? 'active' : activeRetryAt ? 'reconnexion' : pairingPending ? 'connexion' : 'authentification_incomplete', Credentials: isAuthenticated || registered ? 'recuperables' : 'incomplets', Owner: TFBOT_CLUSTER_INSTANCE_URL || TFBOT_CLUSTER_INSTANCE_HOST, OwnerLeaseUntil: tfbotWorkerLeaseUntil > now ? new Date(tfbotWorkerLeaseUntil).toISOString() : null, SocketAuthenticated: isAuthenticated, SocketReady: isWhatsAppSocketReady(localSession, localSession.sock), RestoreError: restoreError, NextRetryAt: activeRetryAt ? new Date(activeRetryAt).toISOString() : null, DuplicateOf: null, Numero: getAuthenticatedPhoneNumber(localSession.sock?.user || null, localSession.authState?.creds) || 'N/A', Name: sanitizeSessionDisplayName(localSession.sock?.user?.name || localSession.sock?.user?.notify || localSession.authState?.creds?.me?.name || 'Bot (tfbot)'), Format: format, Mode: 'prive', WhatsAppEvent: localSession.lastWhatsAppEvent || null, WhatsAppStateAt: localSession.lastWhatsAppEventAt || null, DisconnectCode: currentClose && !isAuthenticated ? localSession.lastDisconnectCode || null : null, DisconnectReason: currentClose && !isAuthenticated ? localSession.lastDisconnectReason || null : null, Alive: isAuthenticated ? getUptimeString(Math.max(1000, aliveSince ? now - aliveSince : 1000)) : null });
+  sessionsList.push({ ID: localSession.id, Sessions: localDisplayStatus, Categorie: isAuthenticated ? 'active' : activeRetryAt ? 'reconnexion' : pairingPending ? 'connexion' : 'authentification_incomplete', Credentials: isAuthenticated || registered ? 'recuperables' : 'incomplets', Owner: TFBOT_CLUSTER_INSTANCE_URL || TFBOT_CLUSTER_INSTANCE_HOST, OwnerLeaseUntil: tfbotWorkerLeaseUntil > now ? new Date(tfbotWorkerLeaseUntil).toISOString() : null, SocketAuthenticated: isAuthenticated, SocketReady: isWhatsAppSocketReady(localSession, localSession.sock), RestoreError: restoreError, NextRetryAt: activeRetryAt ? new Date(activeRetryAt).toISOString() : null, DuplicateOf: null, Numero: getAuthenticatedPhoneNumber(localSession.sock?.user || null, localSession.authState?.creds) || 'N/A', Name: sanitizeSessionDisplayName(localSession.sock?.user?.name || localSession.sock?.user?.notify || localSession.authState?.creds?.me?.name || 'Bot (tfbot)'), Format: format, Mode: 'prive', WhatsAppEvent: localSession.lastWhatsAppEvent || null, WhatsAppStateAt: localSession.lastWhatsAppEventAt || null, InvalidStatusSinceAt: isNonExpiringSessionStatus(localDisplayStatus) ? null : localSession.invalidStatusSinceAt || null, InvalidStatusExpiresAt: isNonExpiringSessionStatus(localDisplayStatus) ? null : localSession.invalidStatusSinceAt ? new Date(parseSessionStatusTimestamp(localSession.invalidStatusSinceAt) + SESSION_INVALID_STATUS_TTL_MS).toISOString() : null, DisconnectCode: currentClose && !isAuthenticated ? localSession.lastDisconnectCode || null : null, DisconnectReason: currentClose && !isAuthenticated ? localSession.lastDisconnectReason || null : null, Alive: isAuthenticated ? getUptimeString(Math.max(1000, aliveSince ? now - aliveSince : 1000)) : null });
 }
         return sessionsList;
     } catch (error) {
@@ -10249,6 +10305,8 @@ for (const localSession of activeSessions.values()) {
                 Mode: 'prive',
                 WhatsAppEvent: authenticated ? 'open' : session.lastWhatsAppEvent || null,
                 WhatsAppStateAt: session.lastWhatsAppEventAt || null,
+                InvalidStatusSinceAt: isNonExpiringSessionStatus(authenticated ? 'connecte' : session.status) ? null : session.invalidStatusSinceAt || null,
+                InvalidStatusExpiresAt: isNonExpiringSessionStatus(authenticated ? 'connecte' : session.status) ? null : session.invalidStatusSinceAt ? new Date(parseSessionStatusTimestamp(session.invalidStatusSinceAt) + SESSION_INVALID_STATUS_TTL_MS).toISOString() : null,
                 DisconnectCode: null,
                 DisconnectReason: null,
                 Alive: authenticated ? (() => { const hasHistory = session.everConnected === true || session.everAuthenticated === true || !!session.socketAuthenticatedAt || authenticated; const startedAt = toTimestamp(session.accountFirstConnectedAt) || toTimestamp(session.connectedSince) || (hasHistory ? getIdTimestamp(sessionId) || toTimestamp(session.createdAt) : 0); return getUptimeString(Math.max(1000, startedAt ? now - startedAt : 1000)); })() : null
@@ -10288,7 +10346,7 @@ function sanitizePublicSessionListSnapshot(sessions) {
         output.ID = sessionId ? `session-${shortLogHash(sessionId)}` : 'unknown';
         output.DuplicateOf = duplicateId ? `session-${shortLogHash(duplicateId)}` : null;
         output.Numero = phone ? `••••${phone.slice(-2)}` : 'N/A';
-        output.Name = output.Name ? 'Bot (tfbot)' : output.Name;
+        output.Name = sanitizeSessionDisplayName(output.Name) || 'Inconnu';
         const ownerValue = String(output.Owner || '').trim();
         if (ownerValue) {
             try { output.Owner = new URL(ownerValue.startsWith('http') ? ownerValue : `https://${ownerValue}`).host; }
@@ -11488,10 +11546,14 @@ function resolveCommand(command, language) {
 function getCommandParsingContext(message) {
     const content = unwrapMessageContent(message);
     const contextInfo = getMessageContextInfo(message);
+    const quotedContent = unwrapMessageContent(contextInfo?.quotedMessage || {});
+    const quotedMediaFormat = getWhatsAppMessageFormat({ message: quotedContent });
     const mediaKeys = ['imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'stickerMessage', 'albumMessage'];
     return {
         hasQuotedMessage: !!(contextInfo?.stanzaId || contextInfo?.quotedMessage),
         hasMedia: mediaKeys.some(key => !!content?.[key]),
+        hasQuotedMedia: ['image', 'video', 'audio', 'document', 'sticker'].includes(quotedMediaFormat),
+        hasQuotedHidetagTarget: ['text', 'video', 'audio'].includes(quotedMediaFormat),
         mentionedJid: Array.isArray(contextInfo?.mentionedJid) ? contextInfo.mentionedJid.map(value => String(value || '').trim()).filter(Boolean) : []
     };
 }
@@ -11499,7 +11561,7 @@ function getCommandParsingContext(message) {
 const commandsWithoutArguments = new Set([
     'prive', 'public', 'menu', 'info', 'alive', 'ping', 'qrbot', 'lien', 'tagall',
     'kickall', 'kickall2', 'ferme', 'ouvert', 'bienvenue', 'nolien', 'nolien2',
-    'del', 'del3', 'vv', 'vv2', 'url', 'sites'
+    'del', 'del3', 'vv', 'vv2', 'hidetag', 'url', 'sites'
 ]);
 
 function hasExplicitAiCommandPrefix(body) {
@@ -11521,7 +11583,15 @@ function parseIncomingCommand(body, language, context = {}) {
     if (!internalCommand) return null;
     if (internalCommand === 'ai' && !hasExplicitAiCommandPrefix(body)) return null;
     if (commandsWithoutArguments.has(internalCommand) && args) return null;
-    
+    if ((internalCommand === 'del' || internalCommand === 'del3') && !context.hasQuotedMessage) return null;
+    if ((internalCommand === 'vv' || internalCommand === 'vv2') && !context.hasQuotedMedia) return null;
+    if (internalCommand === 'hidetag' && !context.hasQuotedHidetagTarget) return null;
+    if (internalCommand === 'del2' && !args && !context.hasQuotedMessage) return null;
+    if (internalCommand === 'code') {
+        if (!/^\+?[0-9][0-9()]*$/u.test(args)) return null;
+        const normalizedPairingDigits = normalizePairingPhoneNumber(args);
+        if (normalizedPairingDigits.length < 8 || normalizedPairingDigits.length > 15 || /^0+$/.test(normalizedPairingDigits)) return null;
+    }
     let parsedArgs = args;
     if (internalCommand === 'ai') {
         const aiPrefixes = new Set(['ai', 'ia', 'assistant', 'asistente', 'asistan', 'iu', 'tfasistan']);
@@ -11550,10 +11620,8 @@ async function sendFormatted(sock, from, type, text, pushName, isAI = false, hos
 }
 
 async function sendPlainFormatted(sock, from, type, text, pushName, sendOptions = {}) {
-    const preserveFormatting = sendOptions.preserveFormatting === true || hasWhatsAppFormatting(text);
-    const ownerName = sanitizeSessionDisplayName(sendOptions.ownerName || sock?.user?.name || sock?.user?.notify || sock?.user?.verifiedName || '') || 'Compte connecté';
-    const caption = buildCaption(type, text, pushName || 'Inconnu', preserveFormatting, ownerName);
-    return queuedSendMessage(sock, from, { text: caption }, sendOptions.messageOptions || {}, 0);
+    const ownerName = sanitizeSessionDisplayName(sendOptions.ownerName || sock?.user?.name || sock?.user?.notify || sock?.user?.verifiedName || '') || 'Inconnu';
+    return sendImageCaptioned(sock, from, adamLogoBuffer, type, text, pushName || 'Inconnu', { ...sendOptions, commandFormat: true, directSend: sendOptions.directSend !== false, ownerName, language: sendOptions.language || 'ht', preserveSourceImage: true });
 }
 
 async function waitForCredentialPersistence(sessionId, timeoutMs = 30000) {
@@ -11597,7 +11665,8 @@ async function cleanupSocket(sessionId, options = {}) {
     const authState = session?.authState || null;
     const pairingRestartRecovery = options.pairingRestartRecovery === true;
     const sessionKey = String(sessionId || '');
-    const socketIsLive = !!oldSocket && !isSocketDefinitelyClosed(oldSocket);
+    const socketCloseEventObserved = String(session?.lastWhatsAppEvent || '').toLowerCase() === 'close';
+    const socketIsLive = !!oldSocket && !isSocketDefinitelyClosed(oldSocket) && !socketCloseEventObserved;
     const getSignalState = () => {
         try {
             return typeof authState?.getSignalTransactionState === 'function'
@@ -11666,7 +11735,7 @@ async function cleanupSocket(sessionId, options = {}) {
             }
             const signalState = getSignalState();
             if (session) delete session.lastAuthStoreCleanupError;
-            console.info('[signal-auth-store-quiescent-before-reconnect]', { sessionId, recoveryMode: pairingRestartRecovery, quietMs: signalQuietMs, timeoutMs: authStoreTimeoutMs, credentialPersistenceQueueEmpty: !credentialPersistenceQueues.has(sessionKey), authWriteQueueEmpty: !authWriteQueues.has(sessionKey), signalTransactionsPending: signalState.pendingCount || 0, signalTransactionOldestAgeMs: signalState.oldestAgeMs || 0, credentialSnapshotPersisted: typeof session?.persistCredentials === 'function', socketStillOpenDuringFlush: true });
+            console.info('[signal-auth-store-quiescent-before-reconnect]', { sessionId, recoveryMode: pairingRestartRecovery, quietMs: signalQuietMs, timeoutMs: authStoreTimeoutMs, credentialPersistenceQueueEmpty: !credentialPersistenceQueues.has(sessionKey), authWriteQueueEmpty: !authWriteQueues.has(sessionKey), signalTransactionsPending: signalState.pendingCount || 0, signalTransactionOldestAgeMs: signalState.oldestAgeMs || 0, credentialSnapshotPersisted: typeof session?.persistCredentials === 'function', socketStillOpenDuringFlush: socketIsLive && !isSocketDefinitelyClosed(oldSocket), closeEventObserved: socketCloseEventObserved });
         } catch (error) {
             if (session) session.lastAuthStoreCleanupError = String(error?.message || error).slice(0, 220);
             const signalState = getSignalState();
@@ -11831,11 +11900,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         const restartDisconnectCode = Number(expiryRuntime?.lastDisconnectCode ?? expiryOwner?.lastDisconnectCode ?? 0);
         const restartDisconnectReason = String(expiryRuntime?.lastDisconnectReason || expiryOwner?.lastDisconnectReason || '');
         const restartLastEvent = String(expiryRuntime?.lastWhatsAppEvent || expiryOwner?.lastWhatsAppEvent || '').toLowerCase();
+        const terminalReconnectFailure = restartDisconnectCode === 401 || /device[_ -]?removed|logged.?out|unauthorized|forbidden|conflict/i.test(restartDisconnectReason) || expiryOwner?.reauthRequired === true || expiryRuntime?.reauthRequired === true || expiryRuntime?.deviceRemoved === true;
         const explicit515Restart = (restartDisconnectCode === 515 || /stream errored.*restart required|restart required/i.test(restartDisconnectReason)) && (pairingRestartPending || restartLastEvent === 'close' || String(expiryOwner?.connectionStatus || '').toLowerCase() === 'reconnexion');
         const pairingRestartRecovery = explicit515Restart || pairingRestartPending && pairingRestartAttempts >= 1 && !connectionEverOpened && !hasHistoricalWhatsAppConnection(expiryOwner, expiryRuntime);
-        const retainedPairingAuthState = pairingRestartRecovery && expiryRuntime?.authState?.creds && typeof expiryRuntime?.persistCredentials === 'function'
+        const recoverableAccountDisconnect = restartLastEvent === 'close' && !terminalReconnectFailure && [0, 408, 425, 500, 502, 503, 504, 515].includes(restartDisconnectCode) && hasRegisteredWhatsAppIdentity(expiryRuntime?.authState?.creds, expiryRuntime?.sock?.user || null);
+        const reuseInMemoryAuthForReconnect = pairingRestartRecovery || recoverableAccountDisconnect;
+        const retainedPairingAuthState = reuseInMemoryAuthForReconnect && expiryRuntime?.authState?.creds && typeof expiryRuntime?.persistCredentials === 'function'
             ? { state: expiryRuntime.authState, saveCreds: expiryRuntime.persistCredentials, signalKeyStore: expiryRuntime.signalKeyStore || null }
             : null;
+        if (recoverableAccountDisconnect) console.info('[session-registered-auth-reconnect-recovery-detected]', { sessionId, disconnectCode: restartDisconnectCode || null, lastWhatsAppEvent: restartLastEvent, memoryAuthStateAvailable: !!retainedPairingAuthState, credentialsRegistered: expiryRuntime?.authState?.creds?.registered === true, terminalReconnectFailure, action: 'reuse_registered_auth_and_signal_keys_for_nonterminal_close_without_waiting_for_store_quiescence' });
         if (pairingRestartRecovery) console.info('[pairing-515-recovery-state-detected]', { sessionId, explicit515Restart, disconnectCode: restartDisconnectCode || null, lastWhatsAppEvent: restartLastEvent || null, connectionEverOpened, ownerAttemptPending: expiryOwner?.pairingAttemptPending === true, runtimeAttemptPending: expiryRuntime?.pairingAttemptPending === true, restartAttempts: pairingRestartAttempts, memoryAuthStateAvailable: !!retainedPairingAuthState, credentialsRegistered: expiryRuntime?.authState?.creds?.registered === true, action: 'reuse_same_in_memory_credentials_and_signal_store_after_any_515_without_waiting_for_mongo_flush' });
         const pendingLockRetry = sessionLockRetryTimers.get(sessionId);
         if (pendingLockRetry) clearTimeout(pendingLockRetry);
@@ -11843,29 +11916,31 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         sessionLockRetryDueAt.delete(sessionId);
         const localSessionToken = sessionRuntimeLockTokens.get(sessionId);
         const localSessionLeaseUntil = Number(sessionRuntimeLockLeaseUntil.get(sessionId) || 0);
-        const reuseLocalSessionLease = explicit515Restart && !!localSessionToken && localSessionLeaseUntil > Date.now() + 1000 && !workerDrainingSessionIds.has(sessionId);
+        const reuseLocalSessionLease = (explicit515Restart || recoverableAccountDisconnect) && !!localSessionToken && localSessionLeaseUntil > Date.now() + 1000 && !workerDrainingSessionIds.has(sessionId);
         const lockAcquired = reuseLocalSessionLease || await runStartStage('session_runtime_lock', () => acquireSessionRuntimeLock(sessionId), 20000);
         if (reuseLocalSessionLease) console.info('[session-runtime-lock-reused-after-515]', { sessionId, leaseRemainingMs: localSessionLeaseUntil - Date.now(), fencingTokenPresent: true, sameProcess: true });
         if (!lockAcquired) throw new Error('session_runtime_lock_owned_elsewhere');
         sessionLockRetryAttempts.delete(sessionId);
-        if (TFBOT_CLUSTER_ENABLED && !explicit515Restart) {
+        if (TFBOT_CLUSTER_ENABLED && !reuseLocalSessionLease) {
             await runStartStage('cluster_owner_lease_write', () => db.collection('session_owners').updateOne(
                 { sessionId },
                 { $set: getClusterSessionOwnerFields(), $setOnInsert: { createdAt: new Date(), sessionId } },
                 { upsert: true }
             ), 15000);
-        } else if (TFBOT_CLUSTER_ENABLED && explicit515Restart) {
+        } else if (TFBOT_CLUSTER_ENABLED && reuseLocalSessionLease) {
             console.info('[cluster-owner-lease-reused-after-515]', { sessionId, sameWorker: true, localFencingLeaseValid: reuseLocalSessionLease, action: 'reuse_existing_owner_lease_for_immediate_same-process_socket_restart' });
         }
         const pendingTimer = reconnectTimers.get(sessionId);
         if (pendingTimer) clearTimeout(pendingTimer);
         reconnectTimers.delete(sessionId);
         const previousSocketRuntime = activeSessions.get(sessionId);
-        const recoveryFromClosedSocket = !!previousSocketRuntime?.sock && isSocketDefinitelyClosed(previousSocketRuntime.sock);
-        const previousSocketCleanupReady = await runStartStage('previous_socket_cleanup', () => cleanupSocket(sessionId, pairingRestartRecovery || recoveryFromClosedSocket ? { pairingRestartRecovery: true, skipAuthStoreFlush: !!retainedPairingAuthState, forceTerminateForPairingRestart: explicit515Restart, credentialPersistenceTimeoutMs: PAIRING_515_CREDENTIAL_TIMEOUT_MS, authStoreTimeoutMs: PAIRING_515_STORE_TIMEOUT_MS, authStoreQuietMs: 150, socketCloseTimeoutMs: 1500 } : {}), pairingRestartRecovery ? 12000 : 60000);
+        const recoveryFromClosedSocket = !!previousSocketRuntime?.sock && (isSocketDefinitelyClosed(previousSocketRuntime.sock) || String(previousSocketRuntime.lastWhatsAppEvent || '').toLowerCase() === 'close');
+        const forceClosedSocketRecovery = recoveryFromClosedSocket && !!retainedPairingAuthState;
+        const fastAuthReconnectCleanup = pairingRestartRecovery || forceClosedSocketRecovery;
+        const previousSocketCleanupReady = await runStartStage('previous_socket_cleanup', () => cleanupSocket(sessionId, fastAuthReconnectCleanup ? { pairingRestartRecovery: true, skipAuthStoreFlush: true, forceTerminateForPairingRestart: true, credentialPersistenceTimeoutMs: PAIRING_515_CREDENTIAL_TIMEOUT_MS, authStoreTimeoutMs: PAIRING_515_STORE_TIMEOUT_MS, authStoreQuietMs: 150, socketCloseTimeoutMs: 1000 } : {}), fastAuthReconnectCleanup ? 12000 : 60000);
         if (previousSocketCleanupReady) {
-            if (explicit515Restart) {
-                Promise.resolve().then(() => clearSessionRestoreFailure(sessionId, activeSessions.get(sessionId))).then(() => console.info('[pairing-515-restore-marker-cleared-background]', { sessionId, socketRestartNotBlockedByMongo: true })).catch(error => console.warn('[pairing-515-restore-marker-clear-failed]', { sessionId, error: error?.message || String(error), action: 'continue_socket_restart_without_waiting_for_restore_marker_cleanup' }));
+            if (retainedPairingAuthState) {
+                Promise.resolve().then(() => clearSessionRestoreFailure(sessionId, activeSessions.get(sessionId))).then(() => console.info('[session-reconnect-restore-marker-cleared-background]', { sessionId, socketRestartNotBlockedByMongo: true })).catch(error => console.warn('[session-reconnect-restore-marker-clear-failed]', { sessionId, error: error?.message || String(error), action: 'continue_socket_restart_without_waiting_for_restore_marker_cleanup' }));
             } else {
                 await runStartStage('clear_restore_failure', () => clearSessionRestoreFailure(sessionId, activeSessions.get(sessionId)), 5000);
             }
@@ -11902,7 +11977,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             }
         }
         let version = null;
-        if (explicit515Restart && Array.isArray(tfbotBaileysSocketVersionCache)) {
+        if (reuseInMemoryAuthForReconnect && Array.isArray(tfbotBaileysSocketVersionCache)) {
             version = tfbotBaileysSocketVersionCache;
             console.info('[baileys-version-reused-after-515]', { sessionId, version: version.join('.'), source: 'same-process-initial-socket', networkFetchSkipped: true });
         } else {
@@ -11922,7 +11997,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         } catch (e) {}
         const existingSessionRecordForStart = activeSessions.get(sessionId);
         const connectionFormat = normalizeConnectionFormat(existingSessionRecordForStart?.format || initialOwnerDoc?.format || initialOwnerDoc?.Format || format, 'pair');
-        console.info('[session-connection-format]', { sessionId, format: connectionFormat, source: existingSessionRecordForStart?.format ? 'active_session' : initialOwnerDoc?.format || initialOwnerDoc?.Format ? 'session_owners' : 'requested_or_default', pairing515Recovery: explicit515Restart, memoryAuthReused: !!retainedPairingAuthState });
+        console.info('[session-connection-format]', { sessionId, format: connectionFormat, source: existingSessionRecordForStart?.format ? 'active_session' : initialOwnerDoc?.format || initialOwnerDoc?.Format ? 'session_owners' : 'requested_or_default', pairing515Recovery: explicit515Restart, memoryAuthReused: !!retainedPairingAuthState, registeredAccountReconnect: recoverableAccountDisconnect });
 
         const baileysLogLevelRaw = String(process.env.BAILEYS_LOG_LEVEL || 'warn').trim().toLowerCase();
         const baileysLogLevel = ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'].includes(baileysLogLevelRaw) ? baileysLogLevelRaw : 'warn';
@@ -11950,7 +12025,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             cachedGroupMetadata: async groupJid => getGroupMetadataCached(sessionId, sock, groupJid),
             browser: ['Ubuntu', 'Chrome', '20.0.04'],
             defaultQueryTimeoutMs: Math.max(30000, Math.min(120000, Number(process.env.BAILEYS_QUERY_TIMEOUT_MS || 120000))),
-            markOnlineOnConnect: true,
+            markOnlineOnConnect: false,
             emitOwnEvents: true,
             fireInitQueries: true,
             generateHighQualityLinkPreview: false,
@@ -11960,7 +12035,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             enableAutoSessionRecreation: true,
             enableRecentMessageCache: true,
             syncFullHistory: false,
-            keepAliveIntervalMs: 30000,
+            keepAliveIntervalMs: 20000,
             persistOutgoingMessage: async (destinationJid, fullMessage) => {
                 if (!fullMessage?.key?.id || !fullMessage?.message) throw new Error('outgoing_retry_preflight_message_incomplete');
                 const startedAt = Date.now();
@@ -12988,11 +13063,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const currentRecord = activeSessions.get(sessionId);
                         await db.collection('session_owners').updateOne(
                             { sessionId },
-                            { $set: { reauthRequired: true, connectionStatus: 'reauth_required', socketAuthenticated: false, socketReady: false, pairingPending: false, pairingAttemptPending: false, lastAuthFailureAt: new Date(closeAt), lastAuthFailure: 'device_removed', lastWhatsAppEvent: 'close', lastWhatsAppEventAt: new Date(closeAt), lastDisconnectCode: statusCode ?? 401, lastDisconnectReason: disconnectReason, statusUpdatedAt: new Date(closeAt), updatedAt: new Date(closeAt) } },
+                            { $set: { reauthRequired: true, connectionStatus: 'reauth_required', invalidStatusSinceAt: new Date(closeAt), invalidStatusExpiresAt: new Date(new Date(closeAt).getTime() + SESSION_INVALID_STATUS_TTL_MS), socketAuthenticated: false, socketReady: false, pairingPending: false, pairingAttemptPending: false, lastAuthFailureAt: new Date(closeAt), lastAuthFailure: 'device_removed', lastWhatsAppEvent: 'close', lastWhatsAppEventAt: new Date(closeAt), lastDisconnectCode: statusCode ?? 401, lastDisconnectReason: disconnectReason, statusUpdatedAt: new Date(closeAt), updatedAt: new Date(closeAt) } },
                             { upsert: false }
                         );
+                        scheduleInvalidStatusCleanup(sessionId, new Date(closeAt).getTime(), SESSION_INVALID_STATUS_TTL_MS);
                         if (currentRecord) {
                             currentRecord.status = 'reauth_required';
+                            currentRecord.invalidStatusSinceAt = new Date(closeAt).getTime();
                             currentRecord.active = false;
                             currentRecord.disconnectTime = closeAt;
                             currentRecord.lastWhatsAppEvent = 'close';
@@ -13020,11 +13097,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const numToBackup = currentRecord ? currentRecord.number : null;
                         await db.collection('session_owners').updateOne(
                             { sessionId },
-                            { $set: { reauthRequired: true, connectionStatus: 'reauth_required', socketAuthenticated: false, socketReady: false, statusUpdatedAt: new Date(closeAt), updatedAt: new Date(closeAt), disconnectTime: new Date(closeAt), unconnectedSinceAt: new Date(closeAt), pairingPending: false, pairingAttemptPending: false, lastAuthFailureAt: new Date(closeAt), lastAuthFailure: disconnectReason, lastWhatsAppEvent: 'close', lastWhatsAppEventAt: new Date(closeAt), lastDisconnectCode: statusCode ?? null, lastDisconnectReason: disconnectReason } },
+                            { $set: { reauthRequired: true, connectionStatus: 'reauth_required', invalidStatusSinceAt: new Date(closeAt), invalidStatusExpiresAt: new Date(new Date(closeAt).getTime() + SESSION_INVALID_STATUS_TTL_MS), socketAuthenticated: false, socketReady: false, statusUpdatedAt: new Date(closeAt), updatedAt: new Date(closeAt), disconnectTime: new Date(closeAt), unconnectedSinceAt: new Date(closeAt), pairingPending: false, pairingAttemptPending: false, lastAuthFailureAt: new Date(closeAt), lastAuthFailure: disconnectReason, lastWhatsAppEvent: 'close', lastWhatsAppEventAt: new Date(closeAt), lastDisconnectCode: statusCode ?? null, lastDisconnectReason: disconnectReason } },
                             { upsert: true }
                         );
+                        scheduleInvalidStatusCleanup(sessionId, new Date(closeAt).getTime(), SESSION_INVALID_STATUS_TTL_MS);
                         if (currentRecord) {
                             currentRecord.status = 'reauth_required';
+                            currentRecord.invalidStatusSinceAt = new Date(closeAt).getTime();
                             currentRecord.active = false;
                             currentRecord.disconnectTime = closeAt;
                             currentRecord.unconnectedSinceAt = new Date(closeAt);
@@ -13420,7 +13499,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             const raw = String(requestedValue || '').trim().replace(/^@/, '');
             if (!raw) return false;
             const normalizedName = normalizePersonName(raw);
-            const protectedNames = [ownerDocument?.Name, ownerDocument?.name, activeHostName, sock.user?.name, sock.user?.notify]
+            const protectedNames = [ownerDocument?.Name, ownerDocument?.name, sock.user?.name, sock.user?.notify, sock.user?.verifiedName]
                 .map(normalizePersonName)
                 .filter(Boolean);
             if (normalizedName && protectedNames.includes(normalizedName)) return true;
@@ -14168,7 +14247,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             });
                         }
 
-                        let activeHostName = sOwnerTop ? (sOwnerTop.Name || "Bot (tfbot)") : "Bot (tfbot)";
+                        let activeHostName = sanitizeSessionDisplayName(sock.user?.name || sock.user?.notify || sock.user?.verifiedName || sOwnerTop?.Name || sOwnerTop?.name || '') || 'Inconnu';
                         const senderJids = [...new Set([sender, m.key.participantAlt, m.key.participantPn, m.key.senderPn, (!isGroup ? m.key.remoteJidAlt : null)].filter(Boolean).map(String))];
                         let mappedPrivateChatPhoneJid = '';
                         let mappedPrivateChatPhoneResolution = '';
@@ -14750,8 +14829,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
                         await (async () => {
                             try {
-                                const shouldSendTyping = isOwnerReal;
+                                const shouldSendTyping = isOwnerReal || isPublicMode;
                                 let isTyping = shouldSendTyping;
+                                if (isPublicMode && !isOwnerReal) void sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', from, msgId).catch(() => {});
                                 let typingUpdateInFlight = false;
                                 const typingInterval = shouldSendTyping ? setInterval(async () => {
                                     if (!isTyping || typingUpdateInFlight) return;
@@ -14802,41 +14882,69 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     console.info('[command-response-sent]', { sessionId, messageId: msgId, command: internalCommand, sourceChatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null, replyTargetJid: rawFrom || from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid', responseMessageId: result?.key?.id || null, transport });
                                     return result;
                                 };
+                                const commandSendOptions = (options = {}, directSend = true) => ({
+                                    ...options,
+                                    commandFormat: true,
+                                    directSend,
+                                    ownerName: activeHostName,
+                                    language: messageLang,
+                                    preserveSourceImage: true
+                                });
                                 const safeSendFormatted = async (...sendArgs) => {
                                     if (isCancelled || terminalResponseSent) return null;
-                                    const sendOptions = sendArgs[7] && typeof sendArgs[7] === 'object' ? sendArgs[7] : {};
+                                    const suppliedOptions = sendArgs[7] && typeof sendArgs[7] === 'object' ? sendArgs[7] : {};
+                                    const send = async directSend => sendFormatted(
+                                        sendArgs[0] || sock,
+                                        sendArgs[1] || from,
+                                        sendArgs[2],
+                                        sendArgs[3],
+                                        sendArgs[4] || pushName,
+                                        false,
+                                        activeHostName,
+                                        commandSendOptions(suppliedOptions, directSend)
+                                    );
                                     if (isSessionMessagingFallbackActive(sessionId)) {
-                                        const result = await sendFormatted(...sendArgs);
-                                        return completeCommandResponse(result, 'rich_session_recovery_fallback');
+                                        const result = await send(false);
+                                        return completeCommandResponse(result, 'formatted_session_recovery_fallback');
                                     }
                                     try {
-                                        const result = await sendBetaStyleText(sendArgs[0] || sock, sendArgs[3], sendOptions);
-                                        return completeCommandResponse(result, 'beta_direct_text');
+                                        const result = await send(true);
+                                        return completeCommandResponse(result, 'formatted_direct_send');
                                     } catch (sendError) {
                                         if (isSignalDecryptionFailure([sendError]) || /signal|decrypt|bad mac|no sessions|chain closed|session error|message counter/i.test(String(sendError?.message || sendError))) {
                                             markSessionMessagingFallback(sessionId, 'signal_transport_degraded', msgId);
                                             console.warn('[command-response-switching-to-rich-fallback]', { sessionId, messageId: msgId, command: internalCommand, error: sendError?.message || String(sendError) });
-                                            const result = await sendFormatted(...sendArgs);
-                                            return completeCommandResponse(result, 'rich_send_after_signal_degradation');
+                                            const result = await send(false);
+                                            return completeCommandResponse(result, 'formatted_send_after_signal_degradation');
                                         }
                                         throw sendError;
                                     }
                                 };
                                 const safeSendPlainFormatted = async (...sendArgs) => {
                                     if (isCancelled || terminalResponseSent) return null;
-                                    const sendOptions = sendArgs[5] && typeof sendArgs[5] === 'object' ? sendArgs[5] : {};
+                                    const suppliedOptions = sendArgs[5] && typeof sendArgs[5] === 'object' ? sendArgs[5] : {};
+                                    const send = async directSend => sendFormatted(
+                                        sendArgs[0] || sock,
+                                        sendArgs[1] || from,
+                                        sendArgs[2],
+                                        sendArgs[3],
+                                        sendArgs[4] || pushName,
+                                        false,
+                                        activeHostName,
+                                        commandSendOptions(suppliedOptions, directSend)
+                                    );
                                     if (isSessionMessagingFallbackActive(sessionId)) {
-                                        const result = await sendFormatted(sendArgs[0] || sock, sendArgs[1] || from, sendArgs[2], sendArgs[3], sendArgs[4], false, activeHostName, sendOptions);
-                                        return completeCommandResponse(result, 'rich_session_recovery_fallback');
+                                        const result = await send(false);
+                                        return completeCommandResponse(result, 'formatted_session_recovery_fallback');
                                     }
                                     try {
-                                        const result = await sendBetaStyleText(sendArgs[0] || sock, sendArgs[3], sendOptions);
-                                        return completeCommandResponse(result, 'beta_direct_text');
+                                        const result = await send(true);
+                                        return completeCommandResponse(result, 'formatted_direct_send');
                                     } catch (sendError) {
                                         if (isSignalDecryptionFailure([sendError]) || /signal|decrypt|bad mac|no sessions|chain closed|session error|message counter/i.test(String(sendError?.message || sendError))) {
                                             markSessionMessagingFallback(sessionId, 'signal_transport_degraded', msgId);
-                                            const result = await sendFormatted(sendArgs[0] || sock, sendArgs[1] || from, sendArgs[2], sendArgs[3], sendArgs[4], false, activeHostName, sendOptions);
-                                            return completeCommandResponse(result, 'rich_send_after_signal_degradation');
+                                            const result = await send(false);
+                                            return completeCommandResponse(result, 'formatted_send_after_signal_degradation');
                                         }
                                         throw sendError;
                                     }
@@ -14846,23 +14954,27 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     const rawActionError = redactActionError(errorArgs[3]);
                                     const errorClass = /(?:not-authorized|forbidden|permission|admin|403)/i.test(rawActionError) ? 'permission_or_admin' : /(?:timeout|timed out|abort)/i.test(rawActionError) ? 'timeout' : /(?:signal|decrypt|bad mac|websocket)/i.test(rawActionError) ? 'connection_or_encryption' : 'action_failure';
                                     const localText = errorFallbackText(errorArgs[2], errorArgs[4], errorClass);
-                                    if (!isSessionMessagingFallbackActive(sessionId)) {
-                                        try {
-                                            const result = await sendBetaStyleText(errorArgs[0] || sock, localText, errorArgs[7] || {});
-                                            return completeCommandResponse(result, 'beta_direct_text_error');
-                                        } catch (sendError) {
-                                            if (isSignalDecryptionFailure([sendError]) || /signal|decrypt|bad mac|no sessions|chain closed|session error|message counter/i.test(String(sendError?.message || sendError))) {
-                                                markSessionMessagingFallback(sessionId, 'signal_transport_degraded', msgId);
-                                                console.warn('[command-error-switching-to-rich-fallback]', { sessionId, messageId: msgId, command: internalCommand, error: sendError?.message || String(sendError) });
-                                            } else {
-                                                throw sendError;
-                                            }
-                                        }
-                                    }
+                                    const suppliedOptions = errorArgs[7] && typeof errorArgs[7] === 'object' ? errorArgs[7] : {};
+                                    const send = async directSend => sendFormatted(
+                                        errorArgs[0] || sock,
+                                        errorArgs[1] || from,
+                                        errorArgs[2],
+                                        localText,
+                                        errorArgs[5] || pushName,
+                                        false,
+                                        activeHostName,
+                                        commandSendOptions(suppliedOptions, directSend)
+                                    );
                                     try {
-                                        const result = await sendActionError(...errorArgs);
-                                        return completeCommandResponse(result, 'rich_session_recovery_fallback');
+                                        const result = await send(!isSessionMessagingFallbackActive(sessionId));
+                                        return completeCommandResponse(result, isSessionMessagingFallbackActive(sessionId) ? 'formatted_session_recovery_fallback' : 'formatted_direct_error');
                                     } catch (sendError) {
+                                        if (isSignalDecryptionFailure([sendError]) || /signal|decrypt|bad mac|no sessions|chain closed|session error|message counter/i.test(String(sendError?.message || sendError))) {
+                                            markSessionMessagingFallback(sessionId, 'signal_transport_degraded', msgId);
+                                            console.warn('[command-error-switching-to-rich-fallback]', { sessionId, messageId: msgId, command: internalCommand, error: sendError?.message || String(sendError) });
+                                            const result = await send(false);
+                                            return completeCommandResponse(result, 'formatted_error_after_signal_degradation');
+                                        }
                                         terminalResponsePromise = null;
                                         terminalResponseSent = false;
                                         console.error('[command-action-error-response-not-confirmed]', { sessionId, messageId: msgId, command: internalCommand, error: sendError?.message || String(sendError) });
@@ -14871,8 +14983,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 };
                                 const trackedSendImageCaptioned = async (...sendArgs) => {
                                     const sendStartedAt = Date.now();
+                                    const suppliedOptions = sendArgs[6] && typeof sendArgs[6] === 'object' ? sendArgs[6] : {};
+                                    const directSend = !isSessionMessagingFallbackActive(sessionId);
+                                    const preparedArgs = [...sendArgs];
+                                    preparedArgs[6] = commandSendOptions(suppliedOptions, directSend);
                                     try {
-                                        const result = await sendImageCaptioned(...sendArgs);
+                                        const result = await sendImageCaptioned(...preparedArgs);
                                         if (!result?.key?.id) throw new Error('whatsapp_send_result_message_id_missing');
                                         responseSentForLog = true;
                                         console.info('[command-response-sent]', {
@@ -14915,6 +15031,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await db.collection('session_owners').updateOne({ sessionId: sessionId }, { $set: { mode: 'prive' } });
                                                 sessionOwnersCache.set(sessionId, sOwnerTop);
                                             }
+                                            await safeSendFormatted(sock, from, t.mode_title || 'Mode', sOwnerTop.mode === 'prive' ? t.mode_changed_private : t.already_private, pushName, false, activeHostName);
                                             break;
                                         case 'public':
                                             if (!isOwnerReal) {
@@ -14926,6 +15043,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await db.collection('session_owners').updateOne({ sessionId: sessionId }, { $set: { mode: 'public' } });
                                                 sessionOwnersCache.set(sessionId, sOwnerTop);
                                             }
+                                            await safeSendFormatted(sock, from, t.mode_title || 'Mode', sOwnerTop.mode === 'public' ? t.mode_changed_public : t.already_public, pushName, false, activeHostName);
                                             break;
                                         case 'menu':
                                             if (args.length > 0) break;
@@ -14994,6 +15112,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                             pairingStartedAt: qrStartedAt,
                                                             pairingChallengeStartedAt: qrStartedAt,
                                                             connectionStatus: 'pairing_starting',
+                                                            invalidStatusSinceAt: qrStartedAt,
+                                                            invalidStatusExpiresAt: new Date(qrStartedAt.getTime() + SESSION_INVALID_STATUS_TTL_MS),
                                                             socketAuthenticated: false,
                                                             socketReady: false,
                                                             everAuthenticated: false,
@@ -15026,6 +15146,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                     },
                                                     { upsert: true }
                                                 );
+                                                scheduleInvalidStatusCleanup(qrSessionId, qrStartedAt.getTime(), SESSION_INVALID_STATUS_TTL_MS);
                                                 schedulePairingChallengeExpiry(qrSessionId, qrStartedAt, 'qrbot_fresh_challenge');
                                                 const qrSession = await createCodeSession(qrSessionId, 'qr', false, false, '');
                                                 const qrRuntime = activeSessions.get(qrSessionId) || qrSession;
@@ -15441,6 +15562,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             try {
                                                 const activatedAt = await activateDel3Rule(sessionId, from, del3Format);
                                                 console.info('[del3-rule-activated]', { sessionId, group: from, format: del3Format, activatedAt, futureMessages: 'same_group_same_whatsapp_format_except_host_and_bot' });
+                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_activated, pushName, false, activeHostName);
                                             } catch (del3ActivationError) {
                                                 await discardPendingDel3Rule(sessionId, from, del3Format).catch(() => {});
                                                 console.error('[del3-rule-activation-failed]', { sessionId, group: from, format: del3Format, error: del3ActivationError?.message || String(del3ActivationError), selectedSamplePreserved: true });
@@ -15456,7 +15578,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             } else {
                                                 console.info('[del3-selected-sample-protected]', { sessionId, group: from, sampleMessageId: quotedDel3Id, ownerProtected: quotedDel3OwnerProtected, fromMe: quotedDel3FromMe, action: 'preserve_selected_sample' });
                                             }
-                                            await safeSendFormatted(sock, from, t.cmd_del3, t.del3_activated, pushName, false, activeHostName);
                                             break;
                                         case 'vv':
                                         case 'vv2': {
@@ -15669,10 +15790,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             }
                                             const pairingNumberInput = String(args || '').normalize('NFKC').replace(/[\p{Cf}\u061c\u200e\u200f]/gu, '').trim();
                                             const pairingNumber = normalizePairingPhoneNumber(pairingNumberInput);
-                                            if (!/^\+?[0-9][0-9\s().-]*$/u.test(pairingNumberInput) || pairingNumber.length < 8 || pairingNumber.length > 15 || /^0+$/.test(pairingNumber)) {
-                                                await safeSendFormatted(sock, from, t.cmd_code, t.code_usage, pushName, true, activeHostName);
-                                                break;
-                                            }
+                                            if (!/^\+?[0-9][0-9\s()]*$/u.test(pairingNumberInput) || pairingNumber.length < 8 || pairingNumber.length > 15 || /^0+$/.test(pairingNumber)) break;
                                             try {
                                                 const pairingApiBase = TFBOT_INTERNAL_API_BASE_URL || TFBOT_CLUSTER_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || TF_BOT_BASE_URL;
                                                 if (!pairingApiBase) throw new Error('pairing_api_not_configured');
@@ -16107,6 +16225,181 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
     }
 }
 
+function normalizeSessionStatusForExpiry(value) {
+    return String(value || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[\s-]+/g, '_');
+}
+
+function isNonExpiringSessionStatus(value) {
+    const status = normalizeSessionStatusForExpiry(value);
+    return ['connecte', 'connected', 'active', 'online', 'synchronisation', 'synchronizing', 'synchronization', 'sync', 'reconnexion', 'reconnecting', 'reconnection', 'reconnect'].includes(status);
+}
+
+function isReconnectingSessionStatus(value) {
+    return ['reconnexion', 'reconnecting', 'reconnection', 'reconnect'].includes(normalizeSessionStatusForExpiry(value));
+}
+
+function hasScheduledSessionReconnect(sessionId, owner = null) {
+    const id = String(sessionId || '').trim();
+    if (!id) return false;
+    if (reconnectTimers.has(id) || sessionLockRetryTimers.has(id)) return true;
+    const storedRetryAt = parseSessionStatusTimestamp(owner?.nextRestoreRetryAt);
+    if (storedRetryAt <= Date.now()) return false;
+    const leaseUntil = parseSessionStatusTimestamp(owner?.ownerLeaseUntil);
+    const ownerId = String(owner?.ownerInstanceId || '');
+    return !TFBOT_CLUSTER_ENABLED || !ownerId || ownerId === TFBOT_CLUSTER_INSTANCE_ID || leaseUntil > Date.now();
+}
+
+function resolveInvalidExpirySessionStatus(owner, runtime, sessionId) {
+    const runtimeStatus = String(runtime?.status || '').trim();
+    const ownerStatus = String(owner?.connectionStatus || owner?.status || '').trim();
+    if (hasScheduledSessionReconnect(sessionId, owner)) return 'reconnexion';
+    if (isReconnectingSessionStatus(runtimeStatus)) return runtimeStatus;
+    if (isReconnectingSessionStatus(ownerStatus)) return ownerStatus;
+    const lastEvent = String(runtime?.lastWhatsAppEvent || owner?.lastWhatsAppEvent || '').trim().toLowerCase();
+    if (lastEvent === 'close') {
+        if (runtimeStatus && !isNonExpiringSessionStatus(runtimeStatus)) return runtimeStatus;
+        if (ownerStatus && !isNonExpiringSessionStatus(ownerStatus)) return ownerStatus;
+        return 'deconnecte';
+    }
+    if (isNonExpiringSessionStatus(runtimeStatus)) return runtimeStatus;
+    if (isNonExpiringSessionStatus(ownerStatus)) return ownerStatus;
+    return runtimeStatus || ownerStatus || 'unknown';
+}
+
+function parseSessionStatusTimestamp(value) {
+    if (value instanceof Date) return value.getTime();
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+    const numeric = Number(value || 0);
+    if (Number.isFinite(numeric) && numeric > 0) return numeric;
+    const parsed = Date.parse(String(value || ''));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function clearInvalidStatusCleanupTimer(sessionId) {
+    const id = String(sessionId || '');
+    const timer = invalidStatusCleanupTimers.get(id);
+    if (timer) clearTimeout(timer);
+    invalidStatusCleanupTimers.delete(id);
+}
+
+function scheduleInvalidStatusCleanup(sessionId, invalidSinceAt, delayMs) {
+    const id = String(sessionId || '');
+    if (!id) return;
+    const existing = invalidStatusCleanupTimers.get(id);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+        invalidStatusCleanupTimers.delete(id);
+        void expireInvalidStatusSession(id, invalidSinceAt).catch(error => {
+            console.error('[session-invalid-status-expiry-failed]', { sessionId: id, error: error?.message || String(error) });
+            scheduleInvalidStatusCleanup(id, invalidSinceAt, 5000);
+        });
+    }, Math.max(0, Number(delayMs) || 0));
+    if (typeof timer.unref === 'function') timer.unref();
+    invalidStatusCleanupTimers.set(id, timer);
+}
+
+async function reconcileInvalidStatusCleanup(owner, runtime = null) {
+    const sessionId = String(owner?.sessionId || runtime?.id || '').trim();
+    if (!sessionId || !db) return 'ignored';
+    const effectiveStatus = resolveInvalidExpirySessionStatus(owner, runtime, sessionId);
+    if (isNonExpiringSessionStatus(effectiveStatus)) {
+        clearInvalidStatusCleanupTimer(sessionId);
+        if (runtime) runtime.invalidStatusSinceAt = null;
+        if (owner.invalidStatusSinceAt != null || owner.invalidStatusExpiresAt != null) {
+            await db.collection('session_owners').updateOne({ sessionId }, { $set: { invalidStatusSinceAt: null, invalidStatusExpiresAt: null } }).catch(error => console.warn('[session-invalid-status-reset-failed]', { sessionId, error: error?.message || String(error) }));
+        }
+        return 'healthy';
+    }
+    let invalidSinceAt = parseSessionStatusTimestamp(owner?.invalidStatusSinceAt) || parseSessionStatusTimestamp(runtime?.invalidStatusSinceAt);
+    if (!invalidSinceAt) invalidSinceAt = Date.now();
+    if (runtime) runtime.invalidStatusSinceAt = invalidSinceAt;
+    const expiresAt = invalidSinceAt + SESSION_INVALID_STATUS_TTL_MS;
+    if (!parseSessionStatusTimestamp(owner?.invalidStatusSinceAt) || parseSessionStatusTimestamp(owner?.invalidStatusExpiresAt) !== expiresAt) {
+        await db.collection('session_owners').updateOne({ sessionId }, { $set: { invalidStatusSinceAt: new Date(invalidSinceAt), invalidStatusExpiresAt: new Date(expiresAt) } }).catch(error => console.warn('[session-invalid-status-start-save-failed]', { sessionId, error: error?.message || String(error) }));
+    }
+    scheduleInvalidStatusCleanup(sessionId, invalidSinceAt, Math.max(0, expiresAt - Date.now()));
+    return 'counting';
+}
+
+async function expireInvalidStatusSession(sessionId, expectedInvalidSinceAt) {
+    const id = String(sessionId || '').trim();
+    if (!id || !db || serverShuttingDown || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive) || tfbotWorkerStopping) return false;
+    const owner = await db.collection('session_owners').findOne({ sessionId: id }).catch(() => null);
+    if (!owner) return false;
+    const runtime = activeSessions.get(id);
+    const status = resolveInvalidExpirySessionStatus(owner, runtime, id);
+    if (isNonExpiringSessionStatus(status)) {
+        await reconcileInvalidStatusCleanup(owner, runtime);
+        return false;
+    }
+    const invalidSinceAt = parseSessionStatusTimestamp(owner.invalidStatusSinceAt) || parseSessionStatusTimestamp(runtime?.invalidStatusSinceAt) || parseSessionStatusTimestamp(expectedInvalidSinceAt);
+    if (!invalidSinceAt || invalidSinceAt !== parseSessionStatusTimestamp(expectedInvalidSinceAt)) {
+        await reconcileInvalidStatusCleanup(owner, runtime);
+        return false;
+    }
+    const remainingMs = invalidSinceAt + SESSION_INVALID_STATUS_TTL_MS - Date.now();
+    if (remainingMs > 0) {
+        scheduleInvalidStatusCleanup(id, invalidSinceAt, remainingMs);
+        return false;
+    }
+    const freshOwner = await db.collection('session_owners').findOne({ sessionId: id }, { projection: { connectionStatus: 1, status: 1, invalidStatusSinceAt: 1, invalidStatusExpiresAt: 1, ownerInstanceId: 1, ownerLeaseUntil: 1, nextRestoreRetryAt: 1, reauthRequired: 1, lastWhatsAppEvent: 1 } }).catch(() => null);
+    if (!freshOwner) return false;
+    const freshStatus = resolveInvalidExpirySessionStatus(freshOwner, runtime, id);
+    if (isNonExpiringSessionStatus(freshStatus)) {
+        await reconcileInvalidStatusCleanup(freshOwner, runtime);
+        return false;
+    }
+    if (parseSessionStatusTimestamp(freshOwner.invalidStatusSinceAt) !== invalidSinceAt) {
+        await reconcileInvalidStatusCleanup(freshOwner, runtime);
+        return false;
+    }
+    const leaseUntil = parseSessionStatusTimestamp(freshOwner.ownerLeaseUntil);
+    if (TFBOT_CLUSTER_ENABLED && freshOwner.ownerInstanceId && freshOwner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && leaseUntil > Date.now()) {
+        scheduleInvalidStatusCleanup(id, invalidSinceAt, Math.min(5000, leaseUntil - Date.now()));
+        return false;
+    }
+    if (runtime?.sock && isAuthenticatedSocketOperational(runtime, runtime.sock)) {
+        await restoreAuthenticatedSessionRuntimeStatus(id, runtime, runtime.sock, 'invalid_status_expiry_verified_authenticated_socket');
+        await db.collection('session_owners').updateOne({ sessionId: id }, { $set: { connectionStatus: 'connecte', socketAuthenticated: true, socketReady: true, invalidStatusSinceAt: null, invalidStatusExpiresAt: null } }).catch(() => {});
+        clearInvalidStatusCleanupTimer(id);
+        return false;
+    }
+    if (runtime?.sock) {
+        const socketClosed = await cleanupSocket(id, { skipAuthStoreFlush: true, forceTerminateForPairingRestart: true, socketCloseTimeoutMs: 1000 }).catch(error => {
+            console.warn('[session-invalid-status-socket-cleanup-failed]', { sessionId: id, error: error?.message || String(error) });
+            return false;
+        });
+        if (!socketClosed && runtime.sock) {
+            scheduleInvalidStatusCleanup(id, invalidSinceAt, 1000);
+            return false;
+        }
+        runtime.status = 'deconnecte';
+        runtime.active = false;
+    }
+    const reconnectTimer = reconnectTimers.get(id);
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimers.delete(id);
+    reconnectRetryDueAt.delete(id);
+    clearPairingChallengeTimer(id);
+    clearPairingRestartWatchdog(id);
+    clearPairing515SocketOpenWatchdog(id);
+    const currentOwner = await db.collection('session_owners').findOne({ sessionId: id }, { projection: { connectionStatus: 1, status: 1, invalidStatusSinceAt: 1, invalidStatusExpiresAt: 1, ownerInstanceId: 1, ownerLeaseUntil: 1, nextRestoreRetryAt: 1, lastWhatsAppEvent: 1 } }).catch(() => null);
+    if (!currentOwner || isNonExpiringSessionStatus(resolveInvalidExpirySessionStatus(currentOwner, runtime, id)) || parseSessionStatusTimestamp(currentOwner.invalidStatusSinceAt) !== invalidSinceAt) {
+        if (currentOwner) await reconcileInvalidStatusCleanup(currentOwner, runtime);
+        return false;
+    }
+    try {
+        await releaseSessionRuntimeLock(id);
+        await deleteMongoSession(id);
+        console.warn('[session-invalid-status-expired-and-deleted]', { sessionId: id, invalidStatus: freshStatus, invalidSinceAt: new Date(invalidSinceAt).toISOString(), elapsedMs: Date.now() - invalidSinceAt, expiryMs: SESSION_INVALID_STATUS_TTL_MS, associatedDataDeleted: true });
+        return true;
+    } catch (error) {
+        console.error('[session-invalid-status-delete-retry]', { sessionId: id, error: error?.message || String(error) });
+        scheduleInvalidStatusCleanup(id, invalidSinceAt, 5000);
+        return false;
+    }
+}
+
 async function cleanupExpiredUnconnectedSessions() {
     if (!db || serverShuttingDown || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive) || tfbotWorkerStopping) return 0;
     if (expiredSessionCleanupPromise) return expiredSessionCleanupPromise;
@@ -16142,6 +16435,23 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
         const staleSessionId = String(owner.sessionId || '').trim();
         if (!staleSessionId) continue;
         const runtime = activeSessions.get(staleSessionId);
+        const invalidStatusState = await reconcileInvalidStatusCleanup(owner, runtime).catch(error => {
+            console.warn('[session-invalid-status-reconcile-failed]', { sessionId: staleSessionId, error: error?.message || String(error) });
+            return 'retry';
+        });
+        if (invalidStatusState === 'healthy') continue;
+        if (invalidStatusState === 'counting') {
+            const invalidSinceAt = parseSessionStatusTimestamp(owner.invalidStatusSinceAt) || parseSessionStatusTimestamp(runtime?.invalidStatusSinceAt);
+            const expiresAt = invalidSinceAt + SESSION_INVALID_STATUS_TTL_MS;
+            if (invalidSinceAt && expiresAt <= Date.now()) {
+                const deleted = await expireInvalidStatusSession(staleSessionId, invalidSinceAt).catch(error => {
+                    console.warn('[session-invalid-status-expiry-check-failed]', { sessionId: staleSessionId, error: error?.message || String(error) });
+                    return false;
+                });
+                if (deleted) staleRemoved++;
+            }
+            continue;
+        }
         const duplicateTarget = String(owner.duplicateAccountOf || owner.duplicateOfSessionId || owner.mergedIntoSessionId || '').trim();
         if (owner.pairingRestartFailed === true) {
             const terminalCleanup = await expireUnregisteredPairingSession(owner, 'periodic_terminal_pairing_record_cleanup');
@@ -16192,7 +16502,7 @@ async function cleanupExpiredUnconnectedSessionsInternal() {
         const runtimeSocketState = runtime?.sock?.ws?.readyState ?? runtime?.sock?.ws?._socket?.readyState ?? runtime?.sock?.socket?.readyState;
         const runtimeSocketStateKnown = typeof runtime?.sock?.ws?.isOpen === 'boolean' || runtimeSocketState !== undefined && runtimeSocketState !== null;
         const runtimeSocketStateUsable = runtime?.sock?.ws?.isOpen === true || Number(runtimeSocketState) === 1 || String(runtimeSocketState).toUpperCase() === 'OPEN';
-        const runtimeSocketDefinitelyClosed = !!runtime?.sock && (Number(runtimeSocketState) === 3 || String(runtimeSocketState).toUpperCase() === 'CLOSED');
+        const runtimeSocketDefinitelyClosed = !!runtime?.sock && (runtime.sock.ws?.isOpen === false || runtime.sock.ws?._socket?.destroyed === true || Number(runtimeSocketState) === 3 || String(runtimeSocketState).toUpperCase() === 'CLOSED');
         const runtimeCredentials = runtime?.authState?.creds;
         const runtimeIdentity = getAuthenticatedPhoneNumber(runtime?.sock?.user, runtimeCredentials) || getAuthenticatedLid(runtime?.sock?.user, runtimeCredentials);
         const runtimeSocketLive = isAuthenticatedSocketOperational(runtime, runtime?.sock);
