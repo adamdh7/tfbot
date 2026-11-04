@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r172-strict-session-data-whitelist-and-logout-before-retirement';
+const TFBOT_CLUSTER_CODE_REVISION = 'r173-lid-aware-private-and-group-outbound-addressing';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -234,8 +234,8 @@ for (const level of Object.keys(tfbotOriginalConsole)) {
 enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'diagnostic-log-start', content: 'Journal opérationnel du cluster démarré; les identifiants, codes, numéros et contenus privés sont masqués.' });
 
 function applyBaileysLidPnDecryptRetryPatch() {
-    const marker = '__tfbotPrivateLidPnDecryptFallbackV117';
-    const previousMarkers = ['__tfbotPrivateLidPnDecryptFallbackV116', '__tfbotPrivateLidPnDecryptFallbackV115', '__tfbotPrivateLidPnDecryptFallbackV114', '__tfbotPrivateLidPnDecryptFallbackV113', '__tfbotPrivateLidPnDecryptFallbackV112', '__tfbotSelfChatPnDecryptFallbackV107'];
+    const marker = '__tfbotPrivateLidPnDecryptFallbackV118';
+    const previousMarkers = ['__tfbotPrivateLidPnDecryptFallbackV117', '__tfbotPrivateLidPnDecryptFallbackV116', '__tfbotPrivateLidPnDecryptFallbackV115', '__tfbotPrivateLidPnDecryptFallbackV114', '__tfbotPrivateLidPnDecryptFallbackV113', '__tfbotPrivateLidPnDecryptFallbackV112', '__tfbotSelfChatPnDecryptFallbackV107'];
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
@@ -244,13 +244,13 @@ function applyBaileysLidPnDecryptRetryPatch() {
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
         if (!filePath) return { applied: false, reason: 'decrypt_module_not_found' };
         let source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, preservesOriginalLidFallback: true, noAutomaticSessionMigration: true };
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, preservesOriginalLidFallback: true, verifiedLidPnSessionMigration: true };
         const injectedBody = `const ${marker} = true;
     const __tfbotPrimaryJid = String(__TFBOT_ORIGINAL_JID__ || '').trim();
     const __tfbotRemoteJid = String(fullMessage?.key?.remoteJid || '').trim();
     const __tfbotNormalizeJid = value => String(value || '').trim().replace(/:\\d+(?=@(?:hosted\\.)?lid$)/i, '').replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
     const __tfbotIsExcludedChat = /@(?:g\\.us|newsletter|broadcast)$/i.test(__tfbotRemoteJid);
-    const __tfbotLidCandidates = [...new Set([__tfbotPrimaryJid, __tfbotRemoteJid].map(__tfbotNormalizeJid).filter(value => /@(?:hosted\\.)?lid$/i.test(value)))];
+    const __tfbotLidCandidates = [...new Set([__tfbotPrimaryJid, __tfbotRemoteJid, fullMessage?.key?.senderLid, fullMessage?.key?.participantLid, fullMessage?.key?.remoteJidAlt].map(__tfbotNormalizeJid).filter(value => /@(?:hosted\\.)?lid$/i.test(value)))];
     const __tfbotIsPrivateLidChat = !__tfbotIsExcludedChat && __tfbotLidCandidates.length > 0;
     const __tfbotIsSelfLidChat = fullMessage?.key?.fromMe === true && __tfbotIsPrivateLidChat;
     const __tfbotPnCandidates = [];
@@ -277,18 +277,28 @@ function applyBaileysLidPnDecryptRetryPatch() {
     const __tfbotOriginalCandidateJid = __tfbotPrimaryJid || __tfbotLidCandidates[0] || __tfbotRemoteJid;
     const __tfbotCandidates = [...new Set([__tfbotPrimaryJid, ...__tfbotPnCandidates, __tfbotRemoteJid])].filter(Boolean);
     const __tfbotDecryptAttempts = [];
+    const __tfbotPersistLidPnAndMigrate = async (__tfbotLid, __tfbotPn, __tfbotMigratePnSession) => {
+        const __tfbotNormalizedLid = __tfbotNormalizeJid(__tfbotLid);
+        const __tfbotNormalizedPn = __tfbotNormalizeJid(__tfbotPn);
+        if (!/^\\d{6,20}@lid$/i.test(__tfbotNormalizedLid) || !/^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotNormalizedPn)) return false;
+        try {
+            if (typeof repository?.lidMapping?.storeLIDPNMappings === 'function') await repository.lidMapping.storeLIDPNMappings([{ lid: __tfbotNormalizedLid, pn: __tfbotNormalizedPn }]);
+            const __tfbotSessionMigrated = __tfbotMigratePnSession === true && typeof repository?.migrateSession === 'function';
+            if (__tfbotSessionMigrated) await repository.migrateSession(__tfbotNormalizedPn, __tfbotNormalizedLid);
+            logger?.debug?.({ decryptAddressType: 'verified_lid_pn_pair', sessionMigration: __tfbotSessionMigrated, sessionMigrationReason: __tfbotSessionMigrated ? 'successful_phone_number_decrypt' : 'not_a_successful_phone_number_decrypt' }, 'private LID PN mapping persisted and applicable Signal session migration evaluated');
+            return true;
+        } catch (mappingMigrationError) {
+            logger?.debug?.({ mappingMigrationErrorName: mappingMigrationError?.name || 'Error' }, 'private LID PN mapping or Signal session migration skipped after successful decrypt');
+            return false;
+        }
+    };
     let __tfbotOriginalDecryptError;
     let __tfbotLastDecryptError;
     for (const __tfbotCandidateJid of __tfbotCandidates) {
         try {
             const __tfbotDecrypted = await repository.decryptMessage({ jid: __tfbotCandidateJid, type: e2eType, ciphertext: content });
-            if (__tfbotIsPrivateLidChat && /^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotCandidateJid)) {
-                const __tfbotLid = __tfbotLidCandidates[0] || '';
-                if (__tfbotLid && typeof repository?.lidMapping?.storeLIDPNMappings === 'function') {
-                    void Promise.resolve().then(() => repository.lidMapping.storeLIDPNMappings([{ lid: __tfbotLid, pn: __tfbotCandidateJid }])).catch(mappingStoreError => {
-                        logger?.debug?.({ mappingStoreErrorName: mappingStoreError?.name || 'Error' }, 'private LID/PN mapping persistence skipped after successful alternate decrypt');
-                    });
-                }
+            if (__tfbotIsPrivateLidChat && __tfbotPnCandidates.length) await __tfbotPersistLidPnAndMigrate(__tfbotLidCandidates[0] || '', __tfbotPnCandidates[0], /^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotCandidateJid));
+            if (__tfbotIsPrivateLidChat && /^\d{6,20}@s\.whatsapp\.net$/i.test(__tfbotCandidateJid)) {
                 logger?.debug?.({ remoteJid: __tfbotRemoteJid, primaryJid: __tfbotPrimaryJid, decryptAddressType: 'phone_number', selfChat: __tfbotIsSelfLidChat, mappingAvailable: __tfbotPnCandidates.length > 0 }, 'private LID PN decrypt fallback succeeded');
             }
             return __tfbotDecrypted;
@@ -311,11 +321,7 @@ function applyBaileysLidPnDecryptRetryPatch() {
                 if (!/^\d{6,20}@s\.whatsapp\.net$/i.test(__tfbotMappedPn) || __tfbotCandidates.includes(__tfbotMappedPn)) continue;
                 try {
                     const __tfbotDecryptedMappedPn = await repository.decryptMessage({ jid: __tfbotMappedPn, type: e2eType, ciphertext: content });
-                    if (typeof repository?.lidMapping?.storeLIDPNMappings === 'function') {
-                        void Promise.resolve().then(() => repository.lidMapping.storeLIDPNMappings([{ lid: __tfbotLid, pn: __tfbotMappedPn }])).catch(mappingStoreError => {
-                            logger?.debug?.({ mappingStoreErrorName: mappingStoreError?.name || 'Error' }, 'private LID/PN mapping persistence skipped after successful mapped decrypt');
-                        });
-                    }
+                    await __tfbotPersistLidPnAndMigrate(__tfbotLid, __tfbotMappedPn, true);
                     logger?.debug?.({ remoteJid: __tfbotRemoteJid, decryptAddressType: 'cached_or_database_phone_number' }, 'private LID PN decrypt fallback succeeded after original address attempts');
                     return __tfbotDecryptedMappedPn;
                 } catch (__tfbotMappedDecryptError) {
@@ -349,7 +355,7 @@ function applyBaileysLidPnDecryptRetryPatch() {
             source = source.slice(0, wrapperStart) + replacement + source.slice(oldIifeEnd + 5);
             if (!source.includes(marker) || source.includes(previousMarker)) return { applied: false, reason: 'previous_private_lid_patch_upgrade_verification_failed', file: path.basename(filePath) };
             fs.writeFileSync(filePath, source, 'utf8');
-            return { applied: true, alreadyApplied: false, upgradedPreviousPatch: true, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, mappingLookupTimeoutMs: 2000, preservesOriginalLidFallback: true, noAutomaticSessionMigration: true };
+            return { applied: true, alreadyApplied: false, upgradedPreviousPatch: true, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, mappingLookupTimeoutMs: 2000, preservesOriginalLidFallback: true, verifiedLidPnSessionMigration: true };
         }
         const callPattern = /((?:(?:const|let|var)\s+)?[A-Za-z_$][\w$]*\s*=\s*)await\s+repository\.decryptMessage\s*\(\s*\{\s*jid\s*:\s*([^,\n]+?)\s*,\s*type\s*:\s*e2eType\s*,\s*ciphertext\s*:\s*content\s*\}\s*\)\s*;?/g;
         const matches = [...source.matchAll(callPattern)];
@@ -359,7 +365,7 @@ function applyBaileysLidPnDecryptRetryPatch() {
         const patchedSource = source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
         if (!patchedSource.includes(marker) || !patchedSource.includes('getPNForLID') || !patchedSource.includes('storeLIDPNMappings') || patchedSource.includes('migrateSession(__tfbotCandidateJid')) return { applied: false, reason: 'private_lid_decrypt_patch_verification_failed', file: path.basename(filePath) };
         fs.writeFileSync(filePath, patchedSource, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, mappingLookupTimeoutMs: 2000, groupMetadataFallback: true, preservesOriginalLidFallback: true, storesMappingOnlyAfterSuccessfulPnDecrypt: true, noAutomaticSessionMigration: true };
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, mappingLookupTimeoutMs: 2000, groupMetadataFallback: true, preservesOriginalLidFallback: true, storesVerifiedMappingAndMigratesPnSessionOnlyAfterSuccessfulPnDecrypt: true, deletesSignalKeys: false };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
@@ -1195,6 +1201,44 @@ const __tfbotExtractRetryReceiptBundleV115 = receipt => {
         return result;
     }
 }
+function applyBaileysLidAwareGroupOutboundAddressingPatch() {
+    const marker = '__tfbotLidAwareGroupOutboundAddressingV173';
+    try {
+        const entryPath = require.resolve('@whiskeysockets/baileys');
+        const entryDirectory = path.dirname(entryPath);
+        const roots = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
+        const candidates = [...new Set(roots.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `messages-send.${extension}`)))) )];
+        const filePath = candidates.find(candidate => fs.existsSync(candidate));
+        if (!filePath) return { applied: false, reason: 'messages_send_module_not_found' };
+        let source = fs.readFileSync(filePath, 'utf8');
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), defaultsMissingGroupModeToLidWhenOwnLidExists: true, preservesExplicitPnMode: true, encryptsGroupSenderKeyWithMatchingIdentity: true };
+        const countPatternMatches = (value, pattern) => [...value.matchAll(new RegExp(pattern.source, `${pattern.flags}g`))].length;
+        const encryptPattern = /const\s*\{\s*ciphertext\s*,\s*senderKeyDistributionMessage\s*\}\s*=\s*await\s+signalRepository\.encryptGroupMessage\s*\(\s*\{\s*group\s*:\s*destinationJid\s*,\s*data\s*:\s*bytes\s*,\s*meId\s*\}\s*\)/;
+        const encryptMatch = encryptPattern.exec(source);
+        if (!encryptMatch || countPatternMatches(source, encryptPattern) !== 1) return { applied: false, reason: 'group_encrypt_identity_anchor_not_found_or_ambiguous', file: path.basename(filePath) };
+        const modeAttributePattern = /(addressing_mode\s*:\s*[^,\n]+?\s*)(?:\|\||\?\?)\s*(['"])pn\2/;
+        const modeAttributeMatch = modeAttributePattern.exec(source);
+        if (!modeAttributeMatch || countPatternMatches(source, modeAttributePattern) !== 1) return { applied: false, reason: 'group_addressing_mode_attribute_anchor_not_found_or_ambiguous', file: path.basename(filePath) };
+        const deviceJidPattern = /jidEncode\(\s*user\s*,\s*groupData\?\.addressingMode\s*===\s*(['"])lid\1\s*\?\s*(['"])lid\2\s*:\s*(['"])s\.whatsapp\.net\3\s*,\s*device\s*\)/;
+        if (!deviceJidPattern.test(source) || countPatternMatches(source, deviceJidPattern) !== 1) return { applied: false, reason: 'group_sender_key_device_address_anchor_not_found_or_ambiguous', file: path.basename(filePath) };
+        source = source.replace(modeAttributePattern, `${modeAttributeMatch[1]}|| (authState.creds?.me?.lid ? 'lid' : 'pn')`);
+        const encryptReplacement = `const ${marker} = true;
+                const __tfbotRawGroupAddressingModeV173 = String(groupData?.addressingMode || (authState.creds?.me?.lid ? 'lid' : 'pn')).toLowerCase();
+                const __tfbotGroupAddressingModeV173 = isGroup && __tfbotRawGroupAddressingModeV173 === 'lid' ? 'lid' : 'pn';
+                const __tfbotGroupSenderIdentityV173 = __tfbotGroupAddressingModeV173 === 'lid' && authState.creds?.me?.lid ? String(authState.creds.me.lid).trim() : meId;
+                logger.debug({ addressingMode: __tfbotGroupAddressingModeV173, senderIdentityType: __tfbotGroupAddressingModeV173 === 'lid' ? 'lid' : 'phone_number', hasOwnLid: Boolean(authState.creds?.me?.lid) }, 'group outbound sender-key addressing mode selected');
+                ${encryptMatch[0].replace(/\bmeId\s*\}/, 'meId: __tfbotGroupSenderIdentityV173 }')}`;
+        source = source.replace(encryptPattern, encryptReplacement);
+        source = source.replace(deviceJidPattern, 'jidEncode(user, __tfbotGroupAddressingModeV173 === \'lid\' ? \'lid\' : \'s.whatsapp.net\', device)');
+        const patchedEncryptPattern = /await\s+signalRepository\.encryptGroupMessage\s*\(\s*\{\s*group\s*:\s*destinationJid\s*,\s*data\s*:\s*bytes\s*,\s*meId\s*:\s*__tfbotGroupSenderIdentityV173\s*\}\s*\)/;
+        if (!source.includes(marker) || !source.includes('meId: __tfbotGroupSenderIdentityV173') || !patchedEncryptPattern.test(source) || !source.includes("__tfbotGroupAddressingModeV173 === 'lid'")) return { applied: false, reason: 'group_lid_addressing_patch_verification_failed', file: path.basename(filePath) };
+        fs.writeFileSync(filePath, source, 'utf8');
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), defaultsMissingGroupModeToLidWhenOwnLidExists: true, preservesExplicitPnMode: true, encryptsGroupSenderKeyWithMatchingIdentity: true, usesSameAddressingModeForSenderKeyRecipients: true, deletesSignalKeys: false };
+    } catch (error) {
+        return { applied: false, reason: String(error?.message || error).slice(0, 180) };
+    }
+}
+
 function applyBaileysCompanionRegRefreshPatch() {
     const marker = '__tfbotCompanionRegRefreshHandlerV116';
     try {
@@ -1355,6 +1399,7 @@ const baileysRetryHeuristicUpgradeStatus = upgradeBaileysRetryHeuristicIfPresent
 const baileysLidPnDecryptPatchStatus = applyBaileysLidPnDecryptRetryPatch();
 const baileysGroupLidPnDecryptPatchStatus = applyBaileysGroupLidPnDecryptRetryPatch();
 const baileysGroupRetrySkdmPatchStatus = applyBaileysGroupRetrySkdmPatch();
+const baileysLidAwareGroupOutboundAddressingPatchStatus = applyBaileysLidAwareGroupOutboundAddressingPatch();
 const baileysSelfChatPlaceholderResendPatchStatus = applyBaileysSelfChatPlaceholderResendPnPatch();
 const baileysSignalTransactionPatchStatus = applyBaileysSignalTransactionPatch();
 const baileysPerChatInboundProcessingPatchStatus = applyBaileysPerChatInboundProcessingPatch();
@@ -1369,6 +1414,7 @@ console.info('[baileys-lid-pn-decrypt-retry-patch]', baileysLidPnDecryptPatchSta
 console.info('[baileys-group-lid-pn-decrypt-retry-patch]', baileysGroupLidPnDecryptPatchStatus);
 console.info('[baileys-self-chat-placeholder-resend-patch]', baileysSelfChatPlaceholderResendPatchStatus);
 console.info('[baileys-group-retry-skdm-patch]', baileysGroupRetrySkdmPatchStatus);
+console.info('[baileys-lid-aware-group-outbound-addressing-patch]', baileysLidAwareGroupOutboundAddressingPatchStatus);
 console.info('[baileys-retry-heuristic-upgrade]', baileysRetryHeuristicUpgradeStatus);
 console.info('[baileys-outgoing-retry-preflight-patch]', { ...baileysOutgoingRetryPreflightPatchStatus, action: baileysOutgoingRetryPreflightPatchStatus.applied ? 'preload_internal_retry_manager_and_persist_generated_full_message_before_network_relay' : 'leave_installed_baileys_source_unchanged' });
 console.info('[baileys-retry-resend-double-encryption-patch]', { ...baileysRetryResendDoubleEncryptionPatchStatus, action: baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'avoid_duplicate_pairwise_encryption_on_retry_resend' : 'not_applicable_for_installed_baileys_version' });
@@ -1404,7 +1450,7 @@ function getTfbotInstalledPackageVersion(packageName) {
     return null;
 }
 const TFBOT_BAILEYS_VERSION = getTfbotInstalledPackageVersion('@whiskeysockets/baileys');
-enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, baileysVersion: TFBOT_BAILEYS_VERSION, perChatInboundProcessing: baileysPerChatInboundProcessingPatchStatus, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, groupLidPnDecrypt: baileysGroupLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus, pairingCodeProtocol: baileysPairingCodeProtocolPatchStatus }) });
+enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, baileysVersion: TFBOT_BAILEYS_VERSION, perChatInboundProcessing: baileysPerChatInboundProcessingPatchStatus, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, groupLidOutboundAddressing: baileysLidAwareGroupOutboundAddressingPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, groupLidPnDecrypt: baileysGroupLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus, pairingCodeProtocol: baileysPairingCodeProtocolPatchStatus }) });
 const { MongoClient } = require('mongodb');
 const { Writable } = require('stream');
 const zlib = require('zlib');
@@ -1555,7 +1601,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-04-r171';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-04-r173';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -3876,14 +3922,25 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         let alternateDestinationResolution = '';
         if (!isSelfChatDestination && sessionId && /@lid$/i.test(originalDestinationJid)) {
             const normalizedOriginalLid = normalizeLidCacheKey(originalDestinationJid);
-            const sessionMapping = lidPhoneResolutionCache.get(`${sessionId}:${normalizedOriginalLid}`);
-            const mappedPhone = normalizePhoneCacheJid(sessionMapping?.phone || '');
-            const sessionMappingFresh = !!(mappedPhone && Date.now() - Number(sessionMapping?.updatedAt || 0) <= LID_PHONE_MAPPING_FRESH_MS);
-            if (sessionMappingFresh) {
-                console.info('[private-send-original-lid-preserved]', { sessionId, mappingAvailable: true, mappingAgeMs: Math.max(0, Date.now() - Number(sessionMapping.updatedAt || 0)), action: 'keep_original_lid_for_outgoing_signal_addressing' });
+            let sessionMapping = lidPhoneResolutionCache.get(`${sessionId}:${normalizedOriginalLid}`);
+            let mappedPhone = normalizePhoneCacheJid(sessionMapping?.phone || '');
+            let sessionMappingFresh = !!(mappedPhone && Date.now() - Number(sessionMapping?.updatedAt || 0) <= LID_PHONE_MAPPING_FRESH_MS);
+            let resolvedMapping = null;
+            if (!sessionMappingFresh) {
+                resolvedMapping = await resolvePhoneForLid(sessionId, sock, originalDestinationJid).catch(() => null);
+                mappedPhone = normalizePhoneCacheJid(resolvedMapping?.phone || '');
+                sessionMapping = lidPhoneResolutionCache.get(`${sessionId}:${normalizedOriginalLid}`) || sessionMapping;
+                sessionMappingFresh = !!(mappedPhone && sessionMapping && Date.now() - Number(sessionMapping.updatedAt || 0) <= LID_PHONE_MAPPING_FRESH_MS);
+            }
+            if (sessionMappingFresh && mappedPhone) {
+                destinationJid = mappedPhone;
+                destinationResolution = 'verified_pn_mapping_primary_for_lid_chat';
+                alternateDestinationJid = originalDestinationJid;
+                alternateDestinationResolution = 'original_lid_fallback_after_verified_pn_failure';
+                console.info('[private-send-verified-pn-primary]', { sessionId, destinationType: 'private_pn', fallbackType: 'private_lid', mappingSource: resolvedMapping?.source || sessionMapping?.source || 'session_lid_phone_cache', mappingAgeMs: Math.max(0, Date.now() - Number(sessionMapping?.updatedAt || 0)), action: 'use_verified_phone_mapping_first_keep_original_lid_as_fallback' });
             } else {
                 void schedulePhoneResolutionForLid(sessionId, sock, originalDestinationJid, 'outgoing_private_chat').catch(() => '');
-                console.info('[private-send-original-lid-preserved]', { sessionId, mappingAvailable: false, action: 'send_to_original_lid_without_waiting_for_phone_resolution' });
+                console.info('[private-send-original-lid-preserved]', { sessionId, mappingAvailable: false, action: 'send_to_original_lid_without_guessing_phone' });
             }
         }
         if (normalizeNativeLidJid(destinationJid)) {
@@ -10012,7 +10069,7 @@ app.get('/sitemap.xml', (req, res) => res.sendFile(path.join(__dirname, 'sitemap
 app.get('/manifest.json', (req, res) => res.sendFile(path.join(__dirname, 'manifest.json')));
 app.get('/sw.js', (req, res) => res.sendFile(path.join(__dirname, 'sw.js')));
 app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s Us Bot (tfbot)"));
-app.get('/ok', (req, res) => res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Revision', TFBOT_CLUSTER_CODE_REVISION).set('X-TFBOT-Release', TFBOT_CODE_RELEASE_ID).set('X-TFBOT-Baileys-Companion-Reg-Refresh', baileysCompanionRegRefreshPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-PN-Decryption', baileysLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-PN-Decryption', baileysGroupLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-Chat-Placeholder-Resend', baileysSelfChatPlaceholderResendPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Retry-Deduplication', baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Own-LID-Retry-Addressing', baileysOwnLidRetryAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Session-Readiness', 'open-event-and-authenticated-identity').send('ok'));
+app.get('/ok', (req, res) => res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Revision', TFBOT_CLUSTER_CODE_REVISION).set('X-TFBOT-Release', TFBOT_CODE_RELEASE_ID).set('X-TFBOT-Baileys-Companion-Reg-Refresh', baileysCompanionRegRefreshPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-PN-Decryption', baileysLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-PN-Decryption', baileysGroupLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-Addressing', baileysLidAwareGroupOutboundAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-Chat-Placeholder-Resend', baileysSelfChatPlaceholderResendPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Retry-Deduplication', baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Own-LID-Retry-Addressing', baileysOwnLidRetryAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Session-Readiness', 'open-event-and-authenticated-identity').send('ok'));
 
 
 const handleTFSlugRequest = (req, res) => {
@@ -17535,11 +17592,13 @@ async function main() {
         companionRegRefreshPatchApplied: baileysCompanionRegRefreshPatchStatus.applied === true,
         ownLidDeviceAddressingPatchApplied: baileysOwnLidRetryAddressingPatchStatus.applied === true,
         groupLidPnDecryptPatchApplied: baileysGroupLidPnDecryptPatchStatus.applied === true,
+        groupLidOutboundAddressingPatchApplied: baileysLidAwareGroupOutboundAddressingPatchStatus.applied === true,
         groupRetrySkdmPatchApplied: baileysGroupRetrySkdmPatchStatus.applied === true,
         groupSenderKeyResetBeforeSendEnabled: false,
         groupSenderKeyResetEveryMessage: false,
         selfChatAddressingMode: 'authenticated_own_phone_only',
         privateLidMappedPhonePrimary: true,
+        privateLidSessionMigrationAfterVerifiedMapping: true,
         privateLidPnDecryptPatchApplied: baileysLidPnDecryptPatchStatus.applied === true,
         passiveSocketHealth: true,
         activeGroupFetchHealthProbe: false,
@@ -17588,7 +17647,7 @@ async function main() {
             tfbotWorkerActive = false;
             tfbotWorkerState = 'coordinator';
             await connectMongo({ coordinatorOnly: true });
-            console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, baileysGroupLidPnDecryptPatch: baileysGroupLidPnDecryptPatchStatus, baileysSignalTransactionPatch: baileysSignalTransactionPatchStatus, baileysPerChatInboundProcessingPatch: baileysPerChatInboundProcessingPatchStatus, baileysOutgoingRetryPreflightPatch: baileysOutgoingRetryPreflightPatchStatus, baileysRetryResendDoubleEncryptionPatch: baileysRetryResendDoubleEncryptionPatchStatus, baileysOwnLidRetryAddressingPatch: baileysOwnLidRetryAddressingPatchStatus, baileysCompanionRegRefreshPatch: baileysCompanionRegRefreshPatchStatus, baileysPairingCodeProtocolPatch: baileysPairingCodeProtocolPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, port: PORT });
+            console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, baileysGroupLidPnDecryptPatch: baileysGroupLidPnDecryptPatchStatus, baileysLidAwareGroupOutboundAddressingPatch: baileysLidAwareGroupOutboundAddressingPatchStatus, baileysSignalTransactionPatch: baileysSignalTransactionPatchStatus, baileysPerChatInboundProcessingPatch: baileysPerChatInboundProcessingPatchStatus, baileysOutgoingRetryPreflightPatch: baileysOutgoingRetryPreflightPatchStatus, baileysRetryResendDoubleEncryptionPatch: baileysRetryResendDoubleEncryptionPatchStatus, baileysOwnLidRetryAddressingPatch: baileysOwnLidRetryAddressingPatchStatus, baileysCompanionRegRefreshPatch: baileysCompanionRegRefreshPatchStatus, baileysPairingCodeProtocolPatch: baileysPairingCodeProtocolPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, port: PORT });
             httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
             const savedSelection = await db.collection('cluster_router').findOne({ _id: TFBOT_ROUTER_STATE_ID }).catch(() => null);
             const savedDomain = TFBOT_ROUTER_DOMAIN_BY_HOST.get(normalizeTfbotHost(savedSelection?.activeHost || ''));
