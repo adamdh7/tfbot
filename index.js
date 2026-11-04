@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r174-deferred-session-restore-retry-standby-safe';
+const TFBOT_CLUSTER_CODE_REVISION = 'r175-self-lid-command-delivery-and-group-key-refresh';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -1601,7 +1601,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-04-r174';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-04-r175';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1805,7 +1805,7 @@ const PAIRING_515_RESTART_OPEN_TIMEOUT_MS = Math.max(30000, Math.min(600000, Num
 const EXPLICIT_LOGOUT_CLEANUP_DELAY_MS = 220000;
 const GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS = Math.max(60000, Number(process.env.GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS) || 6 * 60 * 60 * 1000);
 const GROUP_SENDER_KEY_RESET_EVERY_SEND = String(process.env.GROUP_SENDER_KEY_RESET_EVERY_SEND || 'false').trim().toLowerCase() === 'true';
-const GROUP_SENDER_KEY_RESET_ON_SEND = String(process.env.GROUP_SENDER_KEY_RESET_ON_SEND || 'false').trim().toLowerCase() === 'true';
+const GROUP_SENDER_KEY_RESET_ON_SEND = true;
 const groupSenderKeyResetAt = new Map();
 const groupSenderKeyResetInFlight = new Map();
 const GROUP_METADATA_CACHE_TTL_MS = Math.max(30000, Number(process.env.GROUP_METADATA_CACHE_TTL_MS) || 300000);
@@ -3666,14 +3666,22 @@ function consumeOutgoingTextEcho(sessionId, jid, text) {
     return false;
 }
 
-function getSelfChatAddressPlan(originalDestinationJid, ownPhoneJid) {
+function getSelfChatAddressPlan(originalDestinationJid, ownPhoneJid, ownLidJid) {
     const original = String(originalDestinationJid || '').trim();
+    const originalLid = normalizeLidCacheKey(original);
+    const originalPhone = normalizePhoneCacheJid(original);
     const ownPhone = normalizePhoneCacheJid(ownPhoneJid || '');
-    return {
-        primaryJid: ownPhone,
-        fallbackJid: '',
-        originalType: /@lid$/i.test(original) ? 'lid' : /@s\.whatsapp\.net$/i.test(original) ? 'phone' : 'unknown'
-    };
+    const ownLid = normalizeLidCacheKey(ownLidJid || '');
+    if (/@lid$/i.test(originalLid) && ownLid && originalLid === ownLid) {
+        return { primaryJid: originalLid, fallbackJid: ownPhone, originalType: 'lid', primaryType: 'lid', fallbackType: ownPhone ? 'phone' : '' };
+    }
+    if (originalPhone && ownPhone && originalPhone === ownPhone) {
+        return { primaryJid: originalPhone, fallbackJid: ownLid, originalType: 'phone', primaryType: 'phone', fallbackType: ownLid ? 'lid' : '' };
+    }
+    if (ownLid) {
+        return { primaryJid: ownLid, fallbackJid: ownPhone, originalType: /@lid$/i.test(original) ? 'lid' : /@s\.whatsapp\.net$/i.test(original) ? 'phone' : 'unknown', primaryType: 'lid', fallbackType: ownPhone ? 'phone' : '' };
+    }
+    return { primaryJid: ownPhone, fallbackJid: '', originalType: /@lid$/i.test(original) ? 'lid' : /@s\.whatsapp\.net$/i.test(original) ? 'phone' : 'unknown', primaryType: 'phone', fallbackType: '' };
 }
 
 async function getAuthenticatedSelfPhoneJid(sessionId, sock, credentials) {
@@ -3901,9 +3909,9 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         const originalDestinationIsLid = /@lid$/i.test(originalDestinationJid);
         const originalDestinationIsPhone = /@s\.whatsapp\.net$/i.test(originalDestinationJid);
         const verifiedOwnLidJid = /@lid$/i.test(String(ownLidJid || '')) ? normalizeLidCacheKey(ownLidJid) : '';
-        const selfAddressPlan = isSelfChatDestination ? getSelfChatAddressPlan(originalDestinationJid, ownPhoneJid) : null;
+        const selfAddressPlan = isSelfChatDestination ? getSelfChatAddressPlan(originalDestinationJid, ownPhoneJid, ownLidJid) : null;
         const selfPrimaryJid = selfAddressPlan?.primaryJid || '';
-        const selfFallbackJid = '';
+        const selfFallbackJid = selfAddressPlan?.fallbackJid || '';
         if (isSelfChatDestination && !selfPrimaryJid) throw new Error('self_chat_phone_jid_unavailable');
         if (isSelfChatDestination) {
             console.info('[self-chat-authenticated-address-preserved]', {
@@ -3911,15 +3919,15 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
                 originalDestinationType: selfAddressPlan?.originalType || 'unknown',
                 primaryDestinationType: /@lid$/i.test(selfPrimaryJid) ? 'lid' : /@s\.whatsapp\.net$/i.test(selfPrimaryJid) ? 'phone' : 'unknown',
                 fallbackDestinationType: /@lid$/i.test(selfFallbackJid) ? 'lid' : /@s\.whatsapp\.net$/i.test(selfFallbackJid) ? 'phone' : null,
-                action: 'send_self_chat_only_to_authenticated_phone_jid'
+                action: 'send_self_chat_to_original_authenticated_identity_with_secondary_fallback'
             });
         }
         let destinationJid = isSelfChatDestination ? selfPrimaryJid : originalDestinationJid;
         let destinationResolution = isSelfChatDestination
-            ? 'self_chat_authenticated_phone_primary'
+            ? (/@lid$/i.test(destinationJid) ? 'self_chat_authenticated_lid_primary' : 'self_chat_authenticated_phone_primary')
             : /@lid$/i.test(originalDestinationJid) ? 'original_lid_pending_phone_resolution' : 'original_phone_preserved';
-        let alternateDestinationJid = '';
-        let alternateDestinationResolution = '';
+        let alternateDestinationJid = isSelfChatDestination && selfFallbackJid !== destinationJid ? selfFallbackJid : '';
+        let alternateDestinationResolution = alternateDestinationJid ? 'authenticated_self_identity_fallback' : '';
         if (!isSelfChatDestination && sessionId && /@lid$/i.test(originalDestinationJid)) {
             const normalizedOriginalLid = normalizeLidCacheKey(originalDestinationJid);
             let sessionMapping = lidPhoneResolutionCache.get(`${sessionId}:${normalizedOriginalLid}`);
@@ -9991,13 +9999,19 @@ async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, 
         delete messageOptions.quoted;
         const canUseImageCaption = !!(deliveryImageBuffer?.length && caption.length <= MAX_WHATSAPP_CAPTION_CHARS);
         const payload = canUseImageCaption ? { image: deliveryImageBuffer, caption, ...outgoingOptions } : { text: caption, ...outgoingOptions };
-        if (sendOptions.directSend === true) {
-            const startedAt = Date.now();
-            const result = await sock.sendMessage(jid, payload, messageOptions);
-            console.info('[command-response-direct-send]', { action: String(type || 'Message'), usedImage: canUseImageCaption, imageBytes: canUseImageCaption ? deliveryImageBuffer.length : 0, textLength: caption.length, durationMs: Date.now() - startedAt, responseAccepted: !!result?.key?.id });
+        const sendCommandPayload = value => sendOptions.directSend === true
+            ? sock.sendMessage(jid, value, messageOptions)
+            : queuedSendMessage(sock, jid, value, messageOptions, 0);
+        try {
+            const result = await sendCommandPayload(payload);
+            if (sendOptions.directSend === true) console.info('[command-response-direct-send]', { action: String(type || 'Message'), usedImage: canUseImageCaption, imageBytes: canUseImageCaption ? deliveryImageBuffer.length : 0, textLength: caption.length, responseAccepted: !!result?.key?.id });
             return result;
+        } catch (sendError) {
+            const mediaPayloadFailure = canUseImageCaption && /not-acceptable|unsupported image|image format|thumbnail|sharp|media/i.test(String(sendError?.message || sendError));
+            if (!mediaPayloadFailure) throw sendError;
+            console.warn('[command-response-image-fallback-to-text]', { action: String(type || 'Message'), imageBytes: deliveryImageBuffer.length, errorName: sendError?.name || 'Error', error: String(sendError?.message || sendError).slice(0, 300), fallback: 'queued_text_only' });
+            return queuedSendMessage(sock, jid, { text: caption, ...outgoingOptions }, messageOptions, 0);
         }
-        return queuedSendMessage(sock, jid, payload, messageOptions, 0);
     }
     let deliveryImageBuffer = null;
     try {
@@ -10071,17 +10085,25 @@ async function getWhatsAppGroupProfilePictureBuffer(sock, groupJid, timeoutMs = 
 const logoPath = path.join(__dirname, 'adamdh7.png');
 let adamLogoBuffer = fs.existsSync(logoPath) ? fs.readFileSync(logoPath) : null;
 async function inspectAdamLogo() {
-    if (!Buffer.isBuffer(adamLogoBuffer) || !adamLogoBuffer.length) {
-        console.warn('[logo-image-source-unavailable]');
+    if (!Buffer.isBuffer(adamLogoBuffer) || !adamLogoBuffer.length || adamLogoBuffer.length > 8 * 1024 * 1024) {
+        adamLogoBuffer = null;
+        console.warn('[logo-image-source-unavailable]', { action: 'use_text_only_command_responses' });
         return false;
     }
-    const isPng = adamLogoBuffer.length >= 8 && adamLogoBuffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-    if (!isPng) {
-        console.warn('[logo-image-source-invalid]', { bytes: adamLogoBuffer.length, expectedFormat: 'png' });
+    try {
+        const sharp = require('sharp');
+        const normalized = await sharp(adamLogoBuffer, { failOn: 'error' }).rotate().png().toBuffer();
+        const metadata = normalized.length ? await sharp(normalized, { failOn: 'error' }).metadata() : null;
+        if (!normalized.length || metadata?.format !== 'png' || !(metadata.width > 0) || !(metadata.height > 0)) throw new Error('logo_image_decode_validation_failed');
+        adamLogoBuffer = normalized;
+        console.info('[logo-image-source-ready]', { bytes: adamLogoBuffer.length, width: metadata.width, height: metadata.height, format: 'png', decodedAndReencoded: true });
+        return true;
+    } catch (error) {
+        const originalBytes = adamLogoBuffer.length;
+        adamLogoBuffer = null;
+        console.warn('[logo-image-source-invalid]', { bytes: originalBytes, errorName: error?.name || 'Error', error: String(error?.message || error).slice(0, 220), action: 'use_text_only_command_responses' });
         return false;
     }
-    console.info('[logo-image-source-ready]', { bytes: adamLogoBuffer.length, format: 'png', sourcePreserved: true });
-    return true;
 }
 
 app.get('/sitemap.xml', (req, res) => res.sendFile(path.join(__dirname, 'sitemap.xml')));
@@ -11888,7 +11910,7 @@ async function sendFormatted(sock, from, type, text, pushName, isAI = false, hos
 
 async function sendPlainFormatted(sock, from, type, text, pushName, sendOptions = {}) {
     const ownerName = sanitizeSessionDisplayName(sendOptions.ownerName || sock?.user?.name || sock?.user?.notify || sock?.user?.verifiedName || '') || 'Inconnu';
-    return sendImageCaptioned(sock, from, adamLogoBuffer, type, text, pushName || 'Inconnu', { ...sendOptions, commandFormat: true, directSend: sendOptions.directSend !== false, ownerName, language: sendOptions.language || 'ht', preserveSourceImage: true });
+    return sendImageCaptioned(sock, from, adamLogoBuffer, type, text, pushName || 'Inconnu', { ...sendOptions, commandFormat: true, directSend: sendOptions.directSend === true, ownerName, language: sendOptions.language || 'ht', preserveSourceImage: true });
 }
 
 async function waitForCredentialPersistence(sessionId, timeoutMs = 30000) {
@@ -14628,15 +14650,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             const matchesAuthenticatedOwnLid = !!(authenticatedRouteLid && authenticatedRouteLid === normalizedRawChatForMapping);
                             const ownRouteNumber = authenticatedRouteNumber || (matchesStoredOwnLid ? storedOwnerNumber : '');
                             const mappedToOwnAccount = !!(directPhone && ownRouteNumber && normalizePhoneNumber(directPhone.split('@')[0]) === ownRouteNumber);
-                            if (directPhone) {
+                            if (isFromMe && (matchesStoredOwnLid || matchesAuthenticatedOwnLid)) {
+                                from = normalizeNativeLidJid(normalizedRawChatForMapping);
+                                privateReplyTargetResolution = 'self_chat_original_lid_preferred';
+                            } else if (directPhone) {
                                 from = directPhone;
                                 if (!isFromMe) senderJids.push(directPhone);
-                                privateReplyTargetResolution = isFromMe && (mappedToOwnAccount || matchesStoredOwnLid || matchesAuthenticatedOwnLid)
-                                    ? 'self_chat_pn_from_live_alias'
-                                    : `private_pn_from_lid_${directPhoneCandidate?.source || 'live_mapping'}`;
-                            } else if (isFromMe && ownRouteNumber && (matchesStoredOwnLid || matchesAuthenticatedOwnLid)) {
-                                from = `${ownRouteNumber}@s.whatsapp.net`;
-                                privateReplyTargetResolution = 'self_chat_pn_from_authenticated_owner';
+                                privateReplyTargetResolution = `private_pn_from_lid_${directPhoneCandidate?.source || 'live_mapping'}`;
                             } else if (normalizeNativeLidJid(normalizedRawChatForMapping)) {
                                 from = normalizeNativeLidJid(normalizedRawChatForMapping);
                                 privateReplyTargetResolution = 'native_lid_fallback_without_verified_pn';
@@ -15243,7 +15263,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     console.info('[command-response-sent]', { sessionId, messageId: msgId, command: internalCommand, sourceChatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null, replyTargetJid: rawFrom || from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid', responseMessageId: result?.key?.id || null, transport });
                                     return result;
                                 };
-                                const commandSendOptions = (options = {}, directSend = true) => ({
+                                const commandSendOptions = (options = {}, directSend = false) => ({
                                     ...options,
                                     commandFormat: true,
                                     directSend,
@@ -15264,25 +15284,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         activeHostName,
                                         commandSendOptions(suppliedOptions, directSend)
                                     );
-                                    if (isSessionMessagingFallbackActive(sessionId)) {
-                                        markCommandSending('formatted_session_recovery_fallback', 'text_or_media');
-                                        const result = await send(false);
-                                        return completeCommandResponse(result, 'formatted_session_recovery_fallback');
-                                    }
-                                    try {
-                                        markCommandSending('formatted_direct_send', 'text_or_media');
-                                        const result = await send(true);
-                                        return completeCommandResponse(result, 'formatted_direct_send');
-                                    } catch (sendError) {
-                                        if (isSignalDecryptionFailure([sendError]) || /signal|decrypt|bad mac|no sessions|chain closed|session error|message counter/i.test(String(sendError?.message || sendError))) {
-                                            markSessionMessagingFallback(sessionId, 'signal_transport_degraded', msgId);
-                                            console.warn('[command-response-switching-to-rich-fallback]', { sessionId, messageId: msgId, command: internalCommand, error: sendError?.message || String(sendError) });
-                                            markCommandSending('formatted_send_after_signal_degradation', 'text_or_media');
-                                            const result = await send(false);
-                                            return completeCommandResponse(result, 'formatted_send_after_signal_degradation');
-                                        }
-                                        throw sendError;
-                                    }
+                                    markCommandSending(isSessionMessagingFallbackActive(sessionId) ? 'formatted_session_recovery_fallback' : 'formatted_queued_send', 'text_or_media');
+                                    const result = await send(false);
+                                    return completeCommandResponse(result, isSessionMessagingFallbackActive(sessionId) ? 'formatted_session_recovery_fallback' : 'formatted_queued_send');
                                 };
                                 const safeSendPlainFormatted = async (...sendArgs) => {
                                     if (isCancelled || terminalResponseSent) return null;
@@ -15297,24 +15301,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         activeHostName,
                                         commandSendOptions(suppliedOptions, directSend)
                                     );
-                                    if (isSessionMessagingFallbackActive(sessionId)) {
-                                        markCommandSending('formatted_session_recovery_fallback', 'text');
-                                        const result = await send(false);
-                                        return completeCommandResponse(result, 'formatted_session_recovery_fallback');
-                                    }
-                                    try {
-                                        markCommandSending('formatted_direct_send', 'text');
-                                        const result = await send(true);
-                                        return completeCommandResponse(result, 'formatted_direct_send');
-                                    } catch (sendError) {
-                                        if (isSignalDecryptionFailure([sendError]) || /signal|decrypt|bad mac|no sessions|chain closed|session error|message counter/i.test(String(sendError?.message || sendError))) {
-                                            markSessionMessagingFallback(sessionId, 'signal_transport_degraded', msgId);
-                                            markCommandSending('formatted_send_after_signal_degradation', 'text');
-                                            const result = await send(false);
-                                            return completeCommandResponse(result, 'formatted_send_after_signal_degradation');
-                                        }
-                                        throw sendError;
-                                    }
+                                    markCommandSending(isSessionMessagingFallbackActive(sessionId) ? 'formatted_session_recovery_fallback' : 'formatted_queued_send', 'text');
+                                    const result = await send(false);
+                                    return completeCommandResponse(result, isSessionMessagingFallbackActive(sessionId) ? 'formatted_session_recovery_fallback' : 'formatted_queued_send');
                                 };
                                 const safeSendActionError = async (...errorArgs) => {
                                     if (terminalResponseSent) return terminalResponsePromise;
@@ -15336,7 +15325,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     );
                                     try {
                                         markCommandSending(isSessionMessagingFallbackActive(sessionId) ? 'formatted_session_recovery_fallback' : 'formatted_direct_error', 'error_reply');
-                                        const result = await send(!isSessionMessagingFallbackActive(sessionId));
+                                        const result = await send(false);
                                         return completeCommandResponse(result, isSessionMessagingFallbackActive(sessionId) ? 'formatted_session_recovery_fallback' : 'formatted_direct_error');
                                     } catch (sendError) {
                                         if (isSignalDecryptionFailure([sendError]) || /signal|decrypt|bad mac|no sessions|chain closed|session error|message counter/i.test(String(sendError?.message || sendError))) {
@@ -15355,7 +15344,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 const trackedSendImageCaptioned = async (...sendArgs) => {
                                     const sendStartedAt = Date.now();
                                     const suppliedOptions = sendArgs[6] && typeof sendArgs[6] === 'object' ? sendArgs[6] : {};
-                                    const directSend = !isSessionMessagingFallbackActive(sessionId);
+                                    const directSend = false;
                                     const preparedArgs = [...sendArgs];
                                     preparedArgs[6] = commandSendOptions(suppliedOptions, directSend);
                                     markCommandSending(directSend ? 'image_captioned_direct' : 'image_captioned_fallback', 'image_or_text');
@@ -16501,7 +16490,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     } catch (cmdError) {
                         messageProcessingSucceeded = false;
                         messageProcessingError = cmdError?.message || String(cmdError);
-                        console.error('[message-handler]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, messageClassification: receivedClassification, detectedCommand: receivedParsedCommand?.internalCommand || receivedParsedCommand?.command || null, incomingChatJid: rawFrom, replyTargetJid: from, action: 'message_handler_failed', error: messageProcessingError });
+                        console.error('[message-handler]', { sessionId, upsertType, messageId: msgId, senderName: receivedDiagnostic?.senderName || String(m?.pushName || 'Inconnu').slice(0, 100), senderJid: receivedSenderJid || null, messageClassification: receivedClassification, detectedCommand: receivedParsedCommand?.internalCommand || receivedParsedCommand?.command || null, incomingChatJid: m?.key?.remoteJid || m?.key?.remoteJidAlt || null, replyTargetJid: receivedChat || m?.key?.remoteJid || null, action: 'message_handler_failed', error: messageProcessingError });
                     } finally {
                         messageProcessingCompleted = true;
                         if (!messageProcessingSucceeded) processedLocalCache.delete(`${sessionId}:id:${msgId}`);
@@ -17626,9 +17615,12 @@ async function main() {
         groupLidPnDecryptPatchApplied: baileysGroupLidPnDecryptPatchStatus.applied === true,
         groupLidOutboundAddressingPatchApplied: baileysLidAwareGroupOutboundAddressingPatchStatus.applied === true,
         groupRetrySkdmPatchApplied: baileysGroupRetrySkdmPatchStatus.applied === true,
-        groupSenderKeyResetBeforeSendEnabled: false,
+        groupSenderKeyResetBeforeSendEnabled: GROUP_SENDER_KEY_RESET_ON_SEND,
         groupSenderKeyResetEveryMessage: false,
-        selfChatAddressingMode: 'authenticated_own_phone_only',
+        selfChatAddressingMode: 'original_authenticated_lid_primary_with_phone_fallback',
+        selfChatOriginalJidPreferred: true,
+        commandReplyTransport: 'per_chat_serialized_queue',
+        commandImagePolicy: 'decode_and_reencode_or_text_fallback',
         privateLidMappedPhonePrimary: true,
         privateLidSessionMigrationAfterVerifiedMapping: true,
         privateLidPnDecryptPatchApplied: baileysLidPnDecryptPatchStatus.applied === true,
@@ -17667,7 +17659,7 @@ async function main() {
         timedOutQueuePolicy: 'keep_same_chat_partition_serialized_until_original_operation_settles',
         authenticatedSessionAuthDeletionOnOfflineTimeout: false,
         targetedSignalPeerRecovery: true,
-        selfChatOriginalJidPreferred: false,
+        selfChatOriginalJidPreferred: true,
         lidPhoneMappingFreshMs: LID_PHONE_MAPPING_FRESH_MS,
         sessionScopedLidMappings: true,
         senderKeyIdentityInvalidation: true,
