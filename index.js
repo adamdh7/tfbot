@@ -3,7 +3,7 @@ const MESSAGE_QUEUE_TASK_TIMEOUT_MS = Math.max(5000, Math.min(120000, Number(pro
 const MESSAGE_QUEUE_LATE_GRACE_MS = Math.max(500, Math.min(10000, Number(process.env.MESSAGE_QUEUE_LATE_GRACE_MS || 2500)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r155-pairing-event-replay-http-delivery';
+const TFBOT_CLUSTER_CODE_REVISION = 'r156-no-socket-auth-bootstrap-recovery';
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
 function shortLogHash(value) {
@@ -1549,7 +1549,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-03-r151';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-04-r156';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -5567,10 +5567,7 @@ async function releaseSessionRuntimeLock(sessionId, options = {}) {
     sessionRuntimeLockTokens.delete(sessionId);
     sessionRuntimeLockLeaseUntil.delete(sessionId);
     if (!db) return;
-    if (!lockToken) {
-        console.warn('[session-runtime-lock-release-skipped]', { sessionId, reason: 'missing_fencing_token_leave_record_to_expire' });
-        return;
-    }
+    if (!lockToken) return;
     try {
         const filter = { _id: sessionId, owner: processInstanceId, lockToken };
         await db.collection('session_runtime_locks').deleteOne(filter);
@@ -8629,19 +8626,19 @@ async function startTfbotCoordinatorMonitor() {
 async function createCodeSession(sId, format = 'pair', expectExisting = false, autoExpire = false, requestedNumber = '') {
     if (TFBOT_CLUSTER_COORDINATOR_ONLY || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping))) throw new Error('tfbot_worker_not_active');
     const normalizedFormat = normalizeConnectionFormat(format);
-    const phoneNumber = normalizePhoneNumber(requestedNumber);
     const preallocatedOwner = await db.collection('session_owners').findOne({ sessionId: sId }, { projection: { sessionId: 1, pairingReplacementPending: 1, pairingPending: 1, pairingAttemptPending: 1 } }).catch(() => null);
     if (!preallocatedOwner || preallocatedOwner.pairingReplacementPending !== true || preallocatedOwner.pairingPending !== true || preallocatedOwner.pairingAttemptPending !== true) throw new Error('fresh_pairing_owner_record_not_preallocated');
     if (activeSessions.has(sId)) throw new Error('pairing_session_id_already_active');
     if (!isPendingPairingReplacementSession(sId)) throw new Error('fresh_pairing_replacement_marker_missing');
-    const sessionLockAcquired = await acquireSessionRuntimeLock(sId);
-    if (!sessionLockAcquired) throw new Error('session_runtime_lock_owned_elsewhere');
-    try {
-        return await startAdamBot(sId, autoExpire, normalizedFormat, expectExisting);
-    } catch (error) {
-        await releaseSessionRuntimeLock(sId).catch(() => {});
-        throw error;
+    const started = await startAdamBot(sId, autoExpire, normalizedFormat, expectExisting);
+    const runtime = activeSessions.get(sId) || started || null;
+    if (!runtime?.sock) {
+        const owner = await db.collection('session_owners').findOne({ sessionId: sId }, { projection: { lastRestoreError: 1, connectionStatus: 1, connectionEverOpened: 1 } }).catch(() => null);
+        const detail = String(runtime?.lastAuthStoreCleanupError || runtime?.lastRestoreError || owner?.lastRestoreError || 'pairing_socket_not_started').trim();
+        console.error('[pairing-socket-start-failed-before-code-delivery]', { sessionId: sId, format: normalizedFormat, runtimePresent: !!runtime, socketPresent: !!runtime?.sock, ownerStatus: owner?.connectionStatus || null, connectionEverOpened: owner?.connectionEverOpened === true, reason: detail });
+        throw new Error(detail || 'pairing_socket_not_started');
     }
+    return runtime;
 }
 
 function normalizePairingCode(value) {
@@ -8976,7 +8973,6 @@ async function discardFreshPairingSession(sessionId, reason = 'new_pairing_attem
             scheduleSessionLockRetry(sessionId, false, runtime?.format || owner?.format || 'pair');
             return { removed: false, preserved: true, reason: candidateOpenedDuringCleanup ? 'connection_opened_during_cleanup' : 'authentication_completed_waiting_for_open' };
         }
-        await releaseSessionRuntimeLock(sessionId).catch(() => {});
         await deleteMongoSession(sessionId);
         pendingPairingReplacementSessions.delete(sessionId);
         console.info('[fresh-pairing-attempt-removed]', { sessionId, reason, oldAccountSessionTouched: false, newAttemptCredentialsRemoved: true });
@@ -9696,7 +9692,7 @@ app.get('/sitemap.xml', (req, res) => res.sendFile(path.join(__dirname, 'sitemap
 app.get('/manifest.json', (req, res) => res.sendFile(path.join(__dirname, 'manifest.json')));
 app.get('/sw.js', (req, res) => res.sendFile(path.join(__dirname, 'sw.js')));
 app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s Us Bot (tfbot)"));
-app.get('/ok', (req, res) => res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Baileys-Companion-Reg-Refresh', baileysCompanionRegRefreshPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-PN-Decryption', baileysLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-PN-Decryption', baileysGroupLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-Chat-Placeholder-Resend', baileysSelfChatPlaceholderResendPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Retry-Deduplication', baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Own-LID-Retry-Addressing', baileysOwnLidRetryAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Session-Readiness', 'open-event-and-authenticated-identity').send('ok'));
+app.get('/ok', (req, res) => res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Revision', TFBOT_CLUSTER_CODE_REVISION).set('X-TFBOT-Release', TFBOT_CODE_RELEASE_ID).set('X-TFBOT-Baileys-Companion-Reg-Refresh', baileysCompanionRegRefreshPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-PN-Decryption', baileysLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-PN-Decryption', baileysGroupLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-Chat-Placeholder-Resend', baileysSelfChatPlaceholderResendPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Retry-Deduplication', baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Own-LID-Retry-Addressing', baileysOwnLidRetryAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Session-Readiness', 'open-event-and-authenticated-identity').send('ok'));
 
 
 const handleTFSlugRequest = (req, res) => {
@@ -11494,36 +11490,81 @@ async function cleanupSocket(sessionId, options = {}) {
     const oldSocket = session?.sock || null;
     const authState = session?.authState || null;
     const pairingRestartRecovery = options.pairingRestartRecovery === true;
-    if (options.skipAuthStoreFlush !== true) {
+    const sessionKey = String(sessionId || '');
+    const socketIsLive = !!oldSocket && !isSocketDefinitelyClosed(oldSocket);
+    const getSignalState = () => {
         try {
+            return typeof authState?.getSignalTransactionState === 'function'
+                ? authState.getSignalTransactionState() || { pendingCount: 0, oldestAgeMs: 0, lastActivityAt: 0 }
+                : { pendingCount: 0, oldestAgeMs: 0, lastActivityAt: 0 };
+        } catch (error) {
+            return { pendingCount: 0, oldestAgeMs: 0, lastActivityAt: 0, stateError: String(error?.message || error).slice(0, 180) };
+        }
+    };
+    if (options.skipAuthStoreFlush !== true) {
+        let stage = 'initial_state';
+        try {
+            if (!socketIsLive) {
+                stage = 'no_live_socket_skip_credential_snapshot';
+                clearSessionOpenReadinessRetry(sessionId);
+                if (typeof authState?.setAuthSocket === 'function') authState.setAuthSocket(null);
+                const hasQueuedWork = credentialPersistenceQueues.has(sessionKey) || authWriteQueues.has(sessionKey) || (authWriteFailures.get(sessionKey)?.failures?.length || 0) > 0 || !!getSignalState().pendingCount;
+                if (!hasQueuedWork) {
+                    if (session?.sock === oldSocket) session.sock = null;
+                    if (session) delete session.lastAuthStoreCleanupError;
+                    console.info('[signal-auth-store-no-live-socket-skip-snapshot]', { sessionId, runtimePresent: !!session, authStatePresent: !!authState, action: 'start_new_socket_without_forcing_a_stale_credentials_snapshot' });
+                    return true;
+                }
+                stage = 'wait_existing_credential_persistence';
+                const credentialsPersisted = await waitForCredentialPersistence(sessionId, credentialPersistenceTimeoutMs);
+                if (!credentialsPersisted) throw new Error('credential_persistence_not_quiescent_without_live_socket');
+                stage = 'flush_existing_auth_writes';
+                await flushAuthWritesForSession(sessionId, authStoreTimeoutMs);
+                stage = 'wait_existing_signal_transactions';
+                if (typeof authState?.waitForSignalTransactions === 'function') await authState.waitForSignalTransactions(authStoreTimeoutMs, pairingRestartRecovery ? 100 : Math.min(350, authStoreQuietMs));
+                const signalState = getSignalState();
+                if (Number(signalState.pendingCount || 0) > 0 || credentialPersistenceQueues.has(sessionKey) || authWriteQueues.has(sessionKey) || (authWriteFailures.get(sessionKey)?.failures?.length || 0) > 0) throw new Error('auth_store_not_quiescent_without_live_socket');
+                if (session?.sock === oldSocket) session.sock = null;
+                if (session) delete session.lastAuthStoreCleanupError;
+                console.info('[signal-auth-store-no-live-socket-drained]', { sessionId, credentialQueueEmpty: !credentialPersistenceQueues.has(sessionKey), authQueueEmpty: !authWriteQueues.has(sessionKey), signalTransactionsPending: signalState.pendingCount || 0, action: 'drain_existing_writes_without_snapshotting_credentials_from_a_closed_socket' });
+                return true;
+            }
             const signalQuietMs = pairingRestartRecovery ? 100 : authStoreQuietMs;
+            stage = 'wait_signal_transactions_before_snapshot';
             if (typeof authState?.waitForSignalTransactions === 'function') await authState.waitForSignalTransactions(authStoreTimeoutMs, signalQuietMs);
+            stage = 'wait_credential_persistence_before_snapshot';
             const credentialsPersistedBeforeSnapshot = await waitForCredentialPersistence(sessionId, credentialPersistenceTimeoutMs);
             if (!credentialsPersistedBeforeSnapshot) throw new Error('credential_persistence_not_quiescent_before_socket_replacement');
             if (typeof session?.persistCredentials === 'function') {
+                stage = 'persist_live_socket_credentials_snapshot';
                 const saved = await promiseWithTimeout(session.persistCredentials(), credentialPersistenceTimeoutMs, 'credential_snapshot_persistence_timeout');
                 if (saved !== true) throw new Error('credential_snapshot_persistence_not_confirmed');
             }
+            stage = 'wait_credential_persistence_after_snapshot';
             const credentialsPersisted = await waitForCredentialPersistence(sessionId, credentialPersistenceTimeoutMs);
             if (!credentialsPersisted) throw new Error('credential_persistence_not_quiescent_after_snapshot');
+            stage = 'flush_live_socket_auth_writes';
             await flushAuthWritesForSession(sessionId, authStoreTimeoutMs);
+            stage = 'wait_signal_transactions_after_snapshot';
             if (typeof authState?.waitForSignalTransactions === 'function') await authState.waitForSignalTransactions(authStoreTimeoutMs, signalQuietMs);
             if (pairingRestartRecovery) {
-                const signalState = typeof authState?.getSignalTransactionState === 'function' ? authState.getSignalTransactionState() : { pendingCount: 0, oldestAgeMs: 0 };
-                const writeFailure = authWriteFailures.get(String(sessionId || ''));
+                stage = 'verify_pairing_restart_auth_store';
+                const signalState = getSignalState();
+                const writeFailure = authWriteFailures.get(sessionKey);
                 if (Number(signalState.pendingCount || 0) > 0) throw new Error(`signal_auth_transaction_queue_not_quiescent:${signalState.pendingCount}:${signalState.oldestAgeMs || 0}`);
-                if (credentialPersistenceQueues.has(String(sessionId || '')) || authWriteQueues.has(String(sessionId || ''))) throw new Error('signal_auth_store_queues_still_pending_after_515_flush');
+                if (credentialPersistenceQueues.has(sessionKey) || authWriteQueues.has(sessionKey)) throw new Error('signal_auth_store_queues_still_pending_after_515_flush');
                 if ((writeFailure?.failures?.length || 0) > 0) throw new Error(`signal_auth_store_unresolved_write_failure:${writeFailure.message || 'unknown'}`);
             } else {
+                stage = 'verify_auth_store_quiescence';
                 await waitForAuthStoreQuiescence(sessionId, authStoreTimeoutMs, authStoreQuietMs);
             }
-            const signalState = typeof authState?.getSignalTransactionState === 'function' ? authState.getSignalTransactionState() : { pendingCount: 0, oldestAgeMs: 0 };
-            delete session.lastAuthStoreCleanupError;
-            console.info('[signal-auth-store-quiescent-before-reconnect]', { sessionId, recoveryMode: pairingRestartRecovery, quietMs: signalQuietMs, timeoutMs: authStoreTimeoutMs, credentialPersistenceQueueEmpty: !credentialPersistenceQueues.has(String(sessionId || '')), authWriteQueueEmpty: !authWriteQueues.has(String(sessionId || '')), signalTransactionsPending: signalState.pendingCount || 0, signalTransactionOldestAgeMs: signalState.oldestAgeMs || 0, credentialSnapshotPersisted: typeof session?.persistCredentials === 'function', socketStillOpenDuringFlush: !!oldSocket && !isSocketDefinitelyClosed(oldSocket) });
+            const signalState = getSignalState();
+            if (session) delete session.lastAuthStoreCleanupError;
+            console.info('[signal-auth-store-quiescent-before-reconnect]', { sessionId, recoveryMode: pairingRestartRecovery, quietMs: signalQuietMs, timeoutMs: authStoreTimeoutMs, credentialPersistenceQueueEmpty: !credentialPersistenceQueues.has(sessionKey), authWriteQueueEmpty: !authWriteQueues.has(sessionKey), signalTransactionsPending: signalState.pendingCount || 0, signalTransactionOldestAgeMs: signalState.oldestAgeMs || 0, credentialSnapshotPersisted: typeof session?.persistCredentials === 'function', socketStillOpenDuringFlush: true });
         } catch (error) {
             if (session) session.lastAuthStoreCleanupError = String(error?.message || error).slice(0, 220);
-            const signalState = typeof authState?.getSignalTransactionState === 'function' ? authState.getSignalTransactionState() : { pendingCount: 0, oldestAgeMs: 0 };
-            console.error('[signal-auth-store-flush-before-reconnect-failed]', { sessionId, error: error?.message || String(error), credentialQueuePending: credentialPersistenceQueues.has(String(sessionId || '')), authQueuePending: authWriteQueues.has(String(sessionId || '')), authWriteFailure: authWriteFailures.get(String(sessionId || ''))?.message || null, signalTransactionsPending: signalState.pendingCount || 0, signalTransactionOldestAgeMs: signalState.oldestAgeMs || 0, socketKeptOpen: !!oldSocket && !isSocketDefinitelyClosed(oldSocket), action: 'retain_current_socket_and_account_runtime_lock_until_auth_store_is_confirmed_quiescent' });
+            const signalState = getSignalState();
+            console.error('[signal-auth-store-flush-before-reconnect-failed]', { sessionId, stage, error: error?.message || String(error), errorName: error?.name || 'Error', stack: String(error?.stack || '').slice(0, 2400), credentialQueuePending: credentialPersistenceQueues.has(sessionKey), authQueuePending: authWriteQueues.has(sessionKey), authWriteFailure: authWriteFailures.get(sessionKey)?.message || null, signalTransactionsPending: signalState.pendingCount || 0, signalTransactionOldestAgeMs: signalState.oldestAgeMs || 0, socketKeptOpen: socketIsLive && !isSocketDefinitelyClosed(oldSocket), action: 'retain_existing_auth_documents_and_retry_without_forcing_a_stale_credentials_snapshot' });
             return false;
         }
     }
@@ -11583,14 +11624,14 @@ async function cleanupSocket(sessionId, options = {}) {
             await flushAuthWritesForSession(sessionId, authStoreTimeoutMs);
             if (pairingRestartRecovery) {
                 if (typeof authState?.waitForSignalTransactions === 'function') await authState.waitForSignalTransactions(authStoreTimeoutMs, 100);
-                const signalState = typeof authState?.getSignalTransactionState === 'function' ? authState.getSignalTransactionState() : { pendingCount: 0, oldestAgeMs: 0 };
-                if (Number(signalState.pendingCount || 0) > 0 || credentialPersistenceQueues.has(String(sessionId || '')) || authWriteQueues.has(String(sessionId || '')) || (authWriteFailures.get(String(sessionId || ''))?.failures?.length || 0) > 0) throw new Error('signal_auth_store_not_empty_after_515_socket_close');
+                const signalState = getSignalState();
+                if (Number(signalState.pendingCount || 0) > 0 || credentialPersistenceQueues.has(sessionKey) || authWriteQueues.has(sessionKey) || (authWriteFailures.get(sessionKey)?.failures?.length || 0) > 0) throw new Error('signal_auth_store_not_empty_after_515_socket_close');
             } else {
                 await waitForAuthStoreQuiescence(sessionId, authStoreTimeoutMs, Math.max(250, Math.min(1000, authStoreQuietMs)));
             }
         } catch (error) {
             if (session) session.lastAuthStoreCleanupError = String(error?.message || error).slice(0, 220);
-            console.error('[signal-auth-store-post-close-verification-failed]', { sessionId, error: error?.message || String(error), recoveryMode: pairingRestartRecovery, action: 'preserve_auth_documents_and_block_replacement_until_store_recovery' });
+            console.error('[signal-auth-store-post-close-verification-failed]', { sessionId, error: error?.message || String(error), errorName: error?.name || 'Error', stack: String(error?.stack || '').slice(0, 1800), recoveryMode: pairingRestartRecovery, action: 'preserve_auth_documents_and_block_replacement_until_store_recovery' });
             return false;
         }
     }
