@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r177-direct-by-default-legacy-transport-only-on-signal-degradation';
+const TFBOT_CLUSTER_CODE_REVISION = 'r178-group-legacy-owner-linked-device-fast-private';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -2252,12 +2252,29 @@ function sanitizeSessionDisplayName(value) {
 }
 
 function normalizeLidCacheKey(value) {
-    return String(value || '').trim().replace(/:\d+@lid$/i, '@lid').toLowerCase();
+    return String(value || '').trim().replace(/:\d+(?=@(?:hosted\.)?lid$)/i, '').replace(/@hosted\.lid$/i, '@lid').toLowerCase();
 }
 
 function normalizeNativeLidJid(value) {
-    const match = String(value || '').trim().match(/^(\d{3,20})(?::\d+)?@lid$/i);
+    const match = String(value || '').trim().match(/^(\d{3,20})(?::\d+)?@(?:hosted\.)?lid$/i);
     return match ? `${match[1]}@lid` : '';
+}
+
+function normalizeOwnerIdentityJid(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const lid = normalizeNativeLidJid(raw);
+    if (lid) return lid;
+    const phoneMatch = raw.match(/^(\+?\d{6,20})(?::\d+)?@(?:s\.whatsapp\.net|c\.us)$/i);
+    if (phoneMatch) {
+        const number = normalizePhoneNumber(phoneMatch[1]);
+        return /^\d{6,20}$/.test(number) ? `${number}@s.whatsapp.net` : '';
+    }
+    if (/^\+?\d{6,20}$/.test(raw)) {
+        const number = normalizePhoneNumber(raw);
+        return /^\d{6,20}$/.test(number) ? `${number}@s.whatsapp.net` : '';
+    }
+    return '';
 }
 
 function normalizePhoneCacheJid(value) {
@@ -3606,7 +3623,10 @@ async function resetGroupSenderKeyMemoryBeforeSend(sessionId, groupJid) {
     if (!GROUP_SENDER_KEY_RESET_ON_SEND || !sessionId || !/@g\.us$/i.test(normalizedGroupJid)) return false;
     const cacheKey = `${sessionId}:${normalizedGroupJid}`;
     const lastResetAt = Number(groupSenderKeyResetAt.get(cacheKey) || 0);
-    if (!GROUP_SENDER_KEY_RESET_EVERY_SEND && lastResetAt && Date.now() - lastResetAt < GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS) return false;
+    if (!GROUP_SENDER_KEY_RESET_EVERY_SEND && lastResetAt && Date.now() - lastResetAt < GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS) {
+        console.info('[group-sender-key-preparation-reused]', { sessionId, groupJid: normalizedGroupJid, cooldownRemainingMs: Math.max(0, GROUP_SENDER_KEY_SEND_RESET_COOLDOWN_MS - (Date.now() - lastResetAt)), action: 'reuse_sender_key_memory_after_recent_successful_preparation' });
+        return true;
+    }
     const pending = groupSenderKeyResetInFlight.get(cacheKey);
     if (pending) return pending;
     const active = activeSessions.get(sessionId);
@@ -3863,17 +3883,18 @@ function shouldActivateLegacyMessagingFallback(error) {
         || /Failed to decrypt message|failed to decrypt message|SignalErrorInvalidMessage|calculateMAC|retry.{0,20}(?:error|code).{0,8}(?:4|7)\b/i.test(getSignalLogText([error]));
 }
 
-async function sendPresenceUpdateWithDiagnostics(sock, sessionId, presence, jid, messageId = null) {
+async function sendPresenceUpdateWithDiagnostics(sock, sessionId, presence, jid, messageId = null, requestedTimeoutMs = WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS) {
     const destination = String(jid || '').trim();
+    const timeoutMs = Math.max(250, Math.min(WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS, Number(requestedTimeoutMs) || WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS));
     const startedAt = Date.now();
-    console.info('[whatsapp-presence-update-requested]', { sessionId, messageId: messageId || null, presence, chatType: getWhatsAppDestinationType(destination), destinationJid: destination || null });
+    console.info('[whatsapp-presence-update-requested]', { sessionId, messageId: messageId || null, presence, chatType: getWhatsAppDestinationType(destination), destinationJid: destination || null, timeoutMs });
     try {
         if (!sock || typeof sock.sendPresenceUpdate !== 'function' || !destination) throw new Error('whatsapp_presence_target_or_socket_unavailable');
-        await promiseWithTimeout(Promise.resolve().then(() => sock.sendPresenceUpdate(presence, destination)), WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS, 'WhatsApp presence update');
+        await promiseWithTimeout(Promise.resolve().then(() => sock.sendPresenceUpdate(presence, destination)), timeoutMs, 'WhatsApp presence update');
         console.info('[whatsapp-presence-update-completed]', { sessionId, messageId: messageId || null, presence, chatType: getWhatsAppDestinationType(destination), durationMs: Date.now() - startedAt, requestCompleted: true, peerDisplayNotGuaranteed: true });
         return true;
     } catch (error) {
-        console.warn('[whatsapp-presence-update-failed]', { sessionId, messageId: messageId || null, presence, chatType: getWhatsAppDestinationType(destination), durationMs: Date.now() - startedAt, timeoutMs: WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS, errorName: error?.name || error?.constructor?.name || null, errorMessage: String(error?.message || error).slice(0, 500) });
+        console.warn('[whatsapp-presence-update-failed]', { sessionId, messageId: messageId || null, presence, chatType: getWhatsAppDestinationType(destination), durationMs: Date.now() - startedAt, timeoutMs, errorName: error?.name || error?.constructor?.name || null, errorMessage: String(error?.message || error).slice(0, 500) });
         return false;
     }
 }
@@ -3916,6 +3937,16 @@ async function sendFastMessageWithDiagnostics(sock, jid, content, options = {}, 
     if (!sessionId) throw new Error('whatsapp_socket_session_replaced');
     const destination = String(jid || '').trim();
     if (!destination) throw new Error('whatsapp_send_target_missing');
+    if (/@g\.us$/i.test(destination)) {
+        try {
+            const groupResult = await queuedSendMessageLegacy(sock, destination, content, options, 0);
+            console.info('[whatsapp-send-group-legacy-forced]', { sessionId, responseMessageId: groupResult?.key?.id || null, destinationType: 'group', reason: 'group_sender_key_preparation_required_before_send' });
+            return groupResult;
+        } catch (groupError) {
+            if (shouldActivateLegacyMessagingFallback(groupError)) markSessionMessagingFallback(sessionId, `group_legacy_send_${classifyWhatsAppFailure(groupError)}`);
+            throw groupError;
+        }
+    }
     const outgoingText = getOutgoingDiagnosticText(content);
     const outgoingType = Object.keys(content || {}).join(',') || 'unknown';
     const echoToken = rememberOutgoingTextEcho(sessionId, destination, content);
@@ -4105,7 +4136,8 @@ async function queuedSendMessageLegacy(sock, jid, content, options = {}, delayMs
             const platformDestination = /@g\.us$/i.test(sendTargetJid) || /@newsletter$/i.test(sendTargetJid) || /@broadcast$/i.test(sendTargetJid);
             if (!platformDestination && !/@s\.whatsapp\.net$/i.test(sendTargetJid) && !normalizeNativeLidJid(sendTargetJid)) throw new Error('private_destination_jid_invalid');
             if (sessionId && /@g\.us$/i.test(sendTargetJid)) {
-                await resetGroupSenderKeyMemoryBeforeSend(sessionId, sendTargetJid);
+                const senderKeyPrepared = await resetGroupSenderKeyMemoryBeforeSend(sessionId, sendTargetJid);
+                if (!senderKeyPrepared) throw new Error('group_sender_key_preparation_failed');
             }
             const echoToken = rememberOutgoingTextEcho(sessionId, sendTargetJid, outgoingContent);
             console.info('[whatsapp-send-attempt-start]', { sessionId, attempt: attemptNumber, destinationType: getWhatsAppDestinationType(sendTargetJid), isSelfChatDestination, messageType: outgoingDiagnosticType, messageText: outgoingDiagnosticText || null, messageTextLength: outgoingDiagnosticText.length });
@@ -4236,10 +4268,18 @@ async function queuedSendMessageLegacy(sock, jid, content, options = {}, delayMs
 async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180) {
     const sessionId = findActiveSessionIdForSocket(sock);
     if (!sessionId) throw new Error('whatsapp_socket_session_replaced');
-    if (isSessionMessagingFallbackActive(sessionId)) {
-        const fallbackResult = await queuedSendMessageLegacy(sock, jid, content, options, delayMs);
-        if (fallbackResult?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, fallbackResult.key.id);
-        return fallbackResult;
+    const isGroupDestination = /@g\.us$/i.test(String(jid || '').trim());
+    const fallbackActive = isSessionMessagingFallbackActive(sessionId);
+    if (isGroupDestination || fallbackActive) {
+        try {
+            const legacyResult = await queuedSendMessageLegacy(sock, jid, content, options, delayMs);
+            if (fallbackActive && !isGroupDestination && legacyResult?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, legacyResult.key.id);
+            if (isGroupDestination) console.info('[whatsapp-send-group-legacy-forced]', { sessionId, responseMessageId: legacyResult?.key?.id || null, destinationType: 'group', fallbackActive, reason: 'all_group_messages_use_legacy_sender_key_preparation_path' });
+            return legacyResult;
+        } catch (legacyError) {
+            if (shouldActivateLegacyMessagingFallback(legacyError)) markSessionMessagingFallback(sessionId, `legacy_send_${classifyWhatsAppFailure(legacyError)}`);
+            throw legacyError;
+        }
     }
     try {
         return await sendFastMessageWithDiagnostics(sock, jid, content, options, 'adaptive_direct_send');
@@ -10136,10 +10176,11 @@ async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, 
         const messageOptions = { ...(sendOptions.messageOptions || {}) };
         delete messageOptions.quoted;
         const canUseImageCaption = !!(deliveryImageBuffer?.length && caption.length <= MAX_WHATSAPP_CAPTION_CHARS);
-        const sendCommandPayload = value => sendOptions.directSend === true
+        const directPrivateCommandSend = sendOptions.directSend === true && !/@g\.us$/i.test(String(jid || '').trim());
+        const sendCommandPayload = value => directPrivateCommandSend
             ? sendFastMessageWithDiagnostics(sock, jid, value, messageOptions, 'formatted_command_response')
             : queuedSendMessage(sock, jid, value, messageOptions, 0);
-        if (sendOptions.directSend === true) {
+        if (directPrivateCommandSend) {
             if (deliveryImageBuffer?.length) {
                 const sourceBuffer = deliveryImageBuffer;
                 void normalizeOutgoingImageBuffer(sourceBuffer).then(normalized => {
@@ -11480,42 +11521,49 @@ function hasPersistedWhatsAppAccountIdentity(record = {}) {
 function getConfiguredOwnerAccessIdentities(ownerRecord = {}, currentSessionId = '') {
     const numbers = new Set();
     const lids = new Set();
+    const jids = new Set();
     if (currentSessionId && String(ownerRecord?.sessionId || '') === String(currentSessionId)) {
         const numberValues = [
             ownerRecord?.OwnerNumber, ownerRecord?.ownerNumber, ownerRecord?.OwnerPhone, ownerRecord?.ownerPhone,
             ownerRecord?.DeployerNumber, ownerRecord?.deployerNumber,
             ownerRecord?.CreatedByNumber, ownerRecord?.createdByNumber, ownerRecord?.PairingNumber,
-            ownerRecord?.Number, ownerRecord?.number, ownerRecord?.AccountJid, ownerRecord?.accountJid
+            ownerRecord?.Number, ownerRecord?.number
         ];
-        const lidValues = [
-            ownerRecord?.OwnerLid, ownerRecord?.ownerLid
-        ];
+        const jidValues = [ownerRecord?.OwnerLid, ownerRecord?.ownerLid, ownerRecord?.AccountJid, ownerRecord?.accountJid, ownerRecord?.OwnerJid, ownerRecord?.ownerJid];
         for (const number of numberValues.flatMap(value => Array.isArray(value) ? value : String(value || '').split(/[,;]+/))) {
             const normalized = normalizePhoneNumber(number);
             if (/^\d{6,20}$/.test(normalized)) numbers.add(normalized);
         }
-        for (const lid of lidValues.flatMap(value => Array.isArray(value) ? value : String(value || '').split(/[,;\s]+/))) {
-            const normalized = normalizeLidCacheKey(lid);
-            if (/@lid$/i.test(normalized)) lids.add(normalized);
+        for (const value of jidValues.flatMap(value => Array.isArray(value) ? value : String(value || '').split(/[,;\s]+/))) {
+            const normalizedJid = normalizeOwnerIdentityJid(value);
+            if (!normalizedJid) continue;
+            jids.add(normalizedJid);
+            if (/@lid$/i.test(normalizedJid)) lids.add(normalizedJid);
+            else {
+                const normalizedNumber = normalizedJidNumber(normalizedJid);
+                if (normalizedNumber) numbers.add(normalizedNumber);
+            }
         }
     }
-    return { numbers, lids };
+    return { numbers, lids, jids };
 }
 
 function matchConfiguredOwnerAccess(identities, senderJids = [], senderNumbers = [], rawChatJid = '', isGroup = false, currentSessionId = '') {
     const candidates = Array.isArray(senderJids) ? senderJids : [];
     const normalizedNumbers = (Array.isArray(senderNumbers) ? senderNumbers : []).map(normalizePhoneNumber);
-    for (const candidate of [...candidates, ...(!isGroup ? [rawChatJid] : [])]) {
-        const normalized = normalizeLidCacheKey(candidate);
-        if (!/@lid$/i.test(normalized)) continue;
-        const rememberedPhone = normalizePhoneCacheJid(getRememberedPhoneForLid(currentSessionId, normalized));
+    const candidateJids = [...candidates, ...(!isGroup ? [rawChatJid] : [])].map(normalizeOwnerIdentityJid).filter(Boolean);
+    for (const candidate of candidateJids) {
+        if (!/@lid$/i.test(candidate)) continue;
+        const rememberedPhone = normalizePhoneCacheJid(getRememberedPhoneForLid(currentSessionId, candidate));
         const rememberedNumber = normalizedJidNumber(rememberedPhone);
         if (rememberedNumber) normalizedNumbers.push(rememberedNumber);
     }
     const accountMatch = normalizedNumbers.some(value => identities.numbers.has(normalizePhoneNumber(value)));
-    const senderLidMatch = candidates.some(value => identities.lids.has(normalizeLidCacheKey(value)));
-    const privateChatLidMatch = !isGroup && identities.lids.has(normalizeLidCacheKey(rawChatJid));
-    return { matched: accountMatch || senderLidMatch || privateChatLidMatch, accountMatch, lidMatch: senderLidMatch || privateChatLidMatch };
+    const configuredJids = identities.jids instanceof Set ? identities.jids : new Set();
+    const senderJidMatch = candidateJids.some(value => configuredJids.has(value));
+    const senderLidMatch = candidateJids.some(value => identities.lids.has(value));
+    const privateChatLidMatch = !isGroup && identities.lids.has(normalizeOwnerIdentityJid(rawChatJid));
+    return { matched: accountMatch || senderJidMatch || senderLidMatch || privateChatLidMatch, accountMatch, jidMatch: senderJidMatch, lidMatch: senderLidMatch || privateChatLidMatch };
 }
 
 function hasLinkedDeviceSentEnvelope(message) {
@@ -14740,24 +14788,26 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         }
                         if (!sOwnerTop) {
                             const ownerReadStartedAt = Date.now();
-                            console.info('[message-owner-record-read-started]', { sessionId, messageId: msgId, chatJid: from, hasCachedOwnerRecord: false, nonBlocking: true });
-                            void ownerColTop.findOne({ sessionId }).then(latestOwnerDoc => {
+                            console.info('[message-owner-record-read-started]', { sessionId, messageId: msgId, chatJid: from, hasCachedOwnerRecord: false, nonBlocking: false, timeoutMs: 1400 });
+                            try {
+                                const latestOwnerDoc = await promiseWithTimeout(ownerColTop.findOne({ sessionId }), 1400, 'session owner mode lookup');
                                 if (latestOwnerDoc && String(latestOwnerDoc.sessionId || '') === String(sessionId)) {
+                                    sOwnerTop = latestOwnerDoc;
                                     sessionOwnersCache.set(sessionId, latestOwnerDoc);
-                                    console.info('[message-owner-record-read-completed]', { sessionId, messageId: msgId, durationMs: Date.now() - ownerReadStartedAt, hasOwnerRecord: true, nextMessageUsesCache: true });
+                                    console.info('[message-owner-record-read-completed]', { sessionId, messageId: msgId, durationMs: Date.now() - ownerReadStartedAt, hasOwnerRecord: true, currentMessageUsesLoadedMode: true });
                                 } else {
                                     console.warn('[message-owner-record-missing]', { sessionId, chatJid: from, messageId: msgId, upsertType });
                                 }
-                            }).catch(ownerReadError => {
+                            } catch (ownerReadError) {
                                 console.error('[message-owner-record-read-failed]', { sessionId, chatJid: from, messageId: msgId, durationMs: Date.now() - ownerReadStartedAt, error: ownerReadError?.message || String(ownerReadError), fallbackToCachedRecord: false });
-                            });
+                            }
                         }
 
                         let activeHostName = sanitizeSessionDisplayName(sock.user?.name || sock.user?.notify || sock.user?.verifiedName || sOwnerTop?.Name || sOwnerTop?.name || '') || 'Inconnu';
-                        const senderJids = [...new Set([sender, m.key.participantAlt, m.key.participantPn, m.key.senderPn, (!isGroup ? m.key.remoteJidAlt : null)].filter(Boolean).map(String))];
+                        const senderJids = [...new Set([sender, m.key.participant, m.key.participantAlt, m.key.participantPn, m.key.senderPn, m.key.senderLid, m.key.participantLid, (!isGroup ? m.key.remoteJidAlt : null)].filter(Boolean).map(String))];
                         let mappedPrivateChatPhoneJid = '';
                         let mappedPrivateChatPhoneResolution = '';
-                        const normalizedLidForMapping = value => normalizeNativeLidJid(value) || String(value || '').replace(/:\d+@lid$/i, '@lid');
+                        const normalizedLidForMapping = value => normalizeNativeLidJid(value) || (/\s*@(?:hosted\.)?lid$/i.test(String(value || '').trim()) ? normalizeLidCacheKey(value) : String(value || '').trim());
                         const normalizedRawChatForMapping = normalizedLidForMapping(rawFrom);
                         for (const senderIdentity of [...senderJids]) {
                             const normalizedSenderIdentity = normalizedLidForMapping(senderIdentity);
@@ -14848,38 +14898,70 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             .map(value => normalizePhoneCacheJid(value))
                             .filter(Boolean);
                         senderJids.push(...explicitPhoneAliases);
-                        const senderNumbers = [...new Set(senderJids.filter(identity => !/@lid(?:$|:)/i.test(String(identity || ''))).map(normalizedJidNumber).filter(Boolean))];
+                        const senderNumbers = [...new Set(senderJids.map(normalizedJidNumber).filter(Boolean))];
                         const sNum = senderNumbers[0] || '';
                         const ownerNumber = normalizePhoneNumber(sOwnerTop?.Number || '');
                         const authenticatedAccountNumber = getAuthenticatedPhoneNumber(sock.user, state.creds);
                         const authenticatedOwnLid = getAuthenticatedLid(sock.user, state.creds);
                         const ownLidCandidates = authenticatedOwnLid ? [authenticatedOwnLid] : [];
-                        const senderMatchesOwnLid = senderJids.some(jid => ownLidCandidates.includes(normalizeLidCacheKey(jid)));
-                        const privateChatMatchesOwnLid = !isGroup && ownLidCandidates.includes(normalizeLidCacheKey(rawFrom));
-                        const senderMatchesAuthenticatedAccount = !!authenticatedAccountNumber && senderNumbers.includes(authenticatedAccountNumber);
                         const configuredOwnerAccess = getConfiguredOwnerAccessIdentities(sOwnerTop, sessionId);
+                        const ownIdentityJids = new Set([
+                            sock.user?.id,
+                            sock.user?.lid,
+                            state.creds?.me?.id,
+                            state.creds?.me?.lid,
+                            botId,
+                            authenticatedOwnLid,
+                            authenticatedAccountNumber ? `${authenticatedAccountNumber}@s.whatsapp.net` : ''
+                        ].map(normalizeOwnerIdentityJid).filter(Boolean));
+                        for (const configuredJid of configuredOwnerAccess.jids || []) ownIdentityJids.add(configuredJid);
+                        const senderIdentityJids = [...new Set([...senderJids, ...(!isGroup ? [rawFrom] : [])].map(normalizeOwnerIdentityJid).filter(Boolean))];
+                        const senderMatchesOwnJid = senderIdentityJids.some(value => ownIdentityJids.has(value));
+                        const senderMatchesOwnLid = senderIdentityJids.some(value => /@lid$/i.test(value) && (ownIdentityJids.has(value) || configuredOwnerAccess.lids.has(value)));
+                        const privateChatMatchesOwnLid = !isGroup && ownIdentityJids.has(normalizeOwnerIdentityJid(rawFrom)) && /@lid$/i.test(normalizeOwnerIdentityJid(rawFrom));
+                        const privateChatMatchesOwnIdentity = !isGroup && ownIdentityJids.has(normalizeOwnerIdentityJid(rawFrom));
                         const configuredOwnerMatch = matchConfiguredOwnerAccess(configuredOwnerAccess, senderJids, senderNumbers, rawFrom, isGroup, sessionId);
+                        const ownerNumberSet = new Set([...configuredOwnerAccess.numbers, ...(authenticatedAccountNumber ? [authenticatedAccountNumber] : [])]);
+                        const senderMatchesAuthenticatedAccount = !!authenticatedAccountNumber && senderNumbers.includes(authenticatedAccountNumber);
+                        let senderMatchesMappedOwnAlias = false;
+                        for (const candidateJid of senderIdentityJids) {
+                            if (/@lid$/i.test(candidateJid)) {
+                                const rememberedPhone = normalizePhoneCacheJid(getRememberedPhoneForLid(sessionId, candidateJid));
+                                if (rememberedPhone && ownerNumberSet.has(normalizedJidNumber(rememberedPhone))) {
+                                    senderMatchesMappedOwnAlias = true;
+                                    break;
+                                }
+                            } else if (/@s\.whatsapp\.net$/i.test(candidateJid)) {
+                                const rememberedLid = normalizeOwnerIdentityJid(getRememberedLidForPhone(sessionId, candidateJid));
+                                if (rememberedLid && ownIdentityJids.has(rememberedLid)) {
+                                    senderMatchesMappedOwnAlias = true;
+                                    break;
+                                }
+                            }
+                        }
                         let sessionOwnerLiveLidMatch = false;
-                        let sessionOwnerIdentitySource = configuredOwnerMatch.accountMatch ? 'session_owner_phone_or_remembered_lid' : configuredOwnerMatch.lidMatch ? 'session_owner_configured_lid' : '';
-                        if (!configuredOwnerMatch.matched && configuredOwnerAccess.numbers.size) {
-                            for (const senderLid of senderJids.filter(value => /@(?:hosted\.)?lid$/i.test(String(value || '')))) {
+                        let sessionOwnerIdentitySource = senderMatchesOwnJid ? 'authenticated_socket_jid_or_linked_device_alias' : configuredOwnerMatch.accountMatch ? 'session_owner_phone_or_remembered_lid' : configuredOwnerMatch.lidMatch ? 'session_owner_configured_lid' : '';
+                        if (!configuredOwnerMatch.matched && ownerNumberSet.size) {
+                            for (const senderLid of senderIdentityJids.filter(value => /@lid$/i.test(value))) {
                                 const rememberedOwnerPhone = normalizePhoneCacheJid(getRememberedPhoneForLid(sessionId, senderLid));
-                                if (rememberedOwnerPhone && configuredOwnerAccess.numbers.has(normalizedJidNumber(rememberedOwnerPhone))) {
+                                if (rememberedOwnerPhone && ownerNumberSet.has(normalizedJidNumber(rememberedOwnerPhone))) {
                                     sessionOwnerLiveLidMatch = true;
                                     sessionOwnerIdentitySource = 'session_owner_cached_lid_mapping';
                                     break;
                                 }
                                 void schedulePhoneResolutionForLid(sessionId, sock, senderLid, 'owner_lid_resolution').then(mappedValue => {
                                     const mappedSessionOwnerPhone = normalizePhoneCacheJid(mappedValue);
-                                    if (!mappedSessionOwnerPhone || !configuredOwnerAccess.numbers.has(normalizedJidNumber(mappedSessionOwnerPhone))) return;
+                                    if (!mappedSessionOwnerPhone || !ownerNumberSet.has(normalizedJidNumber(mappedSessionOwnerPhone))) return;
                                     rememberLidPhonePair(sessionId, senderLid, mappedSessionOwnerPhone, 'background_owner_lid_resolution');
                                     console.info('[session-owner-sender-recognized-from-background-lid-mapping]', { sessionId, messageId: msgId, senderLidHash: shortLogHash(senderLid), senderPhoneHash: shortLogHash(mappedSessionOwnerPhone), currentMessageDispatchNotDelayed: true, typingForCurrentMessageNotRetried: true });
                                 }).catch(() => '');
                             }
                         }
+                        const linkedDeviceEnvelope = hasLinkedDeviceSentEnvelope(m.message);
+                        const linkedDeviceOwnerMatch = linkedDeviceEnvelope && (senderMatchesOwnJid || senderMatchesAuthenticatedAccount || senderMatchesMappedOwnAlias || configuredOwnerMatch.matched || privateChatMatchesOwnIdentity || sessionOwnerLiveLidMatch);
                         const ownerNumberCandidates = [...configuredOwnerAccess.numbers];
-                        const isOwnerReal = !!isFromMe || senderMatchesAuthenticatedAccount || senderMatchesOwnLid || privateChatMatchesOwnLid || configuredOwnerMatch.matched || sessionOwnerLiveLidMatch;
-                        if (isOwnerReal) void sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', from, msgId).catch(() => {});
+                        const isOwnerReal = !!isFromMe || senderMatchesOwnJid || senderMatchesAuthenticatedAccount || senderMatchesOwnLid || privateChatMatchesOwnLid || privateChatMatchesOwnIdentity || configuredOwnerMatch.matched || senderMatchesMappedOwnAlias || sessionOwnerLiveLidMatch || linkedDeviceOwnerMatch;
+                        if (isOwnerReal && !sessionOwnerIdentitySource) sessionOwnerIdentitySource = linkedDeviceOwnerMatch ? 'verified_linked_device_envelope' : senderMatchesMappedOwnAlias ? 'session_owner_verified_lid_pn_alias' : 'authenticated_account_identity';
                         const dispatchModeValue = [sOwnerTop?.mode, sOwnerTop?.Mode, sOwnerTop?.botMode].find(value => value !== undefined && value !== null && String(value).trim() !== '');
                         const dispatchPublicMode = ['public', 'piblik', 'publico'].includes(normalizeText(dispatchModeValue || 'prive'));
                         if (!isOwnerReal && !dispatchPublicMode) {
@@ -14994,9 +15076,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             senderJid: sender,
                             senderAliases: senderJids,
                             pushName: sName,
-                            configuredOwnerAccess: configuredOwnerAccess.numbers.size > 0 || configuredOwnerAccess.lids.size > 0,
-                            configuredOwnerIdentityHashes: [...ownerNumberCandidates, ...configuredOwnerAccess.lids].map(shortLogHash),
-                            ownerMatchSources: { fromMe: isFromMe, senderMatchesAuthenticatedAccount, senderMatchesOwnLid, privateChatMatchesOwnLid, configuredOwnerAccountMatched: configuredOwnerMatch.accountMatch, configuredOwnerLidMatched: configuredOwnerMatch.lidMatch, ownerScope: 'current_session_owner_only', sessionOwnerIdentitySource },
+                            configuredOwnerAccess: configuredOwnerAccess.numbers.size > 0 || configuredOwnerAccess.lids.size > 0 || (configuredOwnerAccess.jids?.size || 0) > 0,
+                            configuredOwnerIdentityHashes: [...ownerNumberCandidates, ...configuredOwnerAccess.lids, ...(configuredOwnerAccess.jids || [])].map(shortLogHash),
+                            ownerMatchSources: { fromMe: isFromMe, senderMatchesOwnJid, senderMatchesAuthenticatedAccount, senderMatchesOwnLid, privateChatMatchesOwnLid, privateChatMatchesOwnIdentity, senderMatchesMappedOwnAlias, linkedDeviceEnvelope, linkedDeviceOwnerMatch, configuredOwnerAccountMatched: configuredOwnerMatch.accountMatch, configuredOwnerJidMatched: configuredOwnerMatch.jidMatch, configuredOwnerLidMatched: configuredOwnerMatch.lidMatch, ownerScope: 'current_session_owner_only', sessionOwnerIdentitySource },
                             isOwnerReal,
                             isGroup,
                             mode: normalizeText(sOwnerTop?.mode || sOwnerTop?.Mode || sOwnerTop?.botMode || 'prive')
@@ -15335,7 +15417,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             try {
                                 const shouldSendTyping = isOwnerReal || isPublicMode;
                                 let isTyping = shouldSendTyping;
-                                if (isPublicMode && !isOwnerReal) void sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', from, msgId).catch(() => {});
+                                if (shouldSendTyping) await sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', from, msgId, 900);
                                 let typingUpdateInFlight = false;
                                 const typingInterval = shouldSendTyping ? setInterval(async () => {
                                     if (!isTyping || typingUpdateInFlight) return;
@@ -15386,30 +15468,34 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 if (typeof timeoutId.unref === 'function') timeoutId.unref();
 
                                 const sendBetaStyleText = async (targetSocket, targetText, sendOptions = {}) => {
-                                    const targetJid = String(rawFrom || from || '').trim();
+                                    const targetJid = String(from || rawFrom || '').trim();
                                     if (!targetJid) throw new Error('whatsapp_reply_target_missing');
                                     const payload = { text: String(targetText ?? '') };
                                     if (Array.isArray(sendOptions.mentions) && sendOptions.mentions.length) payload.mentions = sendOptions.mentions;
                                     const messageOptions = { ...(sendOptions.messageOptions || {}), quoted: m };
-                                    markCommandSending('direct_send_message', 'text');
+                                    const groupTarget = /@g\.us$/i.test(targetJid);
+                                    const transport = groupTarget ? 'existing_queued_group_sender_key_transport' : isSessionMessagingFallbackActive(sessionId) ? 'existing_queued_legacy_fallback' : 'simple_direct_send';
+                                    markCommandSending(transport, 'text');
                                     try {
-                                        return await targetSocket.sendMessage(targetJid, payload, messageOptions);
+                                        return await queuedSendMessage(targetSocket, targetJid, payload, messageOptions, 0);
                                     } catch (error) {
-                                        markCommandSendFailure('direct_send_message', error);
+                                        markCommandSendFailure(transport, error);
+                                        if (shouldActivateLegacyMessagingFallback(error)) markSessionMessagingFallback(sessionId, `beta_style_text_${classifyWhatsAppFailure(error)}`, msgId);
                                         throw error;
                                     }
                                 };
                                 const trackedQueuedSendMessage = async (...sendArgs) => {
                                     const destination = String(sendArgs[1] || from || '');
                                     const payloadType = Object.keys(sendArgs[2] || {}).filter(key => !['mentions', 'quoted', 'contextInfo', 'messageContextInfo'].includes(key)).join(',') || 'message';
-                                    const useLegacy = isSessionMessagingFallbackActive(sessionId);
-                                    let transportUsed = useLegacy ? 'existing_queued_legacy_fallback' : 'simple_direct_send';
+                                    const useGroupLegacy = /@g\.us$/i.test(destination);
+                                    const useLegacy = useGroupLegacy || isSessionMessagingFallbackActive(sessionId);
+                                    let transportUsed = useGroupLegacy ? 'existing_queued_group_sender_key_transport' : useLegacy ? 'existing_queued_legacy_fallback' : 'simple_direct_send';
                                     markCommandSending(transportUsed, payloadType);
                                     try {
                                         let result;
                                         if (useLegacy) {
                                             result = await queuedSendMessageLegacy(...sendArgs);
-                                            if (result?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, result.key.id);
+                                            if (!useGroupLegacy && result?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, result.key.id);
                                         } else {
                                             try {
                                                 result = await sendFastMessageWithDiagnostics(sendArgs[0] || sock, destination, sendArgs[2] || {}, sendArgs[3] || {}, 'tracked_command_message');
@@ -15427,7 +15513,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         console.info('[command-lifecycle]', { sessionId, messageId: msgId, command: internalCommand, chatJid: destination, phase: 'response-sent', transport: transportUsed, responseMessageId: result?.key?.id || null, payloadType, attempt: commandSendAttempt, elapsedMs: Date.now() - commandLifecycleStartedAt });
                                         return result;
                                     } catch (error) {
-                                        markCommandSendFailure(useLegacy ? 'existing_queued_legacy_fallback' : 'adaptive_send', error);
+                                        markCommandSendFailure(useLegacy ? transportUsed : 'adaptive_send', error);
+                                        if (shouldActivateLegacyMessagingFallback(error)) markSessionMessagingFallback(sessionId, `tracked_command_${classifyWhatsAppFailure(error)}`, msgId);
                                         throw error;
                                     }
                                 };
@@ -15449,11 +15536,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     preserveSourceImage: true
                                 });
                                 const executeAdaptiveFormattedSend = async (send, responseType = 'text_or_media') => {
-                                    if (isSessionMessagingFallbackActive(sessionId)) {
-                                        markCommandSending('existing_queued_legacy_fallback', responseType);
+                                    const groupLegacyRequired = isGroup;
+                                    const fallbackActive = isSessionMessagingFallbackActive(sessionId);
+                                    if (groupLegacyRequired || fallbackActive) {
+                                        const legacyTransport = groupLegacyRequired ? 'existing_queued_group_sender_key_transport' : 'existing_queued_legacy_fallback';
+                                        markCommandSending(legacyTransport, responseType);
                                         try {
                                             const result = await send(false);
-                                            return completeCommandResponse(result, 'existing_queued_legacy_fallback');
+                                            if (!groupLegacyRequired && result?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, result.key.id);
+                                            return completeCommandResponse(result, legacyTransport);
                                         } catch (legacyError) {
                                             markSessionMessagingFallback(sessionId, 'legacy_fallback_send_failed', msgId);
                                             throw legacyError;
@@ -15539,10 +15630,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 const trackedSendImageCaptioned = async (...sendArgs) => {
                                     const sendStartedAt = Date.now();
                                     const suppliedOptions = sendArgs[6] && typeof sendArgs[6] === 'object' ? sendArgs[6] : {};
-                                    const directSend = !isSessionMessagingFallbackActive(sessionId);
+                                    const directSend = !isGroup && !isSessionMessagingFallbackActive(sessionId);
                                     const preparedArgs = [...sendArgs];
                                     preparedArgs[6] = commandSendOptions(suppliedOptions, directSend);
-                                    markCommandSending(directSend ? 'simple_direct_send' : 'existing_queued_legacy_fallback', 'image_or_text');
+                                    const imageTransport = isGroup ? 'existing_queued_group_sender_key_transport' : directSend ? 'simple_direct_send' : 'existing_queued_legacy_fallback';
+                                    markCommandSending(imageTransport, 'image_or_text');
                                     try {
                                         let result;
                                         try {
@@ -15568,11 +15660,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid',
                                             responseMessageId: result?.key?.id || null,
                                             durationMs: Date.now() - sendStartedAt,
-                                            transport: directSend ? 'simple_direct_send' : 'existing_queued_legacy_fallback'
+                                            transport: imageTransport
                                         });
                                         return result;
                                     } catch (sendError) {
                                         commandOperationFailed = true;
+                                        if (shouldActivateLegacyMessagingFallback(sendError)) markSessionMessagingFallback(sessionId, `image_captioned_${classifyWhatsAppFailure(sendError)}`, msgId);
                                         markCommandSendFailure('image_captioned', sendError);
                                         console.error('[command-response-send-failed]', {
                                             sessionId,
@@ -17822,13 +17915,18 @@ async function main() {
         groupLidOutboundAddressingPatchApplied: baileysLidAwareGroupOutboundAddressingPatchStatus.applied === true,
         groupRetrySkdmPatchApplied: baileysGroupRetrySkdmPatchStatus.applied === true,
         groupSenderKeyResetBeforeSendEnabled: GROUP_SENDER_KEY_RESET_ON_SEND,
-        groupSenderKeyResetScope: 'legacy_fallback_transport_only',
-        groupSenderKeyResetEveryMessage: false,
+        groupSenderKeyResetScope: 'all_group_messages_always_use_legacy_sender_key_preparation_transport',
+        groupSenderKeyResetEveryMessage: GROUP_SENDER_KEY_RESET_EVERY_SEND,
+        privateSenderKeyResetScope: 'not_applicable_to_private_chats',
         selfChatAddressingMode: 'original_authenticated_lid_primary_with_phone_fallback',
         selfChatOriginalJidPreferred: true,
-        commandReplyTransport: 'direct_send_by_default_legacy_queue_only_during_signal_or_decryption_degradation',
-        commandReplyFastPath: 'sock.sendMessage_direct_without_queue_identity_resolution_or_sender_key_reset',
-        commandReplyFallback: 'existing_per_chat_serialized_queue_with_session_ownership_signal_and_address_recovery',
+        commandReplyTransport: 'private_direct_by_default_group_legacy_sender_key_transport_always',
+        commandReplyFastPath: 'private_sock.sendMessage_direct_without_per_chat_queue_or_pre_send_identity_migration',
+        commandReplyGroupTransport: 'existing_per_chat_serialized_legacy_queue_with_sender_key_reset_and_distribution',
+        commandReplyFallback: 'existing_per_chat_serialized_queue_with_session_ownership_signal_and_address_recovery_for_private_signal_degradation',
+        ownerIdentityResolution: 'fromMe_socket_id_lid_session_scoped_pn_lid_aliases_and_verified_linked_device_envelopes',
+        commandPolicy: 'owner_always_allowed_public_all_senders_private_non_owner_silent',
+        commandTyping: 'bounded_composing_presence_before_response_only_for_owner_or_public_mode',
         commandReplyFallbackRecovery: 'legacy_queue_sender_key_reset_and_identity_resolution_until_three_successes_after_15_seconds_or_window_expiry',
         sendHealthChecks: 'throttled_background_session_socket_and_ownership_audit_not_blocking_message_send',
         commandImagePolicy: 'decode_and_reencode_or_text_fallback',
