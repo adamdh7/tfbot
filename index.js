@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r185-qrbot-no-id-qr-text-single-block-format';
+const TFBOT_CLUSTER_CODE_REVISION = 'r186-group-send-fallback-qrbot-exact-caption-timeout';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -1737,7 +1737,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-05-r185-qrbot-no-id-qr-text-single-block-format';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-05-r186-group-send-fallback-qrbot-exact-caption-timeout';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -4253,7 +4253,14 @@ async function queuedSendMessageLegacy(sock, jid, content, options = {}, delayMs
             if (!platformDestination && !/@s\.whatsapp\.net$/i.test(sendTargetJid) && !normalizeNativeLidJid(sendTargetJid)) throw new Error('private_destination_jid_invalid');
             if (sessionId && /@g\.us$/i.test(sendTargetJid)) {
                 const senderKeyPrepared = await resetGroupSenderKeyMemoryBeforeSend(sessionId, sendTargetJid);
-                if (!senderKeyPrepared) throw new Error('group_sender_key_preparation_failed');
+                if (!senderKeyPrepared) {
+                    console.warn('[group-sender-key-preparation-degraded]', {
+                        sessionId,
+                        groupJid: sendTargetJid,
+                        action: 'continue_with_baileys_native_sender_key_preparation',
+                        sendAttempt: attemptNumber
+                    });
+                }
             }
             const echoToken = rememberOutgoingTextEcho(sessionId, sendTargetJid, outgoingContent);
             console.info('[whatsapp-send-attempt-start]', { sessionId, attempt: attemptNumber, destinationType: getWhatsAppDestinationType(sendTargetJid), isSelfChatDestination, messageType: outgoingDiagnosticType, messageText: outgoingDiagnosticText || null, messageTextLength: outgoingDiagnosticText.length });
@@ -10312,7 +10319,9 @@ async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, 
         let deliveryImageBuffer = Buffer.isBuffer(imageBuffer) ? imageBuffer : imageBuffer instanceof Uint8Array ? Buffer.from(imageBuffer.buffer, imageBuffer.byteOffset, imageBuffer.byteLength) : null;
         const ownerName = sanitizeSessionDisplayName(sendOptions.ownerName || sock?.user?.name || sock?.user?.notify || sock?.user?.verifiedName || '') || 'Inconnu';
         const preserveFormatting = sendOptions.preserveFormatting === true || hasWhatsAppFormatting(text);
-        const caption = buildCaption(type, text, userName, preserveFormatting, ownerName, sendOptions.language || 'ht');
+        const caption = typeof sendOptions.exactCaption === 'string'
+            ? normalizeCaptionText(sendOptions.exactCaption)
+            : buildCaption(type, text, userName, preserveFormatting, ownerName, sendOptions.language || 'ht');
         const outgoingOptions = {};
         if (Array.isArray(sendOptions.mentions) && sendOptions.mentions.length) outgoingOptions.mentions = sendOptions.mentions;
         const messageOptions = { ...(sendOptions.messageOptions || {}) };
@@ -15981,9 +15990,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 qrRuntime.pairingAttemptPending = true;
                                                 qrRuntime.pairingChallengeStartedAt = qrStartedAt.getTime();
                                                 qrRuntime.format = 'qr';
-                                                const qrString = await waitForSessionQr(qrSessionId);
+                                                console.info('[qrbot-waiting-for-fresh-qr]', { sessionId: qrSessionId, timeoutMs: 90000, minimumDelayMs: 4000, oldAccountSessionPreserved: true });
+                                                const qrString = await waitForSessionQr(qrSessionId, 90000, 4000);
                                                 const qrBuffer = await QRCode.toBuffer(qrString, { width: 512, margin: 2, errorCorrectionLevel: 'M', type: 'png', color: { dark: '#000000', light: '#ffffff' } });
-                                                await trackedSendImageCaptioned(sock, from, qrBuffer, t.qrbot_created, t.qrbot_scan, pushName);
+                                                const qrbotCaption = `*_${t.qrbot_created}_*\n\n_${t.qrbot_scan}_`;
+                                                await trackedSendImageCaptioned(sock, from, qrBuffer, t.qrbot_created, qrbotCaption, pushName, { preserveFormatting: true, exactCaption: qrbotCaption });
                                                 terminalResponseSent = true;
                                                 console.info('[qrbot-fresh-challenge-created]', { sessionId: qrSessionId, format: 'qr', challengeFresh: true, oldAccountSessionPreserved: true, outgoingCaption: 'scan_instruction_only', captionIncludesSessionId: false });
                                             } catch (qrbotError) {
@@ -16937,7 +16948,21 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     commandOperationFailed = true;
                                     logCommandLifecycle('failure', { stage: 'operation', action: 'command_handler_failed', error: String(e?.message || e).slice(0, 500), durationMs: Date.now() - commandStartedAt });
                                     console.error('[command-failed]', { sessionId, messageId: msgId, senderName: sName, senderJid: sender, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: from, command: internalCommand, durationMs: Date.now() - commandStartedAt, action: 'command_handler_failed', error: e?.message || String(e) });
-                                    await safeSendActionError(sock, from, getCommandActionTitle(t, internalCommand), e, messageLang, pushName, m.messageTimestamp);
+                                    if (typeof safeSendActionError === 'function') {
+                                        await safeSendActionError(sock, from, getCommandActionTitle(t, internalCommand), e, messageLang, pushName, m.messageTimestamp);
+                                    } else {
+                                        const fallbackErrorText = errorFallbackText(getCommandActionTitle(t, internalCommand), messageLang, 'action_failure');
+                                        console.error('[command-action-error-handler-unavailable]', { sessionId, messageId: msgId, command: internalCommand, action: 'send_plain_localized_fallback' });
+                                        try {
+                                            const fallbackResult = await trackedQueuedSendMessage(sock, from, { text: fallbackErrorText }, { quoted: m }, 220);
+                                            if (fallbackResult?.key?.id) {
+                                                terminalResponseSent = true;
+                                                responseSentForLog = true;
+                                            }
+                                        } catch (fallbackError) {
+                                            console.error('[command-action-error-fallback-failed]', { sessionId, messageId: msgId, command: internalCommand, error: fallbackError?.message || String(fallbackError) });
+                                        }
+                                    }
                                 } finally {
                                     if (timeoutId) clearTimeout(timeoutId);
                                     isTyping = false;
