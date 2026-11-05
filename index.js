@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r180-signal-device-address-preservation-private-group';
+const TFBOT_CLUSTER_CODE_REVISION = 'r181-retry-base-key-collision-recovery-private-group';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -1242,6 +1242,98 @@ const __tfbotExtractRetryReceiptBundleV115 = receipt => {
         return result;
     }
 }
+function applyBaileysRetryBaseKeyCollisionPatch() {
+    const result = { applied: false, version: '6.7.23', issue: 'Baileys#2506', reason: 'not_attempted' };
+    try {
+        const entryPath = require.resolve('@whiskeysockets/baileys');
+        const entryDirectory = path.dirname(entryPath);
+        const roots = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'Socket'), path.join(entryDirectory, 'socket')])];
+        const candidates = [...new Set(roots.flatMap(directory => ['messages-recv.js', 'messages-recv.cjs', 'messages-recv.mjs'].map(name => path.join(directory, name))))];
+        const filePath = candidates.find(candidate => fs.existsSync(candidate));
+        if (!filePath) return { ...result, reason: 'messages_recv_module_not_found' };
+        let source = fs.readFileSync(filePath, 'utf8');
+        const helperMarker = 'const __tfbotRetryBaseKeyCacheV181 = new Map();';
+        const appliedMarker = 'const __tfbotRetryBaseKeyCollisionAppliedV181 = true;';
+        const receiveMarker = 'const __tfbotGroupRetryReceiptBundleV126 = true;';
+        const assertAnchor = 'if (!__tfbotInjectedBundleV115) await assertSessions([participant], true);';
+        if (!source.includes(receiveMarker) || !source.includes('__tfbotExtractRetryReceiptBundleV115') || !source.includes('signalRepository.getSessionInfo')) {
+            return { ...result, reason: 'compatible_retry_receipt_patch_not_found', file: path.basename(filePath) };
+        }
+        if (source.includes(helperMarker) && source.includes(appliedMarker)) {
+            return { ...result, applied: true, alreadyApplied: true, file: path.basename(filePath), retryCountTwoBaseKeySnapshot: true, repeatedBaseKeySessionRefresh: true, emitsRetrySessionRecoveryDiagnostics: true };
+        }
+        if (source.includes(helperMarker) || source.includes(appliedMarker)) {
+            return { ...result, reason: 'partial_previous_base_key_patch_detected', file: path.basename(filePath) };
+        }
+        const anchorIndex = source.indexOf(assertAnchor);
+        if (anchorIndex < 0 || source.indexOf(assertAnchor, anchorIndex + assertAnchor.length) >= 0) {
+            return { ...result, reason: 'retry_session_assert_anchor_mismatch', file: path.basename(filePath) };
+        }
+        const helper = `const __tfbotRetryBaseKeyCacheV181 = new Map();
+const __tfbotRetryBaseKeyCacheLimitV181 = 1024;
+const __tfbotRetryBaseKeyCacheTtlV181 = 900000;
+const __tfbotRetryBaseKeyCacheSaveV181 = (key, value) => {
+    const bytes = Buffer.from(value || []);
+    if (!bytes.length) return false;
+    const now = Date.now();
+    for (const [storedKey, storedValue] of __tfbotRetryBaseKeyCacheV181) {
+        if (storedValue.expiresAt <= now) __tfbotRetryBaseKeyCacheV181.delete(storedKey);
+    }
+    __tfbotRetryBaseKeyCacheV181.delete(key);
+    __tfbotRetryBaseKeyCacheV181.set(key, { bytes, expiresAt: now + __tfbotRetryBaseKeyCacheTtlV181 });
+    while (__tfbotRetryBaseKeyCacheV181.size > __tfbotRetryBaseKeyCacheLimitV181) {
+        const oldestKey = __tfbotRetryBaseKeyCacheV181.keys().next().value;
+        if (oldestKey === undefined) break;
+        __tfbotRetryBaseKeyCacheV181.delete(oldestKey);
+    }
+    return true;
+};
+const __tfbotRetryBaseKeyCacheMatchesV181 = (key, value) => {
+    const stored = __tfbotRetryBaseKeyCacheV181.get(key);
+    if (!stored) return false;
+    __tfbotRetryBaseKeyCacheV181.delete(key);
+    if (stored.expiresAt <= Date.now()) return false;
+    const current = Buffer.from(value || []);
+    return stored.bytes.length === current.length && stored.bytes.equals(current);
+};
+const __tfbotRetryBaseKeyCacheDeleteV181 = key => __tfbotRetryBaseKeyCacheV181.delete(key);
+${appliedMarker}
+`;
+        const receiveMarkerIndex = source.indexOf(receiveMarker);
+        source = source.slice(0, receiveMarkerIndex) + helper + source.slice(receiveMarkerIndex);
+        const upgradedGuard = `const __tfbotRetryCountV181 = Math.max(1, Number(retryNode?.attrs?.count) || 1);
+        const __tfbotRetryMessageIdV181 = String(ids?.[0] || '');
+        const __tfbotRetryBaseKeyCacheKeyV181 = __tfbotRetryMessageIdV181 ? \`${'${'}String(__tfbotSignalSessionIdV115)}:${'${'}__tfbotRetryMessageIdV181}\` : '';
+        let __tfbotRetryBaseKeyCollisionV181 = false;
+        if (__tfbotRetryBaseKeyCacheKeyV181 && typeof signalRepository.getSessionInfo === 'function') {
+            const __tfbotRetrySessionInfoV181 = await signalRepository.getSessionInfo(participant);
+            if (__tfbotRetrySessionInfoV181?.baseKey) {
+                if (__tfbotRetryCountV181 === 2) {
+                    if (__tfbotRetryBaseKeyCacheSaveV181(__tfbotRetryBaseKeyCacheKeyV181, __tfbotRetrySessionInfoV181.baseKey)) logger.debug({ participant, messageId: __tfbotRetryMessageIdV181, retryCount: __tfbotRetryCountV181 }, 'saved retry session base key snapshot');
+                } else if (__tfbotRetryCountV181 > 2) {
+                    __tfbotRetryBaseKeyCollisionV181 = __tfbotRetryBaseKeyCacheMatchesV181(__tfbotRetryBaseKeyCacheKeyV181, __tfbotRetrySessionInfoV181.baseKey);
+                    __tfbotRetryBaseKeyCacheDeleteV181(__tfbotRetryBaseKeyCacheKeyV181);
+                    if (__tfbotRetryBaseKeyCollisionV181) {
+                        logger.warn({ participant, messageId: __tfbotRetryMessageIdV181, retryCount: __tfbotRetryCountV181 }, 'retry base key collision detected; forcing a fresh recipient session');
+                        await authState.keys.set({ session: { [__tfbotSignalSessionIdV115]: null } });
+                        __tfbotInjectedBundleV115 = false;
+                    }
+                }
+            }
+        }
+        if (!__tfbotInjectedBundleV115 || __tfbotRetryBaseKeyCollisionV181) await assertSessions([participant], true);
+        logger.debug({ participant, messageId: __tfbotRetryMessageIdV181 || null, retryCount: __tfbotRetryCountV181, hasReceiptKeyBundle: Boolean(__tfbotRetryBundleV115), injectedReceiptKeyBundle: __tfbotInjectedBundleV115, baseKeyCollision: __tfbotRetryBaseKeyCollisionV181, signalSessionAddress: __tfbotSignalSessionIdV115 }, 'retry recipient Signal session recovery prepared');`;
+        source = source.slice(0, anchorIndex + helper.length) + source.slice(anchorIndex + helper.length).replace(assertAnchor, upgradedGuard);
+        if (!source.includes(helperMarker) || !source.includes(appliedMarker) || !source.includes('retry base key collision detected; forcing a fresh recipient session') || !source.includes('__tfbotRetryCountV181 === 2') || !source.includes('__tfbotRetryCountV181 > 2') || !source.includes('retry recipient Signal session recovery prepared')) {
+            return { ...result, reason: 'base_key_patch_verification_failed', file: path.basename(filePath) };
+        }
+        fs.writeFileSync(filePath, source, 'utf8');
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), retryCountTwoBaseKeySnapshot: true, repeatedBaseKeySessionRefresh: true, emitsRetrySessionRecoveryDiagnostics: true, cacheLimit: 1024, cacheTtlMs: 900000, preservesDeviceScopedSignalAddress: true };
+    } catch (error) {
+        return { ...result, reason: String(error?.message || error).slice(0, 220) };
+    }
+}
+
 function applyBaileysLidAwareGroupOutboundAddressingPatch() {
     const marker = '__tfbotLidAwareGroupOutboundAddressingV173';
     try {
@@ -1440,6 +1532,7 @@ const baileysRetryHeuristicUpgradeStatus = upgradeBaileysRetryHeuristicIfPresent
 const baileysLidPnDecryptPatchStatus = applyBaileysLidPnDecryptRetryPatch();
 const baileysGroupLidPnDecryptPatchStatus = applyBaileysGroupLidPnDecryptRetryPatch();
 const baileysGroupRetrySkdmPatchStatus = applyBaileysGroupRetrySkdmPatch();
+const baileysRetryBaseKeyCollisionPatchStatus = applyBaileysRetryBaseKeyCollisionPatch();
 const baileysLidAwareGroupOutboundAddressingPatchStatus = applyBaileysLidAwareGroupOutboundAddressingPatch();
 const baileysSelfChatPlaceholderResendPatchStatus = applyBaileysSelfChatPlaceholderResendPnPatch();
 const baileysSignalTransactionPatchStatus = applyBaileysSignalTransactionPatch();
@@ -1455,6 +1548,7 @@ console.info('[baileys-lid-pn-decrypt-retry-patch]', baileysLidPnDecryptPatchSta
 console.info('[baileys-group-lid-pn-decrypt-retry-patch]', baileysGroupLidPnDecryptPatchStatus);
 console.info('[baileys-self-chat-placeholder-resend-patch]', baileysSelfChatPlaceholderResendPatchStatus);
 console.info('[baileys-group-retry-skdm-patch]', baileysGroupRetrySkdmPatchStatus);
+console.info('[baileys-retry-base-key-collision-patch]', baileysRetryBaseKeyCollisionPatchStatus);
 console.info('[baileys-lid-aware-group-outbound-addressing-patch]', baileysLidAwareGroupOutboundAddressingPatchStatus);
 console.info('[baileys-retry-heuristic-upgrade]', baileysRetryHeuristicUpgradeStatus);
 console.info('[baileys-outgoing-retry-preflight-patch]', { ...baileysOutgoingRetryPreflightPatchStatus, action: baileysOutgoingRetryPreflightPatchStatus.applied ? 'preload_internal_retry_manager_and_start_generated_message_persistence_in_background_before_network_relay' : 'leave_installed_baileys_source_unchanged' });
@@ -1491,7 +1585,7 @@ function getTfbotInstalledPackageVersion(packageName) {
     return null;
 }
 const TFBOT_BAILEYS_VERSION = getTfbotInstalledPackageVersion('@whiskeysockets/baileys');
-enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, baileysVersion: TFBOT_BAILEYS_VERSION, perChatInboundProcessing: baileysPerChatInboundProcessingPatchStatus, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, groupLidOutboundAddressing: baileysLidAwareGroupOutboundAddressingPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, groupLidPnDecrypt: baileysGroupLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus, pairingCodeProtocol: baileysPairingCodeProtocolPatchStatus }) });
+enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, baileysVersion: TFBOT_BAILEYS_VERSION, perChatInboundProcessing: baileysPerChatInboundProcessingPatchStatus, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, retryBaseKeyCollision: baileysRetryBaseKeyCollisionPatchStatus, groupLidOutboundAddressing: baileysLidAwareGroupOutboundAddressingPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, groupLidPnDecrypt: baileysGroupLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus, pairingCodeProtocol: baileysPairingCodeProtocolPatchStatus }) });
 const { MongoClient } = require('mongodb');
 const { Writable } = require('stream');
 const zlib = require('zlib');
@@ -17939,6 +18033,7 @@ async function main() {
         groupLidPnDecryptPatchApplied: baileysGroupLidPnDecryptPatchStatus.applied === true,
         groupLidOutboundAddressingPatchApplied: baileysLidAwareGroupOutboundAddressingPatchStatus.applied === true,
         groupRetrySkdmPatchApplied: baileysGroupRetrySkdmPatchStatus.applied === true,
+        retryBaseKeyCollisionPatchApplied: baileysRetryBaseKeyCollisionPatchStatus.applied === true,
         groupSenderKeyResetBeforeSendEnabled: GROUP_SENDER_KEY_RESET_ON_SEND,
         groupSenderKeyResetScope: 'all_group_messages_always_use_legacy_sender_key_preparation_transport',
         groupSenderKeyResetEveryMessage: GROUP_SENDER_KEY_RESET_EVERY_SEND,
