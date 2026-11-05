@@ -5,8 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r179-forced-legacy-transport-all-destinations-stabilization';
-const FORCE_LEGACY_COMMAND_TRANSPORT = true;
+const TFBOT_CLUSTER_CODE_REVISION = 'r180-signal-device-address-preservation-private-group';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -235,8 +234,8 @@ for (const level of Object.keys(tfbotOriginalConsole)) {
 enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'diagnostic-log-start', content: 'Journal opérationnel du cluster démarré; les identifiants, codes, numéros et contenus privés sont masqués.' });
 
 function applyBaileysLidPnDecryptRetryPatch() {
-    const marker = '__tfbotPrivateLidPnDecryptFallbackV118';
-    const previousMarkers = ['__tfbotPrivateLidPnDecryptFallbackV117', '__tfbotPrivateLidPnDecryptFallbackV116', '__tfbotPrivateLidPnDecryptFallbackV115', '__tfbotPrivateLidPnDecryptFallbackV114', '__tfbotPrivateLidPnDecryptFallbackV113', '__tfbotPrivateLidPnDecryptFallbackV112', '__tfbotSelfChatPnDecryptFallbackV107'];
+    const marker = '__tfbotPrivateLidPnDecryptFallbackV119';
+    const previousMarkers = ['__tfbotPrivateLidPnDecryptFallbackV118', '__tfbotPrivateLidPnDecryptFallbackV117', '__tfbotPrivateLidPnDecryptFallbackV116', '__tfbotPrivateLidPnDecryptFallbackV115', '__tfbotPrivateLidPnDecryptFallbackV114', '__tfbotPrivateLidPnDecryptFallbackV113', '__tfbotPrivateLidPnDecryptFallbackV112', '__tfbotSelfChatPnDecryptFallbackV107'];
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
@@ -245,11 +244,14 @@ function applyBaileysLidPnDecryptRetryPatch() {
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
         if (!filePath) return { applied: false, reason: 'decrypt_module_not_found' };
         let source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, preservesOriginalLidFallback: true, verifiedLidPnSessionMigration: true };
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, preservesOriginalLidFallback: true, preservesSignalDeviceAddress: true, verifiedLidPnSessionMigration: true };
         const injectedBody = `const ${marker} = true;
     const __tfbotPrimaryJid = String(__TFBOT_ORIGINAL_JID__ || '').trim();
     const __tfbotRemoteJid = String(fullMessage?.key?.remoteJid || '').trim();
     const __tfbotNormalizeJid = value => String(value || '').trim().replace(/:\\d+(?=@(?:hosted\\.)?lid$)/i, '').replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
+    const __tfbotSignalDeviceFromJid = value => String(value || '').trim().match(/:(\\d+)(?=@(?:hosted\\.)?lid$|@s\\.whatsapp\\.net$)/i)?.[1] || '';
+    const __tfbotSignalDeviceSource = [__tfbotPrimaryJid, __tfbotRemoteJid, fullMessage?.key?.senderLid, fullMessage?.key?.participantLid, fullMessage?.key?.remoteJidAlt].find(value => __tfbotSignalDeviceFromJid(value) && /@(?:hosted\\.)?lid$/i.test(String(value || ''))) || __tfbotPrimaryJid;
+    const __tfbotWithSignalDevice = (value, sourceJid = __tfbotSignalDeviceSource) => { const normalized = __tfbotNormalizeJid(value); const device = __tfbotSignalDeviceFromJid(value) || __tfbotSignalDeviceFromJid(sourceJid); return device ? normalized.replace(/@/, ':' + device + '@') : normalized; };
     const __tfbotIsExcludedChat = /@(?:g\\.us|newsletter|broadcast)$/i.test(__tfbotRemoteJid);
     const __tfbotLidCandidates = [...new Set([__tfbotPrimaryJid, __tfbotRemoteJid, fullMessage?.key?.senderLid, fullMessage?.key?.participantLid, fullMessage?.key?.remoteJidAlt].map(__tfbotNormalizeJid).filter(value => /@(?:hosted\\.)?lid$/i.test(value)))];
     const __tfbotIsPrivateLidChat = !__tfbotIsExcludedChat && __tfbotLidCandidates.length > 0;
@@ -268,10 +270,12 @@ function applyBaileysLidPnDecryptRetryPatch() {
             stanza?.attrs?.sender_pn
         ];
         for (const __tfbotRawPn of __tfbotExplicitPnCandidates) {
-            const __tfbotPn = __tfbotNormalizeJid(__tfbotRawPn);
-            if (/^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotPn) && !__tfbotPnCandidates.includes(__tfbotPn)) {
-                __tfbotPnCandidates.push(__tfbotPn);
-                __tfbotExplicitPnCandidateCount++;
+            const __tfbotPnVariants = [...new Set([__tfbotWithSignalDevice(__tfbotRawPn, __tfbotSignalDeviceSource), __tfbotNormalizeJid(__tfbotRawPn)])];
+            for (const __tfbotPn of __tfbotPnVariants) {
+                if (/^\\d{6,20}(?::\\d+)?@s\\.whatsapp\\.net$/i.test(__tfbotPn) && !__tfbotPnCandidates.includes(__tfbotPn)) {
+                    __tfbotPnCandidates.push(__tfbotPn);
+                    __tfbotExplicitPnCandidateCount++;
+                }
             }
         }
     }
@@ -281,11 +285,13 @@ function applyBaileysLidPnDecryptRetryPatch() {
     const __tfbotPersistLidPnAndMigrate = async (__tfbotLid, __tfbotPn, __tfbotMigratePnSession) => {
         const __tfbotNormalizedLid = __tfbotNormalizeJid(__tfbotLid);
         const __tfbotNormalizedPn = __tfbotNormalizeJid(__tfbotPn);
+        const __tfbotDevicePn = String(__tfbotPn || '').trim();
+        const __tfbotDeviceLid = __tfbotWithSignalDevice(__tfbotNormalizedLid, __tfbotDevicePn);
         if (!/^\\d{6,20}@lid$/i.test(__tfbotNormalizedLid) || !/^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotNormalizedPn)) return false;
         try {
             if (typeof repository?.lidMapping?.storeLIDPNMappings === 'function') await repository.lidMapping.storeLIDPNMappings([{ lid: __tfbotNormalizedLid, pn: __tfbotNormalizedPn }]);
             const __tfbotSessionMigrated = __tfbotMigratePnSession === true && typeof repository?.migrateSession === 'function';
-            if (__tfbotSessionMigrated) await repository.migrateSession(__tfbotNormalizedPn, __tfbotNormalizedLid);
+            if (__tfbotSessionMigrated) await repository.migrateSession(__tfbotDevicePn, __tfbotDeviceLid);
             logger?.debug?.({ decryptAddressType: 'verified_lid_pn_pair', sessionMigration: __tfbotSessionMigrated, sessionMigrationReason: __tfbotSessionMigrated ? 'successful_phone_number_decrypt' : 'not_a_successful_phone_number_decrypt' }, 'private LID PN mapping persisted and applicable Signal session migration evaluated');
             return true;
         } catch (mappingMigrationError) {
@@ -298,8 +304,9 @@ function applyBaileysLidPnDecryptRetryPatch() {
     for (const __tfbotCandidateJid of __tfbotCandidates) {
         try {
             const __tfbotDecrypted = await repository.decryptMessage({ jid: __tfbotCandidateJid, type: e2eType, ciphertext: content });
-            if (__tfbotIsPrivateLidChat && __tfbotPnCandidates.length) await __tfbotPersistLidPnAndMigrate(__tfbotLidCandidates[0] || '', __tfbotPnCandidates[0], /^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotCandidateJid));
-            if (__tfbotIsPrivateLidChat && /^\d{6,20}@s\.whatsapp\.net$/i.test(__tfbotCandidateJid)) {
+            const __tfbotCandidateIsPn = /^\\d{6,20}(?::\\d+)?@s\\.whatsapp\\.net$/i.test(__tfbotCandidateJid);
+            if (__tfbotIsPrivateLidChat && __tfbotPnCandidates.length) await __tfbotPersistLidPnAndMigrate(__tfbotLidCandidates[0] || '', __tfbotCandidateIsPn ? __tfbotCandidateJid : __tfbotPnCandidates[0], __tfbotCandidateIsPn);
+            if (__tfbotIsPrivateLidChat && /^\d{6,20}(?::\d+)?@s\.whatsapp\.net$/i.test(__tfbotCandidateJid)) {
                 logger?.debug?.({ remoteJid: __tfbotRemoteJid, primaryJid: __tfbotPrimaryJid, decryptAddressType: 'phone_number', selfChat: __tfbotIsSelfLidChat, mappingAvailable: __tfbotPnCandidates.length > 0 }, 'private LID PN decrypt fallback succeeded');
             }
             return __tfbotDecrypted;
@@ -318,16 +325,19 @@ function applyBaileysLidPnDecryptRetryPatch() {
                     __tfbotMappingTimer = setTimeout(() => resolve(''), 2000);
                     if (typeof __tfbotMappingTimer.unref === 'function') __tfbotMappingTimer.unref();
                 });
-                const __tfbotMappedPn = __tfbotNormalizeJid(await Promise.race([__tfbotMappingLookup, __tfbotMappingTimeout]));
-                if (!/^\d{6,20}@s\.whatsapp\.net$/i.test(__tfbotMappedPn) || __tfbotCandidates.includes(__tfbotMappedPn)) continue;
-                try {
-                    const __tfbotDecryptedMappedPn = await repository.decryptMessage({ jid: __tfbotMappedPn, type: e2eType, ciphertext: content });
-                    await __tfbotPersistLidPnAndMigrate(__tfbotLid, __tfbotMappedPn, true);
-                    logger?.debug?.({ remoteJid: __tfbotRemoteJid, decryptAddressType: 'cached_or_database_phone_number' }, 'private LID PN decrypt fallback succeeded after original address attempts');
-                    return __tfbotDecryptedMappedPn;
-                } catch (__tfbotMappedDecryptError) {
-                    __tfbotLastDecryptError = __tfbotMappedDecryptError;
-                    __tfbotDecryptAttempts.push({ addressType: 'mapped_phone_number', errorName: __tfbotMappedDecryptError?.name || 'Error', errorMessage: String(__tfbotMappedDecryptError?.message || '').slice(0, 180) });
+                const __tfbotMappedPnBase = __tfbotNormalizeJid(await Promise.race([__tfbotMappingLookup, __tfbotMappingTimeout]));
+                const __tfbotMappedPnCandidates = [...new Set([__tfbotWithSignalDevice(__tfbotMappedPnBase, __tfbotSignalDeviceSource), __tfbotMappedPnBase])].filter(value => /^\\d{6,20}(?::\\d+)?@s\\.whatsapp\\.net$/i.test(value));
+                for (const __tfbotMappedPn of __tfbotMappedPnCandidates) {
+                    if (__tfbotCandidates.includes(__tfbotMappedPn)) continue;
+                    try {
+                        const __tfbotDecryptedMappedPn = await repository.decryptMessage({ jid: __tfbotMappedPn, type: e2eType, ciphertext: content });
+                        await __tfbotPersistLidPnAndMigrate(__tfbotLid, __tfbotMappedPn, true);
+                        logger?.debug?.({ remoteJid: __tfbotRemoteJid, decryptAddressType: 'cached_or_database_phone_number', signalDeviceAddressPreserved: !!__tfbotSignalDeviceFromJid(__tfbotMappedPn) }, 'private LID PN decrypt fallback succeeded after original address attempts');
+                        return __tfbotDecryptedMappedPn;
+                    } catch (__tfbotMappedDecryptError) {
+                        __tfbotLastDecryptError = __tfbotMappedDecryptError;
+                        __tfbotDecryptAttempts.push({ addressType: 'mapped_phone_number', deviceAddress: !!__tfbotSignalDeviceFromJid(__tfbotMappedPn), errorName: __tfbotMappedDecryptError?.name || 'Error', errorMessage: String(__tfbotMappedDecryptError?.message || '').slice(0, 180) });
+                    }
                 }
             } catch (mappingLookupError) {
                 logger?.debug?.({ mappingLookupErrorName: mappingLookupError?.name || 'Error' }, 'private LID-to-PN lookup did not return a usable mapping');
@@ -356,7 +366,7 @@ function applyBaileysLidPnDecryptRetryPatch() {
             source = source.slice(0, wrapperStart) + replacement + source.slice(oldIifeEnd + 5);
             if (!source.includes(marker) || source.includes(previousMarker)) return { applied: false, reason: 'previous_private_lid_patch_upgrade_verification_failed', file: path.basename(filePath) };
             fs.writeFileSync(filePath, source, 'utf8');
-            return { applied: true, alreadyApplied: false, upgradedPreviousPatch: true, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, mappingLookupTimeoutMs: 2000, preservesOriginalLidFallback: true, verifiedLidPnSessionMigration: true };
+            return { applied: true, alreadyApplied: false, upgradedPreviousPatch: true, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, mappingLookupTimeoutMs: 2000, preservesOriginalLidFallback: true, preservesSignalDeviceAddress: true, verifiedLidPnSessionMigration: true };
         }
         const callPattern = /((?:(?:const|let|var)\s+)?[A-Za-z_$][\w$]*\s*=\s*)await\s+repository\.decryptMessage\s*\(\s*\{\s*jid\s*:\s*([^,\n]+?)\s*,\s*type\s*:\s*e2eType\s*,\s*ciphertext\s*:\s*content\s*\}\s*\)\s*;?/g;
         const matches = [...source.matchAll(callPattern)];
@@ -366,7 +376,7 @@ function applyBaileysLidPnDecryptRetryPatch() {
         const patchedSource = source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
         if (!patchedSource.includes(marker) || !patchedSource.includes('getPNForLID') || !patchedSource.includes('storeLIDPNMappings') || patchedSource.includes('migrateSession(__tfbotCandidateJid')) return { applied: false, reason: 'private_lid_decrypt_patch_verification_failed', file: path.basename(filePath) };
         fs.writeFileSync(filePath, patchedSource, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, mappingLookupTimeoutMs: 2000, groupMetadataFallback: true, preservesOriginalLidFallback: true, storesVerifiedMappingAndMigratesPnSessionOnlyAfterSuccessfulPnDecrypt: true, deletesSignalKeys: false };
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), privateLidChats: true, selfChatAndOtherPrivateChats: true, resolvesPnFromSignalRepository: true, mappingLookupTimeoutMs: 2000, groupMetadataFallback: true, preservesOriginalLidFallback: true, storesVerifiedMappingAndMigratesPnSessionOnlyAfterSuccessfulPnDecrypt: true, preservesSignalDeviceAddress: true, deletesSignalKeys: false };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
@@ -876,8 +886,8 @@ const ${marker} = true;`;
     }
 }
 function applyBaileysGroupLidPnDecryptRetryPatch() {
-    const marker = '__tfbotGroupLidPnDecryptFallbackV117';
-    const previousMarkers = ['__tfbotGroupLidPnDecryptFallbackV116', '__tfbotGroupLidPnDecryptFallbackV115', '__tfbotGroupLidPnDecryptFallbackV114', '__tfbotGroupLidPnDecryptFallbackV113', '__tfbotGroupLidPnDecryptFallbackV112'];
+    const marker = '__tfbotGroupLidPnDecryptFallbackV118';
+    const previousMarkers = ['__tfbotGroupLidPnDecryptFallbackV117', '__tfbotGroupLidPnDecryptFallbackV116', '__tfbotGroupLidPnDecryptFallbackV115', '__tfbotGroupLidPnDecryptFallbackV114', '__tfbotGroupLidPnDecryptFallbackV113', '__tfbotGroupLidPnDecryptFallbackV112'];
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
@@ -886,11 +896,15 @@ function applyBaileysGroupLidPnDecryptRetryPatch() {
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
         if (!filePath) return { applied: false, reason: 'decrypt_module_not_found' };
         let source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), groupAuthorLidFallback: true, prefersExplicitParticipantPn: true, usesCachedOrDatabaseMappingOnly: true, groupMetadataNetworkFetchDuringDecrypt: false, mappingLookupTimeoutMs: 2000, originalLidAttemptPreserved: true };
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), groupAuthorLidFallback: true, prefersExplicitParticipantPn: true, usesCachedOrDatabaseMappingOnly: true, groupMetadataNetworkFetchDuringDecrypt: false, mappingLookupTimeoutMs: 2000, originalLidAttemptPreserved: true, preservesSignalDeviceAddress: true };
         const buildInjectedBody = (groupExpression, authorExpression) => `const ${marker} = true;
     const __tfbotGroupJid = String(${groupExpression} || '').trim();
     const __tfbotAuthorJid = String(${authorExpression} || '').trim();
-    const __tfbotNormalizedAuthorLid = __tfbotAuthorJid.replace(/:\\d+(?=@(?:hosted\\.)?lid$)/i, '');
+    const __tfbotAuthorLidJid = [fullMessage?.key?.participantLid, fullMessage?.key?.senderLid, __tfbotAuthorJid].find(value => /@(?:hosted\\.)?lid$/i.test(String(value || ''))) || __tfbotAuthorJid;
+    const __tfbotNormalizedAuthorLid = __tfbotAuthorLidJid.replace(/:\\d+(?=@(?:hosted\\.)?lid$)/i, '');
+    const __tfbotSignalDeviceFromJid = value => String(value || '').trim().match(/:(\\d+)(?=@(?:hosted\\.)?lid$|@s\\.whatsapp\\.net$)/i)?.[1] || '';
+    const __tfbotSignalDeviceSource = [__tfbotAuthorLidJid, __tfbotAuthorJid].find(value => __tfbotSignalDeviceFromJid(value) && /@(?:hosted\\.)?lid$/i.test(String(value || ''))) || __tfbotAuthorJid;
+    const __tfbotWithSignalDevice = (value, sourceJid = __tfbotSignalDeviceSource) => { const normalized = String(value || '').trim().replace(/:\\d+(?=@(?:hosted\\.)?lid$)/i, '').replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, ''); const device = __tfbotSignalDeviceFromJid(value) || __tfbotSignalDeviceFromJid(sourceJid); return device ? normalized.replace(/@/, ':' + device + '@') : normalized; };
     const __tfbotIsAuthorLid = /@(?:hosted\\.)?lid$/i.test(__tfbotNormalizedAuthorLid);
     const __tfbotExplicitPnCandidates = [...new Set([
         fullMessage?.key?.participantPn,
@@ -898,10 +912,10 @@ function applyBaileysGroupLidPnDecryptRetryPatch() {
         fullMessage?.key?.participantAlt,
         stanza?.attrs?.participant_pn,
         stanza?.attrs?.sender_pn
-    ].map(value => String(value || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '')).filter(value => /^\\d{6,20}@s\\.whatsapp\\.net$/i.test(value)))];
+    ].flatMap(value => [__tfbotWithSignalDevice(value, __tfbotSignalDeviceSource), String(value || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '')]).filter(value => /^\\d{6,20}(?::\\d+)?@s\\.whatsapp\\.net$/i.test(value)))];
     const __tfbotRememberGroupPn = pn => {
         if (!__tfbotIsAuthorLid || typeof repository?.lidMapping?.storeLIDPNMappings !== 'function') return;
-        void Promise.resolve().then(() => repository.lidMapping.storeLIDPNMappings([{ lid: __tfbotNormalizedAuthorLid, pn }])).catch(mappingStoreError => {
+        void Promise.resolve().then(() => repository.lidMapping.storeLIDPNMappings([{ lid: __tfbotNormalizedAuthorLid, pn: String(pn || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '') }])).catch(mappingStoreError => {
             logger?.debug?.({ mappingStoreErrorName: mappingStoreError?.name || 'Error' }, 'group LID/PN mapping persistence skipped after successful alternate decrypt');
         });
     };
@@ -924,12 +938,22 @@ function applyBaileysGroupLidPnDecryptRetryPatch() {
                 __tfbotMappingTimer = setTimeout(() => resolve(''), 2000);
                 if (typeof __tfbotMappingTimer.unref === 'function') __tfbotMappingTimer.unref();
             });
-            const __tfbotMappedAuthorPn = String(await Promise.race([__tfbotMappingLookup, __tfbotMappingTimeout]) || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
-            if (!/^\\d{6,20}@s\\.whatsapp\\.net$/i.test(__tfbotMappedAuthorPn) || __tfbotExplicitPnCandidates.includes(__tfbotMappedAuthorPn)) throw __tfbotOriginalGroupDecryptError;
-            const __tfbotDecryptedMappedPn = await repository.decryptGroupMessage({ group: __tfbotGroupJid, authorJid: __tfbotMappedAuthorPn, msg: content });
-            __tfbotRememberGroupPn(__tfbotMappedAuthorPn);
-            logger?.debug?.({ groupJid: __tfbotGroupJid, authorJid: __tfbotNormalizedAuthorLid, decryptAuthorType: 'cached_or_database_phone_number' }, 'group LID PN decrypt fallback succeeded');
-            return __tfbotDecryptedMappedPn;
+            const __tfbotMappedAuthorPnBase = String(await Promise.race([__tfbotMappingLookup, __tfbotMappingTimeout]) || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
+            const __tfbotMappedAuthorPnCandidates = [...new Set([__tfbotWithSignalDevice(__tfbotMappedAuthorPnBase, __tfbotSignalDeviceSource), __tfbotMappedAuthorPnBase])].filter(value => /^\\d{6,20}(?::\\d+)?@s\\.whatsapp\\.net$/i.test(value));
+            let __tfbotMappedDecryptError;
+            for (const __tfbotMappedAuthorPn of __tfbotMappedAuthorPnCandidates) {
+                if (__tfbotExplicitPnCandidates.includes(__tfbotMappedAuthorPn)) continue;
+                try {
+                    const __tfbotDecryptedMappedPn = await repository.decryptGroupMessage({ group: __tfbotGroupJid, authorJid: __tfbotMappedAuthorPn, msg: content });
+                    __tfbotRememberGroupPn(__tfbotMappedAuthorPn);
+                    logger?.debug?.({ groupJid: __tfbotGroupJid, authorJid: __tfbotNormalizedAuthorLid, decryptAuthorType: 'cached_or_database_phone_number', signalDeviceAddressPreserved: !!__tfbotSignalDeviceFromJid(__tfbotMappedAuthorPn) }, 'group LID PN decrypt fallback succeeded');
+                    return __tfbotDecryptedMappedPn;
+                } catch (__tfbotMappedPnError) {
+                    __tfbotMappedDecryptError = __tfbotMappedPnError;
+                }
+            }
+            if (!__tfbotMappedAuthorPnCandidates.length && __tfbotMappedDecryptError) throw __tfbotMappedDecryptError;
+            throw __tfbotOriginalGroupDecryptError;
         } catch (__tfbotGroupFallbackError) {
             logger?.warn?.({ groupJid: __tfbotGroupJid, authorJid: __tfbotNormalizedAuthorLid, explicitPnCandidateCount: __tfbotExplicitPnCandidates.length, mappingAvailable: typeof repository?.lidMapping?.getPNForLID === 'function', errorName: __tfbotGroupFallbackError?.name || 'Error' }, 'group LID PN decrypt fallback failed; original LID decrypt error preserved');
             throw __tfbotOriginalGroupDecryptError;
@@ -951,9 +975,9 @@ function applyBaileysGroupLidPnDecryptRetryPatch() {
             if (!/((?:(?:const|let|var)\s+)?[A-Za-z_$][\w$]*\s*=\s*)$/.test(assignmentPrefix)) return { applied: false, reason: 'previous_group_lid_patch_assignment_prefix_not_found', file: path.basename(filePath) };
             const replacement = `await (async () => {\n${buildInjectedBody(groupMatch[1].trim(), authorMatch[1].trim())}\n})();`;
             source = source.slice(0, wrapperStart) + replacement + source.slice(wrapperEnd + 5);
-            if (!source.includes(marker) || source.includes(previousMarker) || !source.includes('fullMessage?.key?.participantPn') || !source.includes('fullMessage?.key?.senderPn') || !source.includes('setTimeout(() => resolve(\'\'), 500);')) return { applied: false, reason: 'previous_group_lid_patch_upgrade_verification_failed', file: path.basename(filePath) };
+            if (!source.includes(marker) || source.includes(previousMarker) || !source.includes('fullMessage?.key?.participantPn') || !source.includes('fullMessage?.key?.senderPn') || !source.includes('setTimeout(() => resolve(\'\'), 2000);')) return { applied: false, reason: 'previous_group_lid_patch_upgrade_verification_failed', file: path.basename(filePath) };
             fs.writeFileSync(filePath, source, 'utf8');
-            return { applied: true, alreadyApplied: false, upgradedPreviousPatch: true, file: path.basename(filePath), prefersExplicitParticipantPn: true, mappingLookupTimeoutMs: 2000, groupMetadataNetworkFetchDuringDecrypt: false, originalLidAttemptPreserved: true };
+            return { applied: true, alreadyApplied: false, upgradedPreviousPatch: true, file: path.basename(filePath), prefersExplicitParticipantPn: true, mappingLookupTimeoutMs: 2000, groupMetadataNetworkFetchDuringDecrypt: false, originalLidAttemptPreserved: true, preservesSignalDeviceAddress: true };
         }
         const callPattern = /((?:(?:const|let|var)\s+)?[A-Za-z_$][\w$]*\s*=\s*)await\s+repository\.decryptGroupMessage\s*\(\s*\{\s*group\s*:\s*([^,\n]+?)\s*,\s*authorJid\s*:\s*([^,\n]+?)\s*,\s*msg\s*:\s*content\s*\}\s*\)\s*;?/g;
         const matches = [...source.matchAll(callPattern)];
@@ -963,7 +987,7 @@ function applyBaileysGroupLidPnDecryptRetryPatch() {
         const patchedSource = source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
         if (!patchedSource.includes(marker) || !patchedSource.includes('fullMessage?.key?.participantPn') || !patchedSource.includes('fullMessage?.key?.senderPn') || !patchedSource.includes('decryptGroupMessage({ group: __tfbotGroupJid, authorJid: __tfbotExplicitPn, msg: content })')) return { applied: false, reason: 'group_lid_decrypt_patch_verification_failed', file: path.basename(filePath) };
         fs.writeFileSync(filePath, patchedSource, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), prefersExplicitParticipantPn: true, usesCachedOrDatabaseMappingOnly: true, mappingLookupTimeoutMs: 2000, groupMetadataNetworkFetchDuringDecrypt: false, originalLidAttemptPreserved: true };
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), prefersExplicitParticipantPn: true, usesCachedOrDatabaseMappingOnly: true, mappingLookupTimeoutMs: 2000, groupMetadataNetworkFetchDuringDecrypt: false, originalLidAttemptPreserved: true, preservesSignalDeviceAddress: true };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
@@ -1619,7 +1643,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-04-r179';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-04-r177';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -4269,24 +4293,27 @@ async function queuedSendMessageLegacy(sock, jid, content, options = {}, delayMs
 async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180) {
     const sessionId = findActiveSessionIdForSocket(sock);
     if (!sessionId) throw new Error('whatsapp_socket_session_replaced');
-    const fallbackWasActive = isSessionMessagingFallbackActive(sessionId);
     const isGroupDestination = /@g\.us$/i.test(String(jid || '').trim());
-    console.info('[whatsapp-send-transport-selected]', {
-        sessionId,
-        destinationType: getWhatsAppDestinationType(jid),
-        messageType: Object.keys(content || {}).filter(key => !['mentions', 'quoted', 'contextInfo', 'messageContextInfo'].includes(key)).join(',') || 'unknown',
-        transport: 'forced_legacy_queued_transport',
-        forcedForStabilization: FORCE_LEGACY_COMMAND_TRANSPORT,
-        fallbackWasActive,
-        groupSenderKeyPreparation: isGroupDestination ? 'legacy_reset_before_send_with_group_cooldown' : 'private_legacy_identity_resolution_and_queue'
-    });
+    const fallbackActive = isSessionMessagingFallbackActive(sessionId);
+    if (isGroupDestination || fallbackActive) {
+        try {
+            const legacyResult = await queuedSendMessageLegacy(sock, jid, content, options, delayMs);
+            if (fallbackActive && !isGroupDestination && legacyResult?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, legacyResult.key.id);
+            if (isGroupDestination) console.info('[whatsapp-send-group-legacy-forced]', { sessionId, responseMessageId: legacyResult?.key?.id || null, destinationType: 'group', fallbackActive, reason: 'all_group_messages_use_legacy_sender_key_preparation_path' });
+            return legacyResult;
+        } catch (legacyError) {
+            if (shouldActivateLegacyMessagingFallback(legacyError)) markSessionMessagingFallback(sessionId, `legacy_send_${classifyWhatsAppFailure(legacyError)}`);
+            throw legacyError;
+        }
+    }
     try {
-        const legacyResult = await queuedSendMessageLegacy(sock, jid, content, options, delayMs);
-        if (!FORCE_LEGACY_COMMAND_TRANSPORT && fallbackWasActive && legacyResult?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, legacyResult.key.id);
-        return legacyResult;
-    } catch (legacyError) {
-        if (shouldActivateLegacyMessagingFallback(legacyError)) markSessionMessagingFallback(sessionId, `forced_legacy_send_${classifyWhatsAppFailure(legacyError)}`);
-        throw legacyError;
+        return await sendFastMessageWithDiagnostics(sock, jid, content, options, 'adaptive_direct_send');
+    } catch (directError) {
+        if (!shouldActivateLegacyMessagingFallback(directError)) throw directError;
+        markSessionMessagingFallback(sessionId, `adaptive_direct_send_${classifyWhatsAppFailure(directError)}`);
+        const fallbackResult = await queuedSendMessageLegacy(sock, jid, content, options, delayMs);
+        if (fallbackResult?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, fallbackResult.key.id);
+        return fallbackResult;
     }
 }
 
@@ -10174,12 +10201,10 @@ async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, 
         const messageOptions = { ...(sendOptions.messageOptions || {}) };
         delete messageOptions.quoted;
         const canUseImageCaption = !!(deliveryImageBuffer?.length && caption.length <= MAX_WHATSAPP_CAPTION_CHARS);
-        const directPrivateCommandSend = !FORCE_LEGACY_COMMAND_TRANSPORT && sendOptions.directSend === true && !/@g\.us$/i.test(String(jid || '').trim());
-        const sendCommandPayload = value => FORCE_LEGACY_COMMAND_TRANSPORT
-            ? queuedSendMessageLegacy(sock, jid, value, messageOptions, 0)
-            : directPrivateCommandSend
-                ? sendFastMessageWithDiagnostics(sock, jid, value, messageOptions, 'formatted_command_response')
-                : queuedSendMessage(sock, jid, value, messageOptions, 0);
+        const directPrivateCommandSend = sendOptions.directSend === true && !/@g\.us$/i.test(String(jid || '').trim());
+        const sendCommandPayload = value => directPrivateCommandSend
+            ? sendFastMessageWithDiagnostics(sock, jid, value, messageOptions, 'formatted_command_response')
+            : queuedSendMessage(sock, jid, value, messageOptions, 0);
         if (directPrivateCommandSend) {
             if (deliveryImageBuffer?.length) {
                 const sourceBuffer = deliveryImageBuffer;
@@ -15473,10 +15498,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     const payload = { text: String(targetText ?? '') };
                                     if (Array.isArray(sendOptions.mentions) && sendOptions.mentions.length) payload.mentions = sendOptions.mentions;
                                     const messageOptions = { ...(sendOptions.messageOptions || {}), quoted: m };
-                                    const transport = 'forced_legacy_queued_transport';
+                                    const groupTarget = /@g\.us$/i.test(targetJid);
+                                    const transport = groupTarget ? 'existing_queued_group_sender_key_transport' : isSessionMessagingFallbackActive(sessionId) ? 'existing_queued_legacy_fallback' : 'simple_direct_send';
                                     markCommandSending(transport, 'text');
                                     try {
-                                        return await queuedSendMessageLegacy(targetSocket, targetJid, payload, messageOptions, 180);
+                                        return await queuedSendMessage(targetSocket, targetJid, payload, messageOptions, 0);
                                     } catch (error) {
                                         markCommandSendFailure(transport, error);
                                         if (shouldActivateLegacyMessagingFallback(error)) markSessionMessagingFallback(sessionId, `beta_style_text_${classifyWhatsAppFailure(error)}`, msgId);
@@ -15486,15 +15512,33 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 const trackedQueuedSendMessage = async (...sendArgs) => {
                                     const destination = String(sendArgs[1] || from || '');
                                     const payloadType = Object.keys(sendArgs[2] || {}).filter(key => !['mentions', 'quoted', 'contextInfo', 'messageContextInfo'].includes(key)).join(',') || 'message';
-                                    const transportUsed = 'forced_legacy_queued_transport';
+                                    const useGroupLegacy = /@g\.us$/i.test(destination);
+                                    const useLegacy = useGroupLegacy || isSessionMessagingFallbackActive(sessionId);
+                                    let transportUsed = useGroupLegacy ? 'existing_queued_group_sender_key_transport' : useLegacy ? 'existing_queued_legacy_fallback' : 'simple_direct_send';
                                     markCommandSending(transportUsed, payloadType);
                                     try {
-                                        const result = await queuedSendMessageLegacy(...sendArgs);
+                                        let result;
+                                        if (useLegacy) {
+                                            result = await queuedSendMessageLegacy(...sendArgs);
+                                            if (!useGroupLegacy && result?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, result.key.id);
+                                        } else {
+                                            try {
+                                                result = await sendFastMessageWithDiagnostics(sendArgs[0] || sock, destination, sendArgs[2] || {}, sendArgs[3] || {}, 'tracked_command_message');
+                                            } catch (directError) {
+                                                markCommandSendFailure('simple_direct_send', directError);
+                                                if (!shouldActivateLegacyMessagingFallback(directError)) throw directError;
+                                                markSessionMessagingFallback(sessionId, `tracked_command_signal_${classifyWhatsAppFailure(directError)}`, msgId);
+                                                transportUsed = 'existing_queued_legacy_fallback_after_signal_failure';
+                                                markCommandSending(transportUsed, payloadType);
+                                                result = await queuedSendMessageLegacy(...sendArgs);
+                                                if (result?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, result.key.id);
+                                            }
+                                        }
                                         if (result?.key?.id) responseSentForLog = true;
                                         console.info('[command-lifecycle]', { sessionId, messageId: msgId, command: internalCommand, chatJid: destination, phase: 'response-sent', transport: transportUsed, responseMessageId: result?.key?.id || null, payloadType, attempt: commandSendAttempt, elapsedMs: Date.now() - commandLifecycleStartedAt });
                                         return result;
                                     } catch (error) {
-                                        markCommandSendFailure(transportUsed, error);
+                                        markCommandSendFailure(useLegacy ? transportUsed : 'adaptive_send', error);
                                         if (shouldActivateLegacyMessagingFallback(error)) markSessionMessagingFallback(sessionId, `tracked_command_${classifyWhatsAppFailure(error)}`, msgId);
                                         throw error;
                                     }
@@ -15511,20 +15555,44 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 const commandSendOptions = (options = {}, directSend = false) => ({
                                     ...options,
                                     commandFormat: true,
-                                    directSend: FORCE_LEGACY_COMMAND_TRANSPORT ? false : directSend,
+                                    directSend,
                                     ownerName: activeHostName,
                                     language: messageLang,
                                     preserveSourceImage: true
                                 });
                                 const executeAdaptiveFormattedSend = async (send, responseType = 'text_or_media') => {
-                                    const transport = 'forced_legacy_queued_transport';
-                                    markCommandSending(transport, responseType);
+                                    const groupLegacyRequired = isGroup;
+                                    const fallbackActive = isSessionMessagingFallbackActive(sessionId);
+                                    if (groupLegacyRequired || fallbackActive) {
+                                        const legacyTransport = groupLegacyRequired ? 'existing_queued_group_sender_key_transport' : 'existing_queued_legacy_fallback';
+                                        markCommandSending(legacyTransport, responseType);
+                                        try {
+                                            const result = await send(false);
+                                            if (!groupLegacyRequired && result?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, result.key.id);
+                                            return completeCommandResponse(result, legacyTransport);
+                                        } catch (legacyError) {
+                                            markSessionMessagingFallback(sessionId, 'legacy_fallback_send_failed', msgId);
+                                            throw legacyError;
+                                        }
+                                    }
+                                    markCommandSending('simple_direct_send', responseType);
                                     try {
-                                        const result = await send(false);
-                                        return completeCommandResponse(result, transport);
-                                    } catch (legacyError) {
-                                        if (shouldActivateLegacyMessagingFallback(legacyError)) markSessionMessagingFallback(sessionId, `forced_legacy_formatted_${classifyWhatsAppFailure(legacyError)}`, msgId);
-                                        throw legacyError;
+                                        const result = await send(true);
+                                        return completeCommandResponse(result, 'simple_direct_send');
+                                    } catch (fastSendError) {
+                                        markCommandSendFailure('simple_direct_send', fastSendError);
+                                        if (!shouldActivateLegacyMessagingFallback(fastSendError)) throw fastSendError;
+                                        markSessionMessagingFallback(sessionId, `formatted_command_signal_${classifyWhatsAppFailure(fastSendError)}`, msgId);
+                                        console.warn('[command-response-switching-to-existing-transport]', { sessionId, messageId: msgId, command: internalCommand, failureClass: classifyWhatsAppFailure(fastSendError), error: String(fastSendError?.message || fastSendError).slice(0, 500), action: 'retry_once_through_existing_queued_transport_for_signal_degradation' });
+                                        markCommandSending('existing_queued_legacy_fallback_after_signal_failure', responseType);
+                                        try {
+                                            const result = await send(false);
+                                            return completeCommandResponse(result, 'existing_queued_legacy_fallback_after_signal_failure');
+                                        } catch (legacySendError) {
+                                            markCommandSendFailure('existing_queued_legacy_fallback_after_signal_failure', legacySendError);
+                                            markSessionMessagingFallback(sessionId, 'fast_and_legacy_send_failed', msgId);
+                                            throw legacySendError;
+                                        }
                                     }
                                 };
                                 const safeSendFormatted = async (...sendArgs) => {
@@ -15587,18 +15655,22 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 const trackedSendImageCaptioned = async (...sendArgs) => {
                                     const sendStartedAt = Date.now();
                                     const suppliedOptions = sendArgs[6] && typeof sendArgs[6] === 'object' ? sendArgs[6] : {};
-                                    const directSend = false;
+                                    const directSend = !isGroup && !isSessionMessagingFallbackActive(sessionId);
                                     const preparedArgs = [...sendArgs];
-                                    preparedArgs[6] = commandSendOptions(suppliedOptions, false);
-                                    const imageTransport = 'forced_legacy_queued_transport';
+                                    preparedArgs[6] = commandSendOptions(suppliedOptions, directSend);
+                                    const imageTransport = isGroup ? 'existing_queued_group_sender_key_transport' : directSend ? 'simple_direct_send' : 'existing_queued_legacy_fallback';
                                     markCommandSending(imageTransport, 'image_or_text');
                                     try {
                                         let result;
                                         try {
                                             result = await sendImageCaptioned(...preparedArgs);
                                         } catch (sendError) {
-                                            if (shouldActivateLegacyMessagingFallback(sendError)) markSessionMessagingFallback(sessionId, `image_captioned_signal_${classifyWhatsAppFailure(sendError)}`, msgId);
-                                            throw sendError;
+                                            if (!directSend || !shouldActivateLegacyMessagingFallback(sendError)) throw sendError;
+                                            markCommandSendFailure('simple_direct_send', sendError);
+                                            markSessionMessagingFallback(sessionId, `image_captioned_signal_${classifyWhatsAppFailure(sendError)}`, msgId);
+                                            preparedArgs[6] = commandSendOptions(suppliedOptions, false);
+                                            markCommandSending('existing_queued_legacy_fallback_after_signal_failure', 'image_or_text');
+                                            result = await sendImageCaptioned(...preparedArgs);
                                         }
                                         if (!result?.key?.id) throw new Error('whatsapp_send_result_message_id_missing');
                                         responseSentForLog = true;
@@ -17868,22 +17940,15 @@ async function main() {
         groupLidOutboundAddressingPatchApplied: baileysLidAwareGroupOutboundAddressingPatchStatus.applied === true,
         groupRetrySkdmPatchApplied: baileysGroupRetrySkdmPatchStatus.applied === true,
         groupSenderKeyResetBeforeSendEnabled: GROUP_SENDER_KEY_RESET_ON_SEND,
-        groupSenderKeyResetScope: 'all_command_replies_use_legacy_queue_and_group_sender_key_preparation_when_group_destination',
+        groupSenderKeyResetScope: 'all_group_messages_always_use_legacy_sender_key_preparation_transport',
         groupSenderKeyResetEveryMessage: GROUP_SENDER_KEY_RESET_EVERY_SEND,
-        groupSenderKeyResetPolicy: 'clear_sender_key_memory_before_group_send_when_group_cooldown_has_elapsed_and_reuse_recent_preparation',
         privateSenderKeyResetScope: 'not_applicable_to_private_chats',
-        selfChatAddressingMode: 'legacy_queue_original_authenticated_lid_primary_with_verified_phone_fallback',
+        selfChatAddressingMode: 'original_authenticated_lid_primary_with_phone_fallback',
         selfChatOriginalJidPreferred: true,
-        commandReplyTransport: 'forced_legacy_queued_transport_for_all_destinations',
-        commandReplyFastPath: false,
-        commandReplyGroupTransport: 'legacy_queue_with_sender_key_preparation_and_distribution',
-        commandReplyPrivateTransport: 'legacy_queue_with_session_scoped_identity_resolution_and_verified_alias_fallback',
-        commandReplyFallback: 'forced_legacy_for_all_command_reply_destinations_during_stabilization',
-        forcedLegacyCommandTransport: FORCE_LEGACY_COMMAND_TRANSPORT,
-        trackedTextRepliesUseLegacyQueue: true,
-        formattedRepliesUseLegacyQueue: true,
-        imageRepliesUseLegacyQueue: true,
-        betaStyleTextRepliesUseLegacyQueue: true,
+        commandReplyTransport: 'private_direct_by_default_group_legacy_sender_key_transport_always',
+        commandReplyFastPath: 'private_sock.sendMessage_direct_without_per_chat_queue_or_pre_send_identity_migration',
+        commandReplyGroupTransport: 'existing_per_chat_serialized_legacy_queue_with_sender_key_reset_and_distribution',
+        commandReplyFallback: 'existing_per_chat_serialized_queue_with_session_ownership_signal_and_address_recovery_for_private_signal_degradation',
         ownerIdentityResolution: 'fromMe_socket_id_lid_session_scoped_pn_lid_aliases_and_verified_linked_device_envelopes',
         commandPolicy: 'owner_always_allowed_public_all_senders_private_non_owner_silent',
         commandTyping: 'bounded_composing_presence_before_response_only_for_owner_or_public_mode',
