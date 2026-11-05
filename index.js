@@ -15914,9 +15914,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             } catch (qrUploadError) {
                                                 console.error('[qr-upload-to-bref]', redactActionError(qrUploadError).slice(0, 400));
                                             }
-                                            const qrCaptionSource = Buffer.byteLength(args, 'utf8') <= 500 ? `${args}${qrPublicUrl ? `\n${qrPublicUrl}` : ''}` : `${t.qr_generated || 'QR code generated.'}${qrPublicUrl ? `\n${qrPublicUrl}` : ''}`;
-                                            const qrCaptionText = `*_${qrCaptionSource}_*`;
-                                            const qrCaptionCanStayTogether = buildCaption(t.cmd_qr, qrCaptionText, pushName, true, activeHostName, messageLang).length <= MAX_WHATSAPP_CAPTION_CHARS;
+                                            const qrCaptionSource = args.trim().length <= 700 ? args.trim() : (t.qr_generated || 'QR code generated.');
+const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` : ''}`;
+                                             const qrCaptionCanStayTogether = buildCaption(t.cmd_qr, qrCaptionText, pushName, true, activeHostName, messageLang).length <= MAX_WHATSAPP_CAPTION_CHARS;
                                             console.info('[qr-text-result-formatting]', { sessionId, messageId: msgId, inputBytes: Buffer.byteLength(args, 'utf8'), publicUrlIncluded: !!qrPublicUrl, formatting: 'single_bold_italic_block', deliveryMode: qrCaptionCanStayTogether ? 'image_caption' : 'separate_text_message', textAndUrlKeptTogether: true });
                                             if (qrCaptionCanStayTogether) {
                                                 await trackedSendImageCaptioned(sock, from, qrBuffer, t.cmd_qr, qrCaptionText, pushName, { preserveFormatting: true });
