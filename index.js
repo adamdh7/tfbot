@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r183-native-lid-private-and-pn-default-group-public-mode-sync';
+const TFBOT_CLUSTER_CODE_REVISION = 'r182-group-sender-key-reset-before-every-send';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -1200,32 +1200,8 @@ const __tfbotExtractRetryReceiptBundleV115 = receipt => {
         }
         let sendSource = fs.readFileSync(sendPath, 'utf8');
         const sendMarker = '__tfbotGroupRetrySkdmEmbeddedV115';
-        const retrySkdmIdentityMarker = '__tfbotRetrySkdmUsePrimaryMeIdV183';
-        const oldRetrySkdmIdentityBlock = `const __tfbotOwnLidV115 = String(authState.creds?.me?.lid || '').trim();
-                        let __tfbotGroupSenderIdentityV115 = '';
-                        if (__tfbotOwnLidV115 && await signalRepository.hasSenderKey({ group: destinationJid, meId: __tfbotOwnLidV115 })) __tfbotGroupSenderIdentityV115 = __tfbotOwnLidV115;
-                        else if (await signalRepository.hasSenderKey({ group: destinationJid, meId })) __tfbotGroupSenderIdentityV115 = meId;`;
-        const newRetrySkdmIdentityBlock = `const __tfbotOwnLidV115 = String(authState.creds?.me?.lid || '').trim();
-                        let __tfbotGroupSenderIdentityV115 = '';
-                        if (await signalRepository.hasSenderKey({ group: destinationJid, meId })) __tfbotGroupSenderIdentityV115 = meId;
-                        else if (__tfbotOwnLidV115 && await signalRepository.hasSenderKey({ group: destinationJid, meId: __tfbotOwnLidV115 })) __tfbotGroupSenderIdentityV115 = __tfbotOwnLidV115;`;
         if (sendSource.includes(sendMarker)) {
-            if (!sendSource.includes(retrySkdmIdentityMarker)) {
-                if (!sendSource.includes(oldRetrySkdmIdentityBlock)) {
-                    result.reason = 'previous_group_retry_skdm_identity_anchor_not_found';
-                    return result;
-                }
-                sendSource = sendSource.replace(oldRetrySkdmIdentityBlock, newRetrySkdmIdentityBlock);
-                sendSource = sendSource.replace(sendMarker, `${sendMarker}\nconst ${retrySkdmIdentityMarker} = true;`);
-                if (!sendSource.includes(retrySkdmIdentityMarker) || sendSource.indexOf('if (await signalRepository.hasSenderKey({ group: destinationJid, meId }))') > sendSource.indexOf('else if (__tfbotOwnLidV115')) {
-                    result.reason = 'group_retry_skdm_identity_upgrade_verification_failed';
-                    return result;
-                }
-                fs.writeFileSync(sendPath, sendSource, 'utf8');
-                result.messagesSend = { applied: true, alreadyApplied: false, upgradedIdentityOrder: true, file: path.basename(sendPath), prefersMainMessageSenderIdentity: true, retainsExplicitLidFallback: true };
-            } else {
-                result.messagesSend = { applied: true, alreadyApplied: true, file: path.basename(sendPath), prefersMainMessageSenderIdentity: true, retainsExplicitLidFallback: true };
-            }
+            result.messagesSend = { applied: true, alreadyApplied: true, file: path.basename(sendPath) };
         } else {
             const groupPatchAnchor = /const\s+patched\s*=\s*await\s+patchMessageBeforeSending\(message\)\s*;?/;
             const groupPatchMatch = groupPatchAnchor.exec(sendSource);
@@ -1238,8 +1214,8 @@ const __tfbotExtractRetryReceiptBundleV115 = receipt => {
                     try {
                         const __tfbotOwnLidV115 = String(authState.creds?.me?.lid || '').trim();
                         let __tfbotGroupSenderIdentityV115 = '';
-                        if (await signalRepository.hasSenderKey({ group: destinationJid, meId })) __tfbotGroupSenderIdentityV115 = meId;
-                        else if (__tfbotOwnLidV115 && await signalRepository.hasSenderKey({ group: destinationJid, meId: __tfbotOwnLidV115 })) __tfbotGroupSenderIdentityV115 = __tfbotOwnLidV115;
+                        if (__tfbotOwnLidV115 && await signalRepository.hasSenderKey({ group: destinationJid, meId: __tfbotOwnLidV115 })) __tfbotGroupSenderIdentityV115 = __tfbotOwnLidV115;
+                        else if (await signalRepository.hasSenderKey({ group: destinationJid, meId })) __tfbotGroupSenderIdentityV115 = meId;
                         if (__tfbotGroupSenderIdentityV115) {
                             const __tfbotRetrySkdmV115 = await signalRepository.getSenderKeyDistributionMessage({ group: destinationJid, meId: __tfbotGroupSenderIdentityV115 });
                             if (__tfbotRetrySkdmV115) __tfbotRetryMessageV115 = { ...message, senderKeyDistributionMessage: { groupId: destinationJid, axolotlSenderKeyDistributionMessage: __tfbotRetrySkdmV115 } };
@@ -1249,15 +1225,14 @@ const __tfbotExtractRetryReceiptBundleV115 = receipt => {
                     }
                 }
                 const ${sendMarker} = true;
-                const ${retrySkdmIdentityMarker} = true;
                 const patched = await patchMessageBeforeSending(__tfbotRetryMessageV115);`;
             sendSource = sendSource.slice(0, groupPatchMatch.index) + replacement + sendSource.slice(groupPatchMatch.index + groupPatchMatch[0].length);
-            if (!sendSource.includes(sendMarker) || !sendSource.includes(retrySkdmIdentityMarker) || !sendSource.includes('axolotlSenderKeyDistributionMessage: __tfbotRetrySkdmV115')) {
+            if (!sendSource.includes(sendMarker) || !sendSource.includes('axolotlSenderKeyDistributionMessage: __tfbotRetrySkdmV115')) {
                 result.reason = 'baileys_6_7_23_send_patch_verification_failed';
                 return result;
             }
             fs.writeFileSync(sendPath, sendSource, 'utf8');
-            result.messagesSend = { applied: true, alreadyApplied: false, file: path.basename(sendPath), embedsSkdmInGroupRetryMessage: true, prefersMainMessageSenderIdentity: true, retainsExplicitLidFallback: true, preservesLegacyParticipantSkdm: true };
+            result.messagesSend = { applied: true, alreadyApplied: false, file: path.basename(sendPath), embedsSkdmInGroupRetryMessage: true, preservesLegacyParticipantSkdm: true };
         }
         result.applied = result.libsignal.applied === true && result.messagesRecv.applied === true && result.messagesSend.applied === true;
         result.reason = result.applied ? 'ok' : 'partial_application';
@@ -1360,8 +1335,7 @@ ${appliedMarker}
 }
 
 function applyBaileysLidAwareGroupOutboundAddressingPatch() {
-    const marker = '__tfbotLidAwareGroupOutboundAddressingV183';
-    const previousMarker = '__tfbotLidAwareGroupOutboundAddressingV173';
+    const marker = '__tfbotLidAwareGroupOutboundAddressingV173';
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
@@ -1370,18 +1344,7 @@ function applyBaileysLidAwareGroupOutboundAddressingPatch() {
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
         if (!filePath) return { applied: false, reason: 'messages_send_module_not_found' };
         let source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), defaultsMissingGroupModeToPn: true, honorsExplicitLidMode: true, encryptsGroupSenderKeyWithMatchingIdentity: true };
-        if (source.includes(previousMarker)) {
-            const oldDefault = "(authState.creds?.me?.lid ? 'lid' : 'pn')";
-            const oldDefaultCount = [...source.matchAll(new RegExp(oldDefault.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))].length;
-            if (oldDefaultCount !== 2) return { applied: false, reason: 'previous_group_addressing_patch_default_count_mismatch', file: path.basename(filePath), oldDefaultCount };
-            source = source.replaceAll(oldDefault, "'pn'").replaceAll('V173', 'V183');
-            source = source.replace("defaultsMissingGroupModeToLidWhenOwnLidExists: true", "defaultsMissingGroupModeToPn: true");
-            source = source.replace("logger.debug({ addressingMode: __tfbotGroupAddressingModeV183, senderIdentityType: __tfbotGroupAddressingModeV183 === 'lid' ? 'lid' : 'phone_number', hasOwnLid: Boolean(authState.creds?.me?.lid) }, 'group outbound sender-key addressing mode selected');", "logger.debug({ addressingMode: __tfbotGroupAddressingModeV183, groupMetadataAddressingMode: groupData?.addressingMode || null, addressingModeSource: groupData?.addressingMode === 'lid' ? 'explicit_group_metadata_lid' : groupData?.addressingMode === 'pn' ? 'explicit_group_metadata_pn' : 'baileys_default_pn', senderIdentityType: __tfbotGroupAddressingModeV183 === 'lid' ? 'lid' : 'phone_number', hasOwnLid: Boolean(authState.creds?.me?.lid) }, 'group outbound sender-key addressing mode selected');");
-            if (!source.includes(marker) || !source.includes("groupData?.addressingMode || 'pn'") || source.includes("groupData?.addressingMode || 'lid'")) return { applied: false, reason: 'previous_group_addressing_patch_upgrade_verification_failed', file: path.basename(filePath) };
-            fs.writeFileSync(filePath, source, 'utf8');
-            return { applied: true, alreadyApplied: false, upgradedPreviousPatch: true, file: path.basename(filePath), defaultsMissingGroupModeToPn: true, honorsExplicitLidMode: true, preservesExplicitPnMode: true, encryptsGroupSenderKeyWithMatchingIdentity: true, usesSameAddressingModeForSenderKeyRecipients: true };
-        }
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), defaultsMissingGroupModeToLidWhenOwnLidExists: true, preservesExplicitPnMode: true, encryptsGroupSenderKeyWithMatchingIdentity: true };
         const countPatternMatches = (value, pattern) => [...value.matchAll(new RegExp(pattern.source, `${pattern.flags}g`))].length;
         const encryptPattern = /const\s*\{\s*ciphertext\s*,\s*senderKeyDistributionMessage\s*\}\s*=\s*await\s+signalRepository\.encryptGroupMessage\s*\(\s*\{\s*group\s*:\s*destinationJid\s*,\s*data\s*:\s*bytes\s*,\s*meId\s*\}\s*\)/;
         const encryptMatch = encryptPattern.exec(source);
@@ -1391,19 +1354,19 @@ function applyBaileysLidAwareGroupOutboundAddressingPatch() {
         if (!modeAttributeMatch || countPatternMatches(source, modeAttributePattern) !== 1) return { applied: false, reason: 'group_addressing_mode_attribute_anchor_not_found_or_ambiguous', file: path.basename(filePath) };
         const deviceJidPattern = /jidEncode\(\s*user\s*,\s*groupData\?\.addressingMode\s*===\s*(['"])lid\1\s*\?\s*(['"])lid\2\s*:\s*(['"])s\.whatsapp\.net\3\s*,\s*device\s*\)/;
         if (!deviceJidPattern.test(source) || countPatternMatches(source, deviceJidPattern) !== 1) return { applied: false, reason: 'group_sender_key_device_address_anchor_not_found_or_ambiguous', file: path.basename(filePath) };
-        source = source.replace(modeAttributePattern, `${modeAttributeMatch[1]}|| 'pn'`);
+        source = source.replace(modeAttributePattern, `${modeAttributeMatch[1]}|| (authState.creds?.me?.lid ? 'lid' : 'pn')`);
         const encryptReplacement = `const ${marker} = true;
-                const __tfbotRawGroupAddressingModeV183 = String(groupData?.addressingMode || 'pn').toLowerCase();
-                const __tfbotGroupAddressingModeV183 = isGroup && __tfbotRawGroupAddressingModeV183 === 'lid' ? 'lid' : 'pn';
-                const __tfbotGroupSenderIdentityV183 = __tfbotGroupAddressingModeV183 === 'lid' && authState.creds?.me?.lid ? String(authState.creds.me.lid).trim() : meId;
-                logger.debug({ addressingMode: __tfbotGroupAddressingModeV183, groupMetadataAddressingMode: groupData?.addressingMode || null, addressingModeSource: groupData?.addressingMode === 'lid' ? 'explicit_group_metadata_lid' : groupData?.addressingMode === 'pn' ? 'explicit_group_metadata_pn' : 'baileys_default_pn', senderIdentityType: __tfbotGroupAddressingModeV183 === 'lid' ? 'lid' : 'phone_number', hasOwnLid: Boolean(authState.creds?.me?.lid) }, 'group outbound sender-key addressing mode selected');
-                ${encryptMatch[0].replace(/\bmeId\s*\}/, 'meId: __tfbotGroupSenderIdentityV183 }')}`;
+                const __tfbotRawGroupAddressingModeV173 = String(groupData?.addressingMode || (authState.creds?.me?.lid ? 'lid' : 'pn')).toLowerCase();
+                const __tfbotGroupAddressingModeV173 = isGroup && __tfbotRawGroupAddressingModeV173 === 'lid' ? 'lid' : 'pn';
+                const __tfbotGroupSenderIdentityV173 = __tfbotGroupAddressingModeV173 === 'lid' && authState.creds?.me?.lid ? String(authState.creds.me.lid).trim() : meId;
+                logger.debug({ addressingMode: __tfbotGroupAddressingModeV173, senderIdentityType: __tfbotGroupAddressingModeV173 === 'lid' ? 'lid' : 'phone_number', hasOwnLid: Boolean(authState.creds?.me?.lid) }, 'group outbound sender-key addressing mode selected');
+                ${encryptMatch[0].replace(/\bmeId\s*\}/, 'meId: __tfbotGroupSenderIdentityV173 }')}`;
         source = source.replace(encryptPattern, encryptReplacement);
-        source = source.replace(deviceJidPattern, 'jidEncode(user, __tfbotGroupAddressingModeV183 === \'lid\' ? \'lid\' : \'s.whatsapp.net\', device)');
-        const patchedEncryptPattern = /await\s+signalRepository\.encryptGroupMessage\s*\(\s*\{\s*group\s*:\s*destinationJid\s*,\s*data\s*:\s*bytes\s*,\s*meId\s*:\s*__tfbotGroupSenderIdentityV183\s*\}\s*\)/;
-        if (!source.includes(marker) || !source.includes("groupData?.addressingMode || 'pn'") || !patchedEncryptPattern.test(source) || !source.includes("__tfbotGroupAddressingModeV183 === 'lid'")) return { applied: false, reason: 'group_pn_default_addressing_patch_verification_failed', file: path.basename(filePath) };
+        source = source.replace(deviceJidPattern, 'jidEncode(user, __tfbotGroupAddressingModeV173 === \'lid\' ? \'lid\' : \'s.whatsapp.net\', device)');
+        const patchedEncryptPattern = /await\s+signalRepository\.encryptGroupMessage\s*\(\s*\{\s*group\s*:\s*destinationJid\s*,\s*data\s*:\s*bytes\s*,\s*meId\s*:\s*__tfbotGroupSenderIdentityV173\s*\}\s*\)/;
+        if (!source.includes(marker) || !source.includes('meId: __tfbotGroupSenderIdentityV173') || !patchedEncryptPattern.test(source) || !source.includes("__tfbotGroupAddressingModeV173 === 'lid'")) return { applied: false, reason: 'group_lid_addressing_patch_verification_failed', file: path.basename(filePath) };
         fs.writeFileSync(filePath, source, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), defaultsMissingGroupModeToPn: true, honorsExplicitLidMode: true, encryptsGroupSenderKeyWithMatchingIdentity: true, usesSameAddressingModeForSenderKeyRecipients: true, deletesSignalKeys: false };
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), defaultsMissingGroupModeToLidWhenOwnLidExists: true, preservesExplicitPnMode: true, encryptsGroupSenderKeyWithMatchingIdentity: true, usesSameAddressingModeForSenderKeyRecipients: true, deletesSignalKeys: false };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
@@ -1774,7 +1737,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-05-r183';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-04-r182';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -4255,11 +4218,11 @@ async function queuedSendMessageLegacy(sock, jid, content, options = {}, delayMs
                 sessionMappingFresh = !!(mappedPhone && sessionMapping && Date.now() - Number(sessionMapping.updatedAt || 0) <= LID_PHONE_MAPPING_FRESH_MS);
             }
             if (sessionMappingFresh && mappedPhone) {
-                destinationJid = originalDestinationJid;
-                destinationResolution = 'native_lid_primary_with_verified_pn_fallback';
-                alternateDestinationJid = mappedPhone;
-                alternateDestinationResolution = 'verified_pn_fallback_after_lid_send_failure';
-                console.info('[private-send-native-lid-primary]', { sessionId, destinationType: 'private_lid', fallbackType: 'private_pn', mappingSource: resolvedMapping?.source || sessionMapping?.source || 'session_lid_phone_cache', mappingAgeMs: Math.max(0, Date.now() - Number(sessionMapping?.updatedAt || 0)), action: 'preserve_original_lid_as_primary_and_use_verified_phone_only_after_lid_send_failure' });
+                destinationJid = mappedPhone;
+                destinationResolution = 'verified_pn_mapping_primary_for_lid_chat';
+                alternateDestinationJid = originalDestinationJid;
+                alternateDestinationResolution = 'original_lid_fallback_after_verified_pn_failure';
+                console.info('[private-send-verified-pn-primary]', { sessionId, destinationType: 'private_pn', fallbackType: 'private_lid', mappingSource: resolvedMapping?.source || sessionMapping?.source || 'session_lid_phone_cache', mappingAgeMs: Math.max(0, Date.now() - Number(sessionMapping?.updatedAt || 0)), action: 'use_verified_phone_mapping_first_keep_original_lid_as_fallback' });
             } else {
                 void schedulePhoneResolutionForLid(sessionId, sock, originalDestinationJid, 'outgoing_private_chat').catch(() => '');
                 console.info('[private-send-original-lid-preserved]', { sessionId, mappingAvailable: false, action: 'send_to_original_lid_without_guessing_phone' });
@@ -4268,9 +4231,8 @@ async function queuedSendMessageLegacy(sock, jid, content, options = {}, delayMs
         if (normalizeNativeLidJid(destinationJid)) {
             destinationJid = normalizeNativeLidJid(destinationJid);
             if (!isSelfChatDestination) {
-                const hasVerifiedPnFallback = !!(alternateDestinationJid && /@s\.whatsapp\.net$/i.test(alternateDestinationJid));
-                destinationResolution = hasVerifiedPnFallback ? 'native_lid_primary_with_verified_pn_fallback' : 'native_lid_preserved_without_verified_pn';
-                console.info('[private-send-native-lid-preserved]', { sessionId, destinationType: 'private_lid', mappingAvailable: hasVerifiedPnFallback, fallbackType: hasVerifiedPnFallback ? 'private_pn' : null, action: hasVerifiedPnFallback ? 'send_to_native_lid_first_and_keep_verified_phone_fallback' : 'send_to_native_lid_without_guessing_phone' });
+                destinationResolution = 'native_lid_preserved_without_verified_pn';
+                console.info('[private-send-native-lid-preserved]', { sessionId, destinationType: 'private_lid', mappingAvailable: false, action: 'send_to_native_lid_without_guessing_phone' });
             }
         } else if (/@(?:hosted\.)?lid$/i.test(destinationJid)) {
             throw new Error('private_destination_lid_invalid');
@@ -11995,17 +11957,6 @@ function normalizeText(str) {
     return str ? String(str).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim() : "";
 }
 
-function getSessionOwnerMode(owner) {
-    const acceptedPublicModes = new Set(['public', 'piblik', 'publico']);
-    const acceptedPrivateModes = new Set(['prive', 'private', 'privado', 'privee']);
-    const candidates = [owner?.mode, owner?.Mode, owner?.botMode].map(normalizeText).filter(Boolean);
-    for (const candidate of candidates) {
-        if (acceptedPublicModes.has(candidate)) return 'public';
-        if (acceptedPrivateModes.has(candidate)) return 'prive';
-    }
-    return 'prive';
-}
-
 const LANGUAGE_NAMES = { fr: 'French', en: 'English', es: 'Spanish', ht: 'Haitian Creole' };
 const LANGUAGE_LABELS = {
     fr: { fr: 'Français', en: 'Anglais', es: 'Espagnol', ht: 'Créole haïtien' },
@@ -15130,7 +15081,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const ownerNumberCandidates = [...configuredOwnerAccess.numbers];
                         const isOwnerReal = !!isFromMe || senderMatchesOwnJid || senderMatchesAuthenticatedAccount || senderMatchesOwnLid || privateChatMatchesOwnLid || privateChatMatchesOwnIdentity || configuredOwnerMatch.matched || senderMatchesMappedOwnAlias || sessionOwnerLiveLidMatch || linkedDeviceOwnerMatch;
                         if (isOwnerReal && !sessionOwnerIdentitySource) sessionOwnerIdentitySource = linkedDeviceOwnerMatch ? 'verified_linked_device_envelope' : senderMatchesMappedOwnAlias ? 'session_owner_verified_lid_pn_alias' : 'authenticated_account_identity';
-                        const dispatchPublicMode = getSessionOwnerMode(sOwnerTop) === 'public';
+                        const dispatchModeValue = [sOwnerTop?.mode, sOwnerTop?.Mode, sOwnerTop?.botMode].find(value => value !== undefined && value !== null && String(value).trim() !== '');
+                        const dispatchPublicMode = ['public', 'piblik', 'publico'].includes(normalizeText(dispatchModeValue || 'prive'));
                         if (!isOwnerReal && !dispatchPublicMode) {
                             console.info('[message-ignored]', { sessionId, messageId: msgId, senderJid: sender, chatJid: from, reason: 'private_mode_non_owner', action: 'ignore_before_group_rules_profile_writes_and_command_dispatch' });
                             return;
@@ -15248,7 +15200,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             ownerMatchSources: { fromMe: isFromMe, senderMatchesOwnJid, senderMatchesAuthenticatedAccount, senderMatchesOwnLid, privateChatMatchesOwnLid, privateChatMatchesOwnIdentity, senderMatchesMappedOwnAlias, linkedDeviceEnvelope, linkedDeviceOwnerMatch, configuredOwnerAccountMatched: configuredOwnerMatch.accountMatch, configuredOwnerJidMatched: configuredOwnerMatch.jidMatch, configuredOwnerLidMatched: configuredOwnerMatch.lidMatch, ownerScope: 'current_session_owner_only', sessionOwnerIdentitySource },
                             isOwnerReal,
                             isGroup,
-                            mode: getSessionOwnerMode(sOwnerTop)
+                            mode: normalizeText(sOwnerTop?.mode || sOwnerTop?.Mode || sOwnerTop?.botMode || 'prive')
                         });
                         console.info('[message-command-classification]', {
                             sessionId,
@@ -15412,8 +15364,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         }
                         }
 
-                        const botMode = getSessionOwnerMode(sOwnerTop);
-                        const isPublicMode = botMode === 'public';
+                        const storedModeValue = [sOwnerTop?.mode, sOwnerTop?.Mode, sOwnerTop?.botMode].find(value => value !== undefined && value !== null && String(value).trim() !== '');
+                        const normalizedStoredMode = normalizeText(storedModeValue || 'prive');
+                        const isPublicMode = ['public', 'piblik', 'publico'].includes(normalizedStoredMode);
+                        const botMode = isPublicMode ? 'public' : 'prive';
                         const allowed = !isChannel && (isOwnerReal || isPublicMode);
 
                         const bodyRaw = earlyBody;
@@ -15853,28 +15807,24 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 await safeSendFormatted(sock, from, 'Mode', t.owner_required, pushName, false, activeHostName);
                                                 break;
                                             }
-                                            const privateModeChanged = getSessionOwnerMode(sOwnerTop) !== 'prive' || sOwnerTop.mode !== 'prive' || sOwnerTop.Mode !== 'prive' || sOwnerTop.botMode !== 'prive';
-                                            sOwnerTop = { ...(sOwnerTop || {}), mode: 'prive', Mode: 'prive', botMode: 'prive' };
-                                            if (privateModeChanged) {
-                                                await db.collection('session_owners').updateOne({ sessionId: sessionId }, { $set: { mode: 'prive', Mode: 'prive', botMode: 'prive', updatedAt: new Date() } });
+                                            if (sOwnerTop.mode !== 'prive') {
+                                                sOwnerTop.mode = 'prive';
+                                                await db.collection('session_owners').updateOne({ sessionId: sessionId }, { $set: { mode: 'prive' } });
                                                 sessionOwnersCache.set(sessionId, sOwnerTop);
-                                                console.info('[session-owner-mode-updated]', { sessionId, mode: 'prive', modeAliasesSynchronized: true, source: 'owner_command' });
                                             }
-                                            await safeSendFormatted(sock, from, t.mode_title || 'Mode', privateModeChanged ? t.mode_changed_private : t.already_private, pushName, false, activeHostName);
+                                            await safeSendFormatted(sock, from, t.mode_title || 'Mode', sOwnerTop.mode === 'prive' ? t.mode_changed_private : t.already_private, pushName, false, activeHostName);
                                             break;
                                         case 'public':
                                             if (!isOwnerReal) {
                                                 await safeSendFormatted(sock, from, 'Mode', t.owner_required, pushName, false, activeHostName);
                                                 break;
                                             }
-                                            const publicModeChanged = getSessionOwnerMode(sOwnerTop) !== 'public' || sOwnerTop.mode !== 'public' || sOwnerTop.Mode !== 'public' || sOwnerTop.botMode !== 'public';
-                                            sOwnerTop = { ...(sOwnerTop || {}), mode: 'public', Mode: 'public', botMode: 'public' };
-                                            if (publicModeChanged) {
-                                                await db.collection('session_owners').updateOne({ sessionId: sessionId }, { $set: { mode: 'public', Mode: 'public', botMode: 'public', updatedAt: new Date() } });
+                                            if (sOwnerTop.mode !== 'public') {
+                                                sOwnerTop.mode = 'public';
+                                                await db.collection('session_owners').updateOne({ sessionId: sessionId }, { $set: { mode: 'public' } });
                                                 sessionOwnersCache.set(sessionId, sOwnerTop);
-                                                console.info('[session-owner-mode-updated]', { sessionId, mode: 'public', modeAliasesSynchronized: true, source: 'owner_command' });
                                             }
-                                            await safeSendFormatted(sock, from, t.mode_title || 'Mode', publicModeChanged ? t.mode_changed_public : t.already_public, pushName, false, activeHostName);
+                                            await safeSendFormatted(sock, from, t.mode_title || 'Mode', sOwnerTop.mode === 'public' ? t.mode_changed_public : t.already_public, pushName, false, activeHostName);
                                             break;
                                         case 'menu':
                                             if (args.length > 0) break;
@@ -18082,7 +18032,6 @@ async function main() {
         ownLidDeviceAddressingPatchApplied: baileysOwnLidRetryAddressingPatchStatus.applied === true,
         groupLidPnDecryptPatchApplied: baileysGroupLidPnDecryptPatchStatus.applied === true,
         groupLidOutboundAddressingPatchApplied: baileysLidAwareGroupOutboundAddressingPatchStatus.applied === true,
-        groupOutboundAddressingDefault: 'explicit_group_metadata_else_pn',
         groupRetrySkdmPatchApplied: baileysGroupRetrySkdmPatchStatus.applied === true,
         retryBaseKeyCollisionPatchApplied: baileysRetryBaseKeyCollisionPatchStatus.applied === true,
         groupSenderKeyResetBeforeSendEnabled: GROUP_SENDER_KEY_RESET_ON_SEND,
@@ -18097,14 +18046,11 @@ async function main() {
         commandReplyFallback: 'existing_per_chat_serialized_queue_with_session_ownership_signal_and_address_recovery_for_private_signal_degradation',
         ownerIdentityResolution: 'fromMe_socket_id_lid_session_scoped_pn_lid_aliases_and_verified_linked_device_envelopes',
         commandPolicy: 'owner_always_allowed_public_all_senders_private_non_owner_silent',
-        commandModeStorage: 'mode_Mode_botMode_synchronized_and_single_canonical_reader',
         commandTyping: 'bounded_composing_presence_before_response_only_for_owner_or_public_mode',
         commandReplyFallbackRecovery: 'legacy_queue_sender_key_reset_and_identity_resolution_until_three_successes_after_15_seconds_or_window_expiry',
         sendHealthChecks: 'throttled_background_session_socket_and_ownership_audit_not_blocking_message_send',
         commandImagePolicy: 'decode_and_reencode_or_text_fallback',
-        privateLidMappedPhonePrimary: false,
-        privateLidOriginalAddressPrimary: true,
-        privateLidVerifiedPhoneFallbackAfterSendFailure: true,
+        privateLidMappedPhonePrimary: true,
         privateLidSessionMigrationAfterVerifiedMapping: true,
         privateLidPnDecryptPatchApplied: baileysLidPnDecryptPatchStatus.applied === true,
         passiveSocketHealth: true,
