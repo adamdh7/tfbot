@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r175-self-lid-command-delivery-and-group-key-refresh';
+const TFBOT_CLUSTER_CODE_REVISION = 'r176-fast-command-send-with-automatic-legacy-fallback';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -764,10 +764,23 @@ function applyBaileysSignalTransactionPatch() {
 }
 
 function applyBaileysOutgoingRetryPreflightPatch() {
-    const marker = 'await config.persistOutgoingMessage(jid, fullMsg);';
+    const syncMarker = 'await config.persistOutgoingMessage(jid, fullMsg);';
+    const asyncMarker = 'Promise.resolve(config.persistOutgoingMessage(jid, fullMsg))';
     const managerCall = 'messageRetryManager.addRecentMessage(jid, fullMsg.key.id, fullMsg.message);';
-    const retryManagerPreload = `if (typeof messageRetryManager !== 'undefined' && messageRetryManager && typeof messageRetryManager.addRecentMessage === 'function') {\n\t\t\t\tmessageRetryManager.addRecentMessage(jid, fullMsg.key.id, fullMsg.message);\n\t\t\t}\n\t\t\t`;
-    const legacyManagerBlockPattern = /if\s*\(\s*typeof\s+messageRetryManager\s*!==\s*['"]undefined['"][\s\S]{0,1200}?\n\s*\}/;
+    const retryManagerPreload = `if (typeof messageRetryManager !== 'undefined' && messageRetryManager && typeof messageRetryManager.addRecentMessage === 'function') {
+				messageRetryManager.addRecentMessage(jid, fullMsg.key.id, fullMsg.message);
+			}
+			`;
+    const asyncPersistenceBlock = `if (typeof config.persistOutgoingMessage === 'function') {
+				try {
+					Promise.resolve(config.persistOutgoingMessage(jid, fullMsg)).catch(error => {
+						logger.warn({ messageId: fullMsg?.key?.id || null, error: error?.message || String(error) }, 'Background outgoing retry persistence failed');
+					});
+				} catch (error) {
+					logger.warn({ messageId: fullMsg?.key?.id || null, error: error?.message || String(error) }, 'Background outgoing retry persistence could not start');
+				}
+			}
+			`;
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
@@ -786,46 +799,49 @@ function applyBaileysOutgoingRetryPreflightPatch() {
         relayPattern.lastIndex = fullMessageStart + fullMessageMatch[0].length;
         const relayMatch = relayPattern.exec(source);
         if (!relayMatch || relayMatch.index - fullMessageStart > 20000) return { applied: false, reason: 'relay_after_generated_full_message_not_found', file: path.basename(filePath) };
-
-        const existingIndex = source.indexOf(marker, fullMessageStart);
-        if (existingIndex >= fullMessageStart && existingIndex < relayMatch.index) {
-            let managerIndex = source.indexOf(managerCall, fullMessageStart);
-            if (managerIndex < fullMessageStart || managerIndex >= existingIndex) {
-                let upgradedSource = source;
-                const beforeMarker = source.slice(fullMessageStart, existingIndex);
-                const legacyBlock = legacyManagerBlockPattern.exec(beforeMarker);
-                if (legacyBlock) {
-                    const legacyStart = fullMessageStart + legacyBlock.index;
-                    upgradedSource = source.slice(0, legacyStart) + retryManagerPreload + source.slice(legacyStart + legacyBlock[0].length);
-                } else {
-                    upgradedSource = source.slice(0, existingIndex) + retryManagerPreload + source.slice(existingIndex);
-                }
-                const upgradedManagerIndex = upgradedSource.indexOf(managerCall, fullMessageStart);
-                const upgradedMarkerIndex = upgradedSource.indexOf(marker, fullMessageStart);
-                const upgradedRelayPattern = /\bawait\s+relayMessage\s*\(\s*jid\s*,\s*fullMsg\.message\s*!?\s*,/g;
-                upgradedRelayPattern.lastIndex = upgradedMarkerIndex + marker.length;
-                const upgradedRelayMatch = upgradedRelayPattern.exec(upgradedSource);
-                if (upgradedManagerIndex < fullMessageStart || upgradedManagerIndex >= upgradedMarkerIndex || !upgradedRelayMatch || upgradedMarkerIndex >= upgradedRelayMatch.index) {
-                    return { applied: false, reason: 'existing_preflight_upgrade_order_verification_failed', file: path.basename(filePath) };
-                }
-                fs.writeFileSync(filePath, upgradedSource, 'utf8');
-                return { applied: true, alreadyApplied: false, upgradedExistingPreflight: true, file: path.basename(filePath), sourceFormat: 'generated-message-before-relay', persistedBeforeRelay: true, retryManagerPreloadedBeforeRelay: true, retryManagerCacheEntriesPerMessage: 1 };
+        const searchEnd = relayMatch.index;
+        const existingAsyncIndex = source.indexOf(asyncMarker, fullMessageStart);
+        if (existingAsyncIndex >= fullMessageStart && existingAsyncIndex < searchEnd) {
+            let patchedSource = source;
+            let managerIndex = patchedSource.indexOf(managerCall, fullMessageStart);
+            if (managerIndex < fullMessageStart || managerIndex >= existingAsyncIndex) {
+                patchedSource = patchedSource.slice(0, existingAsyncIndex) + retryManagerPreload + patchedSource.slice(existingAsyncIndex);
+                managerIndex = patchedSource.indexOf(managerCall, fullMessageStart);
             }
-            return { applied: true, alreadyApplied: true, file: path.basename(filePath), sourceFormat: 'generated-message-before-relay', persistedBeforeRelay: true, retryManagerPreloadedBeforeRelay: true, retryManagerCacheEntriesPerMessage: 1 };
+            const asyncIndex = patchedSource.indexOf(asyncMarker, fullMessageStart);
+            const verifyRelayPattern = /\bawait\s+relayMessage\s*\(\s*jid\s*,\s*fullMsg\.message\s*!?\s*,/g;
+            verifyRelayPattern.lastIndex = asyncIndex + asyncMarker.length;
+            const verifyRelay = verifyRelayPattern.exec(patchedSource);
+            if (managerIndex < fullMessageStart || managerIndex >= asyncIndex || !verifyRelay || asyncIndex >= verifyRelay.index) return { applied: false, reason: 'background_preflight_order_verification_failed', file: path.basename(filePath) };
+            if (patchedSource !== source) fs.writeFileSync(filePath, patchedSource, 'utf8');
+            return { applied: true, alreadyApplied: patchedSource === source, upgradedSynchronousPreflight: false, file: path.basename(filePath), retryManagerPreloadBeforeRelay: true, persistenceStartedBeforeRelay: true, persistenceAwaitedBeforeRelay: false, durablePersistenceMode: 'background_parallel_to_relay' };
         }
-        if (source.includes(marker)) return { applied: false, reason: 'existing_preflight_marker_not_before_relay', file: path.basename(filePath) };
-        const insertion = `${retryManagerPreload}if (typeof config.persistOutgoingMessage === 'function') {\n\t\t\t\tawait config.persistOutgoingMessage(jid, fullMsg);\n\t\t\t}\n\t\t\t`;
-        const patchedSource = source.slice(0, relayMatch.index) + insertion + source.slice(relayMatch.index);
-        const persistedIndex = patchedSource.indexOf(marker, fullMessageStart);
-        const managerPreloadIndex = patchedSource.indexOf(managerCall, fullMessageStart);
-        const patchedRelayPattern = /\bawait\s+relayMessage\s*\(\s*jid\s*,\s*fullMsg\.message\s*!?\s*,/g;
-        patchedRelayPattern.lastIndex = relayMatch.index + insertion.length;
-        const patchedRelayMatch = patchedRelayPattern.exec(patchedSource);
-        if (persistedIndex < fullMessageStart || !patchedRelayMatch || persistedIndex >= patchedRelayMatch.index || managerPreloadIndex < fullMessageStart || managerPreloadIndex >= persistedIndex) {
-            return { applied: false, reason: 'preflight_patch_order_verification_failed', file: path.basename(filePath) };
+        const existingSyncIndex = source.indexOf(syncMarker, fullMessageStart);
+        let patchedSource = source;
+        if (existingSyncIndex >= fullMessageStart && existingSyncIndex < searchEnd) {
+            let managerIndex = patchedSource.indexOf(managerCall, fullMessageStart);
+            if (managerIndex < fullMessageStart || managerIndex >= existingSyncIndex) {
+                patchedSource = patchedSource.slice(0, existingSyncIndex) + retryManagerPreload + patchedSource.slice(existingSyncIndex);
+                const oldMarkerIndex = patchedSource.indexOf(syncMarker, fullMessageStart);
+                if (oldMarkerIndex < 0) return { applied: false, reason: 'synchronous_preflight_marker_lost_during_upgrade', file: path.basename(filePath) };
+                patchedSource = patchedSource.slice(0, oldMarkerIndex) + asyncPersistenceBlock + patchedSource.slice(oldMarkerIndex + syncMarker.length);
+            } else {
+                const oldMarkerIndex = patchedSource.indexOf(syncMarker, fullMessageStart);
+                patchedSource = patchedSource.slice(0, oldMarkerIndex) + asyncPersistenceBlock + patchedSource.slice(oldMarkerIndex + syncMarker.length);
+            }
+        } else {
+            let managerIndex = patchedSource.indexOf(managerCall, fullMessageStart);
+            const insertion = `${managerIndex >= fullMessageStart && managerIndex < searchEnd ? '' : retryManagerPreload}${asyncPersistenceBlock}`;
+            patchedSource = patchedSource.slice(0, searchEnd) + insertion + patchedSource.slice(searchEnd);
         }
+        const asyncIndex = patchedSource.indexOf(asyncMarker, fullMessageStart);
+        const managerIndex = patchedSource.indexOf(managerCall, fullMessageStart);
+        const verifyRelayPattern = /\bawait\s+relayMessage\s*\(\s*jid\s*,\s*fullMsg\.message\s*!?\s*,/g;
+        verifyRelayPattern.lastIndex = asyncIndex + asyncMarker.length;
+        const verifyRelay = verifyRelayPattern.exec(patchedSource);
+        if (managerIndex < fullMessageStart || managerIndex >= asyncIndex || asyncIndex < fullMessageStart || !verifyRelay || asyncIndex >= verifyRelay.index) return { applied: false, reason: 'background_preflight_upgrade_order_verification_failed', file: path.basename(filePath) };
         fs.writeFileSync(filePath, patchedSource, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), sourceFormat: 'generated-message-before-relay', persistedBeforeRelay: true, retryManagerPreloadedBeforeRelay: true, retryManagerCacheEntriesPerMessage: 1 };
+        return { applied: true, alreadyApplied: false, upgradedSynchronousPreflight: existingSyncIndex >= fullMessageStart && existingSyncIndex < searchEnd, file: path.basename(filePath), retryManagerPreloadBeforeRelay: true, persistenceStartedBeforeRelay: true, persistenceAwaitedBeforeRelay: false, durablePersistenceMode: 'background_parallel_to_relay' };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
@@ -1416,7 +1432,7 @@ console.info('[baileys-self-chat-placeholder-resend-patch]', baileysSelfChatPlac
 console.info('[baileys-group-retry-skdm-patch]', baileysGroupRetrySkdmPatchStatus);
 console.info('[baileys-lid-aware-group-outbound-addressing-patch]', baileysLidAwareGroupOutboundAddressingPatchStatus);
 console.info('[baileys-retry-heuristic-upgrade]', baileysRetryHeuristicUpgradeStatus);
-console.info('[baileys-outgoing-retry-preflight-patch]', { ...baileysOutgoingRetryPreflightPatchStatus, action: baileysOutgoingRetryPreflightPatchStatus.applied ? 'preload_internal_retry_manager_and_persist_generated_full_message_before_network_relay' : 'leave_installed_baileys_source_unchanged' });
+console.info('[baileys-outgoing-retry-preflight-patch]', { ...baileysOutgoingRetryPreflightPatchStatus, action: baileysOutgoingRetryPreflightPatchStatus.applied ? 'preload_internal_retry_manager_and_start_generated_message_persistence_in_background_before_network_relay' : 'leave_installed_baileys_source_unchanged' });
 console.info('[baileys-retry-resend-double-encryption-patch]', { ...baileysRetryResendDoubleEncryptionPatchStatus, action: baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'avoid_duplicate_pairwise_encryption_on_retry_resend' : 'not_applicable_for_installed_baileys_version' });
 console.info('[baileys-own-lid-retry-addressing-patch]', { ...baileysOwnLidRetryAddressingPatchStatus, action: baileysOwnLidRetryAddressingPatchStatus.applied ? 'recognize_own_lid_as_self_for_device_encryption' : 'not_applicable_or_source_shape_not_matched' });
 console.info('[baileys-pairing-code-protocol-patch]', baileysPairingCodeProtocolPatchStatus);
@@ -1933,14 +1949,17 @@ function enqueuePairingHttpDiagnostic(sessionId, event, fields = {}, level = 'IN
 function markSessionMessagingFallback(sessionId, reason = 'message_pending', messageId = '') {
     const id = String(sessionId || '').trim();
     if (!id) return 0;
-    const until = Date.now() + SESSION_MESSAGE_FALLBACK_WINDOW_MS;
+    const now = Date.now();
+    const until = now + SESSION_MESSAGE_FALLBACK_WINDOW_MS;
     tfbotSessionMessagingFallbackUntil.set(id, until);
     const runtime = activeSessions.get(id);
     if (runtime) {
         runtime.messageFallbackUntil = until;
         runtime.messageFallbackReason = String(reason || 'message_pending').slice(0, 80);
+        runtime.messageFallbackMarkedAt = now;
+        runtime.messageFallbackSuccesses = 0;
     }
-    console.warn('[session-message-format-fallback-enabled]', { sessionId: id, messageId: messageId || null, reason, durationMs: SESSION_MESSAGE_FALLBACK_WINDOW_MS, action: 'use_existing_formatted_message_transport_while_signal_or_session_is_degraded' });
+    console.warn('[session-message-legacy-fallback-enabled]', { sessionId: id, messageId: messageId || null, reason, durationMs: SESSION_MESSAGE_FALLBACK_WINDOW_MS, action: 'switch_to_existing_queued_transport_after_fast_path_or_signal_degradation' });
     return until;
 }
 function isSessionMessagingFallbackActive(sessionId) {
@@ -1952,7 +1971,25 @@ function isSessionMessagingFallbackActive(sessionId) {
     if (tfbotSessionMessagingFallbackUntil.has(id)) tfbotSessionMessagingFallbackUntil.delete(id);
     if (runtime?.messageFallbackUntil) delete runtime.messageFallbackUntil;
     if (runtime?.messageFallbackReason) delete runtime.messageFallbackReason;
+    if (runtime?.messageFallbackMarkedAt) delete runtime.messageFallbackMarkedAt;
+    if (runtime?.messageFallbackSuccesses) delete runtime.messageFallbackSuccesses;
     return false;
+}
+function recordSessionMessagingFallbackSuccess(sessionId, messageId = '') {
+    const id = String(sessionId || '').trim();
+    if (!id || !isSessionMessagingFallbackActive(id)) return false;
+    const runtime = activeSessions.get(id);
+    if (!runtime) return false;
+    runtime.messageFallbackSuccesses = Math.max(0, Number(runtime.messageFallbackSuccesses || 0)) + 1;
+    const stableForMs = Date.now() - Number(runtime.messageFallbackMarkedAt || Date.now());
+    if (runtime.messageFallbackSuccesses < 3 || stableForMs < 15000) return false;
+    tfbotSessionMessagingFallbackUntil.delete(id);
+    delete runtime.messageFallbackUntil;
+    delete runtime.messageFallbackReason;
+    delete runtime.messageFallbackMarkedAt;
+    delete runtime.messageFallbackSuccesses;
+    console.info('[session-message-fast-path-restored]', { sessionId: id, messageId: messageId || null, legacySuccessfulSends: 3, stableForMs, action: 'return_to_simple_direct_send_after_legacy_transport_recovered' });
+    return true;
 }
 const sessionOpenReadinessTimers = new Map();
 const pairingChallengeTimers = new Map();
@@ -3834,6 +3871,87 @@ async function sendPresenceUpdateWithDiagnostics(sock, sessionId, presence, jid,
     }
 }
 
+const fastSendHealthAuditAt = new Map();
+const FAST_SEND_HEALTH_AUDIT_INTERVAL_MS = 30000;
+function findActiveSessionIdForSocket(sock) {
+    for (const [sessionId, runtime] of activeSessions.entries()) if (runtime?.sock === sock) return sessionId;
+    return '';
+}
+function scheduleFastSendHealthAudit(sessionId, sock, destinationJid, messageId = '') {
+    const id = String(sessionId || '').trim();
+    const now = Date.now();
+    if (!id || now - Number(fastSendHealthAuditAt.get(id) || 0) < FAST_SEND_HEALTH_AUDIT_INTERVAL_MS) return false;
+    fastSendHealthAuditAt.set(id, now);
+    setImmediate(() => {
+        Promise.resolve().then(async () => {
+            const runtime = activeSessions.get(id);
+            const sameSocket = runtime?.sock === sock;
+            const socketOperational = sameSocket && isAuthenticatedSocketOperational(runtime, sock);
+            let ownershipVerified = false;
+            let ownershipError = '';
+            if (socketOperational) {
+                try {
+                    await promiseWithTimeout(assertSessionRuntimeOwnership(id), 6000, 'background fast-send ownership audit');
+                    ownershipVerified = true;
+                } catch (error) {
+                    ownershipError = String(error?.message || error).slice(0, 300);
+                }
+            }
+            const healthy = sameSocket && socketOperational && ownershipVerified;
+            console.info('[fast-send-background-health-audit]', { sessionId: id, messageId: messageId || null, destinationType: getWhatsAppDestinationType(destinationJid), sameSocket, socketOperational, ownershipVerified, healthy, ownershipError: ownershipError || null, sendWasNotBlockedByAudit: true });
+            if (!healthy) markSessionMessagingFallback(id, 'background_session_health_audit_failed', messageId);
+        }).catch(error => console.warn('[fast-send-background-health-audit-failed]', { sessionId: id, messageId: messageId || null, error: error?.message || String(error) }));
+    });
+    return true;
+}
+async function sendFastMessageWithDiagnostics(sock, jid, content, options = {}, source = 'command') {
+    const sessionId = findActiveSessionIdForSocket(sock);
+    if (!sessionId) throw new Error('whatsapp_socket_session_replaced');
+    const destination = String(jid || '').trim();
+    if (!destination) throw new Error('whatsapp_send_target_missing');
+    const outgoingText = getOutgoingDiagnosticText(content);
+    const outgoingType = Object.keys(content || {}).join(',') || 'unknown';
+    const echoToken = rememberOutgoingTextEcho(sessionId, destination, content);
+    const startedAt = Date.now();
+    console.info('[whatsapp-send-fast-start]', { sessionId, source, destinationType: getWhatsAppDestinationType(destination), messageType: outgoingType, messageText: outgoingText || null, messageTextLength: outgoingText.length, route: 'direct_sock_sendMessage_without_pre_send_queue_or_identity_lookup' });
+    try {
+        const result = await sock.sendMessage(destination, content, options);
+        if (!result?.key?.id) throw new Error('whatsapp_fast_send_result_message_id_missing');
+        const retryPreflightStartedBeforeRelay = outgoingRetryPreflightIds.has(`${sessionId}:${result.key.id}`);
+        rememberOutgoingMessageId(sessionId, result.key.id);
+        outgoingMessageCache.add(`${sessionId}:id:${result.key.id}`);
+        outgoingMessageCache.add(`${sessionId}:${result.key.remoteJid || destination}:${result.key.id}`);
+        if (outgoingMessageCache.size > 5000) {
+            const oldest = outgoingMessageCache.values().next().value;
+            if (oldest) outgoingMessageCache.delete(oldest);
+        }
+        if (result.message) {
+            cacheRecentMessage(sessionId, result, [destination]);
+            const preflightSaved = outgoingRetryPreflightIds.has(`${sessionId}:${result.key.id}`);
+            outgoingRetryPreflightIds.delete(`${sessionId}:${result.key.id}`);
+            if (!preflightSaved) {
+                const runtime = activeSessions.get(sessionId);
+                const accountPhone = getAuthenticatedPhoneNumber(sock.user, runtime?.authState?.creds) || normalizedJidNumber(sock.user?.id || sock.user?.phoneNumber || '') || normalizedJidNumber(runtime?.ownPhoneJid || '');
+                const accountJid = String(sock.user?.id || sock.user?.phoneNumber || '');
+                const accountLid = getAuthenticatedLid(sock.user, runtime?.authState?.creds) || runtime?.ownLidJid || '';
+                const aliases = [destination, result.key?.remoteJidAlt, result.key?.participant, result.key?.participantAlt, result.key?.participantPn, result.key?.senderPn].filter(Boolean);
+                void persistOutgoingRetryMessage(sessionId, result.key.remoteJid || destination, result, aliases, accountPhone, accountJid, accountLid, 'background_after_fast_direct_send')
+                    .then(saved => console.info(saved ? '[fast-send-retry-copy-saved]' : '[fast-send-retry-copy-memory-only]', { sessionId, messageId: result.key.id }))
+                    .catch(error => console.warn('[fast-send-retry-copy-save-failed]', { sessionId, messageId: result.key.id, error: error?.message || String(error) }));
+            }
+        }
+        console.info('[whatsapp-send-fast-accepted]', { sessionId, source, destinationType: getWhatsAppDestinationType(destination), responseMessageId: result.key.id, durationMs: Date.now() - startedAt, acceptedBySendMessage: true, retryPreflightStartedBeforeRelay });
+        scheduleFastSendHealthAudit(sessionId, sock, destination, result.key.id);
+        return result;
+    } catch (error) {
+        if (echoToken) {
+            for (const echoKey of echoToken.keys || []) if (outgoingTextEchoCache.get(echoKey) === echoToken.createdAt) outgoingTextEchoCache.delete(echoKey);
+        }
+        console.warn('[whatsapp-send-fast-failed]', { sessionId, source, destinationType: getWhatsAppDestinationType(destination), messageType: outgoingType, failureClass: classifyWhatsAppFailure(error), errorName: error?.name || error?.constructor?.name || null, error: String(error?.message || error).slice(0, 800), durationMs: Date.now() - startedAt, action: 'caller_may_activate_existing_queued_fallback' });
+        throw error;
+    }
+}
+
 async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180) {
     let sessionId = null;
     let activeSession = null;
@@ -4048,7 +4166,7 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             }
         }
         const responseDiagnosticText = getOutgoingDiagnosticText(result?.message || {});
-        const preflightPersistedBeforeRelay = !!(result?.key?.id && outgoingRetryPreflightIds.has(`${sessionId}:${result.key.id}`));
+        const retryPreflightStartedBeforeRelay = !!(result?.key?.id && outgoingRetryPreflightIds.has(`${sessionId}:${result.key.id}`));
         console.info('[whatsapp-send-completed]', {
             sessionId,
             connectedAccountJid: sock.user?.id || null,
@@ -4066,8 +4184,8 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
             responseChatJid: result?.key?.remoteJid || null,
             acceptedBySendMessage: !!result?.key?.id,
             responseAccepted: !!result?.key?.id,
-            preflightPersistedBeforeRelay,
-            persistenceMode: preflightPersistedBeforeRelay ? 'awaited_before_relay' : 'background_after_relay_fallback_or_not_confirmed',
+            retryPreflightStartedBeforeRelay,
+            persistenceMode: retryPreflightStartedBeforeRelay ? 'background_parallel_to_relay' : 'background_after_relay_fallback_or_not_confirmed',
             durationMs: Date.now() - sendStartedAt
         });
         if (sessionId && result?.key?.id) {
@@ -9982,14 +10100,6 @@ async function normalizeOutgoingImageBuffer(imageBuffer) {
 async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, sendOptions = {}) {
     if (sendOptions.commandFormat === true) {
         let deliveryImageBuffer = Buffer.isBuffer(imageBuffer) ? imageBuffer : imageBuffer instanceof Uint8Array ? Buffer.from(imageBuffer.buffer, imageBuffer.byteOffset, imageBuffer.byteLength) : null;
-        if (deliveryImageBuffer?.length) {
-            try {
-                deliveryImageBuffer = await normalizeOutgoingImageBuffer(deliveryImageBuffer);
-            } catch (imageNormalizationError) {
-                console.error('[whatsapp-command-image-normalization-failed]', { action: String(type || 'Message'), errorName: imageNormalizationError?.name || 'Error', error: String(imageNormalizationError?.message || imageNormalizationError).slice(0, 220), fallback: 'send_text_without_image' });
-                deliveryImageBuffer = null;
-            }
-        }
         const ownerName = sanitizeSessionDisplayName(sendOptions.ownerName || sock?.user?.name || sock?.user?.notify || sock?.user?.verifiedName || '') || 'Inconnu';
         const preserveFormatting = sendOptions.preserveFormatting === true || hasWhatsAppFormatting(text);
         const caption = buildCaption(type, text, userName, preserveFormatting, ownerName, sendOptions.language || 'ht');
@@ -9998,20 +10108,36 @@ async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, 
         const messageOptions = { ...(sendOptions.messageOptions || {}) };
         delete messageOptions.quoted;
         const canUseImageCaption = !!(deliveryImageBuffer?.length && caption.length <= MAX_WHATSAPP_CAPTION_CHARS);
-        const payload = canUseImageCaption ? { image: deliveryImageBuffer, caption, ...outgoingOptions } : { text: caption, ...outgoingOptions };
         const sendCommandPayload = value => sendOptions.directSend === true
-            ? sock.sendMessage(jid, value, messageOptions)
+            ? sendFastMessageWithDiagnostics(sock, jid, value, messageOptions, 'formatted_command_response')
             : queuedSendMessage(sock, jid, value, messageOptions, 0);
-        try {
-            const result = await sendCommandPayload(payload);
-            if (sendOptions.directSend === true) console.info('[command-response-direct-send]', { action: String(type || 'Message'), usedImage: canUseImageCaption, imageBytes: canUseImageCaption ? deliveryImageBuffer.length : 0, textLength: caption.length, responseAccepted: !!result?.key?.id });
-            return result;
-        } catch (sendError) {
-            const mediaPayloadFailure = canUseImageCaption && /not-acceptable|unsupported image|image format|thumbnail|sharp|media/i.test(String(sendError?.message || sendError));
-            if (!mediaPayloadFailure) throw sendError;
-            console.warn('[command-response-image-fallback-to-text]', { action: String(type || 'Message'), imageBytes: deliveryImageBuffer.length, errorName: sendError?.name || 'Error', error: String(sendError?.message || sendError).slice(0, 300), fallback: 'queued_text_only' });
-            return queuedSendMessage(sock, jid, { text: caption, ...outgoingOptions }, messageOptions, 0);
+        if (sendOptions.directSend === true) {
+            if (deliveryImageBuffer?.length) {
+                const sourceBuffer = deliveryImageBuffer;
+                void normalizeOutgoingImageBuffer(sourceBuffer).then(normalized => {
+                    if (normalized && normalized !== sourceBuffer) outgoingImageNormalizationCache.set(sourceBuffer, normalized);
+                }).catch(error => console.warn('[fast-send-image-normalization-background-failed]', { action: String(type || 'Message'), error: error?.message || String(error), sendWasNotBlocked: true }));
+            }
+            const payload = canUseImageCaption ? { image: deliveryImageBuffer, caption, ...outgoingOptions } : { text: caption, ...outgoingOptions };
+            try {
+                return await sendCommandPayload(payload);
+            } catch (sendError) {
+                const mediaPayloadFailure = canUseImageCaption && /not-acceptable|unsupported image|image format|thumbnail|sharp|media/i.test(String(sendError?.message || sendError));
+                if (mediaPayloadFailure) console.warn('[command-response-image-fast-path-rejected]', { action: String(type || 'Message'), imageBytes: deliveryImageBuffer.length, errorName: sendError?.name || 'Error', error: String(sendError?.message || sendError).slice(0, 300), fallback: 'caller_switches_to_existing_queued_transport' });
+                throw sendError;
+            }
         }
+        let normalizedImageBuffer = null;
+        if (deliveryImageBuffer?.length) {
+            try { normalizedImageBuffer = await normalizeOutgoingImageBuffer(deliveryImageBuffer); }
+            catch (imageNormalizationError) {
+                console.error('[whatsapp-command-image-normalization-failed]', { action: String(type || 'Message'), errorName: imageNormalizationError?.name || 'Error', error: String(imageNormalizationError?.message || imageNormalizationError).slice(0, 220), fallback: 'send_text_without_image' });
+            }
+        }
+        const payload = normalizedImageBuffer?.length && caption.length <= MAX_WHATSAPP_CAPTION_CHARS
+            ? { image: normalizedImageBuffer, caption, ...outgoingOptions }
+            : { text: caption, ...outgoingOptions };
+        return sendCommandPayload(payload);
     }
     let deliveryImageBuffer = null;
     try {
@@ -12350,7 +12476,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 outgoingRetryPreflightIds.set(`${sessionId}:${messageId}`, Date.now());
                 while (outgoingRetryPreflightIds.size > 5000) outgoingRetryPreflightIds.delete(outgoingRetryPreflightIds.keys().next().value);
                     const preflightText = getOutgoingDiagnosticText(messageToPersist?.message || {});
-                console.info('[message-retry-preflight-start]', { sessionId, messageId, destinationType: isSelfChatMessage ? 'self_chat_pn' : getWhatsAppDestinationType(remoteJid), messageType: Object.keys(messageToPersist?.message || {}).join(',') || 'unknown', messageTextLength: preflightText.length, messageTextHash: preflightText ? shortLogHash(preflightText) : null, aliasCount: aliases.length, memoryCached: true, ownPhoneCached: !!accountPhoneJid, ownLidCached: !!(isSelfChatMessage && accountLid), retryKeyPlan: isSelfChatMessage ? ['messageId', 'pn', ...(accountLid ? ['lid'] : [])] : ['messageId'], writeBeforeRelay: true, persistenceMode: 'awaited_before_relay' });
+                console.info('[message-retry-preflight-start]', { sessionId, messageId, destinationType: isSelfChatMessage ? 'self_chat_pn' : getWhatsAppDestinationType(remoteJid), messageType: Object.keys(messageToPersist?.message || {}).join(',') || 'unknown', messageTextLength: preflightText.length, messageTextHash: preflightText ? shortLogHash(preflightText) : null, aliasCount: aliases.length, memoryCached: true, ownPhoneCached: !!accountPhoneJid, ownLidCached: !!(isSelfChatMessage && accountLid), retryKeyPlan: isSelfChatMessage ? ['messageId', 'pn', ...(accountLid ? ['lid'] : [])] : ['messageId'], persistenceStartedBeforeRelay: true, persistenceAwaitedBeforeRelay: false, persistenceMode: 'background_parallel_to_relay' });
                 if (!db) {
                     console.error('[message-retry-preflight-database-unavailable]', { sessionId, messageId, destinationType: isSelfChatMessage ? 'self_chat_pn' : 'other', memoryFallbackAvailable: true });
                     return;
@@ -12363,7 +12489,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     if (serverShuttingDown || latestRuntime?.sock !== sock || !db) break;
                     if (retryDelays[attempt]) await new Promise(resolve => setTimeout(resolve, retryDelays[attempt]));
                     try {
-                        persisted = await persistOutgoingRetryMessage(sessionId, remoteJid, messageToPersist, aliases, accountPhone, accountJid, accountLid, 'awaited_before_relay');
+                        persisted = await persistOutgoingRetryMessage(sessionId, remoteJid, messageToPersist, aliases, accountPhone, accountJid, accountLid, 'background_parallel_to_relay');
                         if (persisted) break;
                         lastPersistenceError = 'store_write_returned_false';
                     } catch (error) {
@@ -12374,7 +12500,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     console.error('[message-retry-preflight-persist-failed]', { sessionId, messageId, elapsedMs: Date.now() - startedAt, attempts: retryDelays.length, error: lastPersistenceError || 'database_unavailable' });
                     throw new Error('outgoing_retry_preflight_persist_failed');
                 }
-                console.info('[message-retry-preflight-ready]', { sessionId, messageId, elapsedMs: Date.now() - startedAt, destinationType: isSelfChatMessage ? 'self_chat_pn' : 'other', memoryCached: true, durableStoreReady: true, ownPhoneCached: !!accountPhoneJid, ownLidCached: !!(isSelfChatMessage && accountLid), retryKeyPlan: isSelfChatMessage ? ['messageId', 'pn', ...(accountLid ? ['lid'] : [])] : ['messageId'] });
+                console.info('[message-retry-preflight-ready]', { sessionId, messageId, elapsedMs: Date.now() - startedAt, destinationType: isSelfChatMessage ? 'self_chat_pn' : 'other', memoryCached: true, durableStoreWriteCompleted: true, persistenceDidNotBlockRelay: true, ownPhoneCached: !!accountPhoneJid, ownLidCached: !!(isSelfChatMessage && accountLid), retryKeyPlan: isSelfChatMessage ? ['messageId', 'pn', ...(accountLid ? ['lid'] : [])] : ['messageId'] });
             },
             getMessage: async (key) => {
                 const messageId = String(key?.id || '').trim();
@@ -15243,19 +15369,37 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 const trackedQueuedSendMessage = async (...sendArgs) => {
                                     const destination = String(sendArgs[1] || from || '');
                                     const payloadType = Object.keys(sendArgs[2] || {}).filter(key => !['mentions', 'quoted', 'contextInfo', 'messageContextInfo'].includes(key)).join(',') || 'message';
-                                    markCommandSending('queued_send_message', payloadType);
+                                    const useLegacy = isSessionMessagingFallbackActive(sessionId);
+                                    let transportUsed = useLegacy ? 'existing_queued_legacy_fallback' : 'simple_direct_send';
+                                    const sendPayload = () => useLegacy
+                                        ? queuedSendMessage(...sendArgs)
+                                        : sendFastMessageWithDiagnostics(sendArgs[0] || sock, destination, sendArgs[2] || {}, sendArgs[3] || {}, 'tracked_command_message');
+                                    markCommandSending(transportUsed, payloadType);
                                     try {
-                                        const result = await queuedSendMessage(...sendArgs);
+                                        let result;
+                                        try {
+                                            result = await sendPayload();
+                                        } catch (fastOrLegacyError) {
+                                            if (useLegacy) throw fastOrLegacyError;
+                                            markCommandSendFailure('simple_direct_send', fastOrLegacyError);
+                                            markSessionMessagingFallback(sessionId, 'simple_direct_send_failed', msgId);
+                                            transportUsed = 'existing_queued_legacy_fallback_after_fast_failure';
+                                            markCommandSending(transportUsed, payloadType);
+                                            result = await queuedSendMessage(...sendArgs);
+                                            recordSessionMessagingFallbackSuccess(sessionId, result?.key?.id || '');
+                                        }
+                                        if (useLegacy && result?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, result.key.id);
                                         if (result?.key?.id) responseSentForLog = true;
-                                        console.info('[command-lifecycle]', { sessionId, messageId: msgId, command: internalCommand, chatJid: destination, phase: 'response-sent', transport: 'queued_send_message', responseMessageId: result?.key?.id || null, payloadType, attempt: commandSendAttempt, elapsedMs: Date.now() - commandLifecycleStartedAt });
+                                        console.info('[command-lifecycle]', { sessionId, messageId: msgId, command: internalCommand, chatJid: destination, phase: 'response-sent', transport: transportUsed, responseMessageId: result?.key?.id || null, payloadType, attempt: commandSendAttempt, elapsedMs: Date.now() - commandLifecycleStartedAt });
                                         return result;
                                     } catch (error) {
-                                        markCommandSendFailure('queued_send_message', error);
+                                        markCommandSendFailure(useLegacy ? 'existing_queued_legacy_fallback' : 'adaptive_send', error);
                                         throw error;
                                     }
                                 };
                                 const completeCommandResponse = (result, transport) => {
                                     if (!result?.key?.id) throw new Error('whatsapp_send_result_message_id_missing');
+                                    if (String(transport || '').includes('legacy_fallback')) recordSessionMessagingFallbackSuccess(sessionId, result.key.id);
                                     logCommandLifecycle('response-sent', { transport, responseMessageId: result.key.id, attempt: commandSendAttempt || null });
                                     terminalResponseSent = true;
                                     responseSentForLog = true;
@@ -15271,6 +15415,36 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     language: messageLang,
                                     preserveSourceImage: true
                                 });
+                                const executeAdaptiveFormattedSend = async (send, responseType = 'text_or_media') => {
+                                    if (isSessionMessagingFallbackActive(sessionId)) {
+                                        markCommandSending('existing_queued_legacy_fallback', responseType);
+                                        try {
+                                            const result = await send(false);
+                                            return completeCommandResponse(result, 'existing_queued_legacy_fallback');
+                                        } catch (legacyError) {
+                                            markSessionMessagingFallback(sessionId, 'legacy_fallback_send_failed', msgId);
+                                            throw legacyError;
+                                        }
+                                    }
+                                    markCommandSending('simple_direct_send', responseType);
+                                    try {
+                                        const result = await send(true);
+                                        return completeCommandResponse(result, 'simple_direct_send');
+                                    } catch (fastSendError) {
+                                        markCommandSendFailure('simple_direct_send', fastSendError);
+                                        markSessionMessagingFallback(sessionId, 'simple_direct_send_failed', msgId);
+                                        console.warn('[command-response-switching-to-existing-transport]', { sessionId, messageId: msgId, command: internalCommand, error: String(fastSendError?.message || fastSendError).slice(0, 500), action: 'retry_once_through_existing_queued_transport' });
+                                        markCommandSending('existing_queued_legacy_fallback_after_fast_failure', responseType);
+                                        try {
+                                            const result = await send(false);
+                                            return completeCommandResponse(result, 'existing_queued_legacy_fallback_after_fast_failure');
+                                        } catch (legacySendError) {
+                                            markCommandSendFailure('existing_queued_legacy_fallback_after_fast_failure', legacySendError);
+                                            markSessionMessagingFallback(sessionId, 'fast_and_legacy_send_failed', msgId);
+                                            throw legacySendError;
+                                        }
+                                    }
+                                };
                                 const safeSendFormatted = async (...sendArgs) => {
                                     if (isCancelled || terminalResponseSent) return null;
                                     const suppliedOptions = sendArgs[7] && typeof sendArgs[7] === 'object' ? sendArgs[7] : {};
@@ -15284,9 +15458,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         activeHostName,
                                         commandSendOptions(suppliedOptions, directSend)
                                     );
-                                    markCommandSending(isSessionMessagingFallbackActive(sessionId) ? 'formatted_session_recovery_fallback' : 'formatted_queued_send', 'text_or_media');
-                                    const result = await send(false);
-                                    return completeCommandResponse(result, isSessionMessagingFallbackActive(sessionId) ? 'formatted_session_recovery_fallback' : 'formatted_queued_send');
+                                    return executeAdaptiveFormattedSend(send, 'text_or_media');
                                 };
                                 const safeSendPlainFormatted = async (...sendArgs) => {
                                     if (isCancelled || terminalResponseSent) return null;
@@ -15301,9 +15473,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         activeHostName,
                                         commandSendOptions(suppliedOptions, directSend)
                                     );
-                                    markCommandSending(isSessionMessagingFallbackActive(sessionId) ? 'formatted_session_recovery_fallback' : 'formatted_queued_send', 'text');
-                                    const result = await send(false);
-                                    return completeCommandResponse(result, isSessionMessagingFallbackActive(sessionId) ? 'formatted_session_recovery_fallback' : 'formatted_queued_send');
+                                    return executeAdaptiveFormattedSend(send, 'text');
                                 };
                                 const safeSendActionError = async (...errorArgs) => {
                                     if (terminalResponseSent) return terminalResponsePromise;
@@ -15324,17 +15494,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         commandSendOptions(suppliedOptions, directSend)
                                     );
                                     try {
-                                        markCommandSending(isSessionMessagingFallbackActive(sessionId) ? 'formatted_session_recovery_fallback' : 'formatted_direct_error', 'error_reply');
-                                        const result = await send(false);
-                                        return completeCommandResponse(result, isSessionMessagingFallbackActive(sessionId) ? 'formatted_session_recovery_fallback' : 'formatted_direct_error');
+                                        return await executeAdaptiveFormattedSend(send, 'error_reply');
                                     } catch (sendError) {
-                                        if (isSignalDecryptionFailure([sendError]) || /signal|decrypt|bad mac|no sessions|chain closed|session error|message counter/i.test(String(sendError?.message || sendError))) {
-                                            markSessionMessagingFallback(sessionId, 'signal_transport_degraded', msgId);
-                                            console.warn('[command-error-switching-to-rich-fallback]', { sessionId, messageId: msgId, command: internalCommand, error: sendError?.message || String(sendError) });
-                                            markCommandSending('formatted_error_after_signal_degradation', 'error_reply');
-                                            const result = await send(false);
-                                            return completeCommandResponse(result, 'formatted_error_after_signal_degradation');
-                                        }
                                         terminalResponsePromise = null;
                                         terminalResponseSent = false;
                                         console.error('[command-action-error-response-not-confirmed]', { sessionId, messageId: msgId, command: internalCommand, error: sendError?.message || String(sendError) });
@@ -15344,13 +15505,25 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 const trackedSendImageCaptioned = async (...sendArgs) => {
                                     const sendStartedAt = Date.now();
                                     const suppliedOptions = sendArgs[6] && typeof sendArgs[6] === 'object' ? sendArgs[6] : {};
-                                    const directSend = false;
+                                    const directSend = !isSessionMessagingFallbackActive(sessionId);
                                     const preparedArgs = [...sendArgs];
                                     preparedArgs[6] = commandSendOptions(suppliedOptions, directSend);
-                                    markCommandSending(directSend ? 'image_captioned_direct' : 'image_captioned_fallback', 'image_or_text');
+                                    markCommandSending(directSend ? 'simple_direct_send' : 'existing_queued_legacy_fallback', 'image_or_text');
                                     try {
-                                        const result = await sendImageCaptioned(...preparedArgs);
+                                        let result;
+                                        try {
+                                            result = await sendImageCaptioned(...preparedArgs);
+                                        } catch (fastOrLegacyError) {
+                                            if (!directSend) throw fastOrLegacyError;
+                                            markCommandSendFailure('simple_direct_send', fastOrLegacyError);
+                                            markSessionMessagingFallback(sessionId, 'simple_direct_send_failed', msgId);
+                                            preparedArgs[6] = commandSendOptions(suppliedOptions, false);
+                                            markCommandSending('existing_queued_legacy_fallback_after_fast_failure', 'image_or_text');
+                                            result = await sendImageCaptioned(...preparedArgs);
+                                            recordSessionMessagingFallbackSuccess(sessionId, result?.key?.id || '');
+                                        }
                                         if (!result?.key?.id) throw new Error('whatsapp_send_result_message_id_missing');
+                                        if (!directSend) recordSessionMessagingFallbackSuccess(sessionId, result.key.id);
                                         responseSentForLog = true;
                                         console.info('[command-response-sent]', {
                                             sessionId,
@@ -17619,7 +17792,11 @@ async function main() {
         groupSenderKeyResetEveryMessage: false,
         selfChatAddressingMode: 'original_authenticated_lid_primary_with_phone_fallback',
         selfChatOriginalJidPreferred: true,
-        commandReplyTransport: 'per_chat_serialized_queue',
+        commandReplyTransport: 'simple_direct_send_with_automatic_per_session_legacy_queue_fallback',
+        commandReplyFastPath: 'sock.sendMessage_direct_without_pre_send_database_lock_identity_resolution_or_group_sender_key_reset',
+        commandReplyFallback: 'existing_per_chat_serialized_queue_with_session_ownership_signal_and_address_recovery',
+        commandReplyFallbackRecovery: 'three_accepted_legacy_responses_after_15_seconds_or_fallback_window_expiry',
+        sendHealthChecks: 'throttled_background_session_socket_and_ownership_audit_not_blocking_message_send',
         commandImagePolicy: 'decode_and_reencode_or_text_fallback',
         privateLidMappedPhonePrimary: true,
         privateLidSessionMigrationAfterVerifiedMapping: true,
@@ -17655,6 +17832,7 @@ async function main() {
         duplicateAccountOldDeviceLogoutBeforeLocalCredentialDeletion: true,
         baileysCompanionRegRefreshPatch: baileysCompanionRegRefreshPatchStatus,
         outgoingRetryMessagePreloadedInMemoryBeforeRelay: true,
+        outgoingRetryMessageDurablePersistence: 'background_parallel_to_network_relay',
         privateQueueAliasesCanonicalizedWithinSession: true,
         timedOutQueuePolicy: 'keep_same_chat_partition_serialized_until_original_operation_settles',
         authenticatedSessionAuthDeletionOnOfflineTimeout: false,
