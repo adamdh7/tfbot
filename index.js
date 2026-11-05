@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r176-fast-command-send-with-automatic-legacy-fallback';
+const TFBOT_CLUSTER_CODE_REVISION = 'r177-direct-by-default-legacy-transport-only-on-signal-degradation';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -1541,6 +1541,7 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
         : /SessionError:\s*No sessions|No sessions|No session found to decrypt message/i.test(failureText) ? 'signal_session_missing'
         : /Bad MAC|SignalErrorBadMac|SignalErrorInvalidMessage|retry.{0,20}(?:error|code).{0,8}(?:4|7)\b/i.test(failureText) ? 'bad_mac'
         : 'signal_decryption_error';
+    markSessionMessagingFallback(sessionId, `signal_decryption_${kind}`, details.messageId || '');
     const runtime = activeSessions.get(sessionId);
     const credentials = runtime?.authState?.creds || null;
     const user = runtime?.sock?.user || null;
@@ -1617,7 +1618,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-04-r175';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-04-r177';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -3856,6 +3857,12 @@ function classifyWhatsAppFailure(error) {
     return 'other';
 }
 
+function shouldActivateLegacyMessagingFallback(error) {
+    const failureClass = classifyWhatsAppFailure(error);
+    return ['bad_mac', 'chain_closed', 'message_counter_error', 'signal_session_missing', 'signal_key_state'].includes(failureClass)
+        || /Failed to decrypt message|failed to decrypt message|SignalErrorInvalidMessage|calculateMAC|retry.{0,20}(?:error|code).{0,8}(?:4|7)\b/i.test(getSignalLogText([error]));
+}
+
 async function sendPresenceUpdateWithDiagnostics(sock, sessionId, presence, jid, messageId = null) {
     const destination = String(jid || '').trim();
     const startedAt = Date.now();
@@ -3947,12 +3954,14 @@ async function sendFastMessageWithDiagnostics(sock, jid, content, options = {}, 
         if (echoToken) {
             for (const echoKey of echoToken.keys || []) if (outgoingTextEchoCache.get(echoKey) === echoToken.createdAt) outgoingTextEchoCache.delete(echoKey);
         }
-        console.warn('[whatsapp-send-fast-failed]', { sessionId, source, destinationType: getWhatsAppDestinationType(destination), messageType: outgoingType, failureClass: classifyWhatsAppFailure(error), errorName: error?.name || error?.constructor?.name || null, error: String(error?.message || error).slice(0, 800), durationMs: Date.now() - startedAt, action: 'caller_may_activate_existing_queued_fallback' });
+        const failureClass = classifyWhatsAppFailure(error);
+        if (shouldActivateLegacyMessagingFallback(error)) markSessionMessagingFallback(sessionId, `direct_send_${failureClass}`);
+        console.warn('[whatsapp-send-fast-failed]', { sessionId, source, destinationType: getWhatsAppDestinationType(destination), messageType: outgoingType, failureClass, legacyFallbackEligible: shouldActivateLegacyMessagingFallback(error), errorName: error?.name || error?.constructor?.name || null, error: String(error?.message || error).slice(0, 800), durationMs: Date.now() - startedAt, action: 'activate_existing_queued_transport_only_for_signal_or_decryption_degradation' });
         throw error;
     }
 }
 
-async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180) {
+async function queuedSendMessageLegacy(sock, jid, content, options = {}, delayMs = 180) {
     let sessionId = null;
     let activeSession = null;
     for (const [id, session] of activeSessions.entries()) {
@@ -4222,6 +4231,25 @@ async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180
         }
         throw sendError;
     });
+}
+
+async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180) {
+    const sessionId = findActiveSessionIdForSocket(sock);
+    if (!sessionId) throw new Error('whatsapp_socket_session_replaced');
+    if (isSessionMessagingFallbackActive(sessionId)) {
+        const fallbackResult = await queuedSendMessageLegacy(sock, jid, content, options, delayMs);
+        if (fallbackResult?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, fallbackResult.key.id);
+        return fallbackResult;
+    }
+    try {
+        return await sendFastMessageWithDiagnostics(sock, jid, content, options, 'adaptive_direct_send');
+    } catch (directError) {
+        if (!shouldActivateLegacyMessagingFallback(directError)) throw directError;
+        markSessionMessagingFallback(sessionId, `adaptive_direct_send_${classifyWhatsAppFailure(directError)}`);
+        const fallbackResult = await queuedSendMessageLegacy(sock, jid, content, options, delayMs);
+        if (fallbackResult?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, fallbackResult.key.id);
+        return fallbackResult;
+    }
 }
 
 async function queuedDeleteMessageWithAck(sock, jid, messageKey, delayMs = 120, timeoutMs = 6500) {
@@ -10123,8 +10151,9 @@ async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, 
                 return await sendCommandPayload(payload);
             } catch (sendError) {
                 const mediaPayloadFailure = canUseImageCaption && /not-acceptable|unsupported image|image format|thumbnail|sharp|media/i.test(String(sendError?.message || sendError));
-                if (mediaPayloadFailure) console.warn('[command-response-image-fast-path-rejected]', { action: String(type || 'Message'), imageBytes: deliveryImageBuffer.length, errorName: sendError?.name || 'Error', error: String(sendError?.message || sendError).slice(0, 300), fallback: 'caller_switches_to_existing_queued_transport' });
-                throw sendError;
+                if (!mediaPayloadFailure) throw sendError;
+                console.warn('[command-response-image-fast-path-rejected]', { action: String(type || 'Message'), imageBytes: deliveryImageBuffer.length, errorName: sendError?.name || 'Error', error: String(sendError?.message || sendError).slice(0, 300), fallback: 'retry_same_formatted_caption_as_direct_text_without_switching_session_transport' });
+                return await sendCommandPayload({ text: caption, ...outgoingOptions });
             }
         }
         let normalizedImageBuffer = null;
@@ -14693,6 +14722,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         let from = rawFrom;
                         let privateReplyTargetResolution = /@lid$/i.test(rawFrom) ? 'original_chat_jid_lid_preferred' : 'original_chat_jid_pn_preferred';
                         const earlyBody = extractBody(m);
+                        const pendingPlaceholderPattern = /en attente de ce message|waiting for this message|esperando este mensaje|ap(?: |\u00e8n)tann? mesaj sa a|message en cours de chargement|message is loading|el mensaje se est\u00e1 cargando|mesaj la ap chaje/i;
+                        if (pendingPlaceholderPattern.test(String(earlyBody || ''))) {
+                            markSessionMessagingFallback(sessionId, 'message_waiting_placeholder', msgId);
+                            console.warn('[pending-message-placeholder-detected-before-policy]', { sessionId, messageId: msgId, chatType: rawChatIsGroup ? 'group' : rawChatIsChannel ? 'channel' : 'private', action: 'activate_session_legacy_transport_without_typing_or_reply_for_placeholder' });
+                        }
                         const isGroup = rawChatIsGroup;
                         const isChannel = rawChatIsChannel;
                         const messageType = Object.keys(unwrapMessageContent(m.message) || {})[0];
@@ -14839,8 +14873,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     const mappedSessionOwnerPhone = normalizePhoneCacheJid(mappedValue);
                                     if (!mappedSessionOwnerPhone || !configuredOwnerAccess.numbers.has(normalizedJidNumber(mappedSessionOwnerPhone))) return;
                                     rememberLidPhonePair(sessionId, senderLid, mappedSessionOwnerPhone, 'background_owner_lid_resolution');
-                                    console.info('[session-owner-sender-recognized-from-background-lid-mapping]', { sessionId, messageId: msgId, senderLidHash: shortLogHash(senderLid), senderPhoneHash: shortLogHash(mappedSessionOwnerPhone), currentMessageDispatchNotDelayed: true });
-                                    void sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', from, msgId).catch(() => {});
+                                    console.info('[session-owner-sender-recognized-from-background-lid-mapping]', { sessionId, messageId: msgId, senderLidHash: shortLogHash(senderLid), senderPhoneHash: shortLogHash(mappedSessionOwnerPhone), currentMessageDispatchNotDelayed: true, typingForCurrentMessageNotRetried: true });
                                 }).catch(() => '');
                             }
                         }
@@ -15371,24 +15404,25 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     const payloadType = Object.keys(sendArgs[2] || {}).filter(key => !['mentions', 'quoted', 'contextInfo', 'messageContextInfo'].includes(key)).join(',') || 'message';
                                     const useLegacy = isSessionMessagingFallbackActive(sessionId);
                                     let transportUsed = useLegacy ? 'existing_queued_legacy_fallback' : 'simple_direct_send';
-                                    const sendPayload = () => useLegacy
-                                        ? queuedSendMessage(...sendArgs)
-                                        : sendFastMessageWithDiagnostics(sendArgs[0] || sock, destination, sendArgs[2] || {}, sendArgs[3] || {}, 'tracked_command_message');
                                     markCommandSending(transportUsed, payloadType);
                                     try {
                                         let result;
-                                        try {
-                                            result = await sendPayload();
-                                        } catch (fastOrLegacyError) {
-                                            if (useLegacy) throw fastOrLegacyError;
-                                            markCommandSendFailure('simple_direct_send', fastOrLegacyError);
-                                            markSessionMessagingFallback(sessionId, 'simple_direct_send_failed', msgId);
-                                            transportUsed = 'existing_queued_legacy_fallback_after_fast_failure';
-                                            markCommandSending(transportUsed, payloadType);
-                                            result = await queuedSendMessage(...sendArgs);
-                                            recordSessionMessagingFallbackSuccess(sessionId, result?.key?.id || '');
+                                        if (useLegacy) {
+                                            result = await queuedSendMessageLegacy(...sendArgs);
+                                            if (result?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, result.key.id);
+                                        } else {
+                                            try {
+                                                result = await sendFastMessageWithDiagnostics(sendArgs[0] || sock, destination, sendArgs[2] || {}, sendArgs[3] || {}, 'tracked_command_message');
+                                            } catch (directError) {
+                                                markCommandSendFailure('simple_direct_send', directError);
+                                                if (!shouldActivateLegacyMessagingFallback(directError)) throw directError;
+                                                markSessionMessagingFallback(sessionId, `tracked_command_signal_${classifyWhatsAppFailure(directError)}`, msgId);
+                                                transportUsed = 'existing_queued_legacy_fallback_after_signal_failure';
+                                                markCommandSending(transportUsed, payloadType);
+                                                result = await queuedSendMessageLegacy(...sendArgs);
+                                                if (result?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, result.key.id);
+                                            }
                                         }
-                                        if (useLegacy && result?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, result.key.id);
                                         if (result?.key?.id) responseSentForLog = true;
                                         console.info('[command-lifecycle]', { sessionId, messageId: msgId, command: internalCommand, chatJid: destination, phase: 'response-sent', transport: transportUsed, responseMessageId: result?.key?.id || null, payloadType, attempt: commandSendAttempt, elapsedMs: Date.now() - commandLifecycleStartedAt });
                                         return result;
@@ -15399,7 +15433,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 };
                                 const completeCommandResponse = (result, transport) => {
                                     if (!result?.key?.id) throw new Error('whatsapp_send_result_message_id_missing');
-                                    if (String(transport || '').includes('legacy_fallback')) recordSessionMessagingFallbackSuccess(sessionId, result.key.id);
                                     logCommandLifecycle('response-sent', { transport, responseMessageId: result.key.id, attempt: commandSendAttempt || null });
                                     terminalResponseSent = true;
                                     responseSentForLog = true;
@@ -15432,14 +15465,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         return completeCommandResponse(result, 'simple_direct_send');
                                     } catch (fastSendError) {
                                         markCommandSendFailure('simple_direct_send', fastSendError);
-                                        markSessionMessagingFallback(sessionId, 'simple_direct_send_failed', msgId);
-                                        console.warn('[command-response-switching-to-existing-transport]', { sessionId, messageId: msgId, command: internalCommand, error: String(fastSendError?.message || fastSendError).slice(0, 500), action: 'retry_once_through_existing_queued_transport' });
-                                        markCommandSending('existing_queued_legacy_fallback_after_fast_failure', responseType);
+                                        if (!shouldActivateLegacyMessagingFallback(fastSendError)) throw fastSendError;
+                                        markSessionMessagingFallback(sessionId, `formatted_command_signal_${classifyWhatsAppFailure(fastSendError)}`, msgId);
+                                        console.warn('[command-response-switching-to-existing-transport]', { sessionId, messageId: msgId, command: internalCommand, failureClass: classifyWhatsAppFailure(fastSendError), error: String(fastSendError?.message || fastSendError).slice(0, 500), action: 'retry_once_through_existing_queued_transport_for_signal_degradation' });
+                                        markCommandSending('existing_queued_legacy_fallback_after_signal_failure', responseType);
                                         try {
                                             const result = await send(false);
-                                            return completeCommandResponse(result, 'existing_queued_legacy_fallback_after_fast_failure');
+                                            return completeCommandResponse(result, 'existing_queued_legacy_fallback_after_signal_failure');
                                         } catch (legacySendError) {
-                                            markCommandSendFailure('existing_queued_legacy_fallback_after_fast_failure', legacySendError);
+                                            markCommandSendFailure('existing_queued_legacy_fallback_after_signal_failure', legacySendError);
                                             markSessionMessagingFallback(sessionId, 'fast_and_legacy_send_failed', msgId);
                                             throw legacySendError;
                                         }
@@ -15513,17 +15547,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         let result;
                                         try {
                                             result = await sendImageCaptioned(...preparedArgs);
-                                        } catch (fastOrLegacyError) {
-                                            if (!directSend) throw fastOrLegacyError;
-                                            markCommandSendFailure('simple_direct_send', fastOrLegacyError);
-                                            markSessionMessagingFallback(sessionId, 'simple_direct_send_failed', msgId);
+                                        } catch (sendError) {
+                                            if (!directSend || !shouldActivateLegacyMessagingFallback(sendError)) throw sendError;
+                                            markCommandSendFailure('simple_direct_send', sendError);
+                                            markSessionMessagingFallback(sessionId, `image_captioned_signal_${classifyWhatsAppFailure(sendError)}`, msgId);
                                             preparedArgs[6] = commandSendOptions(suppliedOptions, false);
-                                            markCommandSending('existing_queued_legacy_fallback_after_fast_failure', 'image_or_text');
+                                            markCommandSending('existing_queued_legacy_fallback_after_signal_failure', 'image_or_text');
                                             result = await sendImageCaptioned(...preparedArgs);
-                                            recordSessionMessagingFallbackSuccess(sessionId, result?.key?.id || '');
                                         }
                                         if (!result?.key?.id) throw new Error('whatsapp_send_result_message_id_missing');
-                                        if (!directSend) recordSessionMessagingFallbackSuccess(sessionId, result.key.id);
                                         responseSentForLog = true;
                                         console.info('[command-response-sent]', {
                                             sessionId,
@@ -15535,7 +15567,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             replyTargetJid: from,
                                             replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid',
                                             responseMessageId: result?.key?.id || null,
-                                            durationMs: Date.now() - sendStartedAt
+                                            durationMs: Date.now() - sendStartedAt,
+                                            transport: directSend ? 'simple_direct_send' : 'existing_queued_legacy_fallback'
                                         });
                                         return result;
                                     } catch (sendError) {
@@ -16652,7 +16685,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     if (timeoutId) clearTimeout(timeoutId);
                                     isTyping = false;
                                     if (typingInterval) clearInterval(typingInterval);
-                                    if (shouldSendTyping) await sendPresenceUpdateWithDiagnostics(sock, sessionId, 'paused', from, msgId);
+                                    if (shouldSendTyping) void sendPresenceUpdateWithDiagnostics(sock, sessionId, 'paused', from, msgId).catch(() => {});
                                 }
                             } catch (cmdError) {
                                 console.error('[command-handler]', { command: internalCommand, error: cmdError?.message || String(cmdError) });
@@ -17789,13 +17822,14 @@ async function main() {
         groupLidOutboundAddressingPatchApplied: baileysLidAwareGroupOutboundAddressingPatchStatus.applied === true,
         groupRetrySkdmPatchApplied: baileysGroupRetrySkdmPatchStatus.applied === true,
         groupSenderKeyResetBeforeSendEnabled: GROUP_SENDER_KEY_RESET_ON_SEND,
+        groupSenderKeyResetScope: 'legacy_fallback_transport_only',
         groupSenderKeyResetEveryMessage: false,
         selfChatAddressingMode: 'original_authenticated_lid_primary_with_phone_fallback',
         selfChatOriginalJidPreferred: true,
-        commandReplyTransport: 'simple_direct_send_with_automatic_per_session_legacy_queue_fallback',
-        commandReplyFastPath: 'sock.sendMessage_direct_without_pre_send_database_lock_identity_resolution_or_group_sender_key_reset',
+        commandReplyTransport: 'direct_send_by_default_legacy_queue_only_during_signal_or_decryption_degradation',
+        commandReplyFastPath: 'sock.sendMessage_direct_without_queue_identity_resolution_or_sender_key_reset',
         commandReplyFallback: 'existing_per_chat_serialized_queue_with_session_ownership_signal_and_address_recovery',
-        commandReplyFallbackRecovery: 'three_accepted_legacy_responses_after_15_seconds_or_fallback_window_expiry',
+        commandReplyFallbackRecovery: 'legacy_queue_sender_key_reset_and_identity_resolution_until_three_successes_after_15_seconds_or_window_expiry',
         sendHealthChecks: 'throttled_background_session_socket_and_ownership_audit_not_blocking_message_send',
         commandImagePolicy: 'decode_and_reencode_or_text_fallback',
         privateLidMappedPhonePrimary: true,
