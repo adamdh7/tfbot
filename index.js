@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'r186-group-send-fallback-qrbot-exact-caption-timeout';
+const TFBOT_CLUSTER_CODE_REVISION = 'r187-group-admin-filters-del3-send-split';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'no-render-commit'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -7449,7 +7449,8 @@ function getWhatsAppMessageFormat(value) {
         text: ['conversation', 'extendedTextMessage', 'buttonsResponseMessage', 'listResponseMessage', 'templateButtonReplyMessage', 'interactiveResponseMessage', 'groupMentionMessage', 'buttonsMessage', 'listMessage', 'templateMessage', 'interactiveMessage'],
         image: ['imageMessage'],
         video: ['videoMessage', 'ptvMessage'],
-        audio: ['audioMessage', 'voiceMessage'],
+        audio: ['audioMessage'],
+        voice: ['voiceMessage'],
         document: ['documentMessage'],
         sticker: ['stickerMessage', 'lottieStickerMessage'],
         album: ['albumMessage'],
@@ -7458,7 +7459,7 @@ function getWhatsAppMessageFormat(value) {
         poll: ['pollCreationMessage', 'pollCreationMessageV2', 'pollCreationMessageV3', 'pollUpdateMessage'],
         reaction: ['reactionMessage'],
         event: ['eventMessage', 'scheduledCallCreationMessage', 'scheduledCallEditMessage'],
-        status: ['groupStatusMessageContent', 'groupStatusMessage', 'groupStatusMessageV2', 'statusMessage', 'statusMentionMessage', 'statusMentionMessageV2', 'statusMentionMessageV2Extension', 'statusMentionMessageExtension'],
+        status: ['groupStatusMessageContent', 'groupStatusMessage', 'groupStatusMessageV2', 'groupStatusMentionMessage', 'groupStatusMentionMessageV2', 'statusMessage', 'statusMentionMessage', 'statusMentionMessageV2', 'statusMentionMessageV2Extension', 'statusMentionMessageExtension', 'statusMentionMessageV3'],
         group: ['groupInviteMessage', 'newsletterAdminInviteMessage'],
         commerce: ['productMessage', 'orderMessage', 'catalogMessage'],
         payment: ['paymentInviteMessage', 'requestPaymentMessage', 'sendPaymentMessage', 'declinePaymentRequestMessage', 'cancelPaymentRequestMessage'],
@@ -7468,7 +7469,7 @@ function getWhatsAppMessageFormat(value) {
     for (const [format, keys] of Object.entries(groups)) for (const key of keys) keyToFormat.set(key, format);
     const mediaFormats = new Set(['image', 'video', 'audio', 'document', 'sticker', 'album']);
     const ignored = new Set(['messageContextInfo', 'senderKeyDistributionMessage', 'protocolMessage', 'keepInChatMessage', 'messageHistoryBundle', 'contextInfo', 'quotedMessage', 'deviceListMetadata', 'deviceListMetadataVersion', 'messageSecret', 'externalAdReply', 'thumbnail', 'jpegThumbnail']);
-    const wrapperKeys = new Set(['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'documentWithCaptionMessage', 'deviceSentMessage', 'editedMessage', 'associatedChildMessage', 'groupStatusMessageContent', 'statusMessage']);
+    const wrapperKeys = new Set(['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'documentWithCaptionMessage', 'deviceSentMessage', 'editedMessage', 'associatedChildMessage', 'groupStatusMessageContent', 'groupStatusMessage', 'groupStatusMessageV2', 'groupStatusMentionMessage', 'groupStatusMentionMessageV2', 'statusMessage', 'statusMentionMessage', 'statusMentionMessageV2', 'statusMentionMessageV2Extension', 'statusMentionMessageExtension', 'statusMentionMessageV3']);
     const viewOnceWrapperKeys = new Set(['viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension']);
     const getNested = payload => {
         if (!payload || typeof payload !== 'object') return null;
@@ -7501,6 +7502,7 @@ function getWhatsAppMessageFormat(value) {
             if (ignored.has(key) || wrapperKeys.has(key)) continue;
             const known = keyToFormat.get(key);
             if (!known) continue;
+            if (key === 'audioMessage' && payload?.ptt === true) return 'voice';
             const payloadViewOnce = payload && typeof payload === 'object' && (payload.viewOnce === true || payload.isViewOnce === true || payload.is_view_once === true);
             return known;
         }
@@ -9865,7 +9867,7 @@ const translations = {
     disconnect_sys_msg: "La session a été déconnectée. La procédure de suppression des données et des sessions associées a été lancée.",
     del2_activated: "La suppression automatique des messages de @{user} est activée.",
     del2_deactivated: "La suppression automatique des messages de @{user} est désactivée.",
-    del3_activated: "La suppression automatique des futurs messages de même format est activée dans ce groupe. Le message sélectionné reste dans la conversation et les messages du propriétaire du compte restent protégés.",
+    del3_activated: "La suppression automatique des futurs messages de même format est activée dans ce groupe.",
     del3_deactivated: "La suppression automatique des futurs messages de même format est désactivée dans ce groupe.",
     del3_delete_failed: "Le format du message sélectionné n’a pas pu être identifié. Aucune règle automatique n’a été modifiée.",
     del3_deleted_unclassified: "Le format du message sélectionné n’a pas pu être identifié. Aucune règle automatique n’a été modifiée.",
@@ -9959,7 +9961,7 @@ info_text: [
     disconnect_sys_msg: "The session has been disconnected. The removal process for the associated data and sessions has been started.",
     del2_activated: "Automatic deletion for messages from @{user} is enabled.",
     del2_deactivated: "Automatic deletion for messages from @{user} is disabled.",
-    del3_activated: "Automatic deletion of future messages in the same format is enabled for this group. The selected message is kept, and messages from the account owner are protected.",
+    del3_activated: "Automatic deletion of future messages in the same format is enabled for this group.",
     del3_deactivated: "Automatic deletion of future messages in the same format is disabled for this group.",
     del3_delete_failed: "The selected message format could not be identified. No automatic rule was changed.",
     del3_deleted_unclassified: "The selected message format could not be identified. No automatic rule was changed.",
@@ -10053,7 +10055,7 @@ info_text: [
     disconnect_sys_msg: "La sesión se ha desconectado. Se ha iniciado el proceso de eliminación de los datos y las sesiones asociados.",
     del2_activated: "La eliminación automática de los mensajes de @{user} está activada.",
     del2_deactivated: "La eliminación automática de los mensajes de @{user} está desactivada.",
-    del3_activated: "La eliminación automática de futuros mensajes del mismo formato está activada en este grupo. El mensaje seleccionado se conserva y los mensajes del propietario de la cuenta permanecen protegidos.",
+    del3_activated: "La eliminación automática de futuros mensajes del mismo formato está activada en este grupo.",
     del3_deactivated: "La eliminación automática de futuros mensajes del mismo formato está desactivada en este grupo.",
     del3_delete_failed: "No se pudo identificar el formato del mensaje seleccionado. No se modificó ninguna regla automática.",
     del3_deleted_unclassified: "No se pudo identificar el formato del mensaje seleccionado. No se modificó ninguna regla automática.",
@@ -10147,7 +10149,7 @@ info_text: [
     disconnect_sys_msg: "Sesyon an dekonekte. Pwosesis pou efase done ak sesyon ki asosye yo kòmanse.",
     del2_activated: "Efasman otomatik mesaj @{user} aktive.",
     del2_deactivated: "Efasman otomatik mesaj @{user} dezaktive.",
-    del3_activated: "Efasman otomatik pwochen mesaj ki gen menm fòma a aktive nan gwoup sa a. Mesaj ou chwazi a rete nan konvèsasyon an, epi mesaj pwopriyetè kont lan pwoteje.",
+    del3_activated: "Efase otomatik mesaj k ap vini yo ki gen menm fòma a aktive nan gwoup sa a.",
     del3_deactivated: "Efasman otomatik pwochen mesaj ki gen menm fòma a dezaktive nan gwoup sa a.",
     del3_delete_failed: "Yo pa t kapab idantifye fòma mesaj ou chwazi a. Okenn règ otomatik pa chanje.",
     del3_deleted_unclassified: "Yo pa t kapab idantifye fòma mesaj ou chwazi a. Okenn règ otomatik pa chanje.",
@@ -10246,11 +10248,11 @@ function buildCaption(type, text, userName, preserveFormatting = null, ownerName
     return `*○ ${cleanType}*\n\n*Bot (tfbot)*\n${userLabel} : "${cleanUserName}"\n${ownerLabel} : ${cleanOwnerName}${content ? `\n\n${content}` : ''}\n\n> *_Bot (tfbot)_*`;
 }
 
-function splitCaptionBodies(type, text, userName, maxChars = MAX_WHATSAPP_CAPTION_CHARS, preserveFormatting = null, ownerName = '') {
+function splitCaptionBodies(type, text, userName, maxChars = MAX_WHATSAPP_CAPTION_CHARS, preserveFormatting = null, ownerName = '', language = 'ht') {
     const cleanText = normalizeCaptionText(text);
     const keepFormatting = typeof preserveFormatting === 'boolean' ? preserveFormatting : hasWhatsAppFormatting(cleanText);
-    if (!cleanText || buildCaption(type, cleanText, userName, keepFormatting, ownerName).length <= maxChars) return [cleanText];
-    const shellLength = buildCaption(type, '', userName, keepFormatting, ownerName).length;
+    if (!cleanText || buildCaption(type, cleanText, userName, keepFormatting, ownerName, language).length <= maxChars) return [cleanText];
+    const shellLength = buildCaption(type, '', userName, keepFormatting, ownerName, language).length;
     const budget = Math.max(80, maxChars - shellLength - 2);
     const tokens = cleanText.match(/\S+\s*/g) || [cleanText];
     const bodies = [];
@@ -10273,6 +10275,22 @@ function splitCaptionBodies(type, text, userName, maxChars = MAX_WHATSAPP_CAPTIO
     }
     if (current.trim()) bodies.push(current.trim());
     return bodies.length ? bodies : [''];
+}
+
+function splitExactCaptionText(value, maxChars = MAX_WHATSAPP_CAPTION_CHARS) {
+    const source = normalizeCaptionText(value);
+    if (source.length <= maxChars) return [source];
+    const chunks = [];
+    let remaining = source;
+    while (remaining.length > maxChars) {
+        let boundary = remaining.lastIndexOf('\n', maxChars);
+        if (boundary < Math.floor(maxChars * 0.55)) boundary = remaining.lastIndexOf(' ', maxChars);
+        if (boundary < Math.floor(maxChars * 0.55)) boundary = maxChars;
+        chunks.push(remaining.slice(0, boundary).trimEnd());
+        remaining = remaining.slice(boundary).trimStart();
+    }
+    if (remaining) chunks.push(remaining);
+    return chunks.length ? chunks : [''];
 }
 
 const outgoingImageNormalizationCache = new WeakMap();
@@ -10315,85 +10333,65 @@ async function normalizeOutgoingImageBuffer(imageBuffer) {
 }
 
 async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, sendOptions = {}) {
-    if (sendOptions.commandFormat === true) {
-        let deliveryImageBuffer = Buffer.isBuffer(imageBuffer) ? imageBuffer : imageBuffer instanceof Uint8Array ? Buffer.from(imageBuffer.buffer, imageBuffer.byteOffset, imageBuffer.byteLength) : null;
-        const ownerName = sanitizeSessionDisplayName(sendOptions.ownerName || sock?.user?.name || sock?.user?.notify || sock?.user?.verifiedName || '') || 'Inconnu';
-        const preserveFormatting = sendOptions.preserveFormatting === true || hasWhatsAppFormatting(text);
-        const caption = typeof sendOptions.exactCaption === 'string'
-            ? normalizeCaptionText(sendOptions.exactCaption)
-            : buildCaption(type, text, userName, preserveFormatting, ownerName, sendOptions.language || 'ht');
-        const outgoingOptions = {};
-        if (Array.isArray(sendOptions.mentions) && sendOptions.mentions.length) outgoingOptions.mentions = sendOptions.mentions;
-        const messageOptions = { ...(sendOptions.messageOptions || {}) };
-        delete messageOptions.quoted;
-        const canUseImageCaption = !!(deliveryImageBuffer?.length && caption.length <= MAX_WHATSAPP_CAPTION_CHARS);
-        const directPrivateCommandSend = sendOptions.directSend === true && !/@g\.us$/i.test(String(jid || '').trim());
-        const sendCommandPayload = value => directPrivateCommandSend
-            ? sendFastMessageWithDiagnostics(sock, jid, value, messageOptions, 'formatted_command_response')
-            : queuedSendMessage(sock, jid, value, messageOptions, 0);
-        if (directPrivateCommandSend) {
-            if (deliveryImageBuffer?.length) {
-                const sourceBuffer = deliveryImageBuffer;
-                void normalizeOutgoingImageBuffer(sourceBuffer).then(normalized => {
-                    if (normalized && normalized !== sourceBuffer) outgoingImageNormalizationCache.set(sourceBuffer, normalized);
-                }).catch(error => console.warn('[fast-send-image-normalization-background-failed]', { action: String(type || 'Message'), error: error?.message || String(error), sendWasNotBlocked: true }));
-            }
-            const payload = canUseImageCaption ? { image: deliveryImageBuffer, caption, ...outgoingOptions } : { text: caption, ...outgoingOptions };
-            try {
-                return await sendCommandPayload(payload);
-            } catch (sendError) {
-                const mediaPayloadFailure = canUseImageCaption && /not-acceptable|unsupported image|image format|thumbnail|sharp|media/i.test(String(sendError?.message || sendError));
-                if (!mediaPayloadFailure) throw sendError;
-                console.warn('[command-response-image-fast-path-rejected]', { action: String(type || 'Message'), imageBytes: deliveryImageBuffer.length, errorName: sendError?.name || 'Error', error: String(sendError?.message || sendError).slice(0, 300), fallback: 'retry_same_formatted_caption_as_direct_text_without_switching_session_transport' });
-                return await sendCommandPayload({ text: caption, ...outgoingOptions });
-            }
-        }
-        let normalizedImageBuffer = null;
-        if (deliveryImageBuffer?.length) {
-            try { normalizedImageBuffer = await normalizeOutgoingImageBuffer(deliveryImageBuffer); }
-            catch (imageNormalizationError) {
-                console.error('[whatsapp-command-image-normalization-failed]', { action: String(type || 'Message'), errorName: imageNormalizationError?.name || 'Error', error: String(imageNormalizationError?.message || imageNormalizationError).slice(0, 220), fallback: 'send_text_without_image' });
-            }
-        }
-        const payload = normalizedImageBuffer?.length && caption.length <= MAX_WHATSAPP_CAPTION_CHARS
-            ? { image: normalizedImageBuffer, caption, ...outgoingOptions }
-            : { text: caption, ...outgoingOptions };
-        return sendCommandPayload(payload);
-    }
-    let deliveryImageBuffer = null;
-    try {
-        deliveryImageBuffer = await normalizeOutgoingImageBuffer(imageBuffer);
-    } catch (imageNormalizationError) {
-        console.error('[whatsapp-outgoing-image-normalization-failed]', { action: String(type || 'Message'), errorName: imageNormalizationError?.name || 'Error', error: String(imageNormalizationError?.message || imageNormalizationError).slice(0, 220) });
-    }
-    if (!deliveryImageBuffer) {
-        const fallbackOwnerName = sanitizeSessionDisplayName(sendOptions.ownerName || sock?.user?.name || sock?.user?.notify || sock?.user?.verifiedName || '') || 'Compte connecté';
-        const fallbackFormatting = sendOptions.preserveFormatting === true || hasWhatsAppFormatting(text);
-        const fallbackBodies = splitCaptionBodies(type, text, userName, MAX_WHATSAPP_CAPTION_CHARS, fallbackFormatting, fallbackOwnerName);
-        let fallbackResult = null;
-        for (const body of fallbackBodies) {
-            const fallbackOptions = {};
-            if (Array.isArray(sendOptions.mentions) && sendOptions.mentions.length) fallbackOptions.mentions = sendOptions.mentions.filter(mention => body.includes(`@${String(mention).split('@')[0]}`));
-            fallbackResult = await queuedSendMessage(sock, jid, { text: buildCaption(type, body, userName, fallbackFormatting, fallbackOwnerName), ...fallbackOptions }, sendOptions.messageOptions || {}, 220);
-        }
-        return fallbackResult;
-    }
-    const preserveFormatting = sendOptions.preserveFormatting === true || hasWhatsAppFormatting(text);
-    const ownerName = sanitizeSessionDisplayName(sendOptions.ownerName || sock?.user?.name || sock?.user?.notify || sock?.user?.verifiedName || '') || 'Compte connecté';
-    const bodies = splitCaptionBodies(type, text, userName, MAX_WHATSAPP_CAPTION_CHARS, preserveFormatting, ownerName);
-    let lastResult = null;
-    for (const body of bodies) {
-        const caption = buildCaption(type, body, userName, preserveFormatting, ownerName);
-        const options = {};
-        if (Array.isArray(sendOptions.mentions) && sendOptions.mentions.length) {
-            options.mentions = sendOptions.mentions.filter(mention => body.includes(`@${String(mention).split('@')[0]}`));
-        }
+    const directPrivateCommandSend = sendOptions.commandFormat === true && sendOptions.directSend === true && !/@g\.us$/i.test(String(jid || '').trim());
+    const exactCaptionMode = typeof sendOptions.exactCaption === 'string';
+    const ownerName = sanitizeSessionDisplayName(sendOptions.ownerName || sock?.user?.name || sock?.user?.notify || sock?.user?.verifiedName || '') || (sendOptions.commandFormat === true ? 'Inconnu' : 'Compte connecté');
+    const language = sendOptions.language || 'ht';
+    const preserveFormatting = sendOptions.preserveFormatting === true || hasWhatsAppFormatting(exactCaptionMode ? sendOptions.exactCaption : text);
+    const fullCaption = exactCaptionMode
+        ? normalizeCaptionText(sendOptions.exactCaption)
+        : null;
+    const bodies = exactCaptionMode
+        ? splitExactCaptionText(fullCaption, MAX_WHATSAPP_CAPTION_CHARS)
+        : splitCaptionBodies(type, text, userName, MAX_WHATSAPP_CAPTION_CHARS, preserveFormatting, ownerName, language);
+    const selectedBodies = sendOptions.longTextMode === 'truncate' ? bodies.slice(0, 1) : bodies;
+    const messageOptions = { ...(sendOptions.messageOptions || {}) };
+    if (sendOptions.commandFormat === true) delete messageOptions.quoted;
+    const resolveCaption = body => exactCaptionMode ? body : buildCaption(type, body, userName, preserveFormatting, ownerName, language);
+    const resolveMentions = body => Array.isArray(sendOptions.mentions) && sendOptions.mentions.length
+        ? sendOptions.mentions.filter(mention => body.includes(`@${String(mention).split('@')[0]}`))
+        : [];
+    const sendPayload = value => directPrivateCommandSend
+        ? sendFastMessageWithDiagnostics(sock, jid, value, messageOptions, 'formatted_command_response')
+        : queuedSendMessage(sock, jid, value, messageOptions, sendOptions.commandFormat === true ? 0 : 220);
+    let deliveryImageBuffer = Buffer.isBuffer(imageBuffer)
+        ? imageBuffer
+        : imageBuffer instanceof Uint8Array
+            ? Buffer.from(imageBuffer.buffer, imageBuffer.byteOffset, imageBuffer.byteLength)
+            : null;
+    if (directPrivateCommandSend && deliveryImageBuffer?.length) {
+        const sourceBuffer = deliveryImageBuffer;
+        void normalizeOutgoingImageBuffer(sourceBuffer).then(normalized => {
+            if (normalized && normalized !== sourceBuffer) outgoingImageNormalizationCache.set(sourceBuffer, normalized);
+        }).catch(error => console.warn('[fast-send-image-normalization-background-failed]', { action: String(type || 'Message'), error: error?.message || String(error), sendWasNotBlocked: true }));
+    } else if (deliveryImageBuffer?.length) {
         try {
-            lastResult = await queuedSendMessage(sock, jid, { image: deliveryImageBuffer, caption, ...options }, sendOptions.messageOptions || {}, 220);
-        } catch (error) {
-            console.error('[whatsapp-send]', { action: String(type || 'Message'), error: error?.message || String(error), imageBytes: deliveryImageBuffer.length });
-            throw error;
+            deliveryImageBuffer = await normalizeOutgoingImageBuffer(deliveryImageBuffer);
+        } catch (imageNormalizationError) {
+            console.error('[whatsapp-outgoing-image-normalization-failed]', { action: String(type || 'Message'), errorName: imageNormalizationError?.name || 'Error', error: String(imageNormalizationError?.message || imageNormalizationError).slice(0, 220), imageKeptAsUnavailable: true });
+            deliveryImageBuffer = null;
         }
+    }
+    if (!deliveryImageBuffer?.length) {
+        console.warn('[whatsapp-outgoing-image-unavailable]', { action: String(type || 'Message'), textParts: selectedBodies.length, formattingPreserved: true });
+    }
+    let lastResult = null;
+    for (let index = 0; index < selectedBodies.length; index++) {
+        const body = selectedBodies[index];
+        const caption = resolveCaption(body);
+        const mentionOptions = resolveMentions(body);
+        const sendOptionsForPart = mentionOptions.length ? { mentions: mentionOptions } : {};
+        if (index === 0 && deliveryImageBuffer?.length) {
+            try {
+                lastResult = await sendPayload({ image: deliveryImageBuffer, caption, ...sendOptionsForPart });
+                continue;
+            } catch (sendError) {
+                const mediaPayloadFailure = /not-acceptable|unsupported image|image format|thumbnail|sharp|media/i.test(String(sendError?.message || sendError));
+                if (!mediaPayloadFailure) throw sendError;
+                console.warn('[command-response-image-rejected]', { action: String(type || 'Message'), imageBytes: deliveryImageBuffer.length, errorName: sendError?.name || 'Error', error: String(sendError?.message || sendError).slice(0, 300), fallback: 'send_formatted_caption_as_text_then_preserve_remaining_parts' });
+            }
+        }
+        lastResult = await sendPayload({ text: caption, ...sendOptionsForPart });
     }
     return lastResult;
 }
@@ -11781,6 +11779,54 @@ function getMessageContextInfo(message) {
 function extractBody(m) {
     const msg = unwrapMessageContent(m?.message);
     return msg.conversation || msg.extendedTextMessage?.text || msg.imageMessage?.caption || msg.videoMessage?.caption || msg.documentMessage?.caption || msg.buttonsResponseMessage?.selectedButtonId || msg.listResponseMessage?.singleSelectReply?.selectedRowId || '';
+}
+
+function extractMessageTextForLinkDetection(message) {
+    const source = message?.message && typeof message.message === 'object' ? message.message : message;
+    const textKeys = new Set(['conversation', 'text', 'caption', 'matchedText', 'selectedButtonId', 'selectedRowId', 'title', 'description', 'body', 'displayText', 'contentText', 'messageText', 'optionName', 'vcard', 'name', 'displayName', 'formattedName', 'fileName']);
+    const previewUrlKeys = new Set(['url', 'canonicalUrl', 'sourceUrl', 'href']);
+    const ignoredKeys = new Set(['quotedMessage', 'messageSecret', 'mediaKey', 'fileSha256', 'fileEncSha256', 'directPath', 'jpegThumbnail', 'thumbnail', 'thumbnailDirectPath', 'thumbnailSha256', 'thumbnailEncSha256', 'ciphertext', 'encryptedContent', 'encrypted_content', 'ephemeral', 'static', 'payload', 'deviceIdentity', 'privateKey', 'publicKey', 'preKey', 'signedPreKey', 'identityKey', 'advSecretKey', 'registration']);
+    const values = [];
+    const seen = new WeakSet();
+    const scan = (node, key = '', inPreview = false, depth = 0) => {
+        if (node === null || node === undefined || depth > 18) return;
+        if (typeof node === 'string') {
+            if (textKeys.has(key) || (inPreview && previewUrlKeys.has(key))) values.push(node);
+            return;
+        }
+        if (typeof node !== 'object' || Buffer.isBuffer(node) || node instanceof Uint8Array || seen.has(node)) return;
+        seen.add(node);
+        for (const [childKey, child] of Object.entries(node)) {
+            if (ignoredKeys.has(childKey)) continue;
+            if (childKey === 'contextInfo' || childKey === 'messageContextInfo') {
+                if (child && typeof child === 'object' && child.externalAdReply) scan(child.externalAdReply, 'externalAdReply', true, depth + 1);
+                continue;
+            }
+            if (['externalAdReply', 'linkPreview', 'linkPreviewMessage'].includes(childKey)) {
+                scan(child, childKey, true, depth + 1);
+                continue;
+            }
+            scan(child, childKey, inPreview, depth + 1);
+        }
+    };
+    scan(source);
+    const fallback = extractBody(message);
+    if (fallback && !values.includes(fallback)) values.unshift(String(fallback));
+    return values.filter(Boolean).join('\n');
+}
+
+function containsWhatsAppLink(value) {
+    const source = String(value || '');
+    const linkPattern = /(?:https?:\/\/|ftp:\/\/|www\.)[^\s<>{}\[\]"']+|\b(?:localhost|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63})(?::\d{1,5})?(?:\/[^\s<>{}\[\]"']*)?|\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?(?:\/[^\s<>{}\[\]"']*)?/iu;
+    return linkPattern.test(source);
+}
+
+function createGroupDeleteMessageKey(message, groupJid, senderJid, senderAliases = []) {
+    const sourceKey = message?.key || {};
+    const participant = [sourceKey.participant, sourceKey.participantPn, sourceKey.participantAlt, sourceKey.senderPn, senderJid, ...(Array.isArray(senderAliases) ? senderAliases : [])].map(value => String(value || '').trim()).find(Boolean) || '';
+    const key = { ...sourceKey, remoteJid: String(sourceKey.remoteJid || groupJid || '').trim(), id: String(sourceKey.id || '').trim(), fromMe: sourceKey.fromMe === true };
+    if (participant) key.participant = participant;
+    return key;
 }
 
 function getMessageAuditDetails(message) {
@@ -15127,9 +15173,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         if (isOwnerReal && !sessionOwnerIdentitySource) sessionOwnerIdentitySource = linkedDeviceOwnerMatch ? 'verified_linked_device_envelope' : senderMatchesMappedOwnAlias ? 'session_owner_verified_lid_pn_alias' : 'authenticated_account_identity';
                         const dispatchModeValue = [sOwnerTop?.mode, sOwnerTop?.Mode, sOwnerTop?.botMode].find(value => value !== undefined && value !== null && String(value).trim() !== '');
                         const dispatchPublicMode = ['public', 'piblik', 'publico'].includes(normalizeText(dispatchModeValue || 'prive'));
-                        if (!isOwnerReal && !dispatchPublicMode) {
-                            console.info('[message-ignored]', { sessionId, messageId: msgId, senderJid: sender, chatJid: from, reason: 'private_mode_non_owner', action: 'ignore_before_group_rules_profile_writes_and_command_dispatch' });
+                        if (!isOwnerReal && !dispatchPublicMode && !isGroup) {
+                            console.info('[message-ignored]', { sessionId, messageId: msgId, senderJid: sender, chatJid: from, reason: 'private_mode_non_owner', action: 'ignore_private_chat_before_profile_writes_and_command_dispatch' });
                             return;
+                        }
+                        if (!isOwnerReal && !dispatchPublicMode && isGroup) {
+                            console.info('[group-moderation-allowed-in-private-mode]', { sessionId, messageId: msgId, senderJid: sender, chatJid: from, action: 'run_group_moderation_before_private_mode_command_policy' });
                         }
                         const sName = pushName;
                         const socketOwnerName = sanitizeSessionDisplayName(sock.user?.name);
@@ -15275,10 +15324,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     let metadataDel2Match = getCachedGroupMetadata(sessionId, from, 240000);
                                     if (!metadataDel2Match) metadataDel2Match = await getGroupMetadataCached(sessionId, sock, from);
                                     const senderParticipantDel2 = findActionParticipant(sender, metadataDel2Match) || senderJids.map(identity => findActionParticipant(identity, metadataDel2Match)).find(Boolean) || null;
+                                    const senderIdentityResolutionDel2 = await resolveDel3ParticipantIdentity(sock, sessionId, from, [...senderJids, ...(senderParticipantDel2 ? participantAliases(senderParticipantDel2) : [])]);
+                                    const senderJidsDel2 = [...new Set([...senderJids, ...senderIdentityResolutionDel2.aliases].map(normalizeActionJid).filter(Boolean))];
+                                    const senderNumbersDel2 = [...new Set([...senderNumbers, ...senderIdentityResolutionDel2.aliases.map(normalizedJidNumber).filter(Boolean)])];
                                     let del2Match = false;
                                     for (const target of del2List) {
                                         const stored = normalizeActionJid(target);
-                                        if (senderJids.some(identity => normalizeActionJid(identity) === stored)) {
+                                        if (senderJidsDel2.includes(stored)) {
                                             del2Match = true;
                                             break;
                                         }
@@ -15289,18 +15341,18 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 if (mappedTarget) storedNumber = normalizedJidNumber(mappedTarget);
                                             } catch (mappingError) {}
                                         }
-                                        if (storedNumber && senderNumbers.includes(storedNumber)) {
+                                        if (storedNumber && senderNumbersDel2.includes(storedNumber)) {
                                             del2Match = true;
                                             break;
                                         }
                                         const targetParticipantDel2 = findActionParticipant(target, metadataDel2Match);
-                                        if (targetParticipantDel2 && senderParticipantDel2 && participantMatchesIdentities(targetParticipantDel2, senderJids)) {
+                                        if (targetParticipantDel2 && senderParticipantDel2 && participantMatchesIdentities(targetParticipantDel2, senderJidsDel2)) {
                                             del2Match = true;
                                             break;
                                         }
                                         if (targetParticipantDel2 && senderParticipantDel2) {
                                             const targetAliasesDel2 = participantAliases(targetParticipantDel2).map(normalizeActionJid).filter(Boolean);
-                                            const senderAliasesDel2 = participantAliases(senderParticipantDel2).map(normalizeActionJid).filter(Boolean);
+                                            const senderAliasesDel2 = [...participantAliases(senderParticipantDel2), ...senderJidsDel2].map(normalizeActionJid).filter(Boolean);
                                             if (targetAliasesDel2.some(alias => senderAliasesDel2.includes(alias))) {
                                                 del2Match = true;
                                                 break;
@@ -15311,7 +15363,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         let del2DeleteSucceeded = false;
                                         let del2DeleteError = null;
                                         try {
-                                            await queuedSendMessage(sock, from, { delete: m.key }, {}, 200);
+                                            const del2DeleteKey = createGroupDeleteMessageKey(m, from, sender, senderJids);
+                                            await queuedSendMessage(sock, from, { delete: del2DeleteKey }, {}, 0);
                                             del2DeleteSucceeded = true;
                                         } catch (deleteErrorDel2) {
                                             del2DeleteError = deleteErrorDel2?.message || String(deleteErrorDel2);
@@ -15364,42 +15417,32 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             try {
                                 const antiLinkMode = await getGroupSetting(sessionId, from, 'noLien') || 'off';
                                 if (antiLinkMode !== 'off') {
-                                    const metadata = await getMeta();
-                                    const senderIsAdmin = metadata?.participants?.some(p => {
-                                        if (!isAdminParticipantForPolicy(p)) return false;
+                                    const metadata = antiLinkMode === 'strict' ? null : await getMeta();
+                                    const metadataAvailable = Array.isArray(metadata?.participants);
+                                    const senderParticipantForLink = metadataAvailable ? metadata.participants.find(p => {
                                         const ids = participantAliases(p);
                                         if (ids.some(id => senderJids.includes(id))) return true;
                                         return ids.map(normalizedJidNumber).filter(Boolean).some(number => senderNumbers.includes(number));
-                                    }) || false;
+                                    }) || null : null;
+                                    const senderIsAdmin = senderParticipantForLink ? isAdminParticipantForPolicy(senderParticipantForLink) : null;
                                     const isStrict = antiLinkMode === 'strict';
-                                    let shouldDelete = false;
-
-                                    const msgContent = unwrapMessageContent(m.message);
-                                    const actualType = Object.keys(msgContent || {})[0] || messageType;
-
-                                    const bodyRawStr = extractBody(m);
-                                    const linkRegex = /https?:\/\/[^\s]+|wa\.me|whatsapp\.com\/channel|chat\.whatsapp\.com/i;
-                                    shouldDelete = linkRegex.test(bodyRawStr);
+                                    const bodyRawStr = extractMessageTextForLinkDetection(m);
+                                    const shouldDelete = containsWhatsAppLink(bodyRawStr);
 
                                     if (shouldDelete) {
-                                        let canDelete = false;
-                                        if (isStrict) {
-                                            if (sender !== botId && !isOwnerReal) canDelete = true;
-                                        } else {
-                                            if (!senderIsAdmin && sender !== botId && !isOwnerReal) canDelete = true;
-                                        }
-
+                                        const canDelete = sender !== botId && !isOwnerReal && (isStrict || (metadataAvailable && !!senderParticipantForLink && !senderIsAdmin));
                                         if (canDelete) {
                                             let antiLinkDeleteSucceeded = false;
                                             let antiLinkDeleteError = null;
                                             try {
-                                                await queuedSendMessage(sock, from, { delete: m.key }, {}, 200);
+                                                const antiLinkDeleteKey = createGroupDeleteMessageKey(m, from, sender, senderJids);
+                                                await queuedSendMessage(sock, from, { delete: antiLinkDeleteKey }, {}, 0);
                                                 antiLinkDeleteSucceeded = true;
                                             } catch (antiLinkDeleteFailure) {
                                                 antiLinkDeleteError = antiLinkDeleteFailure?.message || String(antiLinkDeleteFailure);
                                             }
-                                            console.info('[message-action-completed]', { sessionId, messageId: msgId, action: 'delete_by_anti_link_rule', success: antiLinkDeleteSucceeded, antiLinkMode, isStrict, senderIsAdmin, senderName: pushName, senderJid: sender, chatJid: from, bodyPreview: String(bodyRawStr || '').slice(0, 240), error: antiLinkDeleteError });
-                                            return;
+                                            console.info('[message-action-completed]', { sessionId, messageId: msgId, action: 'delete_by_anti_link_rule', success: antiLinkDeleteSucceeded, antiLinkMode, isStrict, metadataAvailable, senderIsAdmin, senderName: pushName, senderJid: sender, chatJid: from, bodyPreview: String(bodyRawStr || '').slice(0, 240), error: antiLinkDeleteError });
+                                            if (antiLinkDeleteSucceeded) return;
                                         }
                                     }
                                 }
@@ -15697,7 +15740,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     directSend,
                                     ownerName: activeHostName,
                                     language: messageLang,
-                                    preserveSourceImage: true
+                                    preserveSourceImage: true,
+                                    longTextMode: internalCommand === 'lien' ? 'truncate' : (options.longTextMode || 'split')
                                 });
                                 const executeAdaptiveFormattedSend = async (send, responseType = 'text_or_media') => {
                                     const groupLegacyRequired = isGroup;
@@ -16240,7 +16284,13 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                             }
                                             const currentNL = await getGroupSetting(sessionId, from, 'noLien');
                                             const newNL = currentNL === 'simple' ? 'off' : 'simple';
+                                            if (newNL !== 'off' && !await canBotModerateGroup(from, true)) {
+                                                await safeSendFormatted(sock, from, t.cmd_nolien, t.del3_bot_admin_required, pushName, true, activeHostName);
+                                                break;
+                                            }
                                             await setGroupSetting(sessionId, from, 'noLien', newNL);
+                                            const persistedNLSetting = await db.collection('group_settings').findOne({ sessionId, gjid: from }, { projection: { noLien: 1 } });
+                                            if (persistedNLSetting?.noLien !== newNL) throw new Error('nolink_activation_not_verified');
                                             await safeSendFormatted(sock, from, t.cmd_nolien, newNL === 'simple' ? t.nolien_on : t.nolien_off, pushName, false, activeHostName);
                                             break;
                                         case 'nolien2':
@@ -16251,7 +16301,13 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                             }
                                             const currentNL2 = await getGroupSetting(sessionId, from, 'noLien');
                                             const newNL2 = currentNL2 === 'strict' ? 'off' : 'strict';
+                                            if (newNL2 !== 'off' && !await canBotModerateGroup(from, true)) {
+                                                await safeSendFormatted(sock, from, t.cmd_nolien2, t.del3_bot_admin_required, pushName, true, activeHostName);
+                                                break;
+                                            }
                                             await setGroupSetting(sessionId, from, 'noLien', newNL2);
+                                            const persistedNL2Setting = await db.collection('group_settings').findOne({ sessionId, gjid: from }, { projection: { noLien: 1 } });
+                                            if (persistedNL2Setting?.noLien !== newNL2) throw new Error('nolink2_activation_not_verified');
                                             await safeSendFormatted(sock, from, t.cmd_nolien2, newNL2 === 'strict' ? t.nolien2_on : t.nolien2_off, pushName, false, activeHostName);
                                             break;
                                         case 'del':
@@ -16339,8 +16395,18 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 const storedNumber = normalizedJidNumber(storedTarget);
                                                 return !!storedNumber && storedNumber === normalizedJidNumber(targetJid);
                                             });
-                                            if (existingDel2Target) await removeDel2Target(sessionId, from, existingDel2Target);
-                                            else await addDel2Target(sessionId, from, targetJid);
+                                            if (existingDel2Target) {
+                                                await removeDel2Target(sessionId, from, existingDel2Target);
+                                            } else {
+                                                if (!await canBotModerateGroup(from, true)) {
+                                                    await safeSendFormatted(sock, from, t.cmd_del2, t.del3_bot_admin_required, pushName, true, activeHostName);
+                                                    break;
+                                                }
+                                                await addDel2Target(sessionId, from, targetJid);
+                                                const verifiedDel2Targets = await getDel2Targets(sessionId, from);
+                                                const del2WasPersisted = verifiedDel2Targets.some(storedTarget => normalizeActionJid(storedTarget) === normalizeActionJid(targetJid) || (!!normalizedJidNumber(storedTarget) && normalizedJidNumber(storedTarget) === normalizedJidNumber(targetJid)));
+                                                if (!del2WasPersisted) throw new Error('del2_target_activation_not_verified');
+                                            }
                                             const del2MentionId = String(normalizedJidNumber(targetJid) || targetJid.split('@')[0] || requestedParticipantDel2?.notify || requestedParticipantDel2?.name || 'user');
                                             const del2ConfirmationText = (existingDel2Target ? t.del2_deactivated : t.del2_activated).replace('@{user}', `@${del2MentionId}`);
                                             await safeSendFormatted(sock, from, t.cmd_del2, del2ConfirmationText, pushName, false, activeHostName, { mentions: [targetJid] });
@@ -16381,17 +16447,6 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                             const quotedDel3FromMe = storedDel3Quote ? storedDel3Quote.fromMe === true || quotedDel3KeySource.fromMe === true : quoted.fromMe === true || quotedDel3KeySource.fromMe === true;
                                             const quotedDel3Participant = quotedDel3KeySource.participant || quoted.participant || quoted.participantPn || quoted.participantAlt || quoted.senderPn || '';
                                             const quotedDel3IdentityResolution = await resolveDel3ParticipantIdentity(sock, sessionId, from, [quotedDel3Participant, quotedDel3KeySource.participantAlt, quotedDel3KeySource.participantPn, quotedDel3KeySource.senderPn, quoted.participantAlt, quoted.participantPn, quoted.senderPn]);
-                                            const quotedDel3Key = {
-                                                ...quotedDel3KeySource,
-                                                remoteJid: quotedDel3KeySource.remoteJid || quoted.remoteJid || from,
-                                                remoteJidAlt: quotedDel3KeySource.remoteJidAlt || quoted.remoteJidAlt || '',
-                                                id: quotedDel3Id,
-                                                fromMe: quotedDel3FromMe
-                                            };
-                                            if (quotedDel3Participant && !quotedDel3FromMe) quotedDel3Key.participant = quotedDel3Participant;
-                                            if (quoted.participantAlt) quotedDel3Key.participantAlt = quoted.participantAlt;
-                                            if (quoted.participantPn) quotedDel3Key.participantPn = quoted.participantPn;
-                                            if (quoted.senderPn) quotedDel3Key.senderPn = quoted.senderPn;
                                             const quotedDel3ResolvedParticipant = quotedDel3IdentityResolution.aliases.find(value => /@(?:s\.whatsapp\.net|lid)$/i.test(value)) || quotedDel3Participant;
                                             const quotedDel3OwnerProtected = quotedDel3FromMe || !!(sOwnerTop && isProtectedWhatsAppTarget(quotedDel3ResolvedParticipant, sOwnerTop, sock.user?.id || botId, quotedDel3IdentityResolution.aliases.join(' ')));
                                             const quotedDel3IdentityUnresolved = quotedDel3IdentityResolution.unresolvedLids.length > 0 && !quotedDel3IdentityResolution.hasPhoneIdentity;
@@ -16402,58 +16457,59 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                             }
                                             const currentDel3Rules = await getDel3Rules(sessionId, from);
                                             const del3AlreadyEnabled = !!del3Format && currentDel3Rules.some(rule => rule.format === del3Format);
-                                            const botCanModerateDel3 = await canBotModerateGroup(from, false);
-                                            if (!botCanModerateDel3) {
-                                                await safeSendFormatted(sock, from, t.cmd_del3, t.del3_bot_admin_required, pushName, true, activeHostName);
-                                                break;
-                                            }
-                                            console.info('[del3-format-sample-selected]', { sessionId, group: from, messageId: quotedDel3Id, format: del3Format || 'unknown', ownerProtected: quotedDel3OwnerProtected, ownerSampleAuthorized: quotedDel3OwnerSampleAuthorized, fromMe: quotedDel3FromMe, action: 'store_whatsapp_message_format_and_apply_rule_only_to_future_matching_messages_except_owner_and_bot' });
+                                            console.info('[del3-format-sample-selected]', { sessionId, group: from, messageId: quotedDel3Id, format: del3Format || 'unknown', ownerProtected: quotedDel3OwnerProtected, ownerSampleAuthorized: quotedDel3OwnerSampleAuthorized, fromMe: quotedDel3FromMe, action: 'use_selected_message_only_as_a_format_sample_and_preserve_it' });
                                             if (!del3Format) {
-                                                console.info('[del3-selected-message-format-unknown]', { sessionId, group: from, messageId: quotedDel3Id, messageContentAvailable: !!quotedDel3Message, automaticRuleChanged: false, selectedSampleDeleted: false });
+                                                console.info('[del3-selected-message-format-unknown]', { sessionId, group: from, messageId: quotedDel3Id, messageContentAvailable: !!quotedDel3Message, automaticRuleChanged: false, selectedSamplePreserved: true });
                                                 break;
                                             }
                                             let del3RuleChanged = false;
                                             let del3ActionText = '';
                                             if (del3AlreadyEnabled) {
-                                                await removeDel3Rule(sessionId, from, del3Format);
-                                                del3RuleChanged = true;
-                                                del3ActionText = t.del3_deactivated;
-                                                console.info('[del3-rule-deactivated]', { sessionId, group: from, format: del3Format, selectedSampleWillBeDeleted: true });
-                                            } else {
-                                                await stageDel3Rule(sessionId, from, del3Format, extractBody({ message: quotedDel3Message }));
-                                                console.info('[del3-rule-staged]', { sessionId, group: from, format: del3Format, sampleTextStored: true, activationRequiresDeliveredConfirmation: false });
                                                 try {
+                                                    const remainingDel3Rules = await removeDel3Rule(sessionId, from, del3Format);
+                                                    if (remainingDel3Rules.some(rule => rule.format === del3Format)) throw new Error('del3_deactivation_not_verified');
+                                                    del3RuleChanged = true;
+                                                    del3ActionText = t.del3_deactivated;
+                                                    console.info('[del3-rule-deactivated]', { sessionId, group: from, format: del3Format, selectedSamplePreserved: true, deactivationVerified: true });
+                                                } catch (del3DeactivationError) {
+                                                    console.error('[del3-rule-deactivation-failed]', { sessionId, group: from, format: del3Format, error: String(del3DeactivationError?.message || del3DeactivationError).slice(0, 300), selectedSamplePreserved: true });
+                                                    await safeSendFormatted(sock, from, t.cmd_del3, errorFallbackText('del3', messageLang), pushName, false, activeHostName);
+                                                    break;
+                                                }
+                                            } else {
+                                                const botCanModerateDel3 = await canBotModerateGroup(from, true);
+                                                if (!botCanModerateDel3) {
+                                                    await safeSendFormatted(sock, from, t.cmd_del3, t.del3_bot_admin_required, pushName, true, activeHostName);
+                                                    break;
+                                                }
+                                                const ownerIdentityAvailableForDel3 = !!(sOwnerTop && [sOwnerTop.Number, sOwnerTop.number, sOwnerTop.OwnerNumber, sOwnerTop.ownerNumber, sOwnerTop.PairingNumber, sOwnerTop.AccountJid, sOwnerTop.accountJid, sOwnerTop.OwnerLid, sOwnerTop.ownerLid].some(value => String(value || '').trim()));
+                                                if (!ownerIdentityAvailableForDel3) {
+                                                    console.warn('[del3-activation-blocked]', { sessionId, group: from, format: del3Format, reason: 'owner_identity_record_unavailable' });
+                                                    await safeSendFormatted(sock, from, t.cmd_del3, errorFallbackText('del3', messageLang), pushName, false, activeHostName);
+                                                    break;
+                                                }
+                                                let activationPersisted = false;
+                                                try {
+                                                    await stageDel3Rule(sessionId, from, del3Format, extractBody({ message: quotedDel3Message }));
+                                                    console.info('[del3-rule-staged]', { sessionId, group: from, format: del3Format, sampleTextStored: true, selectedSamplePreserved: true, activationVerifiedBeforeConfirmation: true });
                                                     const activatedAt = await activateDel3Rule(sessionId, from, del3Format);
+                                                    activationPersisted = true;
+                                                    const verifiedDel3Rules = await getDel3Rules(sessionId, from);
+                                                    if (!verifiedDel3Rules.some(rule => rule.format === del3Format)) throw new Error('del3_activation_not_verified');
                                                     del3RuleChanged = true;
                                                     del3ActionText = t.del3_activated;
-                                                    console.info('[del3-rule-activated]', { sessionId, group: from, format: del3Format, activatedAt, futureMessages: 'same_group_same_whatsapp_format_except_host_and_bot' });
+                                                    console.info('[del3-rule-activated]', { sessionId, group: from, format: del3Format, activatedAt, activationVerified: true, selectedSamplePreserved: true, futureMessages: 'same_group_same_whatsapp_format_except_host_and_bot' });
                                                 } catch (del3ActivationError) {
-                                                    await discardPendingDel3Rule(sessionId, from, del3Format).catch(() => {});
-                                                    console.error('[del3-rule-activation-failed]', { sessionId, group: from, format: del3Format, error: del3ActivationError?.message || String(del3ActivationError), selectedSampleDeleted: false });
+                                                    if (activationPersisted) await removeDel3Rule(sessionId, from, del3Format).catch(() => {});
+                                                    else await discardPendingDel3Rule(sessionId, from, del3Format).catch(() => {});
+                                                    console.error('[del3-rule-activation-failed]', { sessionId, group: from, format: del3Format, error: del3ActivationError?.message || String(del3ActivationError), activationConfirmed: false, selectedSamplePreserved: true });
+                                                    await safeSendFormatted(sock, from, t.cmd_del3, errorFallbackText('del3', messageLang), pushName, false, activeHostName);
                                                     break;
                                                 }
                                             }
                                             if (del3RuleChanged) {
-                                                let sampleDeleted = false;
-                                                try {
-                                                    console.info('[del3-sample-delete-started]', { sessionId, group: from, messageId: quotedDel3Id, fromMe: quotedDel3FromMe, ownerSampleAuthorized: quotedDel3OwnerSampleAuthorized });
-                                                    markCommandSending('queued_delete_message', 'del3_sample');
-                                                    const deletion = await queuedDeleteMessageWithAck(sock, from, quotedDel3Key, 180, 6500);
-                                                    sampleDeleted = !!deletion?.acknowledgementStatus;
-                                                    if (sampleDeleted) {
-                                                        console.info('[del3-sample-deleted]', { sessionId, group: from, messageId: quotedDel3Id, acknowledgementStatus: deletion?.acknowledgementStatus ?? null, formatRuleRetained: true });
-                                                    } else {
-                                                        commandOperationFailed = true;
-                                                        logCommandLifecycle('failure', { stage: 'sample_delete', action: 'del3_sample_delete_not_confirmed', formatRuleRetained: true });
-                                                        console.warn('[del3-sample-delete-unconfirmed]', { sessionId, group: from, messageId: quotedDel3Id, acknowledgementStatus: deletion?.acknowledgementStatus ?? null, formatRuleRetained: true });
-                                                    }
-                                                } catch (del3SampleDeleteError) {
-                                                    commandOperationFailed = true;
-                                                    logCommandLifecycle('failure', { stage: 'sample_delete', action: 'del3_sample_delete_failed', error: String(del3SampleDeleteError?.message || del3SampleDeleteError).slice(0, 500), formatRuleRetained: true });
-                                                    console.error('[del3-sample-delete-failed]', { sessionId, group: from, messageId: quotedDel3Id, formatRuleRetained: true, error: del3SampleDeleteError?.message || String(del3SampleDeleteError) });
-                                                }
                                                 await safeSendFormatted(sock, from, t.cmd_del3, del3ActionText, pushName, false, activeHostName);
-                                                console.info('[del3-toggle-completed]', { sessionId, group: from, format: del3Format, ruleActive: !del3AlreadyEnabled, sampleDeleted, sampleFormatRetainedForFutureMatches: true, ownerMessagesExempt: true, botMessagesExempt: true });
+                                                console.info('[del3-toggle-completed]', { sessionId, group: from, format: del3Format, ruleActive: !del3AlreadyEnabled, activationOrDeactivationVerified: true, selectedSamplePreserved: true, ownerMessagesExempt: true, botMessagesExempt: true });
                                             }
                                             break;
                                         case 'vv':
