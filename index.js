@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r191-vv-viewonce-restore-ai-typing';
+const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r192-account-scoped-message-claims-and-duplicate-cleanup';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -1737,7 +1737,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-08-r191-vv-viewonce-restore-ai-typing';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-08-r192-account-scoped-message-claims-and-duplicate-cleanup';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -3209,12 +3209,12 @@ function queueMessage(executeFn, delayMs = 150, queueKey = null, partitionKey = 
 
 async function claimMessageForProcessing(sessionId, messageId, remoteJid = '', accountIdentity = '', upsertType = 'notify') {
     if (!sessionId || !messageId) return false;
-    if (!db) return false;
+    if (!db) return true;
     const normalizedChat = String(remoteJid || 'unknown-chat').trim();
     const normalizedMessageId = String(messageId || '').trim();
     const accountScope = String(accountIdentity || sessionId).trim();
     const accountScopeHash = shortLogHash(accountScope);
-    const documentId = `message:${normalizedMessageId}`;
+    const documentId = `${accountScopeHash}:${normalizedMessageId}`;
     const now = Date.now();
     const leaseUntil = new Date(now + MESSAGE_PROCESSING_LEASE_MS);
     const reclaimConditions = [
@@ -3239,15 +3239,15 @@ async function claimMessageForProcessing(sessionId, messageId, remoteJid = '', a
         return result.upsertedCount === 1 || result.matchedCount === 1;
     } catch (error) {
         if (error && error.code === 11000) return false;
-        console.warn('[message-dedupe-persistent-claim-unavailable]', { sessionId, remoteJid: normalizedChat, messageId: normalizedMessageId, error: error?.message || String(error), action: 'skip_dispatch_to_prevent_cross_runtime_duplicate_replies' });
-        return false;
+        console.warn('[message-dedupe-persistent-claim-unavailable]', { sessionId, remoteJid: normalizedChat, messageId: normalizedMessageId, accountScopeHash, error: error?.message || String(error), action: 'continue_under_exclusive_session_runtime_lock_and_local_message_id_deduplication' });
+        return true;
     }
 }
 
 async function renewMessageProcessingClaim(sessionId, messageId, accountIdentity = '') {
     if (!db || !sessionId || !messageId) return false;
     const accountScope = String(accountIdentity || sessionId).trim();
-    const documentId = `message:${String(messageId || '').trim()}`;
+    const documentId = `${shortLogHash(accountScope)}:${String(messageId || '').trim()}`;
     const now = new Date();
     try {
         const result = await db.collection('processed_messages').updateOne(
@@ -3265,7 +3265,7 @@ async function finishMessageProcessingClaim(sessionId, messageId, accountIdentit
     if (!db || !sessionId || !messageId) return false;
     const normalizedMessageId = String(messageId || '').trim();
     const accountScope = String(accountIdentity || sessionId).trim();
-    const documentId = `message:${normalizedMessageId}`;
+    const documentId = `${shortLogHash(accountScope)}:${normalizedMessageId}`;
     const now = new Date();
     try {
         const update = succeeded
@@ -4525,6 +4525,7 @@ const TFBOT_LOGICAL_COLLECTIONS = new Set([
     'session_account_runtime_locks',
     'session_owners',
     'session_runtime_locks',
+    'tfbot_ai_conversations',
     'user_preferences'
 ]);
 
@@ -6554,9 +6555,10 @@ function scheduleTfServerAiCleanupRetry(sessionId) {
 async function clearTfServerAiSessionsForSession(sessionId) {
     const id = String(sessionId || '').trim();
     if (!id || !db) return { cleared: 0, pending: 0 };
-    const collection = db.collection('tfbot_ai_conversations');
+    let collection;
     let records;
     try {
+        collection = db.collection('tfbot_ai_conversations');
         records = await collection.find({ $or: [{ sessionId: id }, { sessionIds: id }] }).toArray();
     } catch (error) {
         console.warn('[tfserver-ai-cleanup-list-failed]', { sessionId: id, error: error?.message || String(error) });
