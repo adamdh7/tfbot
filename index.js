@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r193-fix-received-command-initialization';
+const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r194-ai-image-and-code-text-delivery';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -6539,6 +6539,50 @@ async function callTfServerAiMessage(sessionId, userPhone, text, useSearch = fal
     if (!answer) throw new Error('tfserver_ai_empty_response');
     console.info('[tfserver-ai-request-completed]', { sessionId, conversationHash: shortLogHash(tfid), mode: useSearch ? 'search' : 'chat', inputLength: query.length, responseLength: answer.length });
     return answer;
+}
+
+function parseTfServerAiGeneratedImage(answer) {
+    const text = String(answer || '');
+    const matches = [...text.matchAll(/!\[Generated Image\]\((https:\/\/bref\.adamdh7\.org\/TF-[A-Za-z0-9_-]+\/[^\s)]+)\)/gi)];
+    if (!matches.length) return { text, imageUrl: '' };
+    const selected = matches[matches.length - 1];
+    let imageUrl = '';
+    try {
+        const parsed = new URL(selected[1]);
+        if (parsed.protocol === 'https:' && parsed.hostname.toLowerCase() === 'bref.adamdh7.org' && /^\/TF-[A-Za-z0-9_-]+\//i.test(parsed.pathname)) imageUrl = parsed.toString();
+    } catch (error) {}
+    if (!imageUrl) return { text, imageUrl: '' };
+    const cleanText = text.replace(selected[0], '').replace(/\n{3,}/g, '\n\n').trim();
+    return { text: cleanText, imageUrl };
+}
+
+function formatTfServerAiWhatsAppText(value) {
+    return String(value || '').replace(/https?:\/\/[^\s<>]+/g, url => `*_${url}_*`).trim();
+}
+
+async function sendTfServerAiReply(sock, jid, answer, sendMessage, quotedMessage) {
+    const parsed = parseTfServerAiGeneratedImage(answer);
+    let imageBuffer = null;
+    if (parsed.imageUrl) {
+        const response = await fetchWithRetry(parsed.imageUrl, { method: 'GET', redirect: 'error', cache: 'no-store' }, 3);
+        if (!response.ok) throw new Error(`tfserver_ai_generated_image_http_${response.status}`);
+        const contentType = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+        if (!/^image\/(?:png|jpeg|webp|gif)$/i.test(contentType)) throw new Error('tfserver_ai_generated_image_invalid_content_type');
+        const declaredLength = Number(response.headers.get('content-length') || 0);
+        if (declaredLength > 15 * 1024 * 1024) throw new Error('tfserver_ai_generated_image_too_large');
+        imageBuffer = Buffer.from(await response.arrayBuffer());
+        if (!imageBuffer.length || imageBuffer.length > 15 * 1024 * 1024) throw new Error('tfserver_ai_generated_image_invalid_size');
+    }
+    const caption = formatTfServerAiWhatsAppText(parsed.text);
+    if (imageBuffer) {
+        const sent = await sendMessage(sock, jid, { image: imageBuffer, ...(caption ? { caption } : {}) }, { quoted: quotedMessage }, 180);
+        if (!sent?.key?.id) throw new Error('tfserver_ai_generated_image_send_unconfirmed');
+        return { sent: true, type: 'image', imageUrl: parsed.imageUrl };
+    }
+    if (!caption) throw new Error('tfserver_ai_response_empty_after_formatting');
+    const sent = await sendMessage(sock, jid, { text: caption }, { quoted: quotedMessage }, 180);
+    if (!sent?.key?.id) throw new Error('tfserver_ai_text_send_unconfirmed');
+    return { sent: true, type: 'text' };
 }
 
 function scheduleTfServerAiCleanupRetry(sessionId) {
@@ -16638,6 +16682,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 break;
                                             }
                                             if (!quotedMessage && !quoted?.stanzaId) {
+                                                console.warn('[quoted-media-command-missing-quote]', { sessionId, messageId: msgId, command: internalCommand, chatType: isGroup ? 'group' : 'private', hasContextInfo: !!quoted, quotedMessageAvailable: false, stanzaIdAvailable: false });
                                                 await safeSendFormatted(sock, from, commandTitleVO, internalCommand === 'vv2' ? (t.vv2_usage || t.vv_usage) : t.vv_usage, pushName, true, activeHostName);
                                                 break;
                                             }
@@ -16656,6 +16701,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 if (mediaInfoVO?.payload) break;
                                             }
                                             if (!mediaInfoVO?.payload) {
+                                                console.warn('[quoted-media-command-payload-not-found]', { sessionId, messageId: msgId, command: internalCommand, quotedMessageAvailable: !!quotedSourceVO, persistentQuoteAvailable: !!quotedRecordVO?.message, quoteRecordSource: quotedRecordVO?.source || null, quoteRecordFormat: quotedRecordVO?.messageFormat || null });
                                                 console.info('[quoted-media-ignored-not-view-once]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, reason: 'quoted_media_payload_unavailable', quotedMessageAvailable: !!quotedSourceVO, storedQuoteAvailable: !!quotedRecordVO?.message, storedQuoteFormat: quotedRecordVO?.messageFormat || null });
                                                 break;
                                             }
@@ -16770,8 +16816,10 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 const aiUserPhone = await getTfServerAiUserPhoneNumber(sessionId, sock, [sender, ...senderJids], sNum, isOwnerReal ? authenticatedAccountNumber : '');
                                                 const aiResponseText = await callTfServerAiMessage(sessionId, aiUserPhone, promptText, false);
                                                 if (isCancelled) return;
-                                                await safeSendFormatted(sock, from, t.ai_title, aiResponseText, pushName, true, activeHostName, { preserveFormatting: true });
+                                                const aiDelivery = await sendTfServerAiReply(sock, from, aiResponseText, trackedQueuedSendMessage, m);
                                                 terminalResponseSent = true;
+                                                responseSentForLog = true;
+                                                console.info('[tfserver-ai-whatsapp-delivered]', { sessionId, messageId: msgId, mode: 'chat', deliveryType: aiDelivery.type, generatedImage: aiDelivery.type === 'image' });
                                             } catch (e) {
                                                 await safeSendActionError(sock, from, t.ai_title, e, messageLang, pushName, m.messageTimestamp);
                                             }
@@ -16861,12 +16909,12 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 if (isCancelled) return;
                                                 if (!data || !data.code) throw new Error(data?.error || data?.message || 'pair_code_not_returned');
                                                 if (!isCancelled) {
-                                                    const codeFile = Buffer.from(String(data.code).trim(), 'utf8');
-                                                    const codeMessage = await trackedQueuedSendMessage(sock, from, { document: codeFile, mimetype: 'text/plain', fileName: 'code.txt' }, {}, 0);
-                                                    if (!codeMessage?.key?.id) throw new Error('pairing_code_file_send_not_confirmed');
+                                                    const codeText = String(data.code).trim();
+                                                    const codeMessage = await trackedQueuedSendMessage(sock, from, { text: codeText }, { quoted: m }, 0);
+                                                    if (!codeMessage?.key?.id) throw new Error('pairing_code_text_send_not_confirmed');
                                                     responseSentForLog = true;
                                                     terminalResponseSent = true;
-                                                    console.info('[pairing-code-delivered]', { sessionId, messageId: msgId, delivered: true, format: 'text_file_without_caption', connectionFormat: normalizeConnectionFormat(activeSessions.get(sessionId)?.format || 'pair') });
+                                                    console.info('[pairing-code-delivered]', { sessionId, messageId: msgId, delivered: true, format: 'plain_chat_text', connectionFormat: normalizeConnectionFormat(activeSessions.get(sessionId)?.format || 'pair') });
                                                 }
                                             } catch (e) {
                                                 const safeCodeMessage = t.code_error;
@@ -17069,8 +17117,10 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 const searchUserPhone = await getTfServerAiUserPhoneNumber(sessionId, sock, [sender, ...senderJids], sNum, isOwnerReal ? authenticatedAccountNumber : '');
                                                 const searchAIResponse = await callTfServerAiMessage(sessionId, searchUserPhone, searchQuery, true);
                                                 if (isCancelled) return;
-                                                await safeSendFormatted(sock, from, t.search_title, searchAIResponse, pushName, true, activeHostName, { preserveFormatting: true });
+                                                const searchDelivery = await sendTfServerAiReply(sock, from, searchAIResponse, trackedQueuedSendMessage, m);
                                                 terminalResponseSent = true;
+                                                responseSentForLog = true;
+                                                console.info('[tfserver-ai-whatsapp-delivered]', { sessionId, messageId: msgId, mode: 'search', deliveryType: searchDelivery.type, generatedImage: searchDelivery.type === 'image' });
                                             } catch (e) {
                                                 await safeSendActionError(sock, from, t.search_title, e, messageLang, pushName, m.messageTimestamp);
                                             }
