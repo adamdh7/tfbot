@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r189-user-phone-tfid-vv-viewonce-sites-code-txt';
+const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r191-vv-viewonce-restore-ai-typing';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -215,7 +215,7 @@ for (const level of Object.keys(tfbotOriginalConsole)) {
     console[level] = (...args) => {
         try {
             const serialized = args.map(value => typeof value === 'string' ? value : tfbotDiagnosticSerialize(value)).join(' ');
-            const operationalLog = /tfbot-router|tfbot-worker|cluster-|session-(?:restore|orphan|expired|duplicate|runtime-lock|account-runtime-lock|reconnect|open|health|runtime-status)|signal-|whatsapp-signal|pairing-challenge|worker-handoff|send-failure|whatsapp-send|mongo-(?:connect|close)|storage-layout|messages-upsert|message-|command-|whatsapp-presence-update|group-metadata|group-sender-key|sender-key-memory|group-participant|baileys-|message-receipt|message-status/i.test(serialized);
+            const operationalLog = /tfbot-router|tfbot-worker|cluster-|session-(?:restore|orphan|expired|duplicate|runtime-lock|account-runtime-lock|reconnect|open|health|runtime-status)|signal-|whatsapp-signal|pairing-challenge|worker-handoff|send-failure|whatsapp-send|mongo-(?:connect|close)|storage-layout|messages-upsert|message-|command-|stale-command|tfserver-ai|del3-|quoted-media|view-once|group-status|whatsapp-presence-update|group-metadata|group-sender-key|sender-key-memory|group-participant|baileys-|message-receipt|message-status/i.test(serialized);
             if (isSignalDecryptionFailure(args)) {
                 const fallbackSessionMatch = serialized.match(/(?:sessionId|session_id)["'=:\s]+([A-Za-z0-9_-]{8,120})/i);
                 const diagnosticSession = fallbackSessionMatch?.[1] || getTfbotDiagnosticSession()?.sessionId || '';
@@ -1737,7 +1737,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-08-r189-user-phone-tfid-vv-viewonce-sites-code-txt';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-08-r191-vv-viewonce-restore-ai-typing';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1851,7 +1851,8 @@ const BOT_TIME_ZONE = process.env.BOT_TIME_ZONE || 'America/Santo_Domingo';
 const AI_MAX_INPUT_CHARS = Math.max(1000, Number(process.env.AI_MAX_INPUT_CHARS || 12000));
 const SEARCH_QUERY_MAX_CHARS = Math.max(200, Number(process.env.SEARCH_QUERY_MAX_CHARS || 1200));
 const TFSERVER_AI_URL = String(process.env.TFSERVER_AI_URL || 'https://tfserver-ai.onrender.com').trim().replace(/\/+$/, '');
-const TFSERVER_AI_TOKEN = String(process.env.TFSERVER_AI_TOKEN || '').trim();
+const TFSERVER_AI_TOKEN = String(process.env.TFSERVER_AI_TOKEN || process.env.TOKEN || '').trim();
+const TFBOT_MAX_COMMAND_AGE_MS = Math.max(30000, Math.min(600000, Number(process.env.TFBOT_MAX_COMMAND_AGE_MS || 120000)));
 const TFSERVER_AI_TIMEOUT_MS = Math.max(15000, Math.min(300000, Number(process.env.TFSERVER_AI_TIMEOUT_MS || 180000)));
 const TFSERVER_AI_DELETE_TIMEOUT_MS = Math.max(3000, Math.min(30000, Number(process.env.TFSERVER_AI_DELETE_TIMEOUT_MS || 12000)));
 const TFSERVER_AI_CLEANUP_RETRY_MS = Math.max(10000, Math.min(300000, Number(process.env.TFSERVER_AI_CLEANUP_RETRY_MS || 30000)));
@@ -3423,7 +3424,7 @@ function persistQuotedMessageForCommands(sessionId, message, aliases = []) {
             ? message.messageTimestamp.toNumber()
             : Number(message.messageTimestamp || 0);
         const messageFormat = getWhatsAppMessageFormat(message);
-        const retainMediaPayload = mediaMessage && mediaInfo.viewOnce !== true && key.fromMe !== true;
+        const retainMediaPayload = mediaMessage && (mediaInfo.viewOnce === true || key.fromMe !== true);
         const record = {
             _id: `quoted:${sessionId}:${messageId}`,
             sessionId,
@@ -6358,46 +6359,87 @@ async function useMongoAuthState(sessionId, expectExisting = false) {
 }
 
 function buildTfServerAiEventText(bodyText) {
-    let accumulated = '';
-    let finalAnswer = '';
     let generationAnswer = '';
     let streamError = '';
+    let generationComplete = false;
     for (const line of String(bodyText || '').split(/\r?\n/)) {
-        if (!line.startsWith('data:')) continue;
-        const raw = line.slice(5).trim();
+        const trimmedLine = String(line || '').trim();
+        if (!trimmedLine || trimmedLine.startsWith(':') || /^(?:event|id|retry):/i.test(trimmedLine)) continue;
+        const raw = trimmedLine.startsWith('data:') ? trimmedLine.slice(5).trim() : trimmedLine;
         if (!raw || raw === '[DONE]') continue;
         let event;
         try { event = JSON.parse(raw); } catch (error) { continue; }
         const type = String(event?.type || '').toLowerCase();
-        if (type === 'clear') {
-            accumulated = '';
-            finalAnswer = '';
-            generationAnswer = '';
-        } else if (type === 'response' || type === 'response_post_tool') {
-            accumulated += String(event?.content || '');
-        } else if (type === 'final') {
-            if (event?.error === true) streamError = String(event?.content || event?.message || streamError);
-            else if (typeof event?.content === 'string') finalAnswer = event.content;
-        } else if (type === 'generation_end' && typeof event?.final_message === 'string') {
-            generationAnswer = event.final_message;
-        } else if (type === 'error') {
-            streamError = String(event?.message || event?.content || streamError);
+        if (type === 'generation_end') {
+            generationComplete = event?.done === true;
+            if (event?.error === true || event?.stopped === true) streamError = String(event?.message || event?.final_message || 'generation_incomplete');
+            else if (typeof event?.final_message === 'string') generationAnswer = event.final_message;
+        } else if (type === 'error' || (type === 'final' && event?.error === true)) {
+            streamError = String(event?.message || event?.content || streamError || 'generation_failed');
         }
     }
-    if (finalAnswer.trim()) return finalAnswer.trim();
-    if (generationAnswer.trim()) return generationAnswer.trim();
-    if (accumulated.trim()) return accumulated.trim();
     if (streamError) throw new Error(`tfserver_ai_generation_failed:${streamError.slice(0, 500)}`);
+    if (generationComplete && generationAnswer.trim()) return generationAnswer.trim();
     try {
         const parsed = JSON.parse(String(bodyText || ''));
         if (parsed?.status === 'maintenance') throw new Error('tfserver_ai_maintenance');
         const candidate = parsed?.answer || parsed?.content || parsed?.message || parsed?.final_message;
         if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
         if (parsed?.status === 'deleted') return '';
+        if (parsed?.error || parsed?.ok === false) throw new Error(`tfserver_ai_response_failed:${String(parsed?.message || parsed?.error).slice(0, 300)}`);
     } catch (error) {
         if (String(error?.message || '').startsWith('tfserver_ai_')) throw error;
     }
     return '';
+}
+
+async function readTfServerAiFinalStream(response) {
+    const reader = response?.body?.getReader?.();
+    if (!reader) {
+        const bodyText = await response.text();
+        const finalMessage = buildTfServerAiEventText(bodyText);
+        if (!finalMessage) throw new Error('tfserver_ai_stream_missing_final_message');
+        return finalMessage;
+    }
+    const decoder = new TextDecoder('utf-8');
+    let pending = '';
+    let generationEnd = null;
+    let streamError = '';
+    let eventCount = 0;
+    const consumeLine = line => {
+        const trimmedLine = String(line || '').trim();
+        if (!trimmedLine || trimmedLine.startsWith(':') || /^(?:event|id|retry):/i.test(trimmedLine)) return;
+        const raw = trimmedLine.startsWith('data:') ? trimmedLine.slice(5).trim() : trimmedLine;
+        if (!raw || raw === '[DONE]') return;
+        let event;
+        try { event = JSON.parse(raw); } catch (error) { return; }
+        eventCount++;
+        const type = String(event?.type || '').toLowerCase();
+        if (type === 'generation_end') generationEnd = event;
+        else if (type === 'error' || (type === 'final' && event?.error === true)) streamError = String(event?.message || event?.content || 'generation_failed');
+    };
+    try {
+        while (true) {
+            const chunk = await reader.read();
+            pending += decoder.decode(chunk.value || new Uint8Array(0), { stream: !chunk.done });
+            const lines = pending.split(/\r?\n/);
+            pending = lines.pop() || '';
+            for (const line of lines) consumeLine(line);
+            if (chunk.done) break;
+        }
+        if (pending) consumeLine(pending);
+    } finally {
+        try { reader.releaseLock(); } catch (error) {}
+    }
+    if (streamError) throw new Error(`tfserver_ai_generation_failed:${streamError.slice(0, 500)}`);
+    if (!generationEnd) throw new Error('tfserver_ai_stream_closed_before_generation_end');
+    if (generationEnd.error === true || generationEnd.stopped === true || generationEnd.done !== true) {
+        throw new Error(`tfserver_ai_generation_incomplete:${String(generationEnd.message || (generationEnd.stopped ? 'generation_stopped' : 'generation_not_completed')).slice(0, 240)}`);
+    }
+    const finalMessage = String(generationEnd.final_message || '').trim();
+    if (!finalMessage) throw new Error('tfserver_ai_generation_completed_without_final_message');
+    console.info('[tfserver-ai-stream-final-received]', { eventCount, finalLength: finalMessage.length, generationDone: true });
+    return finalMessage;
 }
 
 async function postTfServerAi(payload, timeoutMs = TFSERVER_AI_TIMEOUT_MS) {
@@ -6407,6 +6449,7 @@ async function postTfServerAi(payload, timeoutMs = TFSERVER_AI_TIMEOUT_MS) {
     const requestHeaders = {
         'Content-Type': 'application/json',
         'Accept': 'text/event-stream, application/json',
+        'Cache-Control': 'no-cache',
         'x-caller-host': 'dh7.adamdh7.org'
     };
     if (TFSERVER_AI_TOKEN) {
@@ -6422,9 +6465,18 @@ async function postTfServerAi(payload, timeoutMs = TFSERVER_AI_TIMEOUT_MS) {
             redirect: 'error',
             cache: 'no-store'
         });
+        if (!response.ok) {
+            try { await response.body?.cancel?.(); } catch (error) {}
+            throw new Error(`tfserver_ai_http_${response.status}`);
+        }
+        const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase();
+        if (contentType.includes('text/event-stream')) {
+            const finalMessage = await readTfServerAiFinalStream(response);
+            return { response, bodyText: '', finalMessage, streamed: true };
+        }
         const bodyText = await response.text();
-        if (!response.ok) throw new Error(`tfserver_ai_http_${response.status}`);
-        return { response, bodyText };
+        const finalMessage = buildTfServerAiEventText(bodyText);
+        return { response, bodyText, finalMessage, streamed: false };
     } catch (error) {
         if (error?.name === 'AbortError') throw new Error('tfserver_ai_timeout');
         throw error;
@@ -6481,8 +6533,8 @@ async function callTfServerAiMessage(sessionId, userPhone, text, useSearch = fal
     const payload = useSearch
         ? { tfid, text: query, action: { name: 'search', params: { query } } }
         : { tfid, text: query };
-    const { bodyText } = await postTfServerAi(payload, TFSERVER_AI_TIMEOUT_MS);
-    const answer = buildTfServerAiEventText(bodyText);
+    const aiResult = await postTfServerAi(payload, TFSERVER_AI_TIMEOUT_MS);
+    const answer = String(aiResult.finalMessage || buildTfServerAiEventText(aiResult.bodyText) || '').trim();
     if (!answer) throw new Error('tfserver_ai_empty_response');
     console.info('[tfserver-ai-request-completed]', { sessionId, conversationHash: shortLogHash(tfid), mode: useSearch ? 'search' : 'chat', inputLength: query.length, responseLength: answer.length });
     return answer;
@@ -7670,11 +7722,7 @@ function getWhatsAppMessageFormat(value) {
         seen.add(node);
         const entries = Object.entries(node);
         const nodeViewOnce = inheritedViewOnce || node.viewOnce === true || node.isViewOnce === true || node.is_view_once === true;
-        for (const [key] of entries) {
-            if (ignored.has(key)) continue;
-            const known = keyToFormat.get(key);
-            if (known === 'status') return 'status';
-        }
+        const containsStatusWrapper = entries.some(([key]) => keyToFormat.get(key) === 'status');
         for (const [key, payload] of entries) {
             if (!viewOnceWrapperKeys.has(key) || !payload || typeof payload !== 'object') continue;
             const found = scan(getNested(payload), depth + 1, seen, true);
@@ -7683,6 +7731,7 @@ function getWhatsAppMessageFormat(value) {
         for (const [key, payload] of entries) {
             if (!wrapperKeys.has(key) || viewOnceWrapperKeys.has(key) || !payload || typeof payload !== 'object') continue;
             const found = scan(getNested(payload), depth + 1, seen, nodeViewOnce);
+            if (found && found.startsWith('other:') && keyToFormat.get(key) === 'status') return 'status';
             if (found) return found;
         }
         for (const [key, payload] of entries) {
@@ -7701,9 +7750,26 @@ function getWhatsAppMessageFormat(value) {
             if (found && !fallback) fallback = found;
             if (!found && !fallback) fallback = `other:${String(key).slice(0, 80)}`;
         }
-        return fallback;
+        return containsStatusWrapper && fallback.startsWith('other:') ? 'status' : (fallback || (containsStatusWrapper ? 'status' : ''));
     };
     return scan(source, 0, new WeakSet());
+}
+
+function hasWhatsAppStatusWrapper(value) {
+    const source = value?.message && typeof value.message === 'object' ? value.message : value;
+    const statusKeys = new Set(['groupStatusMessageContent', 'groupStatusMessage', 'groupStatusMessageV2', 'groupStatusMentionMessage', 'groupStatusMentionMessageV2', 'statusMessage', 'statusMentionMessage', 'statusMentionMessageV2', 'statusMentionMessageV2Extension', 'statusMentionMessageExtension', 'statusMentionMessageV3']);
+    const ignored = new Set(['messageContextInfo', 'contextInfo', 'quotedMessage', 'senderKeyDistributionMessage', 'protocolMessage', 'messageSecret', 'thumbnail', 'jpegThumbnail']);
+    const visit = (node, depth, seen) => {
+        if (!node || typeof node !== 'object' || depth > 18 || seen.has(node)) return false;
+        seen.add(node);
+        for (const [key] of Object.entries(node)) if (statusKeys.has(key)) return true;
+        for (const [key, child] of Object.entries(node)) {
+            if (ignored.has(key) || !child || typeof child !== 'object') continue;
+            if (visit(child, depth + 1, seen)) return true;
+        }
+        return false;
+    };
+    return visit(source, 0, new WeakSet());
 }
 
 function extractWhatsAppResendMedia(value) {
@@ -7712,7 +7778,7 @@ function extractWhatsAppResendMedia(value) {
         'ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension',
         'documentWithCaptionMessage', 'deviceSentMessage', 'editedMessage', 'associatedChildMessage',
         'groupStatusMessageContent', 'groupStatusMessage', 'groupStatusMessageV2', 'statusMessage',
-        'statusMentionMessage', 'statusMentionMessageV2', 'statusMentionMessageV2Extension', 'statusMentionMessageExtension'
+        'statusMentionMessage', 'statusMentionMessageV2', 'statusMentionMessageV2Extension', 'statusMentionMessageExtension', 'statusMentionMessageV3'
     ]);
     const viewOnceWrapperKeys = new Set(['viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension']);
     const ignoredKeys = new Set([
@@ -7886,22 +7952,32 @@ async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, se
     if (!/@g\.us$/i.test(chat) || !messageId || message?.key?.fromMe === true) return false;
     const format = getWhatsAppMessageFormat(message);
     if (!format) return false;
+    const statusWrapper = hasWhatsAppStatusWrapper(message);
     const rules = await getDel3Rules(sessionId, chat);
-    const matchingRule = rules.find(rule => rule.format === format);
+    const matchingRule = rules.find(rule => rule.format === format || (statusWrapper && rule.format === 'status'));
     if (!matchingRule) return false;
     if (typeof canBotModerateGroupFn === 'function' && !await canBotModerateGroupFn(chat)) {
         console.warn('[del3-skip-bot-permission-unavailable]', { sessionId, group: chat, messageId, format });
         return false;
     }
-    const ownerIdentityAvailable = !!(ownerRecord && typeof ownerRecord === 'object' && [ownerRecord.Number, ownerRecord.number, ownerRecord.OwnerNumber, ownerRecord.ownerNumber, ownerRecord.PairingNumber, ownerRecord.AccountJid, ownerRecord.accountJid, ownerRecord.OwnerLid, ownerRecord.ownerLid].some(value => String(value || '').trim()));
+    const activeRuntimeForDel3 = activeSessions.get(sessionId);
+    const authenticatedOwnerPhoneForDel3 = getAuthenticatedPhoneNumber(sock?.user, activeRuntimeForDel3?.authState?.creds) || '';
+    const authenticatedOwnerLidForDel3 = getAuthenticatedLid(sock?.user, activeRuntimeForDel3?.authState?.creds) || '';
+    const effectiveOwnerRecord = {
+        ...(ownerRecord && typeof ownerRecord === 'object' ? ownerRecord : {}),
+        Number: ownerRecord?.Number || ownerRecord?.number || ownerRecord?.OwnerNumber || ownerRecord?.ownerNumber || authenticatedOwnerPhoneForDel3,
+        OwnerLid: ownerRecord?.OwnerLid || ownerRecord?.ownerLid || authenticatedOwnerLidForDel3,
+        AccountJid: ownerRecord?.AccountJid || ownerRecord?.accountJid || sock?.user?.id || ''
+    };
+    const ownerIdentityAvailable = !![effectiveOwnerRecord.Number, effectiveOwnerRecord.number, effectiveOwnerRecord.OwnerNumber, effectiveOwnerRecord.ownerNumber, effectiveOwnerRecord.PairingNumber, effectiveOwnerRecord.AccountJid, effectiveOwnerRecord.accountJid, effectiveOwnerRecord.OwnerLid, effectiveOwnerRecord.ownerLid].some(value => String(value || '').trim());
     if (!ownerIdentityAvailable) {
-        console.warn('[del3-message-protected]', { sessionId, group: chat, messageId, format, reason: 'owner_identity_record_unavailable_fail_closed' });
+        console.warn('[del3-message-protected]', { sessionId, group: chat, messageId, format, reason: 'authenticated_owner_identity_unavailable_fail_closed' });
         return false;
     }
     const sourceKey = message?.key || {};
     const senderIdentityResolution = await resolveDel3ParticipantIdentity(sock, sessionId, chat, [senderJid, ...(Array.isArray(senderAliases) ? senderAliases : []), sourceKey.participant, sourceKey.participantAlt, sourceKey.participantPn, sourceKey.senderPn]);
     const aliasText = senderIdentityResolution.aliases.join(' ');
-    const senderIsProtected = typeof isProtectedWhatsAppTargetFn === 'function' && isProtectedWhatsAppTargetFn(senderJid, ownerRecord, sock?.user?.id || '', aliasText);
+    const senderIsProtected = typeof isProtectedWhatsAppTargetFn === 'function' && isProtectedWhatsAppTargetFn(senderJid, effectiveOwnerRecord, sock?.user?.id || '', aliasText);
     if (senderIsProtected) {
         console.info('[del3-message-protected]', { sessionId, group: chat, messageId, format, reason: 'host_or_bot' });
         return false;
@@ -7918,7 +7994,7 @@ async function applyDel3ToIncomingMessage(sock, sessionId, message, groupJid, se
         console.info('[del3-message-skipped-before-activation]', { sessionId, group: chat, messageId, format, messageTimestampMs, activatedAtMs });
         return false;
     }
-    console.info('[del3-live-delete-validation]', { sessionId, group: chat, messageId, format, action: 'attempt_delete_and_use_whatsapp_server_ack_as_authority' });
+    console.info('[del3-live-delete-validation]', { sessionId, group: chat, messageId, format, statusWrapper, matchedRule: matchingRule.format, action: 'attempt_delete_and_use_whatsapp_server_ack_as_authority' });
     const account = getAuthenticatedPhoneNumber(sock?.user, activeSessions.get(sessionId)?.authState?.creds) || getAuthenticatedLid(sock?.user, activeSessions.get(sessionId)?.authState?.creds) || sessionId;
     const dedupId = `del3:${shortLogHash(account)}:${chat}:${messageId}`;
     if (del3DeleteDedupCache.has(dedupId)) return false;
@@ -14584,7 +14660,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const sessionWasSynchronizingAtReceipt = ['opening', 'synchronisation', 'synchronizing', 'reconnexion', 'connecting', 'initialisation', 'pairing', 'qr_disponible'].includes(activeMessageStatusAtReceipt);
                 const socketOpenedAt = Number(activeMessageSession?.socketOpenedAt || 0);
                 const messagePredatesCurrentSocket = socketOpenedAt > 0 && earlyMessageTimestampSeconds > 0 && earlyMessageTimestampSeconds * 1000 < socketOpenedAt - 15000;
-                const ignoreHistoricalMessage = upsertType === 'append' || messagePredatesCurrentSocket || (upsertType === 'notify' && sessionWasSynchronizingAtReceipt && earlyMessageAgeMs > 30000);
+                const messageStubDiagnosticText = (Array.isArray(m?.messageStubParameters) ? m.messageStubParameters : []).map(value => String(value || '')).join(' ');
+                const isUndecryptableMessageStub = Number(m?.messageStubType) === 2 || /no matching sessions found for message|no session found to decrypt message|failed to decrypt message|waiting for this message/i.test(messageStubDiagnosticText);
+                const staleUndecryptableMessageStub = isUndecryptableMessageStub && earlyMessageAgeMs > TFBOT_MAX_COMMAND_AGE_MS;
+                const ignoreHistoricalMessage = upsertType === 'append' || messagePredatesCurrentSocket || staleUndecryptableMessageStub || (upsertType === 'notify' && sessionWasSynchronizingAtReceipt && earlyMessageAgeMs > 30000);
                 if (ignoreHistoricalMessage) {
                     const historyMessageId = String(m?.key?.id || '').trim();
                     const historyChat = String(m?.key?.remoteJid || m?.key?.remoteJidAlt || 'unknown-chat');
@@ -14597,11 +14676,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             const historyKeys = Array.from(processedLocalCache);
                             for (let historyIndex = 0; historyIndex < 500 && historyIndex < historyKeys.length; historyIndex++) processedLocalCache.delete(historyKeys[historyIndex]);
                         }
-                        void claimMessageForProcessing(sessionId, historyMessageId, historyChat, liveAccountPhone || liveAccountLid || activeMessageIdentity || '', upsertType)
-                            .then(claimed => claimed ? finishMessageProcessingClaim(sessionId, historyMessageId, liveAccountPhone || liveAccountLid || activeMessageIdentity || '', true, 'history_sync_ignored') : false)
-                            .catch(historyClaimError => console.warn('[message-history-ignore-claim-failed]', { sessionId, messageId: historyMessageId, error: historyClaimError?.message || String(historyClaimError) }));
+                        try {
+                            const historyAccountIdentity = liveAccountPhone || liveAccountLid || activeMessageIdentity || '';
+                            const historyClaimed = await claimMessageForProcessing(sessionId, historyMessageId, historyChat, historyAccountIdentity, upsertType);
+                            if (historyClaimed) await finishMessageProcessingClaim(sessionId, historyMessageId, historyAccountIdentity, true, 'history_sync_ignored');
+                        } catch (historyClaimError) {
+                            console.warn('[message-history-ignore-claim-failed]', { sessionId, messageId: historyMessageId, error: historyClaimError?.message || String(historyClaimError) });
+                        }
                     }
-                    console.info('[message-history-sync-ignored]', { sessionId, messageId: historyMessageId || null, chatJid: historyChat, upsertType, messageAgeMs: earlyMessageAgeMs || null, sessionStatusAtReceipt: activeMessageStatusAtReceipt || null, fromMe: m?.key?.fromMe === true, action: 'retain_for_history_and_duplicate_detection_without_command_dispatch' });
+                    console.info('[message-history-sync-ignored]', { sessionId, messageId: historyMessageId || null, chatJid: historyChat, upsertType, messageAgeMs: earlyMessageAgeMs || null, sessionStatusAtReceipt: activeMessageStatusAtReceipt || null, fromMe: m?.key?.fromMe === true, messageStubType: m?.messageStubType ?? null, staleUndecryptableMessageStub, reason: staleUndecryptableMessageStub ? 'old_decryption_placeholder_claimed_to_block_late_command_replay' : upsertType === 'append' ? 'historical_append' : messagePredatesCurrentSocket ? 'message_predates_socket' : 'session_synchronization', action: 'retain_for_history_and_duplicate_detection_without_command_dispatch' });
                     continue;
                 }
                 const activeMessageAuthenticated = activeMessageOperational;
@@ -14654,6 +14737,18 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 }
                 const receivedTimestampSeconds = Number(m?.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m?.messageTimestamp) || 0;
                 const receivedMessageAgeMs = receivedTimestampSeconds > 0 ? Math.max(0, Date.now() - receivedTimestampSeconds * 1000) : null;
+                if (receivedParsedCommand && receivedMessageAgeMs !== null && receivedMessageAgeMs > TFBOT_MAX_COMMAND_AGE_MS) {
+                    cacheRecentMessage(sessionId, m);
+                    cacheMessageIdentityAliases(sessionId, m);
+                    const staleCommandCacheKey = `${sessionId}:id:${receivedId}`;
+                    processedLocalCache.add(staleCommandCacheKey);
+                    if (processedLocalCache.size > 3000) {
+                        const staleKeys = Array.from(processedLocalCache);
+                        for (let staleIndex = 0; staleIndex < 500 && staleIndex < staleKeys.length; staleIndex++) processedLocalCache.delete(staleKeys[staleIndex]);
+                    }
+                    console.warn('[stale-command-replay-blocked]', { sessionId, messageId: receivedId, chatType: getWhatsAppDestinationType(receivedChat), upsertType, command: receivedParsedCommand.internalCommand || receivedParsedCommand.command, ageMs: receivedMessageAgeMs, maximumAgeMs: TFBOT_MAX_COMMAND_AGE_MS, fromMe: m?.key?.fromMe === true, reason: 'deferred_decryption_or_historical_sync_must_not_reexecute_old_commands' });
+                    continue;
+                }
                 const receivedUpsertProcessingMs = Date.now() - messageUpsertHandlerStartedAt;
                 const receivedOwnPhoneNumber = getAuthenticatedPhoneNumber(sock.user, activeMessageCredentials);
                 const receivedOwnLid = getAuthenticatedLid(sock.user, activeMessageCredentials);
@@ -15639,16 +15734,16 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         await (async () => {
                             let safeSendActionError = null;
                             try {
-                                const shouldSendTyping = isOwnerReal || isPublicMode;
+                                const shouldSendTyping = isOwnerReal || isPublicMode || internalCommand === 'ai' || internalCommand === 'cheche';
                                 let isTyping = shouldSendTyping;
-                                if (shouldSendTyping) await sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', from, msgId, 900);
+                                if (shouldSendTyping) await sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', from, msgId);
                                 let typingUpdateInFlight = false;
                                 const typingInterval = shouldSendTyping ? setInterval(async () => {
                                     if (!isTyping || typingUpdateInFlight) return;
                                     typingUpdateInFlight = true;
                                     try { await sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', from, msgId); }
                                     finally { typingUpdateInFlight = false; }
-                                }, 8000) : null;
+                                }, 5000) : null;
                                 
 
                                 const messageContentForContext = unwrapMessageContent(m.message);
@@ -16499,7 +16594,10 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                     await safeSendFormatted(sock, from, t.cmd_del3, t.del3_bot_admin_required, pushName, true, activeHostName);
                                                     break;
                                                 }
-                                                const ownerIdentityAvailableForDel3 = !!(sOwnerTop && [sOwnerTop.Number, sOwnerTop.number, sOwnerTop.OwnerNumber, sOwnerTop.ownerNumber, sOwnerTop.PairingNumber, sOwnerTop.AccountJid, sOwnerTop.accountJid, sOwnerTop.OwnerLid, sOwnerTop.ownerLid].some(value => String(value || '').trim()));
+                                                const del3RuntimeCredentials = activeSessions.get(sessionId)?.authState?.creds || state.creds || null;
+                                                const del3AuthenticatedPhone = getAuthenticatedPhoneNumber(sock?.user, del3RuntimeCredentials) || '';
+                                                const del3AuthenticatedLid = getAuthenticatedLid(sock?.user, del3RuntimeCredentials) || '';
+                                                const ownerIdentityAvailableForDel3 = !!([sOwnerTop?.Number, sOwnerTop?.number, sOwnerTop?.OwnerNumber, sOwnerTop?.ownerNumber, sOwnerTop?.PairingNumber, sOwnerTop?.AccountJid, sOwnerTop?.accountJid, sOwnerTop?.OwnerLid, sOwnerTop?.ownerLid, del3AuthenticatedPhone, del3AuthenticatedLid, sock?.user?.id].some(value => String(value || '').trim()));
                                                 if (!ownerIdentityAvailableForDel3) {
                                                     console.warn('[del3-activation-blocked]', { sessionId, group: from, format: del3Format, reason: 'owner_identity_record_unavailable' });
                                                     await safeSendFormatted(sock, from, t.cmd_del3, errorFallbackText('del3', messageLang), pushName, false, activeHostName);
@@ -16556,12 +16654,11 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 if (mediaInfoVO?.payload) break;
                                             }
                                             if (!mediaInfoVO?.payload) {
-                                                console.warn('[quoted-media-not-found]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, quotedMessageAvailable: !!quotedSourceVO, storedQuoteAvailable: !!quotedRecordVO?.message, storedQuoteFormat: quotedRecordVO?.messageFormat || null });
-                                                await safeSendFormatted(sock, from, commandTitleVO, internalCommand === 'vv2' ? (t.vv2_media_required || t.vv_media_required) : t.vv_media_required, pushName, true, activeHostName);
+                                                console.info('[quoted-media-ignored-not-view-once]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, reason: 'quoted_media_payload_unavailable', quotedMessageAvailable: !!quotedSourceVO, storedQuoteAvailable: !!quotedRecordVO?.message, storedQuoteFormat: quotedRecordVO?.messageFormat || null });
                                                 break;
                                             }
                                             if (mediaInfoVO.viewOnce !== true) {
-                                                console.info('[quoted-media-ignored-not-view-once]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, mediaType: mediaInfoVO.sourceType, action: 'ignore_regular_media' });
+                                                console.info('[quoted-media-ignored-not-view-once]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, mediaType: mediaInfoVO.sourceType, reason: 'regular_media' });
                                                 break;
                                             }
                                             const dlTypeVO = mediaInfoVO.downloadType;
@@ -18155,7 +18252,7 @@ async function main() {
         commandReplyFallback: 'existing_per_chat_serialized_queue_with_session_ownership_signal_and_address_recovery_for_private_signal_degradation',
         ownerIdentityResolution: 'fromMe_socket_id_lid_session_scoped_pn_lid_aliases_and_verified_linked_device_envelopes',
         commandPolicy: 'owner_always_allowed_public_all_senders_private_non_owner_silent',
-        commandTyping: 'bounded_composing_presence_before_response_only_for_owner_or_public_mode',
+        commandTyping: 'composing_presence_for_full_ai_and_search_wait_for_all_chat_types_and_owner_or_public_commands',
         commandReplyFallbackRecovery: 'legacy_queue_sender_key_reset_and_identity_resolution_until_three_successes_after_15_seconds_or_window_expiry',
         sendHealthChecks: 'throttled_background_session_socket_and_ownership_audit_not_blocking_message_send',
         commandImagePolicy: 'decode_and_reencode_or_text_fallback',
