@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r194-ai-image-and-code-text-delivery';
+const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r195-asistan-image-url-and-vv-media-key-selection';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -1737,7 +1737,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-08-r193-fix-received-command-initialization';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-08-r195-asistan-image-url-and-vv-media-key-selection';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -6541,19 +6541,11 @@ async function callTfServerAiMessage(sessionId, userPhone, text, useSearch = fal
     return answer;
 }
 
-function parseTfServerAiGeneratedImage(answer) {
-    const text = String(answer || '');
-    const matches = [...text.matchAll(/!\[Generated Image\]\((https:\/\/bref\.adamdh7\.org\/TF-[A-Za-z0-9_-]+\/[^\s)]+)\)/gi)];
-    if (!matches.length) return { text, imageUrl: '' };
-    const selected = matches[matches.length - 1];
-    let imageUrl = '';
-    try {
-        const parsed = new URL(selected[1]);
-        if (parsed.protocol === 'https:' && parsed.hostname.toLowerCase() === 'bref.adamdh7.org' && /^\/TF-[A-Za-z0-9_-]+\//i.test(parsed.pathname)) imageUrl = parsed.toString();
-    } catch (error) {}
-    if (!imageUrl) return { text, imageUrl: '' };
-    const cleanText = text.replace(selected[0], '').replace(/\n{3,}/g, '\n\n').trim();
-    return { text: cleanText, imageUrl };
+function normalizeTfServerAiGeneratedImageLinks(value) {
+    const source = String(value || '');
+    const generatedImageCount = (source.match(/https:\/\/bref\.adamdh7\.org\/TF-[A-Za-z0-9_-]+\//gi) || []).length;
+    const text = source.replace(/!\[[^\]]*\]\((https:\/\/bref\.adamdh7\.org\/TF-[A-Za-z0-9_-]+\/[^\s)]+)\)/gi, '$1');
+    return { text, generatedImageCount };
 }
 
 function formatTfServerAiWhatsAppText(value) {
@@ -6561,28 +6553,16 @@ function formatTfServerAiWhatsAppText(value) {
 }
 
 async function sendTfServerAiReply(sock, jid, answer, sendMessage, quotedMessage) {
-    const parsed = parseTfServerAiGeneratedImage(answer);
-    let imageBuffer = null;
-    if (parsed.imageUrl) {
-        const response = await fetchWithRetry(parsed.imageUrl, { method: 'GET', redirect: 'error', cache: 'no-store' }, 3);
-        if (!response.ok) throw new Error(`tfserver_ai_generated_image_http_${response.status}`);
-        const contentType = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-        if (!/^image\/(?:png|jpeg|webp|gif)$/i.test(contentType)) throw new Error('tfserver_ai_generated_image_invalid_content_type');
-        const declaredLength = Number(response.headers.get('content-length') || 0);
-        if (declaredLength > 15 * 1024 * 1024) throw new Error('tfserver_ai_generated_image_too_large');
-        imageBuffer = Buffer.from(await response.arrayBuffer());
-        if (!imageBuffer.length || imageBuffer.length > 15 * 1024 * 1024) throw new Error('tfserver_ai_generated_image_invalid_size');
-    }
-    const caption = formatTfServerAiWhatsAppText(parsed.text);
-    if (imageBuffer) {
-        const sent = await sendMessage(sock, jid, { image: imageBuffer, ...(caption ? { caption } : {}) }, { quoted: quotedMessage }, 180);
-        if (!sent?.key?.id) throw new Error('tfserver_ai_generated_image_send_unconfirmed');
-        return { sent: true, type: 'image', imageUrl: parsed.imageUrl };
-    }
-    if (!caption) throw new Error('tfserver_ai_response_empty_after_formatting');
-    const sent = await sendMessage(sock, jid, { text: caption }, { quoted: quotedMessage }, 180);
+    const normalized = normalizeTfServerAiGeneratedImageLinks(answer);
+    const replyText = formatTfServerAiWhatsAppText(normalized.text);
+    if (!replyText) throw new Error('tfserver_ai_response_empty_after_formatting');
+    const sent = await sendMessage(sock, jid, { text: replyText }, { quoted: quotedMessage }, 180);
     if (!sent?.key?.id) throw new Error('tfserver_ai_text_send_unconfirmed');
-    return { sent: true, type: 'text' };
+    return {
+        sent: true,
+        type: normalized.generatedImageCount ? 'text_with_generated_image_url' : 'text',
+        generatedImageCount: normalized.generatedImageCount
+    };
 }
 
 function scheduleTfServerAiCleanupRetry(sessionId) {
@@ -16693,13 +16673,33 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 if (!quotedSourceVO && quotedRecordVO?.message) quotedSourceVO = fixBuffers(quotedRecordVO.message);
                                             }
                                             const mediaCandidatesVO = [];
-                                            if (quotedSourceVO) mediaCandidatesVO.push(quotedSourceVO);
-                                            if (quotedRecordVO?.message) mediaCandidatesVO.push(fixBuffers(quotedRecordVO.message));
-                                            let mediaInfoVO = null;
-                                            for (const candidateVO of mediaCandidatesVO) {
-                                                mediaInfoVO = extractWhatsAppResendMedia(candidateVO);
-                                                if (mediaInfoVO?.payload) break;
-                                            }
+                                            if (quotedSourceVO) mediaCandidatesVO.push({ source: 'quoted_context', message: quotedSourceVO });
+                                            if (quotedRecordVO?.message) mediaCandidatesVO.push({ source: quotedRecordVO.source || 'stored_quote', message: fixBuffers(quotedRecordVO.message) });
+                                            const mediaKeyLengthVO = value => {
+                                                if (Buffer.isBuffer(value) || value instanceof Uint8Array) return value.byteLength || value.length || 0;
+                                                if (Array.isArray(value)) return value.length;
+                                                if (typeof value === 'string') return value.trim().length;
+                                                if (value && typeof value === 'object') {
+                                                    if (value._bsontype === 'Binary') return Number(value.position) || value.buffer?.length || 0;
+                                                    if (value.type === 'Buffer' && Array.isArray(value.data)) return value.data.length;
+                                                }
+                                                return 0;
+                                            };
+                                            const mediaMatchesVO = mediaCandidatesVO.map(candidate => ({
+                                                source: candidate.source,
+                                                info: extractWhatsAppResendMedia(candidate.message)
+                                            })).filter(candidate => candidate.info?.payload);
+                                            mediaMatchesVO.sort((left, right) => {
+                                                const leftViewOnce = Number(left.info.viewOnce === true);
+                                                const rightViewOnce = Number(right.info.viewOnce === true);
+                                                const leftKey = mediaKeyLengthVO(left.info.payload.mediaKey);
+                                                const rightKey = mediaKeyLengthVO(right.info.payload.mediaKey);
+                                                const leftPath = Number(!!(left.info.payload.url || left.info.payload.directPath));
+                                                const rightPath = Number(!!(right.info.payload.url || right.info.payload.directPath));
+                                                return rightViewOnce - leftViewOnce || (rightKey > 0) - (leftKey > 0) || rightKey - leftKey || rightPath - leftPath;
+                                            });
+                                            const selectedMediaVO = mediaMatchesVO[0] || null;
+                                            const mediaInfoVO = selectedMediaVO?.info || null;
                                             if (!mediaInfoVO?.payload) {
                                                 console.warn('[quoted-media-command-payload-not-found]', { sessionId, messageId: msgId, command: internalCommand, quotedMessageAvailable: !!quotedSourceVO, persistentQuoteAvailable: !!quotedRecordVO?.message, quoteRecordSource: quotedRecordVO?.source || null, quoteRecordFormat: quotedRecordVO?.messageFormat || null });
                                                 console.info('[quoted-media-ignored-not-view-once]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, reason: 'quoted_media_payload_unavailable', quotedMessageAvailable: !!quotedSourceVO, storedQuoteAvailable: !!quotedRecordVO?.message, storedQuoteFormat: quotedRecordVO?.messageFormat || null });
@@ -16716,7 +16716,15 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 break;
                                             }
                                             const mediaVO = mediaInfoVO.payload;
-                                            console.info('[quoted-media-download-start]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, mediaType: mediaInfoVO.sourceType, downloadType: dlTypeVO, viewOnce: mediaInfoVO.viewOnce === true, source: quotedRecordVO?.source || 'quoted_context' });
+                                            const selectedMediaKeyLengthVO = mediaKeyLengthVO(mediaVO.mediaKey);
+                                            console.info('[quoted-media-candidate-selected]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, source: selectedMediaVO?.source || 'unknown', candidateCount: mediaCandidatesVO.length, mediaCandidateCount: mediaMatchesVO.length, mediaKeyAvailable: selectedMediaKeyLengthVO > 0, mediaKeyLength: selectedMediaKeyLengthVO, mediaPathAvailable: !!(mediaVO.url || mediaVO.directPath) });
+                                            if (!selectedMediaKeyLengthVO) {
+                                                console.warn('[quoted-media-missing-media-key]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, candidateCount: mediaCandidatesVO.length, mediaCandidateCount: mediaMatchesVO.length, sources: mediaMatchesVO.map(candidate => ({ source: candidate.source, mediaKeyAvailable: mediaKeyLengthVO(candidate.info.payload.mediaKey) > 0, mediaPathAvailable: !!(candidate.info.payload.url || candidate.info.payload.directPath) })) });
+                                                const missingMediaKeyTextVO = ({ fr: 'Les données du média cité sont incomplètes. Le média ne peut pas être récupéré depuis cette copie du message.', ht: 'Done medya ou site a pa konplè. Mwen pa ka rekipere medya a nan kopi mesaj sa a.', es: 'Los datos del contenido citado están incompletos. No se puede recuperar desde esta copia del mensaje.', en: 'The quoted media data is incomplete. It cannot be retrieved from this copy of the message.' })[messageLang] || 'The quoted media data is incomplete. It cannot be retrieved from this copy of the message.';
+                                                await safeSendFormatted(sock, from, commandTitleVO, missingMediaKeyTextVO, pushName, true, activeHostName);
+                                                break;
+                                            }
+                                            console.info('[quoted-media-download-start]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, mediaType: mediaInfoVO.sourceType, downloadType: dlTypeVO, viewOnce: mediaInfoVO.viewOnce === true, source: selectedMediaVO?.source || 'unknown' });
                                             let bufferVO;
                                             try {
                                                 const streamVO = await downloadContentFromMessage(mediaVO, dlTypeVO);
@@ -16819,7 +16827,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 const aiDelivery = await sendTfServerAiReply(sock, from, aiResponseText, trackedQueuedSendMessage, m);
                                                 terminalResponseSent = true;
                                                 responseSentForLog = true;
-                                                console.info('[tfserver-ai-whatsapp-delivered]', { sessionId, messageId: msgId, mode: 'chat', deliveryType: aiDelivery.type, generatedImage: aiDelivery.type === 'image' });
+                                                console.info('[tfserver-ai-whatsapp-delivered]', { sessionId, messageId: msgId, mode: 'chat', deliveryType: aiDelivery.type, generatedImage: aiDelivery.generatedImageCount > 0 });
                                             } catch (e) {
                                                 await safeSendActionError(sock, from, t.ai_title, e, messageLang, pushName, m.messageTimestamp);
                                             }
@@ -17120,7 +17128,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 const searchDelivery = await sendTfServerAiReply(sock, from, searchAIResponse, trackedQueuedSendMessage, m);
                                                 terminalResponseSent = true;
                                                 responseSentForLog = true;
-                                                console.info('[tfserver-ai-whatsapp-delivered]', { sessionId, messageId: msgId, mode: 'search', deliveryType: searchDelivery.type, generatedImage: searchDelivery.type === 'image' });
+                                                console.info('[tfserver-ai-whatsapp-delivered]', { sessionId, messageId: msgId, mode: 'search', deliveryType: searchDelivery.type, generatedImage: searchDelivery.generatedImageCount > 0 });
                                             } catch (e) {
                                                 await safeSendActionError(sock, from, t.search_title, e, messageLang, pushName, m.messageTimestamp);
                                             }
