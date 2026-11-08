@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r192-account-scoped-message-claims-and-duplicate-cleanup';
+const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r193-fix-received-command-initialization';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -1737,7 +1737,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-08-r192-account-scoped-message-claims-and-duplicate-cleanup';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-08-r193-fix-received-command-initialization';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -14723,6 +14723,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const receivedExplicitParsedCommand = String(receivedBody || '').trim()
                     ? parseIncomingCommand(receivedBody, globalLang, getCommandParsingContext(m?.message))
                     : null;
+                const receivedParsedCommand = receivedExplicitParsedCommand;
                 const receivedBodyForAudit = String(receivedBody || '');
                 const receivedAuditDetails = receivedExplicitParsedCommand ? {
                     messageType: receivedType,
@@ -14756,7 +14757,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const receivedOwnLid = getAuthenticatedLid(sock.user, activeMessageCredentials);
                 const receivedOwnAccountJids = [...new Set([sock.user?.id, receivedOwnPhoneNumber ? `${receivedOwnPhoneNumber}@s.whatsapp.net` : '', receivedOwnLid].filter(Boolean).map(String))];
                 const receivedChatAliases = [...new Set([receivedChat, m?.key?.remoteJidAlt].filter(Boolean).map(String))];
-                const receivedParsedCommand = receivedExplicitParsedCommand;
                 if (m?.key?.fromMe === true && receivedParsedCommand) {
                     console.info('[companion-device-command-dispatch]', {
                         sessionId,
