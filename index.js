@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r195-asistan-image-url-and-vv-media-key-selection';
+const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r197-command-age-70s-and-account-scoped-deduplication';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -1737,7 +1737,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-08-r195-asistan-image-url-and-vv-media-key-selection';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-08-r197-command-age-70s-and-account-scoped-deduplication';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -1852,7 +1852,59 @@ const AI_MAX_INPUT_CHARS = Math.max(1000, Number(process.env.AI_MAX_INPUT_CHARS 
 const SEARCH_QUERY_MAX_CHARS = Math.max(200, Number(process.env.SEARCH_QUERY_MAX_CHARS || 1200));
 const TFSERVER_AI_URL = String(process.env.TFSERVER_AI_URL || 'https://tfserver-ai.onrender.com').trim().replace(/\/+$/, '');
 const TFSERVER_AI_TOKEN = String(process.env.TFSERVER_AI_TOKEN || process.env.TOKEN || '').trim();
-const TFBOT_MAX_COMMAND_AGE_MS = Math.max(30000, Math.min(600000, Number(process.env.TFBOT_MAX_COMMAND_AGE_MS || 120000)));
+const TFBOT_MAX_COMMAND_AGE_MS = Math.max(1000, Math.min(70000, Number(process.env.TFBOT_MAX_COMMAND_AGE_MS || 70000)));
+
+function getTfbotTimestampMilliseconds(value) {
+    try {
+        let raw = value;
+        if (raw && typeof raw.toNumber === 'function') raw = raw.toNumber();
+        else if (raw instanceof Date) raw = raw.getTime();
+        else if (typeof raw === 'bigint') raw = Number(raw);
+        else if (raw && typeof raw === 'object') {
+            if (raw.seconds !== undefined) raw = raw.seconds;
+            else if (raw.low !== undefined) raw = Number(raw.low) + Number(raw.high || 0) * 4294967296;
+        }
+        if (typeof raw === 'string') {
+            const trimmed = raw.trim();
+            if (!trimmed) return 0;
+            const numeric = Number(trimmed);
+            raw = Number.isFinite(numeric) ? numeric : Date.parse(trimmed);
+        }
+        const numeric = Number(raw);
+        if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+        return numeric < 1000000000000 ? numeric * 1000 : numeric;
+    } catch (error) {
+        return 0;
+    }
+}
+
+function getTfbotMessageTimestampInfo(message, fallbackReceivedAtMs = Date.now(), nowMs = Date.now()) {
+    const candidates = [
+        { value: message?.messageTimestamp, source: 'messageTimestamp' },
+        { value: message?.timestamp, source: 'timestamp' },
+        { value: message?.key?.timestamp, source: 'key.timestamp' }
+    ];
+    for (const candidate of candidates) {
+        const timestampMs = getTfbotTimestampMilliseconds(candidate.value);
+        if (timestampMs > 0) {
+            const clockOffsetMs = Number(nowMs) - timestampMs;
+            return { timestampMs, source: candidate.source, clockOffsetMs, differenceMs: Math.abs(clockOffsetMs), usedFallback: false };
+        }
+    }
+    const fallback = Number(fallbackReceivedAtMs);
+    const timestampMs = Number.isFinite(fallback) && fallback > 0 ? fallback : Number(nowMs) || Date.now();
+    const clockOffsetMs = Number(nowMs) - timestampMs;
+    return { timestampMs, source: 'upsert_received_at_fallback', clockOffsetMs, differenceMs: Math.abs(clockOffsetMs), usedFallback: true };
+}
+
+function getTfbotAccountMessageClaimScope(sessionId, accountIdentity = '') {
+    const normalizedJid = normalizeOwnerIdentityJid(accountIdentity);
+    if (normalizedJid) return normalizedJid;
+    const raw = String(accountIdentity || '').trim();
+    const digits = normalizePhoneNumber(raw);
+    if (/^\d{6,20}$/.test(digits) && !/^0+$/.test(digits)) return `${digits}@s.whatsapp.net`;
+    return raw || String(sessionId || '').trim();
+}
 const TFSERVER_AI_TIMEOUT_MS = Math.max(15000, Math.min(300000, Number(process.env.TFSERVER_AI_TIMEOUT_MS || 180000)));
 const TFSERVER_AI_DELETE_TIMEOUT_MS = Math.max(3000, Math.min(30000, Number(process.env.TFSERVER_AI_DELETE_TIMEOUT_MS || 12000)));
 const TFSERVER_AI_CLEANUP_RETRY_MS = Math.max(10000, Math.min(300000, Number(process.env.TFSERVER_AI_CLEANUP_RETRY_MS || 30000)));
@@ -3209,10 +3261,10 @@ function queueMessage(executeFn, delayMs = 150, queueKey = null, partitionKey = 
 
 async function claimMessageForProcessing(sessionId, messageId, remoteJid = '', accountIdentity = '', upsertType = 'notify') {
     if (!sessionId || !messageId) return false;
-    if (!db) return true;
+    if (!db) return false;
     const normalizedChat = String(remoteJid || 'unknown-chat').trim();
     const normalizedMessageId = String(messageId || '').trim();
-    const accountScope = String(accountIdentity || sessionId).trim();
+    const accountScope = getTfbotAccountMessageClaimScope(sessionId, accountIdentity);
     const accountScopeHash = shortLogHash(accountScope);
     const documentId = `${accountScopeHash}:${normalizedMessageId}`;
     const now = Date.now();
@@ -3239,14 +3291,14 @@ async function claimMessageForProcessing(sessionId, messageId, remoteJid = '', a
         return result.upsertedCount === 1 || result.matchedCount === 1;
     } catch (error) {
         if (error && error.code === 11000) return false;
-        console.warn('[message-dedupe-persistent-claim-unavailable]', { sessionId, remoteJid: normalizedChat, messageId: normalizedMessageId, accountScopeHash, error: error?.message || String(error), action: 'continue_under_exclusive_session_runtime_lock_and_local_message_id_deduplication' });
-        return true;
+        console.warn('[message-dedupe-persistent-claim-unavailable]', { sessionId, remoteJid: normalizedChat, messageId: normalizedMessageId, accountScopeHash, error: error?.message || String(error), action: 'skip_dispatch_until_atomic_deduplication_is_available' });
+        return false;
     }
 }
 
 async function renewMessageProcessingClaim(sessionId, messageId, accountIdentity = '') {
     if (!db || !sessionId || !messageId) return false;
-    const accountScope = String(accountIdentity || sessionId).trim();
+    const accountScope = getTfbotAccountMessageClaimScope(sessionId, accountIdentity);
     const documentId = `${shortLogHash(accountScope)}:${String(messageId || '').trim()}`;
     const now = new Date();
     try {
@@ -3264,7 +3316,7 @@ async function renewMessageProcessingClaim(sessionId, messageId, accountIdentity
 async function finishMessageProcessingClaim(sessionId, messageId, accountIdentity = '', succeeded = true, error = '') {
     if (!db || !sessionId || !messageId) return false;
     const normalizedMessageId = String(messageId || '').trim();
-    const accountScope = String(accountIdentity || sessionId).trim();
+    const accountScope = getTfbotAccountMessageClaimScope(sessionId, accountIdentity);
     const documentId = `${shortLogHash(accountScope)}:${normalizedMessageId}`;
     const now = new Date();
     try {
@@ -6565,6 +6617,23 @@ async function sendTfServerAiReply(sock, jid, answer, sendMessage, quotedMessage
     };
 }
 
+async function clearTfServerAiConversationForUser(sessionId, userPhone) {
+    const normalizedSession = String(sessionId || '').trim();
+    const tfid = normalizePhoneNumber(userPhone);
+    if (!normalizedSession || !/^\d{6,20}$/.test(tfid) || /^0+$/.test(tfid)) throw new Error('tfserver_ai_user_phone_unavailable');
+    if (!db) throw new Error('tfserver_ai_database_unavailable');
+    const collection = db.collection('tfbot_ai_conversations');
+    const record = await collection.findOne({ _id: tfid, tfid }, { projection: { _id: 1, tfid: 1, sessionId: 1, sessionIds: 1 } });
+    const deleteResponse = await postTfServerAi({ tfid, action: 'delete' }, TFSERVER_AI_DELETE_TIMEOUT_MS);
+    let parsed;
+    try { parsed = JSON.parse(String(deleteResponse.bodyText || deleteResponse.finalMessage || '{}')); } catch (error) { parsed = {}; }
+    const apiConfirmed = parsed?.status === 'deleted' || parsed?.ok === true || parsed?.success === true;
+    if (!apiConfirmed) throw new Error('tfserver_ai_delete_not_confirmed');
+    if (record) await collection.deleteOne({ _id: tfid, tfid });
+    console.info('[tfserver-ai-user-conversation-deleted]', { sessionId: normalizedSession, conversationHash: shortLogHash(tfid), localRecordFound: !!record, apiConfirmed: true });
+    return { deleted: true, apiConfirmed: true, localRecordFound: !!record };
+}
+
 function scheduleTfServerAiCleanupRetry(sessionId) {
     const id = String(sessionId || '').trim();
     if (!id || tfServerAiCleanupTimers.has(id) || serverShuttingDown) return;
@@ -7856,43 +7925,59 @@ function extractWhatsAppResendMedia(value) {
     };
     return visit(source, false, 0, new WeakSet());
 }
-async function findQuotedMessageForCommand(sessionId, chatJid, messageId, allowOutgoingLegacy = true) {
+async function findQuotedMessageCandidatesForCommand(sessionId, chatJid, messageId, allowOutgoingLegacy = true) {
     const id = String(messageId || '').trim();
     const chat = String(chatJid || '').trim();
-    if (!sessionId || !id) return null;
-    const inMemory = recentMsgsCache.find(entry => {
-        if (entry.sessionId !== sessionId || String(entry.id) !== id) return false;
-        const aliases = [entry.from, ...(Array.isArray(entry.chatAliases) ? entry.chatAliases : []), entry.key?.remoteJidAlt].filter(Boolean);
-        return !chat || aliases.some(alias => String(alias) === chat || areEquivalentWhatsAppChatJids(sessionId, alias, chat));
-    });
-    if (inMemory?.message) return { ...inMemory, source: 'session_memory' };
-    if (!db) return null;
+    if (!sessionId || !id) return [];
+    const candidates = [];
+    const addCandidate = (record, source) => {
+        if (!record || (!record.message && !record.messageFormat)) return;
+        const aliases = [record.from, record.remoteJid, record.remoteJidAlt, ...(Array.isArray(record.chatAliases) ? record.chatAliases : []), ...(Array.isArray(record.remoteJidAliases) ? record.remoteJidAliases : []), record.key?.remoteJid, record.key?.remoteJidAlt].map(value => String(value || '').trim()).filter(Boolean);
+        if (chat && aliases.length && !aliases.some(alias => alias === chat || areEquivalentWhatsAppChatJids(sessionId, alias, chat))) return;
+        if (chat && !aliases.length && source === 'persistent_quoted_cache') return;
+        candidates.push({ ...record, message: record.message ? fixBuffers(record.message) : null, source });
+    };
+    const inMemory = recentMsgsCache.find(entry => entry.sessionId === sessionId && String(entry.id) === id);
+    if (inMemory?.message) addCandidate(inMemory, 'session_memory');
+    if (!db) return candidates;
     try {
         const quoted = await db.collection('baileys_quoted_messages').findOne(
             { _id: `quoted:${sessionId}:${id}`, sessionId, messageId: id },
             { projection: { sessionId: 1, messageId: 1, remoteJid: 1, remoteJidAlt: 1, remoteJidAliases: 1, fromMe: 1, participant: 1, participantAlt: 1, participantPn: 1, senderPn: 1, key: 1, message: 1, messageFormat: 1, messageTimestamp: 1 } }
         );
-        if (quoted && (quoted.message || quoted.messageFormat)) {
-            const aliases = [quoted.remoteJid, quoted.remoteJidAlt, ...(Array.isArray(quoted.remoteJidAliases) ? quoted.remoteJidAliases : [])].filter(Boolean);
-            if (!chat || aliases.some(alias => String(alias) === chat || areEquivalentWhatsAppChatJids(sessionId, alias, chat))) return { ...quoted, source: 'persistent_quoted_cache' };
-        }
+        if (quoted && (quoted.message || quoted.messageFormat)) addCandidate(quoted, 'persistent_quoted_cache');
     } catch (error) {
         console.warn('[quoted-message-cache-read-failed]', { sessionId, messageId: id, error: error?.message || String(error) });
     }
-    if (!allowOutgoingLegacy) return null;
-    try {
-        const legacy = await db.collection('baileys_outgoing_messages').findOne(
-            { _id: `${sessionId}:${id}`, sessionId, messageId: id },
-            { projection: { sessionId: 1, messageId: 1, remoteJid: 1, remoteJidAlt: 1, remoteJidAliases: 1, fromMe: 1, participant: 1, participantAlt: 1, participantPn: 1, senderPn: 1, message: 1, messageTimestamp: 1 } }
-        );
-        if (legacy?.message) {
-            const aliases = [legacy.remoteJid, legacy.remoteJidAlt, ...(Array.isArray(legacy.remoteJidAliases) ? legacy.remoteJidAliases : [])].filter(Boolean);
-            if (!chat || !aliases.length || aliases.some(alias => String(alias) === chat || areEquivalentWhatsAppChatJids(sessionId, alias, chat))) return { ...legacy, source: 'legacy_outgoing_cache' };
+    if (allowOutgoingLegacy) {
+        try {
+            const legacy = await db.collection('baileys_outgoing_messages').findOne(
+                { _id: `${sessionId}:${id}`, sessionId, messageId: id },
+                { projection: { sessionId: 1, messageId: 1, remoteJid: 1, remoteJidAlt: 1, remoteJidAliases: 1, fromMe: 1, participant: 1, participantAlt: 1, participantPn: 1, senderPn: 1, key: 1, message: 1, messageTimestamp: 1 } }
+            );
+            if (legacy?.message) addCandidate(legacy, 'legacy_outgoing_cache');
+        } catch (error) {
+            console.warn('[quoted-message-legacy-read-failed]', { sessionId, messageId: id, error: error?.message || String(error) });
         }
-    } catch (error) {
-        console.warn('[quoted-message-legacy-read-failed]', { sessionId, messageId: id, error: error?.message || String(error) });
     }
-    return null;
+    const payloadScore = candidate => {
+        const info = extractWhatsAppResendMedia(candidate.message);
+        if (!info?.payload) return { viewOnce: 0, keyLength: 0, path: 0 };
+        const key = fixBuffers(info.payload.mediaKey);
+        const keyLength = Buffer.isBuffer(key) || key instanceof Uint8Array ? key.length : Array.isArray(key) ? key.length : typeof key === 'string' ? key.trim().length : Number(key?.position || key?.buffer?.length || 0);
+        return { viewOnce: info.viewOnce === true ? 1 : 0, keyLength, path: info.payload.url || info.payload.directPath ? 1 : 0 };
+    };
+    candidates.sort((left, right) => {
+        const a = payloadScore(left);
+        const b = payloadScore(right);
+        return b.viewOnce - a.viewOnce || Number(b.keyLength > 0) - Number(a.keyLength > 0) || b.keyLength - a.keyLength || b.path - a.path;
+    });
+    return candidates;
+}
+
+async function findQuotedMessageForCommand(sessionId, chatJid, messageId, allowOutgoingLegacy = true) {
+    const candidates = await findQuotedMessageCandidatesForCommand(sessionId, chatJid, messageId, allowOutgoingLegacy);
+    return candidates[0] || null;
 }
 
 async function getDel3Rules(sessionId, gjid) {
@@ -12406,7 +12491,7 @@ function parseIncomingCommand(body, language, context = {}) {
     if (internalCommand === 'ai' && !hasExplicitAiCommandPrefix(body)) return null;
     if (commandsWithoutArguments.has(internalCommand) && args) return null;
     if ((internalCommand === 'del' || internalCommand === 'del3') && !context.hasQuotedMessage) return null;
-    if ((internalCommand === 'vv' || internalCommand === 'vv2') && !context.hasQuotedMedia) return null;
+    if ((internalCommand === 'vv' || internalCommand === 'vv2') && !context.hasQuotedMedia && !context.hasQuotedMessage) return null;
     if (internalCommand === 'del2' && !args && !context.hasQuotedMessage) return null;
     if (internalCommand === 'code') {
         if (!/^\+?[0-9][0-9()]*$/u.test(args)) return null;
@@ -14681,8 +14766,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             .catch(ownerMessageSaveError => console.warn('[private-device-outgoing-retry-copy-save-failed]', { sessionId, messageId: earlyReceivedId, upsertType, error: ownerMessageSaveError?.message || String(ownerMessageSaveError) }));
                     }
                 }
-                const earlyMessageTimestampSeconds = Number(m?.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m?.messageTimestamp) || 0;
-                const earlyMessageAgeMs = earlyMessageTimestampSeconds > 0 ? Math.max(0, Date.now() - earlyMessageTimestampSeconds * 1000) : 0;
+                const earlyMessageTimestampInfo = getTfbotMessageTimestampInfo(m, messageUpsertEventStartedAt);
+                const earlyMessageTimestampSeconds = earlyMessageTimestampInfo.timestampMs / 1000;
+                const earlyMessageAgeMs = earlyMessageTimestampInfo.differenceMs;
                 const sessionWasSynchronizingAtReceipt = ['opening', 'synchronisation', 'synchronizing', 'reconnexion', 'connecting', 'initialisation', 'pairing', 'qr_disponible'].includes(activeMessageStatusAtReceipt);
                 const socketOpenedAt = Number(activeMessageSession?.socketOpenedAt || 0);
                 const messagePredatesCurrentSocket = socketOpenedAt > 0 && earlyMessageTimestampSeconds > 0 && earlyMessageTimestampSeconds * 1000 < socketOpenedAt - 15000;
@@ -14703,7 +14789,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             for (let historyIndex = 0; historyIndex < 500 && historyIndex < historyKeys.length; historyIndex++) processedLocalCache.delete(historyKeys[historyIndex]);
                         }
                         try {
-                            const historyAccountIdentity = liveAccountPhone || liveAccountLid || activeMessageIdentity || '';
+                            const historyAccountIdentity = liveAccountPhone || liveAccountLid || activeMessageIdentity || sock.user?.id || sessionId;
                             const historyClaimed = await claimMessageForProcessing(sessionId, historyMessageId, historyChat, historyAccountIdentity, upsertType);
                             if (historyClaimed) await finishMessageProcessingClaim(sessionId, historyMessageId, historyAccountIdentity, true, 'history_sync_ignored');
                         } catch (historyClaimError) {
@@ -14726,8 +14812,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             const transitionKeys = Array.from(processedLocalCache);
                             for (let transitionIndex = 0; transitionIndex < 500 && transitionIndex < transitionKeys.length; transitionIndex++) processedLocalCache.delete(transitionKeys[transitionIndex]);
                         }
-                        void claimMessageForProcessing(sessionId, transitionMessageId, transitionChat, liveAccountPhone || liveAccountLid || activeMessageIdentity || '', upsertType)
-                            .then(claimed => claimed ? finishMessageProcessingClaim(sessionId, transitionMessageId, liveAccountPhone || liveAccountLid || activeMessageIdentity || '', true, 'session_transition_ignored') : false)
+                        void claimMessageForProcessing(sessionId, transitionMessageId, transitionChat, liveAccountPhone || liveAccountLid || activeMessageIdentity || sock.user?.id || sessionId, upsertType)
+                            .then(claimed => claimed ? finishMessageProcessingClaim(sessionId, transitionMessageId, liveAccountPhone || liveAccountLid || activeMessageIdentity || sock.user?.id || sessionId, true, 'session_transition_ignored') : false)
                             .catch(transitionClaimError => console.warn('[message-transition-ignore-claim-failed]', { sessionId, messageId: transitionMessageId, error: transitionClaimError?.message || String(transitionClaimError) }));
                     }
                     console.info('[message-ignored-during-session-transition]', { sessionId, messageId: transitionMessageId || null, chatJid: transitionChat, upsertType, sessionStatusAtReceipt: activeMessageStatusAtReceipt || null, registered: activeMessageCredentials?.registered === true, identityAvailable: !!activeMessageIdentity, socketReady: activeMessageSocketReady, action: 'mark_processed_without_replay_or_command_dispatch' });
@@ -14762,9 +14848,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 if (receivedIsGroup && upsertType === 'notify') {
                     void getGroupMetadataCached(sessionId, sock, receivedChat).catch(metadataError => console.warn('[group-participant-mapping-warmup-failed]', { sessionId, error: metadataError?.message || String(metadataError) }));
                 }
-                const receivedTimestampSeconds = Number(m?.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m?.messageTimestamp) || 0;
-                const receivedMessageAgeMs = receivedTimestampSeconds > 0 ? Math.max(0, Date.now() - receivedTimestampSeconds * 1000) : null;
-                if (receivedParsedCommand && receivedMessageAgeMs !== null && receivedMessageAgeMs > TFBOT_MAX_COMMAND_AGE_MS) {
+                const receivedTimestampInfo = getTfbotMessageTimestampInfo(m, messageUpsertEventStartedAt);
+                const receivedTimestampMs = receivedTimestampInfo.timestampMs;
+                const receivedTimestampSeconds = receivedTimestampMs / 1000;
+                const receivedMessageAgeMs = receivedTimestampInfo.differenceMs;
+                if (receivedParsedCommand && receivedMessageAgeMs > TFBOT_MAX_COMMAND_AGE_MS) {
                     cacheRecentMessage(sessionId, m);
                     cacheMessageIdentityAliases(sessionId, m);
                     const staleCommandCacheKey = `${sessionId}:id:${receivedId}`;
@@ -14773,7 +14861,14 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const staleKeys = Array.from(processedLocalCache);
                         for (let staleIndex = 0; staleIndex < 500 && staleIndex < staleKeys.length; staleIndex++) processedLocalCache.delete(staleKeys[staleIndex]);
                     }
-                    console.warn('[stale-command-replay-blocked]', { sessionId, messageId: receivedId, chatType: getWhatsAppDestinationType(receivedChat), upsertType, command: receivedParsedCommand.internalCommand || receivedParsedCommand.command, ageMs: receivedMessageAgeMs, maximumAgeMs: TFBOT_MAX_COMMAND_AGE_MS, fromMe: m?.key?.fromMe === true, reason: 'deferred_decryption_or_historical_sync_must_not_reexecute_old_commands' });
+                    const staleAccountIdentity = liveAccountPhone || liveAccountLid || sock.user?.id || sessionId;
+                    try {
+                        const staleClaimed = await claimMessageForProcessing(sessionId, receivedId, receivedChat, staleAccountIdentity, upsertType);
+                        if (staleClaimed) await finishMessageProcessingClaim(sessionId, receivedId, staleAccountIdentity, true, 'stale_command_ignored');
+                    } catch (staleClaimError) {
+                        console.warn('[stale-command-dedupe-mark-failed]', { sessionId, messageId: receivedId, error: staleClaimError?.message || String(staleClaimError) });
+                    }
+                    console.warn('[stale-command-replay-blocked]', { sessionId, messageId: receivedId, chatType: getWhatsAppDestinationType(receivedChat), upsertType, command: receivedParsedCommand.internalCommand || receivedParsedCommand.command, ageMs: receivedMessageAgeMs, clockOffsetMs: receivedTimestampInfo.clockOffsetMs, timestampSource: receivedTimestampInfo.source, usedTimestampFallback: receivedTimestampInfo.usedFallback, maximumAgeMs: TFBOT_MAX_COMMAND_AGE_MS, fromMe: m?.key?.fromMe === true, reason: 'message_clock_difference_exceeded_70_seconds_before_deduplication_or_execution' });
                     continue;
                 }
                 const receivedUpsertProcessingMs = Date.now() - messageUpsertHandlerStartedAt;
@@ -15032,7 +15127,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 let distributedClaimKnown = false;
                 let distributedClaimValue = false;
                 try {
-                    distributedClaimValue = await claimMessageForProcessing(sessionId, msgId, receivedChat, liveAccountPhone || liveAccountLid || '', upsertType);
+                    distributedClaimValue = await claimMessageForProcessing(sessionId, msgId, receivedChat, liveAccountPhone || liveAccountLid || sock.user?.id || sessionId, upsertType);
                     distributedClaimKnown = true;
                 } catch (claimError) {
                     distributedClaimKnown = true;
@@ -15078,7 +15173,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     const startMessageClaimHeartbeat = () => {
                         if (messageClaimHeartbeat || messageProcessingCompleted) return;
                         messageClaimHeartbeat = setInterval(() => {
-                            void renewMessageProcessingClaim(sessionId, msgId, liveAccountPhone || liveAccountLid || '');
+                            void renewMessageProcessingClaim(sessionId, msgId, liveAccountPhone || liveAccountLid || sock.user?.id || sessionId);
                         }, Math.max(10000, Math.floor(MESSAGE_PROCESSING_LEASE_MS / 3)));
                         if (typeof messageClaimHeartbeat.unref === 'function') messageClaimHeartbeat.unref();
                     };
@@ -15086,11 +15181,16 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         if (!claimed || !messageProcessingCompleted || messageClaimFinalized) return;
                         messageClaimFinalized = true;
                         if (messageClaimHeartbeat) clearInterval(messageClaimHeartbeat);
-                        await finishMessageProcessingClaim(sessionId, msgId, liveAccountPhone || liveAccountLid || '', messageProcessingSucceeded, messageProcessingError);
+                        await finishMessageProcessingClaim(sessionId, msgId, liveAccountPhone || liveAccountLid || sock.user?.id || sessionId, messageProcessingSucceeded, messageProcessingError);
                     };
                     if (messageClaimed) startMessageClaimHeartbeat();
                     void enqueueInboundCommand(sessionId, receivedChat, async () => {
                     try {
+                        const dispatchTimestampInfo = getTfbotMessageTimestampInfo(m, messageUpsertEventStartedAt);
+                        if (receivedParsedCommand && dispatchTimestampInfo.differenceMs > TFBOT_MAX_COMMAND_AGE_MS) {
+                            console.warn('[stale-command-replay-blocked-before-dispatch]', { sessionId, messageId: msgId, command: receivedParsedCommand.internalCommand || receivedParsedCommand.command, upsertType, ageMs: dispatchTimestampInfo.differenceMs, clockOffsetMs: dispatchTimestampInfo.clockOffsetMs, timestampSource: dispatchTimestampInfo.source, usedTimestampFallback: dispatchTimestampInfo.usedFallback, maximumAgeMs: TFBOT_MAX_COMMAND_AGE_MS, action: 'final_clock_check_after_inbound_queue_wait_before_command_handler' });
+                            return;
+                        }
                         const dispatchRuntime = activeSessions.get(sessionId);
                         if (!dispatchRuntime || dispatchRuntime.sock !== sock || !isAuthenticatedSocketOperational(dispatchRuntime, sock)) throw new Error('whatsapp_session_not_operational_at_command_dispatch');
                         console.info('[message-processing-started]', {
@@ -16666,15 +16766,19 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 await safeSendFormatted(sock, from, commandTitleVO, internalCommand === 'vv2' ? (t.vv2_usage || t.vv_usage) : t.vv_usage, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            let quotedSourceVO = quotedMessage && typeof quotedMessage === 'object' ? quotedMessage : null;
-                                            let quotedRecordVO = null;
-                                            if (quoted?.stanzaId) {
-                                                quotedRecordVO = await findQuotedMessageForCommand(sessionId, from, String(quoted.stanzaId), true).catch(() => null);
-                                                if (!quotedSourceVO && quotedRecordVO?.message) quotedSourceVO = fixBuffers(quotedRecordVO.message);
-                                            }
+                                            const quotedSourceVO = quotedMessage && typeof quotedMessage === 'object' ? fixBuffers(quotedMessage) : null;
+                                            const quotedRecordsVO = quoted?.stanzaId
+                                                ? await findQuotedMessageCandidatesForCommand(sessionId, from, String(quoted.stanzaId), true).catch(error => {
+                                                    console.warn('[quoted-media-all-sources-lookup-failed]', { sessionId, messageId: msgId, command: internalCommand, error: error?.message || String(error) });
+                                                    return [];
+                                                })
+                                                : [];
+                                            const quotedRecordVO = quotedRecordsVO[0] || null;
                                             const mediaCandidatesVO = [];
                                             if (quotedSourceVO) mediaCandidatesVO.push({ source: 'quoted_context', message: quotedSourceVO });
-                                            if (quotedRecordVO?.message) mediaCandidatesVO.push({ source: quotedRecordVO.source || 'stored_quote', message: fixBuffers(quotedRecordVO.message) });
+                                            for (const recordVO of quotedRecordsVO) {
+                                                if (recordVO?.message) mediaCandidatesVO.push({ source: recordVO.source || 'stored_quote', message: fixBuffers(recordVO.message) });
+                                            }
                                             const mediaKeyLengthVO = value => {
                                                 if (Buffer.isBuffer(value) || value instanceof Uint8Array) return value.byteLength || value.length || 0;
                                                 if (Array.isArray(value)) return value.length;
@@ -16702,7 +16806,9 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                             const mediaInfoVO = selectedMediaVO?.info || null;
                                             if (!mediaInfoVO?.payload) {
                                                 console.warn('[quoted-media-command-payload-not-found]', { sessionId, messageId: msgId, command: internalCommand, quotedMessageAvailable: !!quotedSourceVO, persistentQuoteAvailable: !!quotedRecordVO?.message, quoteRecordSource: quotedRecordVO?.source || null, quoteRecordFormat: quotedRecordVO?.messageFormat || null });
-                                                console.info('[quoted-media-ignored-not-view-once]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, reason: 'quoted_media_payload_unavailable', quotedMessageAvailable: !!quotedSourceVO, storedQuoteAvailable: !!quotedRecordVO?.message, storedQuoteFormat: quotedRecordVO?.messageFormat || null });
+                                                console.warn('[quoted-media-ignored-not-view-once]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, reason: 'quoted_media_payload_unavailable', quotedMessageAvailable: !!quotedSourceVO, storedQuoteCandidates: quotedRecordsVO.length, storedQuoteFormat: quotedRecordVO?.messageFormat || null });
+                                                const unavailableMediaTextVO = ({ fr: 'Le média cité est introuvable dans les messages enregistrés.', ht: 'Mwen pa jwenn medya ou te site a nan mesaj ki anrejistre yo.', es: 'No se encontró el contenido citado en los mensajes guardados.', en: 'The quoted media could not be found in the stored messages.' })[messageLang] || 'Le média cité est introuvable dans les messages enregistrés.';
+                                                await safeSendFormatted(sock, from, commandTitleVO, unavailableMediaTextVO, pushName, true, activeHostName);
                                                 break;
                                             }
                                             if (mediaInfoVO.viewOnce !== true) {
@@ -16812,6 +16918,27 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                         case 'ai':
                                             if (!hasExplicitAiCommandPrefix(bodyRaw)) {
                                                 console.warn('[ai-dispatch-blocked-no-explicit-prefix]', { sessionId, messageId: msgId, command: internalCommand, bodyLength: body.length, action: 'never_call_ai_for_ordinary_text' });
+                                                break;
+                                            }
+                                            const aiControlCommand = normalizeText(String(args || '').trim().replace(/^\/+/, ''));
+                                            if (aiControlCommand === 'clear') {
+                                                try {
+                                                    const aiClearUserPhone = await getTfServerAiUserPhoneNumber(sessionId, sock, [sender, ...senderJids], sNum, isOwnerReal ? authenticatedAccountNumber : '');
+                                                    const aiClearResult = await clearTfServerAiConversationForUser(sessionId, aiClearUserPhone);
+                                                    const clearConfirmation = ({
+                                                        fr: 'La session Asistan a été effacée.',
+                                                        en: 'The Asistan conversation has been cleared.',
+                                                        es: 'La sesión de Asistan se ha borrado.',
+                                                        ht: 'Sesyon Asistan an efase.'
+                                                    })[messageLang] || 'La session Asistan a été effacée.';
+                                                    await safeSendFormatted(sock, from, t.ai_title, clearConfirmation, pushName, true, activeHostName);
+                                                    terminalResponseSent = true;
+                                                    responseSentForLog = true;
+                                                    console.info('[tfserver-ai-user-session-cleared]', { sessionId, conversationHash: shortLogHash(aiClearUserPhone), deleted: aiClearResult.deleted, apiConfirmed: aiClearResult.apiConfirmed });
+                                                } catch (clearError) {
+                                                    console.warn('[tfserver-ai-user-session-clear-failed]', { sessionId, error: clearError?.message || String(clearError) });
+                                                    await safeSendActionError(sock, from, t.ai_title, clearError, messageLang, pushName, m.messageTimestamp);
+                                                }
                                                 break;
                                             }
                                             console.info('[ai-dispatch-authorized-explicit-prefix]', { sessionId, messageId: msgId, command: parsedCommand.command, explicitPrefix: true, provider: 'tfserver-ai' });
@@ -17146,7 +17273,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                     await commandExecute();
                                     if (commandOperationFailed) logCommandLifecycle('failure', { stage: 'operation', action: 'command_handler_completed_with_action_error', responseSent: !!(terminalResponseSent || responseSentForLog) });
                                     else logCommandLifecycle('success', { stage: 'operation', action: 'command_handler_completed', responseSent: !!(terminalResponseSent || responseSentForLog) });
-                                    console.info('[command-completed]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, senderName: sName, senderJid: sender, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid', command: internalCommand, durationMs: Date.now() - commandStartedAt, messageAgeMsAtCompletion: receivedMessageAgeMs === null ? null : Math.max(0, Date.now() - receivedTimestampSeconds * 1000), upsertHandlerToCompletionMs: Date.now() - messageUpsertHandlerStartedAt, action: terminalResponseSent || responseSentForLog ? 'command_completed_response_sent' : 'command_completed_without_confirmed_response', responseSent: !!(terminalResponseSent || responseSentForLog) });
+                                    console.info('[command-completed]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, senderName: sName, senderJid: sender, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid', command: internalCommand, durationMs: Date.now() - commandStartedAt, messageAgeMsAtCompletion: Math.abs(Date.now() - receivedTimestampMs), upsertHandlerToCompletionMs: Date.now() - messageUpsertHandlerStartedAt, action: terminalResponseSent || responseSentForLog ? 'command_completed_response_sent' : 'command_completed_without_confirmed_response', responseSent: !!(terminalResponseSent || responseSentForLog) });
                                 } catch (e) {
                                     commandOperationFailed = true;
                                     logCommandLifecycle('failure', { stage: 'operation', action: 'command_handler_failed', error: String(e?.message || e).slice(0, 500), durationMs: Date.now() - commandStartedAt });
