@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r197-command-age-70s-and-account-scoped-deduplication';
+const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r199-viewonce-cache-preservation-large-media-and-command-handoff-drain';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -1737,7 +1737,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-08-r197-command-age-70s-and-account-scoped-deduplication';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-08-r198-forbidden-session-preservation-and-reconnect-circuit-breaker';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -2307,6 +2307,9 @@ const outgoingTextEchoCache = new Map();
 const OUTGOING_ECHO_TTL_MS = 120000;
 const fallbackMessageQueue = { tasks: [], isSendingQueue: false };
 const inboundCommandQueues = new Map();
+const inboundMessagePreDispatchCounts = new Map();
+const quotedMessagePersistenceQueues = new Map();
+const TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS = Math.max(30000, Math.min(300000, Number(process.env.TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS || 180000)));
 const INBOUND_COMMAND_MAX_CONCURRENCY_PER_SESSION = Math.max(4, Math.min(48, Number(process.env.INBOUND_COMMAND_MAX_CONCURRENCY_PER_SESSION) || 24));
 const INBOUND_COMMAND_MAX_PENDING_PER_SESSION = Math.max(50, Math.min(500, Number(process.env.INBOUND_COMMAND_MAX_PENDING_PER_SESSION) || 250));
 const INBOUND_COMMAND_MAX_PENDING_PER_CHAT = Math.max(20, Math.min(200, Number(process.env.INBOUND_COMMAND_MAX_PENDING_PER_CHAT) || 80));
@@ -2401,6 +2404,45 @@ function closeInboundCommandQueue(sessionId) {
     queueState.ready.length = 0;
     if (queueState.active === 0) inboundCommandQueues.delete(id);
     return true;
+}
+
+async function waitForQuotedMessagePersistenceIdle(sessionId, timeoutMs = TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS) {
+    const id = String(sessionId || '').trim();
+    if (!id) return { drained: true, pending: 0, elapsedMs: 0 };
+    const prefix = `quoted:${id}:`;
+    const startedAt = Date.now();
+    const deadline = startedAt + Math.max(1000, Number(timeoutMs) || TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS);
+    while (Date.now() < deadline) {
+        const pending = [...quotedMessagePersistenceQueues.entries()].filter(([key]) => key.startsWith(prefix));
+        if (!pending.length) return { drained: true, pending: 0, elapsedMs: Date.now() - startedAt };
+        const pollDelay = Math.max(25, Math.min(250, deadline - Date.now()));
+        await Promise.race([Promise.allSettled(pending.map(([, promise]) => Promise.resolve(promise))), new Promise(resolve => setTimeout(resolve, pollDelay))]);
+    }
+    const pending = [...quotedMessagePersistenceQueues.keys()].filter(key => key.startsWith(prefix)).length;
+    return { drained: pending === 0, pending, elapsedMs: Date.now() - startedAt };
+}
+
+async function waitForInboundCommandQueueIdle(sessionId, timeoutMs = TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS) {
+    const id = String(sessionId || '').trim();
+    if (!id) return { drained: true, active: 0, pending: 0 };
+    const startedAt = Date.now();
+    const deadline = startedAt + Math.max(1000, Number(timeoutMs) || TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS);
+    let lastLogAt = 0;
+    while (Date.now() < deadline) {
+        const state = inboundCommandQueues.get(id);
+        const active = Number(state?.active || 0);
+        const pending = Number(state?.pending || 0);
+        const ready = Number(state?.ready?.length || 0);
+        const dispatchPending = Number(inboundMessagePreDispatchCounts.get(id) || 0);
+        if ((!state && !dispatchPending) || (state && !active && !pending && !ready && !dispatchPending)) return { drained: true, active: 0, pending: 0, dispatchPending: 0, elapsedMs: Date.now() - startedAt };
+        if (Date.now() - lastLogAt >= 5000) {
+            lastLogAt = Date.now();
+            console.info('[worker-inbound-command-drain-waiting]', { sessionId: id, active, pending, ready, dispatchPending, elapsedMs: Date.now() - startedAt, timeoutMs });
+        }
+        await new Promise(resolve => setTimeout(resolve, 150));
+    }
+    const finalState = inboundCommandQueues.get(id);
+    return { drained: false, active: Number(finalState?.active || 0), pending: Number(finalState?.pending || 0), ready: Number(finalState?.ready?.length || 0), dispatchPending: Number(inboundMessagePreDispatchCounts.get(id) || 0), elapsedMs: Date.now() - startedAt };
 }
 
 function sanitizeSessionDisplayName(value) {
@@ -3430,6 +3472,38 @@ function getOutgoingRetryMessageMemory(sessionId, messageId, requestedAliases = 
     return { ...entry, lookupMode };
 }
 
+function getQuotedMediaKeyLengthForCache(value) {
+    const normalized = fixBuffers(value);
+    if (Buffer.isBuffer(normalized) || normalized instanceof Uint8Array) return normalized.byteLength || normalized.length || 0;
+    if (Array.isArray(normalized)) return normalized.length;
+    if (typeof normalized === 'string') return normalized.trim().length;
+    if (normalized && typeof normalized === 'object') {
+        if (normalized._bsontype === 'Binary') return Number(normalized.position) || normalized.buffer?.length || 0;
+        if (normalized.type === 'Buffer' && Array.isArray(normalized.data)) return normalized.data.length;
+    }
+    return 0;
+}
+
+function getQuotedMessageMediaQuality(message) {
+    const info = extractWhatsAppResendMedia(message);
+    if (!info?.payload) return 0;
+    const keyLength = getQuotedMediaKeyLengthForCache(info.payload.mediaKey);
+    const hasPath = !!(info.payload.url || info.payload.directPath);
+    return (info.viewOnce === true ? 2000000000 : 0) + (keyLength > 0 ? 1000000000 : 0) + (hasPath ? 100000000 : 0) + Math.min(keyLength, 1000000);
+}
+
+function preferCompleteQuotedMessage(existingMessage, incomingMessage) {
+    if (!existingMessage) return incomingMessage;
+    if (!incomingMessage) return existingMessage;
+    const existingInfo = extractWhatsAppResendMedia(existingMessage);
+    const incomingInfo = extractWhatsAppResendMedia(incomingMessage);
+    let normalizedIncoming = incomingMessage;
+    if (existingInfo?.viewOnce === true && incomingInfo?.payload && incomingInfo.viewOnce !== true && incomingMessage && typeof incomingMessage === 'object' && !Array.isArray(incomingMessage)) {
+        normalizedIncoming = { ...incomingMessage, viewOnce: true };
+    }
+    return getQuotedMessageMediaQuality(existingMessage) > getQuotedMessageMediaQuality(normalizedIncoming) ? existingMessage : normalizedIncoming;
+}
+
 function cacheRecentMessage(sessionId, message, extraAliases = []) {
     const id = message?.key?.id;
     if (!sessionId || !id || !message?.message) return;
@@ -3453,11 +3527,24 @@ function cacheRecentMessage(sessionId, message, extraAliases = []) {
     }
     entry.cachedAt = now;
     const existingIndex = recentMsgsCache.findIndex(item => item.sessionId === sessionId && item.id === id);
-    if (existingIndex >= 0) recentMsgsCache.splice(existingIndex, 1);
+    if (existingIndex >= 0) {
+        const existing = recentMsgsCache[existingIndex];
+        const bestMessage = preferCompleteQuotedMessage(existing.message, entry.message);
+        entry.message = bestMessage;
+        if (bestMessage === existing.message) {
+            entry.key = existing.key || entry.key;
+            entry.from = existing.from || entry.from;
+            entry.sender = existing.sender || entry.sender;
+            entry.fromMe = existing.fromMe === true || entry.fromMe;
+            entry.ts = Number(existing.ts) || entry.ts;
+        }
+        entry.chatAliases = [...new Set([...(existing.chatAliases || []), ...entry.chatAliases])].slice(0, 32);
+        recentMsgsCache.splice(existingIndex, 1);
+    }
     recentMsgsCache.push(entry);
-    if (entry.fromMe) cacheOutgoingRetryMessageMemory(sessionId, message, entry.chatAliases);
+    if (entry.fromMe) cacheOutgoingRetryMessageMemory(sessionId, { key: entry.key || message.key, message: entry.message }, entry.chatAliases);
     if (recentMsgsCache.length > 1000) recentMsgsCache.splice(0, recentMsgsCache.length - 1000);
-    persistQuotedMessageForCommands(sessionId, message, entry.chatAliases);
+    persistQuotedMessageForCommands(sessionId, { ...message, key: entry.key || message.key, message: entry.message }, entry.chatAliases);
 }
 
 function persistQuotedMessageForCommands(sessionId, message, aliases = []) {
@@ -3496,11 +3583,24 @@ function persistQuotedMessageForCommands(sessionId, message, aliases = []) {
             createdAt: new Date(now),
             expireAt: new Date(now + 7 * 24 * 60 * 60 * 1000)
         };
-        void db.collection('baileys_quoted_messages').updateOne(
-            { _id: record._id },
-            { $set: record },
-            { upsert: true }
-        ).catch(async error => {
+        if (retainMediaPayload && record.message && !record.message.viewOnce && mediaInfo.viewOnce === true) record.message = { ...record.message, viewOnce: true };
+        const persistenceKey = record._id;
+        const previousWrite = quotedMessagePersistenceQueues.get(persistenceKey) || Promise.resolve();
+        const currentWrite = previousWrite.catch(() => {}).then(async () => {
+            const collection = db.collection('baileys_quoted_messages');
+            const existing = await collection.findOne({ _id: record._id }, { projection: { message: 1, messageFormat: 1 } }).catch(() => null);
+            if (existing?.message && record.message) {
+                const bestMessage = preferCompleteQuotedMessage(existing.message, record.message);
+                if (bestMessage === existing.message) record.messageFormat = existing.messageFormat || record.messageFormat;
+                record.message = bestMessage;
+            } else if (existing?.message && !record.message) {
+                record.message = existing.message;
+                record.messageFormat = existing.messageFormat || record.messageFormat;
+            }
+            await collection.updateOne({ _id: record._id }, { $set: record }, { upsert: true });
+        });
+        quotedMessagePersistenceQueues.set(persistenceKey, currentWrite);
+        void currentWrite.catch(async error => {
             if (error?.code === 11000) {
                 try {
                     await db.collection('baileys_quoted_messages').updateOne({ _id: record._id }, { $set: record }, { upsert: false });
@@ -3511,6 +3611,8 @@ function persistQuotedMessageForCommands(sessionId, message, aliases = []) {
                 }
             }
             if (!serverShuttingDown) console.warn('[quoted-message-cache-persist-failed]', { sessionId, messageId, groupMessage, mediaMessage, error: error?.message || String(error) });
+        }).finally(() => {
+            if (quotedMessagePersistenceQueues.get(persistenceKey) === currentWrite) quotedMessagePersistenceQueues.delete(persistenceKey);
         });
     } catch (error) {
         if (!serverShuttingDown) console.warn('[quoted-message-cache-prepare-failed]', { sessionId, error: error?.message || String(error) });
@@ -4151,7 +4253,8 @@ async function queuedSendMessageLegacy(sock, jid, content, options = {}, delayMs
     const originalDestinationJid = normalizePhoneCacheJid(requestedDestinationJid) || (legacyPrivateMatch ? `${normalizePhoneNumber(legacyPrivateMatch[1])}@s.whatsapp.net` : normalizeNativeLidJid(requestedDestinationJid) || requestedDestinationJid);
     const queuePartitionKey = getMessageQueuePartitionKey(expectedSessionId, originalDestinationJid, expectedSession);
     const outgoingMediaBytes = ['image', 'video', 'audio', 'document', 'sticker'].reduce((total, key) => { const value = content?.[key]; return total + (Buffer.isBuffer(value) ? value.length : value instanceof Uint8Array ? value.byteLength : 0); }, 0);
-    const outgoingContainsMedia = outgoingMediaBytes > 0 || !!(content?.album || content?.albumMessage);
+    const outgoingMediaUsesFileOrStream = ['image', 'video', 'audio', 'document', 'sticker'].some(key => { const media = content?.[key]; return !!(media && typeof media === 'object' && (typeof media.url === 'string' && media.url.trim() || media.stream && typeof media.stream.pipe === 'function')); });
+    const outgoingContainsMedia = outgoingMediaBytes > 0 || outgoingMediaUsesFileOrStream || !!(content?.album || content?.albumMessage);
     const queueEnqueuedAt = Date.now();
     console.info('[whatsapp-send-queued]', { sessionId: expectedSessionId, destinationType: /@g\.us$/i.test(originalDestinationJid) ? 'group' : /@newsletter$/i.test(originalDestinationJid) ? 'channel' : /@lid$/i.test(originalDestinationJid) ? 'private_lid' : 'private_or_other', messageType: Object.keys(content || {}).join(',') || 'unknown', queuePartition: queuePartitionKey, pendingTasks: getMessageQueue(sock, queuePartitionKey).tasks.length });
     return queueMessage(async () => {
@@ -9516,12 +9619,29 @@ async function deactivateTfbotWorker(reason = 'not_selected') {
         return true;
     }
     tfbotWorkerDeactivationPromise = (async () => {
-        const sessionsToDrain = [...activeSessions.entries()];
+        let sessionsToDrain = [...activeSessions.entries()];
         for (const [sessionId] of sessionsToDrain) workerDrainingSessionIds.add(sessionId);
-        workerDrainExpectedClosedUntil = Date.now() + 180000;
+        workerDrainExpectedClosedUntil = Date.now() + TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS + 60000;
+        if (tfbotWorkerActivationPromise) await tfbotWorkerActivationPromise.catch(() => {});
+        sessionsToDrain = [...activeSessions.entries()];
+        for (const [sessionId] of sessionsToDrain) workerDrainingSessionIds.add(sessionId);
+        console.info('[tfbot-worker-command-drain-start]', { host: TFBOT_CLUSTER_INSTANCE_HOST, reason, sessionCount: sessionsToDrain.length, timeoutMs: TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS, action: 'stop_new_upserts_then_wait_for_running_commands_before_socket_cleanup' });
+        const commandDrainResults = await Promise.all(sessionsToDrain.map(async ([sessionId]) => {
+            const result = await waitForInboundCommandQueueIdle(sessionId, TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS);
+            const quotePersistence = result.drained ? await waitForQuotedMessagePersistenceIdle(sessionId, TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS) : { drained: false, pending: 0, elapsedMs: 0 };
+            const drained = result.drained && quotePersistence.drained;
+            if (drained) console.info('[tfbot-worker-command-drain-completed]', { sessionId, elapsedMs: result.elapsedMs, active: result.active, pending: result.pending, dispatchPending: result.dispatchPending, quotedPersistencePending: quotePersistence.pending, quotedPersistenceWaitMs: quotePersistence.elapsedMs });
+            else console.error('[tfbot-worker-command-drain-timeout]', { sessionId, elapsedMs: result.elapsedMs, active: result.active, pending: result.pending, ready: result.ready, dispatchPending: result.dispatchPending, quotedPersistencePending: quotePersistence.pending, action: 'keep_current_sockets_open_and_cancel_handoff' });
+            return { sessionId, ...result, drained, quotePersistencePending: quotePersistence.pending };
+        }));
+        const commandDrainFailure = commandDrainResults.find(result => !result.drained);
+        if (commandDrainFailure) {
+            for (const [sessionId] of sessionsToDrain) workerDrainingSessionIds.delete(sessionId);
+            workerDrainExpectedClosedUntil = 0;
+            throw new Error(`worker_inbound_command_drain_timeout:${commandDrainFailure.sessionId}:${commandDrainFailure.active}:${commandDrainFailure.pending}`);
+        }
         tfbotWorkerStopping = true;
         tfbotWorkerActive = false;
-        if (tfbotWorkerActivationPromise) await tfbotWorkerActivationPromise.catch(() => {});
         tfbotWorkerStarting = false;
         tfbotWorkerState = 'stopping';
         if (clusterHeartbeatTimer) clearInterval(clusterHeartbeatTimer);
@@ -9756,7 +9876,7 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
         let timeoutTimer = null;
         let connectionReadyAt = 0;
         const initialDelayMs = PAIRING_CODE_REQUEST_INITIAL_DELAY_MS;
-        const terminalStatuses = new Set(['duplicate_account', 'pairing_expired', 'auth_error', 'reauth_required', 'logged_out']);
+        const terminalStatuses = new Set(['duplicate_account', 'pairing_expired', 'auth_error', 'reauth_required', 'logged_out', 'forbidden_wait']);
         const getRuntime = () => activeSessions.get(sessionId) || sessionData || initialSession;
         const hasReconnectPath = () => reconnectTimers.has(sessionId) || sessionLockRetryTimers.has(sessionId) || sessionStartPromises.has(sessionId);
         const detachSocket = () => {
@@ -11123,6 +11243,8 @@ for (const ownerDoc of ownerDocs) {
       }
   } else if (duplicateSession) {
       status = 'duplicate_account';
+  } else if (ownerDoc.whatsappForbidden === true || storedStatus === 'forbidden_wait' || ownerDisconnectCode === 403 && ownerLastEvent === 'close') {
+      status = 'forbidden_wait';
   } else if (pairingPending && !pairingExpired) {
       const currentQr = !pairingHasRegisteredIdentity && !!(localSession?.qrString && localSession.pairingAttemptPending === true && localSession.openEventSeen !== true);
       const remoteQr = !pairingHasRegisteredIdentity && !localSession && remoteLeaseLive && String(ownerDoc.lastWhatsAppEvent || '').toLowerCase() === 'qr' && toTimestamp(ownerDoc.lastWhatsAppEventAt) > now - PAIRING_CHALLENGE_TTL_MS;
@@ -11154,6 +11276,7 @@ for (const ownerDoc of ownerDocs) {
 const credentialStateValid = !incompletePairing515 && !credentialsRevoked && (localSocketOperational || hasRegisteredWhatsAppIdentity(activeCredentialRecord, localSession?.sock?.user || null));
   const category = status === 'duplicate_account' ? 'doublon'
       : status === 'connecte' ? 'active'
+      : status === 'forbidden_wait' ? 'forbidden'
       : status === 'reauth_required' ? 'reauthentification'
       : status === 'reconnexion' ? 'reconnexion'
       : pairingPending ? 'connexion'
@@ -11165,7 +11288,7 @@ const credentialStateValid = !incompletePairing515 && !credentialsRevoked && (lo
       void ownerCol?.updateOne({ sessionId }, { $unset: { lastRestoreError: 1, lastRestoreErrorHash: 1, nextRestoreRetryAt: 1 } }).catch(() => {});
   }
   if (localSession && !hasCurrentRetryError && localSession.lastRestoreError) localSession.lastRestoreError = null;
-  const retainOwnerEvent = remoteLeaseLive || status === 'reauth_required' || conflictAuthPreserved;
+  const retainOwnerEvent = remoteLeaseLive || status === 'reauth_required' || status === 'forbidden_wait' || conflictAuthPreserved;
   const eventName = localSocketOperational || remoteOwnerLive ? 'open' : localSession ? localSession.lastWhatsAppEvent || null : retainOwnerEvent ? ownerDoc.lastWhatsAppEvent || null : null;
   const eventAt = localSocketOperational ? localSession.lastWhatsAppEventAt || localSession.connectedAt || null : remoteOwnerLive ? ownerDoc.lastWhatsAppEventAt || ownerDoc.socketAuthenticatedAt || null : localSession ? localSession.lastWhatsAppEventAt || null : retainOwnerEvent ? ownerDoc.lastWhatsAppEventAt || null : null;
   const currentClose = String(eventName || '').toLowerCase() === 'close';
@@ -11292,13 +11415,13 @@ for (const localSession of activeSessions.values()) {
   const retryAt = Math.max(reconnectTimers.has(localSession.id) ? Number(reconnectRetryDueAt.get(localSession.id) || 0) : 0, sessionLockRetryTimers.has(localSession.id) ? Number(sessionLockRetryDueAt.get(localSession.id) || 0) : 0);
   const activeRetryAt = retryAt > now ? retryAt : 0;
   const localSocketConnecting = !!(localSession.sock && !isSocketDefinitelyClosed(localSession.sock) && String(localSession.lastWhatsAppEvent || '').toLowerCase() !== 'close' && Number(localSession.lastDisconnectCode || 0) !== 515);
-  const localDisplayStatus = isAuthenticated ? 'connecte' : previouslyConnected ? activeRetryAt || !localSocketConnecting ? 'reconnexion' : 'synchronisation' : pairingPending ? localSession.qrString && !localRegistered ? 'qr_disponible' : localSocketConnecting || activeRetryAt || localRegistered ? 'synchronisation' : 'pairing' : localSocketConnecting || localRegistered ? 'synchronisation' : 'authentification_incomplete';
+  const localDisplayStatus = isAuthenticated ? 'connecte' : localSession.whatsappForbidden === true || Number(localSession.lastDisconnectCode || 0) === 403 ? 'forbidden_wait' : previouslyConnected ? activeRetryAt || !localSocketConnecting ? 'reconnexion' : 'synchronisation' : pairingPending ? localSession.qrString && !localRegistered ? 'qr_disponible' : localSocketConnecting || activeRetryAt || localRegistered ? 'synchronisation' : 'pairing' : localSocketConnecting || localRegistered ? 'synchronisation' : 'authentification_incomplete';
   const registered = localRegistered;
   const restoreError = activeRetryAt && !isAuthenticated ? String(localSession.lastRestoreError || '') || null : null;
   if (!restoreError && localSession.lastRestoreError) localSession.lastRestoreError = null;
   const currentClose = String(localSession.lastWhatsAppEvent || '').toLowerCase() === 'close';
   const aliveSince = getAccountAliveTimestamp(null, localSession, isAuthenticated);
-  sessionsList.push({ ID: localSession.id, Sessions: localDisplayStatus, Categorie: isAuthenticated ? 'active' : previouslyConnected && localDisplayStatus === 'reconnexion' ? 'reconnexion' : pairingPending || registered ? 'connexion' : 'authentification_incomplete', Credentials: isAuthenticated || registered ? 'recuperables' : 'incomplets', Owner: TFBOT_CLUSTER_INSTANCE_URL || TFBOT_CLUSTER_INSTANCE_HOST, OwnerLeaseUntil: tfbotWorkerLeaseUntil > now ? new Date(tfbotWorkerLeaseUntil).toISOString() : null, SocketAuthenticated: isAuthenticated, SocketReady: isWhatsAppSocketReady(localSession, localSession.sock), RestoreError: restoreError, NextRetryAt: activeRetryAt ? new Date(activeRetryAt).toISOString() : null, DuplicateOf: null, Numero: getAuthenticatedPhoneNumber(localSession.sock?.user || null, localSession.authState?.creds) || 'N/A', Name: sanitizeSessionDisplayName(localSession.sock?.user?.name || localSession.sock?.user?.notify || localSession.authState?.creds?.me?.name || 'Bot (tfbot)'), Format: format, Mode: 'prive', WhatsAppEvent: localSession.lastWhatsAppEvent || null, WhatsAppStateAt: localSession.lastWhatsAppEventAt || null, InvalidStatusSinceAt: isNonExpiringSessionStatus(localDisplayStatus) ? null : localSession.invalidStatusSinceAt || null, InvalidStatusExpiresAt: isNonExpiringSessionStatus(localDisplayStatus) ? null : localSession.invalidStatusSinceAt ? new Date(parseSessionStatusTimestamp(localSession.invalidStatusSinceAt) + SESSION_INVALID_STATUS_TTL_MS).toISOString() : null, DisconnectCode: currentClose && !isAuthenticated ? localSession.lastDisconnectCode || null : null, DisconnectReason: currentClose && !isAuthenticated ? localSession.lastDisconnectReason || null : null, Alive: isAuthenticated ? getUptimeString(Math.max(1000, aliveSince ? now - aliveSince : 1000)) : null });
+  sessionsList.push({ ID: localSession.id, Sessions: localDisplayStatus, Categorie: isAuthenticated ? 'active' : localDisplayStatus === 'forbidden_wait' ? 'forbidden' : previouslyConnected && localDisplayStatus === 'reconnexion' ? 'reconnexion' : pairingPending || registered ? 'connexion' : 'authentification_incomplete', Credentials: isAuthenticated || registered ? 'recuperables' : 'incomplets', Owner: TFBOT_CLUSTER_INSTANCE_URL || TFBOT_CLUSTER_INSTANCE_HOST, OwnerLeaseUntil: tfbotWorkerLeaseUntil > now ? new Date(tfbotWorkerLeaseUntil).toISOString() : null, SocketAuthenticated: isAuthenticated, SocketReady: isWhatsAppSocketReady(localSession, localSession.sock), RestoreError: restoreError, NextRetryAt: activeRetryAt ? new Date(activeRetryAt).toISOString() : null, DuplicateOf: null, Numero: getAuthenticatedPhoneNumber(localSession.sock?.user || null, localSession.authState?.creds) || 'N/A', Name: sanitizeSessionDisplayName(localSession.sock?.user?.name || localSession.sock?.user?.notify || localSession.authState?.creds?.me?.name || 'Bot (tfbot)'), Format: format, Mode: 'prive', WhatsAppEvent: localSession.lastWhatsAppEvent || null, WhatsAppStateAt: localSession.lastWhatsAppEventAt || null, InvalidStatusSinceAt: isNonExpiringSessionStatus(localDisplayStatus) ? null : localSession.invalidStatusSinceAt || null, InvalidStatusExpiresAt: isNonExpiringSessionStatus(localDisplayStatus) ? null : localSession.invalidStatusSinceAt ? new Date(parseSessionStatusTimestamp(localSession.invalidStatusSinceAt) + SESSION_INVALID_STATUS_TTL_MS).toISOString() : null, DisconnectCode: currentClose && !isAuthenticated ? localSession.lastDisconnectCode || null : null, DisconnectReason: currentClose && !isAuthenticated ? localSession.lastDisconnectReason || null : null, Alive: isAuthenticated ? getUptimeString(Math.max(1000, aliveSince ? now - aliveSince : 1000)) : null });
 }
         return sessionsList;
     } catch (error) {
@@ -11312,12 +11435,12 @@ for (const localSession of activeSessions.values()) {
             const localSocketConnecting = !!(session.sock && !isSocketDefinitelyClosed(session.sock) && String(session.lastWhatsAppEvent || '').toLowerCase() !== 'close' && Number(session.lastDisconnectCode || 0) !== 515);
             const retryAt = Math.max(reconnectTimers.has(sessionId) ? Number(reconnectRetryDueAt.get(sessionId) || 0) : 0, sessionLockRetryTimers.has(sessionId) ? Number(sessionLockRetryDueAt.get(sessionId) || 0) : 0);
             const priorStatus = String(session.status || '').toLowerCase();
-            const inactiveStatus = localSocketConnecting || registeredIdentity ? 'synchronisation' : ['pairing', 'pairing_starting', 'qr_disponible', 'reauth_required', 'duplicate_account', 'authentification_incomplete', 'deconnecte'].includes(priorStatus) ? priorStatus : 'authentification_incomplete';
+            const inactiveStatus = session.whatsappForbidden === true || Number(session.lastDisconnectCode || 0) === 403 ? 'forbidden_wait' : localSocketConnecting || registeredIdentity ? 'synchronisation' : ['pairing', 'pairing_starting', 'qr_disponible', 'reauth_required', 'forbidden_wait', 'duplicate_account', 'authentification_incomplete', 'deconnecte'].includes(priorStatus) ? priorStatus : 'authentification_incomplete';
             const fallbackStatus = authenticated ? 'connecte' : historicalOpen ? retryAt > now || !localSocketConnecting ? 'reconnexion' : 'synchronisation' : inactiveStatus;
             return {
                 ID: String(sessionId),
                 Sessions: fallbackStatus,
-                Categorie: authenticated ? 'active' : historicalOpen && fallbackStatus === 'reconnexion' ? 'reconnexion' : registeredIdentity || localSocketConnecting ? 'connexion' : 'authentification_incomplete',
+                Categorie: authenticated ? 'active' : fallbackStatus === 'forbidden_wait' ? 'forbidden' : historicalOpen && fallbackStatus === 'reconnexion' ? 'reconnexion' : registeredIdentity || localSocketConnecting ? 'connexion' : 'authentification_incomplete',
                 Credentials: registeredIdentity ? 'recuperables' : credentials ? 'incomplets' : 'absents',
                 Owner: TFBOT_CLUSTER_INSTANCE_URL || TFBOT_CLUSTER_INSTANCE_HOST,
                 OwnerLeaseUntil: tfbotWorkerLeaseUntil > now ? new Date(tfbotWorkerLeaseUntil).toISOString() : null,
@@ -11700,7 +11823,12 @@ async function generateCloudflareImage(prompt) {
 function scheduleSessionReconnect(sessionId, autoExpire, format, options = {}) {
     if (serverShuttingDown || tfbotWorkerStopping || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive)) return;
     const session = activeSessions.get(sessionId);
-    if (!session || session.retiringDuplicateAccount === true || String(session.status || '').toLowerCase() === 'duplicate_account' || reconnectTimers.has(sessionId) || String(session.status || '').toLowerCase() === 'pairing_expired' || session.reauthRequired === true || session.deviceRemoved === true) return;
+    const currentStatus = String(session?.status || '').toLowerCase();
+    if (session && (session.whatsappForbidden === true || currentStatus === 'forbidden_wait' || Number(session.lastDisconnectCode || 0) === 403)) {
+        console.warn('[session-reconnect-suppressed-whatsapp-forbidden]', { sessionId, disconnectCode: Number(session.lastDisconnectCode || 403), status: currentStatus || null, credentialsPreserved: true, automaticReconnect: false });
+        return;
+    }
+    if (!session || session.retiringDuplicateAccount === true || currentStatus === 'duplicate_account' || reconnectTimers.has(sessionId) || currentStatus === 'pairing_expired' || session.reauthRequired === true || session.deviceRemoved === true) return;
     const disconnectCode = Number(session.lastDisconnectCode || 0);
     const isRestartRequired = disconnectCode === 515 || /stream errored.*restart required|restart required/i.test(String(session.lastDisconnectReason || ''));
     if (session.pairingRestartFailed === true && !isRestartRequired) return;
@@ -12145,7 +12273,7 @@ function waitForSessionQr(sessionId, timeoutMs = 0, minimumDelayMs = 4000) {
         let timeoutTimer = null;
         let qrReadyTimer = null;
         const minimumWait = Math.max(0, Number(minimumDelayMs) || 0);
-        const terminalStatuses = new Set(['duplicate_account', 'pairing_expired', 'auth_error', 'reauth_required', 'logged_out']);
+        const terminalStatuses = new Set(['duplicate_account', 'pairing_expired', 'auth_error', 'reauth_required', 'logged_out', 'forbidden_wait']);
         const getFreshQr = runtime => {
             if (!runtime?.sock) return null;
             const snapshot = getPairingConnectionSnapshot(sessionId, runtime.sock);
@@ -12790,13 +12918,44 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         clearPairing515SocketOpenWatchdog(sessionId);
         let expiryOwner = null;
         try {
-            expiryOwner = await runStartStage('owner_state_read', () => db ? db.collection('session_owners').findOne({ sessionId }, { projection: { connectionEverOpened: 1, pairingExpiredAt: 1, pairingPending: 1, pairingCleanupPending: 1, pairingRestartFailed: 1, pairingRestartAttempts: 1, pairingAttemptPending: 1, pairingReplacementPending: 1, pairingProofPersisted: 1, pairingCredentialsConfirmedAt: 1, pairingAuthStoreFlushedAt: 1, everConnected: 1, everAuthenticated: 1, connectedSince: 1, socketAuthenticatedAt: 1, connectionStatus: 1, lastDisconnectCode: 1, lastDisconnectReason: 1, lastWhatsAppEvent: 1 } }).catch(() => null) : Promise.resolve(null), bootstrap515 ? 5000 : 20000);
+            expiryOwner = await runStartStage('owner_state_read', () => db ? db.collection('session_owners').findOne({ sessionId }, { projection: { connectionEverOpened: 1, pairingExpiredAt: 1, pairingPending: 1, pairingCleanupPending: 1, pairingRestartFailed: 1, pairingRestartAttempts: 1, pairingAttemptPending: 1, pairingReplacementPending: 1, pairingProofPersisted: 1, pairingCredentialsConfirmedAt: 1, pairingAuthStoreFlushedAt: 1, everConnected: 1, everAuthenticated: 1, connectedSince: 1, socketAuthenticatedAt: 1, connectionStatus: 1, lastDisconnectCode: 1, lastDisconnectReason: 1, lastWhatsAppEvent: 1, whatsappForbidden: 1 } }).catch(() => null) : Promise.resolve(null), bootstrap515 ? 5000 : 20000);
         } catch (ownerReadError) {
             if (!bootstrap515) throw ownerReadError;
             console.warn('[pairing-515-owner-state-read-fallback]', { sessionId, error: ownerReadError?.message || String(ownerReadError), action: 'continue_from_registered_in_memory_auth_state' });
         }
         if (expiryOwner?.pairingReplacementPending === true) pendingPairingReplacementSessions.add(sessionId);
         else pendingPairingReplacementSessions.delete(sessionId);
+        const ownerStatusAtStart = String(expiryOwner?.connectionStatus || '').toLowerCase();
+        const ownerDisconnectCodeAtStart = Number(expiryOwner?.lastDisconnectCode || 0);
+        const whatsappForbiddenAtStart = expiryOwner?.whatsappForbidden === true || ownerStatusAtStart === 'forbidden_wait' || ownerDisconnectCodeAtStart === 403 && String(expiryOwner?.lastWhatsAppEvent || '').toLowerCase() === 'close';
+        if (whatsappForbiddenAtStart && expectExisting) {
+            const pausedAt = new Date();
+            await db.collection('session_owners').updateOne(
+                { sessionId },
+                { $set: { whatsappForbidden: true, connectionStatus: 'forbidden_wait', socketAuthenticated: false, socketReady: false, pairingPending: false, pairingAttemptPending: false, reauthRequired: false, credentialsRevoked: false, lastWhatsAppEvent: 'close', lastWhatsAppEventAt: expiryOwner?.lastWhatsAppEventAt || pausedAt, lastDisconnectCode: 403, lastAuthFailure: 'whatsapp_forbidden', statusUpdatedAt: pausedAt, updatedAt: pausedAt }, $unset: { nextRestoreRetryAt: 1, invalidStatusSinceAt: 1, invalidStatusExpiresAt: 1, lastRestoreError: 1, lastRestoreErrorHash: 1 } }
+            ).catch(error => console.warn('[session-forbidden-pause-persist-failed]', { sessionId, error: error?.message || String(error), credentialsPreserved: true }));
+            const pausedRuntime = activeSessions.get(sessionId);
+            if (pausedRuntime) {
+                pausedRuntime.whatsappForbidden = true;
+                pausedRuntime.status = 'forbidden_wait';
+                pausedRuntime.active = false;
+                pausedRuntime.lastDisconnectCode = 403;
+                pausedRuntime.lastWhatsAppEvent = 'close';
+                if (!pausedRuntime.sock || isSocketDefinitelyClosed(pausedRuntime.sock)) pausedRuntime.sock = null;
+            }
+            const reconnectTimer = reconnectTimers.get(sessionId);
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            reconnectTimers.delete(sessionId);
+            reconnectRetryDueAt.delete(sessionId);
+            const lockRetryTimer = sessionLockRetryTimers.get(sessionId);
+            if (lockRetryTimer) clearTimeout(lockRetryTimer);
+            sessionLockRetryTimers.delete(sessionId);
+            sessionLockRetryDueAt.delete(sessionId);
+            if (sessionRuntimeLockTokens.has(sessionId)) await releaseSessionRuntimeLock(sessionId).catch(() => {});
+            clearInvalidStatusCleanupTimer(sessionId);
+            console.warn('[session-restore-skipped-whatsapp-forbidden]', { sessionId, disconnectCode: 403, credentialsPreserved: true, authDocumentsDeleted: false, automaticReconnect: false, action: 'keep_saved_session_without_repeating_forbidden_handshake' });
+            return;
+        }
         if (expiryOwner?.pairingRestartFailed === true || String(expiryOwner?.connectionStatus || '').toLowerCase() === 'pairing_expired' && expiryOwner?.pairingCleanupPending !== true) throw new Error('pairing_restart_failed_new_challenge_required');
         if (expiryOwner?.pairingExpiredAt && expiryOwner.pairingPending !== true && expiryOwner.pairingCleanupPending === true && expiryOwner.pairingRestartFailed !== true) throw new Error('pairing_challenge_expired');
         const expiryRuntime = activeSessions.get(sessionId);
@@ -13601,11 +13760,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     currentSession.sock = sock;
                     currentSession.lastWhatsAppEvent = 'qr';
                     currentSession.lastWhatsAppEventAt = Date.now();
+                    currentSession.whatsappForbidden = false;
                     currentSession.lastDisconnectCode = null;
                     currentSession.lastDisconnectReason = null;
                     currentSession.lastRestoreError = null;
                 }
-                void db.collection('session_owners').updateOne({ sessionId }, { $set: { connectionStatus: 'qr_disponible', socketAuthenticated: false, socketReady: false, pairingPending: true, lastWhatsAppEvent: 'qr', lastWhatsAppEventAt: new Date(), statusUpdatedAt: new Date(), updatedAt: new Date() }, $unset: { lastDisconnectCode: 1, lastDisconnectReason: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, nextRestoreRetryAt: 1 } }).catch(error => console.warn('[session-qr-state-persist-failed]', { sessionId, error: error?.message || String(error) }));
+                void db.collection('session_owners').updateOne({ sessionId }, { $set: { connectionStatus: 'qr_disponible', socketAuthenticated: false, socketReady: false, pairingPending: true, whatsappForbidden: false, lastWhatsAppEvent: 'qr', lastWhatsAppEventAt: new Date(), statusUpdatedAt: new Date(), updatedAt: new Date() }, $unset: { lastDisconnectCode: 1, lastDisconnectReason: 1, lastAuthFailure: 1, lastAuthFailureAt: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, nextRestoreRetryAt: 1 } }).catch(error => console.warn('[session-qr-state-persist-failed]', { sessionId, error: error?.message || String(error) }));
                 console.info('[whatsapp-connection-state]', { sessionId, whatsappEvent: 'qr', displayedState: 'qr_disponible' });
             }
             if (connection === 'connecting') {
@@ -13616,10 +13776,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     currentSession.lastConnectionTransitionAt = Date.now();
                     currentSession.lastWhatsAppEvent = 'connecting';
                     currentSession.lastWhatsAppEventAt = Date.now();
+                    currentSession.whatsappForbidden = false;
                     currentSession.lastDisconnectCode = null;
                     currentSession.lastDisconnectReason = null;
                     currentSession.lastRestoreError = null;
-                    void db.collection('session_owners').updateOne({ sessionId }, { $set: { connectionStatus: currentSession.status, socketAuthenticated: false, socketReady: !!sock?.ws?.isOpen, lastWhatsAppEvent: 'connecting', lastWhatsAppEventAt: new Date(), statusUpdatedAt: new Date(), updatedAt: new Date() }, $unset: { lastDisconnectCode: 1, lastDisconnectReason: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, nextRestoreRetryAt: 1 } }).catch(() => {});
+                    void db.collection('session_owners').updateOne({ sessionId }, { $set: { connectionStatus: currentSession.status, socketAuthenticated: false, socketReady: !!sock?.ws?.isOpen, whatsappForbidden: false, lastWhatsAppEvent: 'connecting', lastWhatsAppEventAt: new Date(), statusUpdatedAt: new Date(), updatedAt: new Date() }, $unset: { lastDisconnectCode: 1, lastDisconnectReason: 1, lastAuthFailure: 1, lastAuthFailureAt: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, nextRestoreRetryAt: 1 } }).catch(() => {});
                     console.info('[whatsapp-connection-state]', { sessionId, whatsappEvent: 'connecting', displayedState: currentSession.status });
                 }
             }
@@ -13631,7 +13792,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 openingSession.lastWhatsAppEvent = 'open';
                 openingSession.lastWhatsAppEventAt = Date.now();
                 const openEventAt = Date.now();
-                void db.collection('session_owners').updateOne({ sessionId }, { $set: { connectionEverOpened: true, connectionEverOpenedAt: new Date(openEventAt), connectionStatus: 'synchronisation', socketAuthenticated: false, socketReady: true, lastWhatsAppEvent: 'open', lastWhatsAppEventAt: new Date(openEventAt), statusUpdatedAt: new Date(openEventAt), updatedAt: new Date(openEventAt) } }).catch(() => {});
+                void db.collection('session_owners').updateOne({ sessionId }, { $set: { connectionEverOpened: true, connectionEverOpenedAt: new Date(openEventAt), connectionStatus: 'synchronisation', socketAuthenticated: false, socketReady: true, whatsappForbidden: false, lastWhatsAppEvent: 'open', lastWhatsAppEventAt: new Date(openEventAt), statusUpdatedAt: new Date(openEventAt), updatedAt: new Date(openEventAt) }, $unset: { lastDisconnectCode: 1, lastDisconnectReason: 1, lastAuthFailure: 1, lastAuthFailureAt: 1, nextRestoreRetryAt: 1 } }).catch(() => {});
                 openingSession.openReadinessStartedAt = openingSession.openReadinessStartedAt || openEventAt;
                 openingSession.connectedAt = Number(openingSession.connectedAt || openEventAt);
                 openingSession.readyAt = Number(openingSession.readyAt || openEventAt);
@@ -13929,6 +14090,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     console.info('[pairing-515-restart-queued]', { sessionId, reconnectWithSameCredentials: true, credentialSaveQueued: true, noCredentialDeletion: true });
                 }
                 const numericDisconnectCode = Number(statusCode || 0);
+                const disconnectIsForbidden = numericDisconnectCode === 403 || numericDisconnectCode === Number(DisconnectReason.forbidden || 403);
                 const disconnectIsConflict = /\bconflict\b|connection[\s_-]*replaced|stream errored.*conflict|replaced by another connection/i.test(disconnectReason);
                 const disconnectIsLoggedOut = numericDisconnectCode === Number(DisconnectReason.loggedOut) || numericDisconnectCode === 401;
                 const disconnectIsDeviceRemoved = numericDisconnectCode === 401 && disconnectIsConflict;
@@ -13958,13 +14120,14 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     statusCode: statusCode ?? null,
                     reason: disconnectReason,
                     requiresReauthentication,
+                    disconnectIsForbidden,
                     pairingAttempt: wasPairingAttempt,
                     pairingRestartRequired,
                     pairingRestartAttempts,
                     credentialsRegistered: closeCredentials?.registered === true,
                     credentialsIdentityPresent: hasRegisteredWhatsAppIdentity(closeCredentials, sock.user || null),
                     credentialsAddressPresent: !!(closeCredentials?.me?.id || closeCredentials?.me?.lid),
-                    willReconnect: !requiresReauthentication
+                    willReconnect: !requiresReauthentication && !disconnectIsForbidden
                 });
                 
                 try {
@@ -13974,7 +14137,68 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     console.error('[whatsapp-close-cleanup]', { sessionId, error: closeError?.message || String(closeError) });
                 }
 
-                if (disconnectIsDeviceRemoved) {
+                if (disconnectIsForbidden) {
+                    try {
+                        const currentRecord = activeSessions.get(sessionId);
+                        const forbiddenAt = new Date(closeAt);
+                        let authCleanupReady = false;
+                        try {
+                            authCleanupReady = await cleanupSocket(sessionId, { credentialPersistenceTimeoutMs: 20000, authStoreTimeoutMs: 30000, authStoreQuietMs: 500, socketCloseTimeoutMs: 1000 });
+                        } catch (authCleanupError) {
+                            console.warn('[whatsapp-forbidden-auth-flush-failed]', { sessionId, error: authCleanupError?.message || String(authCleanupError), credentialsPreserved: true, authDocumentsDeleted: false });
+                        }
+                        await db.collection('session_owners').updateOne(
+                            { sessionId },
+                            { $set: { whatsappForbidden: true, connectionStatus: 'forbidden_wait', socketAuthenticated: false, socketReady: false, pairingPending: false, pairingAttemptPending: false, reauthRequired: false, credentialsRevoked: false, lastAuthFailureAt: forbiddenAt, lastAuthFailure: 'whatsapp_forbidden', lastWhatsAppEvent: 'close', lastWhatsAppEventAt: forbiddenAt, lastDisconnectCode: 403, lastDisconnectReason: disconnectReason, disconnectTime: forbiddenAt, unconnectedSinceAt: forbiddenAt, invalidStatusSinceAt: null, invalidStatusExpiresAt: null, statusUpdatedAt: forbiddenAt, updatedAt: forbiddenAt }, $unset: { nextRestoreRetryAt: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, pairingExpiredAt: 1, pairingCleanupPending: 1 } },
+                            { upsert: false }
+                        );
+                        if (currentRecord) {
+                            currentRecord.whatsappForbidden = true;
+                            currentRecord.status = 'forbidden_wait';
+                            currentRecord.active = false;
+                            currentRecord.disconnectTime = closeAt;
+                            currentRecord.unconnectedSinceAt = closeAt;
+                            currentRecord.invalidStatusSinceAt = null;
+                            currentRecord.lastWhatsAppEvent = 'close';
+                            currentRecord.lastWhatsAppEventAt = closeAt;
+                            currentRecord.lastDisconnectCode = 403;
+                            currentRecord.lastDisconnectReason = disconnectReason;
+                            currentRecord.reauthRequired = false;
+                            currentRecord.reconnectAttempts = 0;
+                            if (currentRecord.sock === sock && (!authCleanupReady || isSocketDefinitelyClosed(sock))) currentRecord.sock = null;
+                        }
+                        const pendingReconnect = reconnectTimers.get(sessionId);
+                        if (pendingReconnect) clearTimeout(pendingReconnect);
+                        reconnectTimers.delete(sessionId);
+                        reconnectRetryDueAt.delete(sessionId);
+                        const pendingLockRetry = sessionLockRetryTimers.get(sessionId);
+                        if (pendingLockRetry) clearTimeout(pendingLockRetry);
+                        sessionLockRetryTimers.delete(sessionId);
+                        sessionLockRetryDueAt.delete(sessionId);
+                        clearInvalidStatusCleanupTimer(sessionId);
+                        clearPairingChallengeTimer(sessionId);
+                        clearPairingRestartWatchdog(sessionId);
+                        clearPairing515SocketOpenWatchdog(sessionId);
+                        await releaseSessionRuntimeLock(sessionId);
+                        console.error('[whatsapp-forbidden-session-paused]', { sessionId, statusCode: 403, credentialsRegistered: closeCredentials?.registered === true, identityPresent: hasRegisteredWhatsAppIdentity(closeCredentials, sock.user || null), authCleanupReady, credentialsPreserved: true, signalKeysDeleted: false, authDocumentsDeleted: false, automaticReconnect: false, action: 'stop_reconnect_loop_and_keep_existing_whatsapp_credentials_and_signal_keys' });
+                    } catch (forbiddenCleanupError) {
+                        console.error('[whatsapp-forbidden-session-pause-failed]', { sessionId, error: forbiddenCleanupError?.message || String(forbiddenCleanupError), credentialsPreserved: true, automaticReconnectSuppressed: true });
+                        const currentRecord = activeSessions.get(sessionId);
+                        if (currentRecord) {
+                            currentRecord.whatsappForbidden = true;
+                            currentRecord.status = 'forbidden_wait';
+                            currentRecord.active = false;
+                            currentRecord.lastDisconnectCode = 403;
+                            currentRecord.lastDisconnectReason = disconnectReason;
+                            currentRecord.sock = null;
+                        }
+                        const pendingReconnect = reconnectTimers.get(sessionId);
+                        if (pendingReconnect) clearTimeout(pendingReconnect);
+                        reconnectTimers.delete(sessionId);
+                        reconnectRetryDueAt.delete(sessionId);
+                        await releaseSessionRuntimeLock(sessionId).catch(() => {});
+                    }
+                } else if (disconnectIsDeviceRemoved) {
                     try {
                         const currentRecord = activeSessions.get(sessionId);
                         await db.collection('session_owners').updateOne(
@@ -14726,6 +14950,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             }
 
             for (const m of rawBatch) {
+                if (workerDrainingSessionIds.has(sessionId) || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping))) {
+                    console.info('[message-upsert-paused-before-message-dispatch-during-worker-handoff]', { sessionId, messageCountRemaining: Math.max(0, rawBatch.length - rawBatch.indexOf(m)), upsertType, action: 'leave_unprocessed_messages_for_selected_worker' });
+                    break;
+                }
+                inboundMessagePreDispatchCounts.set(sessionId, Number(inboundMessagePreDispatchCounts.get(sessionId) || 0) + 1);
                 try {
                 const messageUpsertHandlerStartedAt = Date.now();
                 const activeMessageSession = activeSessions.get(sessionId);
@@ -15859,6 +16088,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
                         await (async () => {
                             let safeSendActionError = null;
+                            const t = translations[messageLang] || translations.ht;
                             try {
                                 const shouldSendTyping = isOwnerReal || isPublicMode || internalCommand === 'ai' || internalCommand === 'cheche';
                                 let isTyping = shouldSendTyping;
@@ -15875,8 +16105,6 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 const messageContentForContext = unwrapMessageContent(m.message);
                                 const quoted = getMessageContextInfo(m.message);
                                 const quotedMessage = quoted.quotedMessage || undefined;
-                                const t = translations[messageLang] || translations.ht;
-
                                 let isCancelled = false;
                                 let terminalResponseSent = false;
                                 let terminalResponsePromise = null;
@@ -15933,13 +16161,15 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     const destination = String(sendArgs[1] || from || '');
                                     const payloadType = Object.keys(sendArgs[2] || {}).filter(key => !['mentions', 'quoted', 'contextInfo', 'messageContextInfo'].includes(key)).join(',') || 'message';
                                     const useGroupLegacy = /@g\.us$/i.test(destination);
-                                    const useLegacy = useGroupLegacy || isSessionMessagingFallbackActive(sessionId);
-                                    let transportUsed = useGroupLegacy ? 'existing_queued_group_sender_key_transport' : useLegacy ? 'existing_queued_legacy_fallback' : 'simple_direct_send';
+                                    const forceLegacy = sendArgs[5] === true;
+                                    const useLegacy = forceLegacy || useGroupLegacy || isSessionMessagingFallbackActive(sessionId);
+                                    const baseSendArgs = sendArgs.slice(0, 5);
+                                    let transportUsed = forceLegacy ? 'queued_media_transport' : useGroupLegacy ? 'existing_queued_group_sender_key_transport' : useLegacy ? 'existing_queued_legacy_fallback' : 'simple_direct_send';
                                     markCommandSending(transportUsed, payloadType);
                                     try {
                                         let result;
                                         if (useLegacy) {
-                                            result = await queuedSendMessageLegacy(...sendArgs);
+                                            result = await queuedSendMessageLegacy(...baseSendArgs);
                                             if (!useGroupLegacy && result?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, result.key.id);
                                         } else {
                                             try {
@@ -15950,7 +16180,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                                 markSessionMessagingFallback(sessionId, `tracked_command_signal_${classifyWhatsAppFailure(directError)}`, msgId);
                                                 transportUsed = 'existing_queued_legacy_fallback_after_signal_failure';
                                                 markCommandSending(transportUsed, payloadType);
-                                                result = await queuedSendMessageLegacy(...sendArgs);
+                                                result = await queuedSendMessageLegacy(...baseSendArgs);
                                                 if (result?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, result.key.id);
                                             }
                                         }
@@ -16048,6 +16278,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 };
                                 safeSendActionError = async (...errorArgs) => {
                                     if (terminalResponseSent) return terminalResponsePromise;
+                                    const currentCommandRuntime = activeSessions.get(sessionId);
+                                    const commandSocketUnavailable = !currentCommandRuntime || currentCommandRuntime.sock !== sock || isSocketDefinitelyClosed(sock) || workerDrainingSessionIds.has(sessionId) || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping));
+                                    if (commandSocketUnavailable) {
+                                        console.warn('[command-action-error-response-skipped-socket-unavailable]', { sessionId, messageId: msgId, command: internalCommand, runtimePresent: !!currentCommandRuntime, sameSocket: currentCommandRuntime?.sock === sock, workerDraining: workerDrainingSessionIds.has(sessionId), workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, action: 'finish_command_without_retrying_a_response_on_a_closed_or_replaced_socket' });
+                                        return null;
+                                    }
                                     commandOperationFailed = true;
                                     logCommandLifecycle('failure', { stage: 'action', error: String(errorArgs[3]?.message || errorArgs[3] || 'action_failed').slice(0, 500) });
                                     const rawActionError = redactActionError(errorArgs[3]);
@@ -16069,8 +16305,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     } catch (sendError) {
                                         terminalResponsePromise = null;
                                         terminalResponseSent = false;
-                                        console.error('[command-action-error-response-not-confirmed]', { sessionId, messageId: msgId, command: internalCommand, error: sendError?.message || String(sendError) });
-                                        throw sendError;
+                                        console.error('[command-action-error-response-not-confirmed]', { sessionId, messageId: msgId, command: internalCommand, error: sendError?.message || String(sendError), action: 'do_not_rethrow_from_error_handler' });
+                                        return null;
                                     }
                                 };
                                 const trackedSendImageCaptioned = async (...sendArgs) => {
@@ -16802,58 +17038,34 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 const rightPath = Number(!!(right.info.payload.url || right.info.payload.directPath));
                                                 return rightViewOnce - leftViewOnce || (rightKey > 0) - (leftKey > 0) || rightKey - leftKey || rightPath - leftPath;
                                             });
-                                            const selectedMediaVO = mediaMatchesVO[0] || null;
-                                            const mediaInfoVO = selectedMediaVO?.info || null;
-                                            if (!mediaInfoVO?.payload) {
+                                            let selectedMediaVO = null;
+                                            let mediaInfoVO = null;
+                                            let mediaVO = null;
+                                            let dlTypeVO = '';
+                                            let sendTypeVO = '';
+                                            let bufferVO = null;
+                                            const downloadableMediaMatchesVO = mediaMatchesVO.filter(candidate => {
+                                                const info = candidate.info;
+                                                return info?.viewOnce === true && ['image', 'video', 'audio', 'document', 'sticker'].includes(info.downloadType) && ['image', 'video', 'audio', 'document', 'sticker'].includes(info.sendType) && mediaKeyLengthVO(info.payload?.mediaKey) > 0;
+                                            });
+                                            if (!mediaMatchesVO.length) {
                                                 console.warn('[quoted-media-command-payload-not-found]', { sessionId, messageId: msgId, command: internalCommand, quotedMessageAvailable: !!quotedSourceVO, persistentQuoteAvailable: !!quotedRecordVO?.message, quoteRecordSource: quotedRecordVO?.source || null, quoteRecordFormat: quotedRecordVO?.messageFormat || null });
-                                                console.warn('[quoted-media-ignored-not-view-once]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, reason: 'quoted_media_payload_unavailable', quotedMessageAvailable: !!quotedSourceVO, storedQuoteCandidates: quotedRecordsVO.length, storedQuoteFormat: quotedRecordVO?.messageFormat || null });
                                                 const unavailableMediaTextVO = ({ fr: 'Le média cité est introuvable dans les messages enregistrés.', ht: 'Mwen pa jwenn medya ou te site a nan mesaj ki anrejistre yo.', es: 'No se encontró el contenido citado en los mensajes guardados.', en: 'The quoted media could not be found in the stored messages.' })[messageLang] || 'Le média cité est introuvable dans les messages enregistrés.';
                                                 await safeSendFormatted(sock, from, commandTitleVO, unavailableMediaTextVO, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            if (mediaInfoVO.viewOnce !== true) {
-                                                console.info('[quoted-media-ignored-not-view-once]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, mediaType: mediaInfoVO.sourceType, reason: 'regular_media' });
+                                            const viewOnceCandidatesVO = mediaMatchesVO.filter(candidate => candidate.info?.viewOnce === true);
+                                            if (!viewOnceCandidatesVO.length) {
+                                                console.info('[quoted-media-ignored-not-view-once]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, mediaType: mediaMatchesVO[0]?.info?.sourceType || null, reason: 'quoted_message_is_not_marked_view_once' });
                                                 break;
                                             }
-                                            const dlTypeVO = mediaInfoVO.downloadType;
-                                            const sendTypeVO = mediaInfoVO.sendType;
-                                            if (!['image', 'video', 'audio', 'document', 'sticker'].includes(dlTypeVO) || !['image', 'video', 'audio', 'document', 'sticker'].includes(sendTypeVO)) {
-                                                await safeSendFormatted(sock, from, commandTitleVO, internalCommand === 'vv2' ? (t.vv2_media_required || t.vv_media_required) : t.vv_media_required, pushName, true, activeHostName);
-                                                break;
-                                            }
-                                            const mediaVO = mediaInfoVO.payload;
-                                            const selectedMediaKeyLengthVO = mediaKeyLengthVO(mediaVO.mediaKey);
-                                            console.info('[quoted-media-candidate-selected]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, source: selectedMediaVO?.source || 'unknown', candidateCount: mediaCandidatesVO.length, mediaCandidateCount: mediaMatchesVO.length, mediaKeyAvailable: selectedMediaKeyLengthVO > 0, mediaKeyLength: selectedMediaKeyLengthVO, mediaPathAvailable: !!(mediaVO.url || mediaVO.directPath) });
-                                            if (!selectedMediaKeyLengthVO) {
-                                                console.warn('[quoted-media-missing-media-key]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, candidateCount: mediaCandidatesVO.length, mediaCandidateCount: mediaMatchesVO.length, sources: mediaMatchesVO.map(candidate => ({ source: candidate.source, mediaKeyAvailable: mediaKeyLengthVO(candidate.info.payload.mediaKey) > 0, mediaPathAvailable: !!(candidate.info.payload.url || candidate.info.payload.directPath) })) });
-                                                const missingMediaKeyTextVO = ({ fr: 'Les données du média cité sont incomplètes. Le média ne peut pas être récupéré depuis cette copie du message.', ht: 'Done medya ou site a pa konplè. Mwen pa ka rekipere medya a nan kopi mesaj sa a.', es: 'Los datos del contenido citado están incompletos. No se puede recuperar desde esta copia del mensaje.', en: 'The quoted media data is incomplete. It cannot be retrieved from this copy of the message.' })[messageLang] || 'The quoted media data is incomplete. It cannot be retrieved from this copy of the message.';
+                                            if (!downloadableMediaMatchesVO.length) {
+                                                console.warn('[quoted-media-missing-download-data]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, candidateCount: mediaCandidatesVO.length, mediaCandidateCount: mediaMatchesVO.length, viewOnceCandidateCount: viewOnceCandidatesVO.length, sources: viewOnceCandidatesVO.map(candidate => ({ source: candidate.source, sourceType: candidate.info.sourceType, mediaKeyLength: mediaKeyLengthVO(candidate.info.payload?.mediaKey), mediaPathAvailable: !!(candidate.info.payload?.url || candidate.info.payload?.directPath) })) });
+                                                const missingMediaKeyTextVO = ({ fr: 'Les données du média cité sont incomplètes. Le bot n’a trouvé aucune copie contenant la clé média nécessaire.', ht: 'Done medya ou site a pa konplè. Bot la pa jwenn yon kopi ki gen kle medya ki nesesè a.', es: 'Los datos del contenido citado están incompletos. No se encontró una copia con la clave multimedia necesaria.', en: 'The quoted media data is incomplete. No available copy contains the required media key.' })[messageLang] || 'Les données du média cité sont incomplètes. Le bot n’a trouvé aucune copie contenant la clé média nécessaire.';
                                                 await safeSendFormatted(sock, from, commandTitleVO, missingMediaKeyTextVO, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            console.info('[quoted-media-download-start]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, mediaType: mediaInfoVO.sourceType, downloadType: dlTypeVO, viewOnce: mediaInfoVO.viewOnce === true, source: selectedMediaVO?.source || 'unknown' });
-                                            let bufferVO;
-                                            try {
-                                                const streamVO = await downloadContentFromMessage(mediaVO, dlTypeVO);
-                                                const chunksVO = [];
-                                                for await (const chunk of streamVO) chunksVO.push(Buffer.from(chunk));
-                                                bufferVO = Buffer.concat(chunksVO);
-                                            } catch (downloadErrorVO) {
-                                                console.error('[quoted-media-download-failed]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, mediaType: mediaInfoVO.sourceType, viewOnce: mediaInfoVO.viewOnce === true, errorName: downloadErrorVO?.name || 'Error', error: String(downloadErrorVO?.message || downloadErrorVO).slice(0, 300) });
-                                                await safeSendActionError(sock, from, commandTitleVO, downloadErrorVO, messageLang, pushName, m.messageTimestamp);
-                                                break;
-                                            }
-                                            if (!Buffer.isBuffer(bufferVO) || !bufferVO.length) {
-                                                const emptyDownloadErrorVO = new Error('quoted_media_download_empty');
-                                                console.warn('[quoted-media-download-empty]', { sessionId, messageId: msgId, command: internalCommand, mediaType: mediaInfoVO.sourceType, viewOnce: mediaInfoVO.viewOnce === true });
-                                                await safeSendActionError(sock, from, commandTitleVO, emptyDownloadErrorVO, messageLang, pushName, m.messageTimestamp);
-                                                break;
-                                            }
-                                            const sendOptsVO = { [sendTypeVO]: bufferVO };
-                                            if (mediaVO.caption) sendOptsVO.caption = mediaVO.caption;
-                                            if (mediaVO.mimetype) sendOptsVO.mimetype = mediaVO.mimetype;
-                                            if (mediaVO.fileName && sendTypeVO === 'document') sendOptsVO.fileName = mediaVO.fileName;
-                                            if (mediaInfoVO.ptt === true || mediaVO.ptt === true) sendOptsVO.ptt = true;
-                                            if (mediaVO.gifPlayback === true && sendTypeVO === 'video') sendOptsVO.gifPlayback = true;
+                                            console.info('[quoted-media-candidate-set]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, candidateCount: mediaCandidatesVO.length, mediaCandidateCount: mediaMatchesVO.length, downloadableCandidateCount: downloadableMediaMatchesVO.length, types: downloadableMediaMatchesVO.map(candidate => ({ source: candidate.source, mediaType: candidate.info.sourceType, keyLength: mediaKeyLengthVO(candidate.info.payload.mediaKey), hasPath: !!(candidate.info.payload.url || candidate.info.payload.directPath) })) });
                                             let resendTargetVO = from;
                                             if (internalCommand === 'vv2') {
                                                 const ownerCredentialsVO = activeSessions.get(sessionId)?.authState?.creds || state.creds || null;
@@ -16864,14 +17076,77 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                     break;
                                                 }
                                             }
-                                            console.info('[quoted-media-download-completed]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, mediaType: mediaInfoVO.sourceType, bytes: bufferVO.length, viewOnceUnwrapped: mediaInfoVO.viewOnce === true, destinationType: internalCommand === 'vv2' ? 'self_chat_pn' : isGroup ? 'group' : 'private' });
+                                            const downloadFailuresVO = [];
+                                            let tempMediaPathVO = '';
+                                            let downloadedBytesVO = 0;
+                                            for (const candidateVO of downloadableMediaMatchesVO) {
+                                                const candidateInfoVO = candidateVO.info;
+                                                const candidateMediaVO = candidateInfoVO.payload;
+                                                const candidateDownloadTypeVO = candidateInfoVO.downloadType;
+                                                let candidateStreamVO = null;
+                                                let candidatePathVO = '';
+                                                try {
+                                                    console.info('[quoted-media-download-attempt]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, source: candidateVO.source, mediaType: candidateInfoVO.sourceType, downloadType: candidateDownloadTypeVO, mediaKeyLength: mediaKeyLengthVO(candidateMediaVO.mediaKey), mediaPathAvailable: !!(candidateMediaVO.url || candidateMediaVO.directPath) });
+                                                    const extensionVO = candidateInfoVO.sendType === 'image' ? 'jpg' : candidateInfoVO.sendType === 'video' ? 'mp4' : candidateInfoVO.sendType === 'audio' ? (String(candidateMediaVO.mimetype || '').toLowerCase().includes('ogg') || candidateInfoVO.ptt === true || candidateMediaVO.ptt === true ? 'ogg' : 'audio') : candidateInfoVO.sendType === 'sticker' ? 'webp' : 'bin';
+                                                    candidatePathVO = path.join(require('os').tmpdir(), `tfbot-vv-${crypto.randomBytes(12).toString('hex')}.${extensionVO}`);
+                                                    candidateStreamVO = await downloadContentFromMessage(candidateMediaVO, candidateDownloadTypeVO);
+                                                    if (!candidateStreamVO || typeof candidateStreamVO.pipe !== 'function') throw new Error('quoted_media_download_stream_unavailable');
+                                                    await require('stream/promises').pipeline(candidateStreamVO, fs.createWriteStream(candidatePathVO, { flags: 'wx' }));
+                                                    const downloadedStatVO = await fs.promises.stat(candidatePathVO);
+                                                    if (!downloadedStatVO.size) throw new Error('quoted_media_download_empty');
+                                                    selectedMediaVO = candidateVO;
+                                                    mediaInfoVO = candidateInfoVO;
+                                                    mediaVO = candidateMediaVO;
+                                                    dlTypeVO = candidateInfoVO.downloadType;
+                                                    sendTypeVO = candidateInfoVO.sendType;
+                                                    tempMediaPathVO = candidatePathVO;
+                                                    downloadedBytesVO = downloadedStatVO.size;
+                                                    console.info('[quoted-media-download-candidate-succeeded]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, source: candidateVO.source, mediaType: candidateInfoVO.sourceType, bytes: downloadedBytesVO, storage: 'temporary_file_stream' });
+                                                    break;
+                                                } catch (downloadErrorVO) {
+                                                    try { candidateStreamVO?.destroy?.(); } catch (destroyError) {}
+                                                    if (candidatePathVO) await fs.promises.unlink(candidatePathVO).catch(() => {});
+                                                    downloadFailuresVO.push({ source: candidateVO.source, mediaType: candidateInfoVO.sourceType, errorName: downloadErrorVO?.name || 'Error', error: String(downloadErrorVO?.message || downloadErrorVO).slice(0, 220) });
+                                                    console.warn('[quoted-media-download-candidate-failed]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, source: candidateVO.source, mediaType: candidateInfoVO.sourceType, errorName: downloadErrorVO?.name || 'Error', error: String(downloadErrorVO?.message || downloadErrorVO).slice(0, 220), remainingCandidates: downloadableMediaMatchesVO.length - downloadFailuresVO.length });
+                                                }
+                                            }
+                                            if (!tempMediaPathVO || !mediaInfoVO || !mediaVO) {
+                                                const finalDownloadErrorVO = new Error(downloadFailuresVO.length ? 'quoted_media_all_candidate_downloads_failed' : 'quoted_media_download_unavailable');
+                                                console.error('[quoted-media-all-download-candidates-failed]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, candidateCount: downloadableMediaMatchesVO.length, failures: downloadFailuresVO });
+                                                await safeSendActionError(sock, from, commandTitleVO, finalDownloadErrorVO, messageLang, pushName, m.messageTimestamp);
+                                                break;
+                                            }
+                                            console.info('[quoted-media-candidate-selected]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, source: selectedMediaVO.source, candidateCount: mediaCandidatesVO.length, mediaCandidateCount: mediaMatchesVO.length, mediaKeyAvailable: mediaKeyLengthVO(mediaVO.mediaKey) > 0, mediaKeyLength: mediaKeyLengthVO(mediaVO.mediaKey), mediaPathAvailable: !!(mediaVO.url || mediaVO.directPath), bytes: downloadedBytesVO, storage: 'temporary_file_stream' });
+                                            const sendOptsVO = { [sendTypeVO]: { url: tempMediaPathVO } };
+                                            if (mediaVO.caption) sendOptsVO.caption = mediaVO.caption;
+                                            if (mediaVO.mimetype) sendOptsVO.mimetype = mediaVO.mimetype;
+                                            else if (sendTypeVO === 'image') sendOptsVO.mimetype = 'image/jpeg';
+                                            else if (sendTypeVO === 'video') sendOptsVO.mimetype = 'video/mp4';
+                                            else if (sendTypeVO === 'audio') sendOptsVO.mimetype = mediaInfoVO.ptt === true || mediaVO.ptt === true ? 'audio/ogg; codecs=opus' : 'audio/mpeg';
+                                            else if (sendTypeVO === 'sticker') sendOptsVO.mimetype = 'image/webp';
+                                            else if (sendTypeVO === 'document') sendOptsVO.mimetype = 'application/octet-stream';
+                                            if (mediaVO.fileName && sendTypeVO === 'document') sendOptsVO.fileName = mediaVO.fileName;
+                                            if (mediaInfoVO.ptt === true || mediaVO.ptt === true) sendOptsVO.ptt = true;
+                                            if (mediaVO.gifPlayback === true && sendTypeVO === 'video') sendOptsVO.gifPlayback = true;
+                                            let resentVO = null;
+                                            let sendErrorVO = null;
                                             try {
-                                                const resentVO = await trackedQueuedSendMessage(sock, resendTargetVO, sendOptsVO, {}, 180);
+                                                resentVO = await trackedQueuedSendMessage(sock, resendTargetVO, sendOptsVO, {}, 180, true);
                                                 if (!resentVO?.key?.id) throw new Error('quoted_media_send_unconfirmed');
-                                                console.info('[quoted-media-resent]', { sessionId, messageId: msgId, command: internalCommand, sourceChatHash: shortLogHash(from), destinationType: internalCommand === 'vv2' ? 'self_chat_pn' : isGroup ? 'group' : 'private', responseMessageId: resentVO.key.id, responseChatHash: shortLogHash(resentVO?.key?.remoteJid || resendTargetVO), mediaType: mediaInfoVO.sourceType, bytes: bufferVO.length, viewOnceUnwrapped: mediaInfoVO.viewOnce === true });
-                                            } catch (sendErrorVO) {
-                                                console.error('[quoted-media-send-failed]', { sessionId, messageId: msgId, command: internalCommand, destinationType: internalCommand === 'vv2' ? 'self_chat_pn' : isGroup ? 'group' : 'private', mediaType: mediaInfoVO.sourceType, bytes: bufferVO.length, viewOnceUnwrapped: mediaInfoVO.viewOnce === true, errorName: sendErrorVO?.name || 'Error', error: String(sendErrorVO?.message || sendErrorVO).slice(0, 300) });
-                                                await safeSendActionError(sock, from, commandTitleVO, sendErrorVO, messageLang, pushName, m.messageTimestamp);
+                                                console.info('[quoted-media-resent]', { sessionId, messageId: msgId, command: internalCommand, sourceChatHash: shortLogHash(from), destinationType: internalCommand === 'vv2' ? 'self_chat_pn' : isGroup ? 'group' : 'private', responseMessageId: resentVO.key.id, responseChatHash: shortLogHash(resentVO?.key?.remoteJid || resendTargetVO), mediaType: mediaInfoVO.sourceType, bytes: downloadedBytesVO, viewOnceUnwrapped: mediaInfoVO.viewOnce === true, transport: 'temporary_file_stream' });
+                                            } catch (sendError) {
+                                                sendErrorVO = sendError;
+                                                console.error('[quoted-media-send-failed]', { sessionId, messageId: msgId, command: internalCommand, destinationType: internalCommand === 'vv2' ? 'self_chat_pn' : isGroup ? 'group' : 'private', mediaType: mediaInfoVO.sourceType, bytes: downloadedBytesVO, viewOnceUnwrapped: mediaInfoVO.viewOnce === true, errorName: sendError?.name || 'Error', error: String(sendError?.message || sendError).slice(0, 300) });
+                                                await safeSendActionError(sock, from, commandTitleVO, sendError, messageLang, pushName, m.messageTimestamp);
+                                            } finally {
+                                                if (tempMediaPathVO) {
+                                                    if (sendErrorVO) {
+                                                        const cleanupTimerVO = setTimeout(() => { void fs.promises.unlink(tempMediaPathVO).catch(() => {}); }, MEDIA_SEND_LATE_GRACE_MS + 1000);
+                                                        if (typeof cleanupTimerVO.unref === 'function') cleanupTimerVO.unref();
+                                                    } else {
+                                                        await fs.promises.unlink(tempMediaPathVO).catch(() => {});
+                                                    }
+                                                }
                                             }
                                             break;
                                         }
@@ -17344,6 +17619,10 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                         error: messageDispatchError?.message || String(messageDispatchError),
                         action: failedCommand ? 'recognized_command_failed_before_dispatch' : 'message_failed_before_dispatch'
                     });
+                } finally {
+                    const remainingDispatches = Math.max(0, Number(inboundMessagePreDispatchCounts.get(sessionId) || 1) - 1);
+                    if (remainingDispatches) inboundMessagePreDispatchCounts.set(sessionId, remainingDispatches);
+                    else inboundMessagePreDispatchCounts.delete(sessionId);
                 }
             }
         });
@@ -17470,7 +17749,7 @@ function normalizeSessionStatusForExpiry(value) {
 
 function isNonExpiringSessionStatus(value) {
     const status = normalizeSessionStatusForExpiry(value);
-    return ['connecte', 'connected', 'active', 'online', 'synchronisation', 'synchronizing', 'synchronization', 'sync', 'reconnexion', 'reconnecting', 'reconnection', 'reconnect'].includes(status);
+    return ['connecte', 'connected', 'active', 'online', 'synchronisation', 'synchronizing', 'synchronization', 'sync', 'reconnexion', 'reconnecting', 'reconnection', 'reconnect', 'forbidden_wait'].includes(status);
 }
 
 function isReconnectingSessionStatus(value) {
@@ -17491,10 +17770,12 @@ function hasScheduledSessionReconnect(sessionId, owner = null) {
 function resolveInvalidExpirySessionStatus(owner, runtime, sessionId) {
     const runtimeStatus = String(runtime?.status || '').trim();
     const ownerStatus = String(owner?.connectionStatus || owner?.status || '').trim();
+    const lastEvent = String(runtime?.lastWhatsAppEvent || owner?.lastWhatsAppEvent || '').trim().toLowerCase();
+    const lastDisconnectCode = Number(runtime?.lastDisconnectCode ?? owner?.lastDisconnectCode ?? owner?.DisconnectCode ?? 0);
+    if (owner?.whatsappForbidden === true || runtime?.whatsappForbidden === true || ownerStatus.toLowerCase() === 'forbidden_wait' || runtimeStatus.toLowerCase() === 'forbidden_wait' || lastDisconnectCode === 403 && lastEvent === 'close') return 'forbidden_wait';
     if (hasScheduledSessionReconnect(sessionId, owner)) return 'reconnexion';
     if (isReconnectingSessionStatus(runtimeStatus)) return runtimeStatus;
     if (isReconnectingSessionStatus(ownerStatus)) return ownerStatus;
-    const lastEvent = String(runtime?.lastWhatsAppEvent || owner?.lastWhatsAppEvent || '').trim().toLowerCase();
     if (lastEvent === 'close') {
         if (runtimeStatus && !isNonExpiringSessionStatus(runtimeStatus)) return runtimeStatus;
         if (ownerStatus && !isNonExpiringSessionStatus(ownerStatus)) return ownerStatus;
@@ -17899,6 +18180,34 @@ async function loadExistingSessions() {
         const number = getAuthenticatedPhoneNumber(null, credentials);
         const lid = getAuthenticatedLid(null, credentials);
         const status = String(owner.connectionStatus || owner.status || '').toLowerCase();
+        const lastEvent = String(owner.lastWhatsAppEvent || '').toLowerCase();
+        if (owner.whatsappForbidden === true || status === 'forbidden_wait' || Number(owner.lastDisconnectCode || 0) === 403 && lastEvent === 'close') {
+            const pausedAt = new Date();
+            await db.collection('session_owners').updateOne(
+                { sessionId },
+                { $set: { whatsappForbidden: true, connectionStatus: 'forbidden_wait', socketAuthenticated: false, socketReady: false, pairingPending: false, pairingAttemptPending: false, reauthRequired: false, credentialsRevoked: false, lastDisconnectCode: 403, lastAuthFailure: 'whatsapp_forbidden', statusUpdatedAt: owner.statusUpdatedAt || pausedAt, updatedAt: pausedAt }, $unset: { nextRestoreRetryAt: 1, invalidStatusSinceAt: 1, invalidStatusExpiresAt: 1 } }
+            ).catch(error => console.warn('[session-restore-forbidden-state-upgrade-failed]', { sessionId, error: error?.message || String(error) }));
+            const localForbiddenRuntime = activeSessions.get(sessionId);
+            if (localForbiddenRuntime) {
+                localForbiddenRuntime.whatsappForbidden = true;
+                localForbiddenRuntime.status = 'forbidden_wait';
+                localForbiddenRuntime.active = false;
+                localForbiddenRuntime.lastDisconnectCode = 403;
+                if (!localForbiddenRuntime.sock || isSocketDefinitelyClosed(localForbiddenRuntime.sock)) localForbiddenRuntime.sock = null;
+            }
+            const oldReconnect = reconnectTimers.get(sessionId);
+            if (oldReconnect) clearTimeout(oldReconnect);
+            reconnectTimers.delete(sessionId);
+            reconnectRetryDueAt.delete(sessionId);
+            const oldLockRetry = sessionLockRetryTimers.get(sessionId);
+            if (oldLockRetry) clearTimeout(oldLockRetry);
+            sessionLockRetryTimers.delete(sessionId);
+            sessionLockRetryDueAt.delete(sessionId);
+            clearInvalidStatusCleanupTimer(sessionId);
+            restoreSkippedCount++;
+            console.warn('[session-restore-skipped-whatsapp-forbidden]', { sessionId, disconnectCode: 403, credentialsPreserved: true, authDocumentsDeleted: false, automaticReconnect: false });
+            continue;
+        }
         const format = normalizeConnectionFormat(owner.format || owner.Format || 'pair');
         const pairingFormat = ['qr', 'pair'].includes(format);
         const pairingState = owner.pairingPending === true
@@ -17954,7 +18263,7 @@ async function loadExistingSessions() {
             deferredLivePeerCandidates.push({ candidate, owner });
             return false;
         }
-        return !owner.reauthRequired && !owner.duplicateAccountOf && status !== 'duplicate_account' && status !== 'reauth_required' && status !== 'pairing_expired';
+        return owner.whatsappForbidden !== true && Number(owner.lastDisconnectCode || 0) !== 403 && status !== 'forbidden_wait' && !owner.reauthRequired && !owner.duplicateAccountOf && status !== 'duplicate_account' && status !== 'reauth_required' && status !== 'pairing_expired';
     });
     for (const deferred of deferredLivePeerCandidates) {
         const ownerLeaseUntilAt = new Date(deferred.owner.ownerLeaseUntil || 0).getTime();
