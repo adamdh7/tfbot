@@ -5,9 +5,9 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'r204';
+const TFBOT_CODE_VERSION = 'r205';
 const TFBOT_LOG_TIME_ZONE = 'America/Chicago';
-const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r204-startup-order-and-reply-context-routing';
+const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r205-upsert-aware-handoff-reconnect-recovery-fast-list-ephemeral-chat';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 function formatTfbotAmericaTimestamp(value = Date.now()) {
@@ -2227,6 +2227,8 @@ const CLOUDFLARE_STATE_COLLECTION = 'bot_runtime_state';
 const CLOUDFLARE_ROTATION_DOCUMENT_ID = 'cloudflare_ai_account_rotation';
 const reconnectTimers = new Map();
 const sessionStartPromises = new Map();
+const sessionStartStartedAt = new Map();
+const sessionReconnectDeferredStarts = new Map();
 const pendingPairingReplacementSessions = new Set();
 const pendingAccountPromotionUpserts = new Map();
 const accountReplacementPromotionPromises = new Map();
@@ -2428,6 +2430,11 @@ const pairingSessionExpiryChecks = new Set();
 const explicitLogoutDeletionTimers = new Map();
 const SESSION_OPEN_READINESS_RETRY_MS = Math.max(1000, Math.min(15000, Number(process.env.SESSION_OPEN_READINESS_RETRY_MS) || 3000));
 const groupMetadataCache = new Map();
+const chatEphemeralExpirationCache = new Map();
+const CHAT_EPHEMERAL_CACHE_TTL_MS = Math.max(60000, Math.min(7 * 24 * 60 * 60 * 1000, Number(process.env.CHAT_EPHEMERAL_CACHE_TTL_MS || 24 * 60 * 60 * 1000)));
+let sessionListSnapshotCache = null;
+let sessionListSnapshotCacheAt = 0;
+let sessionListSnapshotPromise = null;
 function isSocketDefinitelyClosed(sock) {
     const readyState = sock?.ws?.readyState ?? sock?.ws?._socket?.readyState ?? sock?.socket?.readyState;
     return sock?.ws?.isOpen === false || sock?.ws?._socket?.destroyed === true || Number(readyState) === 3 || String(readyState).toUpperCase() === 'CLOSED';
@@ -2578,7 +2585,79 @@ const fallbackMessageQueue = { tasks: [], isSendingQueue: false };
 const inboundCommandQueues = new Map();
 const inboundMessagePreDispatchCounts = new Map();
 const quotedMessagePersistenceQueues = new Map();
+const sessionInboundUpsertActivity = new Map();
+const SESSION_INBOUND_IDLE_QUIET_MS = Math.max(200, Math.min(1500, Number(process.env.SESSION_INBOUND_IDLE_QUIET_MS || 400)));
 const TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS = Math.max(30000, Math.min(300000, Number(process.env.TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS || 180000)));
+
+function beginSessionInboundUpsert(sessionId) {
+    const id = String(sessionId || '').trim();
+    if (!id) return () => {};
+    let state = sessionInboundUpsertActivity.get(id);
+    if (!state) {
+        state = { active: 0, total: 0, lastStartedAt: 0, lastFinishedAt: 0, lastActivityAt: 0 };
+        sessionInboundUpsertActivity.set(id, state);
+    }
+    const now = Date.now();
+    state.active++;
+    state.total++;
+    state.lastStartedAt = now;
+    state.lastActivityAt = now;
+    let released = false;
+    return () => {
+        if (released) return;
+        released = true;
+        const finishedAt = Date.now();
+        state.active = Math.max(0, Number(state.active || 0) - 1);
+        state.lastFinishedAt = finishedAt;
+        state.lastActivityAt = finishedAt;
+        if (state.active === 0 && finishedAt - Number(state.lastStartedAt || 0) > 10 * 60 * 1000) sessionInboundUpsertActivity.delete(id);
+    };
+}
+
+async function waitForSessionInboundProcessingIdle(sessionId, timeoutMs = TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS) {
+    const id = String(sessionId || '').trim();
+    if (!id) return { drained: true, activeUpserts: 0, activeCommands: 0, pendingCommands: 0, dispatchPending: 0, quotedPersistencePending: 0, elapsedMs: 0 };
+    const prefix = `quoted:${id}:`;
+    const startedAt = Date.now();
+    const deadline = startedAt + Math.max(1000, Number(timeoutMs) || TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS);
+    let idleSince = 0;
+    let lastLogAt = 0;
+    let lastState = null;
+    while (Date.now() < deadline) {
+        const upsertState = sessionInboundUpsertActivity.get(id);
+        const queue = inboundCommandQueues.get(id);
+        const activeUpserts = Number(upsertState?.active || 0);
+        const activeCommands = Number(queue?.active || 0);
+        const pendingCommands = Number(queue?.pending || 0);
+        const readyCommands = Number(queue?.ready?.length || 0);
+        const dispatchPending = Number(inboundMessagePreDispatchCounts.get(id) || 0);
+        const quotedPersistencePending = [...quotedMessagePersistenceQueues.keys()].reduce((count, key) => count + (key.startsWith(prefix) ? 1 : 0), 0);
+        const idle = activeUpserts === 0 && activeCommands === 0 && pendingCommands === 0 && readyCommands === 0 && dispatchPending === 0 && quotedPersistencePending === 0;
+        lastState = { activeUpserts, activeCommands, pendingCommands, readyCommands, dispatchPending, quotedPersistencePending };
+        if (idle) {
+            if (!idleSince) idleSince = Date.now();
+            if (Date.now() - idleSince >= SESSION_INBOUND_IDLE_QUIET_MS) return { drained: true, ...lastState, quietMs: Date.now() - idleSince, elapsedMs: Date.now() - startedAt };
+        } else {
+            idleSince = 0;
+        }
+        if (Date.now() - lastLogAt >= 5000) {
+            lastLogAt = Date.now();
+            console.info('[worker-inbound-processing-drain-waiting]', { sessionId: id, ...lastState, elapsedMs: Date.now() - startedAt, timeoutMs, quietWindowMs: SESSION_INBOUND_IDLE_QUIET_MS });
+        }
+        await new Promise(resolve => setTimeout(resolve, 75));
+    }
+    const upsertState = sessionInboundUpsertActivity.get(id);
+    const queue = inboundCommandQueues.get(id);
+    const finalState = {
+        activeUpserts: Number(upsertState?.active || 0),
+        activeCommands: Number(queue?.active || 0),
+        pendingCommands: Number(queue?.pending || 0),
+        readyCommands: Number(queue?.ready?.length || 0),
+        dispatchPending: Number(inboundMessagePreDispatchCounts.get(id) || 0),
+        quotedPersistencePending: [...quotedMessagePersistenceQueues.keys()].reduce((count, key) => count + (key.startsWith(prefix) ? 1 : 0), 0)
+    };
+    return { drained: false, ...finalState, elapsedMs: Date.now() - startedAt, quietWindowMs: SESSION_INBOUND_IDLE_QUIET_MS };
+}
 const INBOUND_COMMAND_MAX_CONCURRENCY_PER_SESSION = Math.max(4, Math.min(48, Number(process.env.INBOUND_COMMAND_MAX_CONCURRENCY_PER_SESSION) || 24));
 const INBOUND_COMMAND_MAX_PENDING_PER_SESSION = Math.max(50, Math.min(500, Number(process.env.INBOUND_COMMAND_MAX_PENDING_PER_SESSION) || 250));
 const INBOUND_COMMAND_MAX_PENDING_PER_CHAT = Math.max(20, Math.min(200, Number(process.env.INBOUND_COMMAND_MAX_PENDING_PER_CHAT) || 80));
@@ -2776,6 +2855,10 @@ function cleanupSessionVolatileCaches(sessionId) {
     for (const key of [...userProfilePersistenceCache.keys()]) if (key.startsWith(sessionPrefix)) userProfilePersistenceCache.delete(key);
     for (const key of [...groupMetadataCache.keys()]) if (key.startsWith(groupPrefix)) groupMetadataCache.delete(key);
     for (const key of [...groupMetadataFetchPromises.keys()]) if (key.startsWith(groupPrefix)) groupMetadataFetchPromises.delete(key);
+    for (const key of [...chatEphemeralExpirationCache.keys()]) if (key.startsWith(sessionPrefix)) chatEphemeralExpirationCache.delete(key);
+    sessionInboundUpsertActivity.delete(id);
+    sessionStartStartedAt.delete(id);
+    sessionReconnectDeferredStarts.delete(id);
     for (const key of [...groupSenderKeyResetAt.keys()]) if (key.startsWith(groupPrefix)) groupSenderKeyResetAt.delete(key);
     for (const key of [...groupSenderKeyResetInFlight.keys()]) if (key.startsWith(groupPrefix)) groupSenderKeyResetInFlight.delete(key);
     for (const key of [...groupSettingsCache.keys()]) if (key.startsWith(`${id}_`)) { groupSettingsCache.delete(key); groupSettingsCacheTimes.delete(key); }
@@ -2919,6 +3002,144 @@ function getRememberedLidForPhone(sessionId, phoneValue) {
     return collect(sessionPrefix);
 }
 
+function normalizeChatEphemeralJid(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    if (/@g\.us$/i.test(raw)) return raw.toLowerCase().replace(/:\d+(?=@)/, '');
+    if (/@(?:hosted\.)?lid$/i.test(raw)) return normalizeLidCacheKey(raw).toLowerCase();
+    const phone = normalizePhoneCacheJid(raw);
+    if (phone) return phone.toLowerCase();
+    return raw.toLowerCase().replace(/:\d+(?=@)/, '');
+}
+
+function rememberWhatsAppChatEphemeralExpiration(sessionId, chatJids, expirationSeconds, source = 'message_context') {
+    const id = String(sessionId || '').trim();
+    const numeric = Number(expirationSeconds);
+    if (!id || !Number.isFinite(numeric) || numeric < 0) return false;
+    const seconds = Math.floor(numeric);
+    const values = Array.isArray(chatJids) ? chatJids : [chatJids];
+    const now = Date.now();
+    let stored = 0;
+    const normalized = [...new Set(values.map(normalizeChatEphemeralJid).filter(Boolean))];
+    for (const jid of normalized) {
+        const key = `${id}:${jid}`;
+        chatEphemeralExpirationCache.set(key, { seconds, updatedAt: now, source: String(source || 'unknown').slice(0, 80) });
+        stored++;
+    }
+    while (chatEphemeralExpirationCache.size > 12000) chatEphemeralExpirationCache.delete(chatEphemeralExpirationCache.keys().next().value);
+    if (stored) console.info('[whatsapp-chat-ephemeral-setting-cached]', { sessionId: id, aliasCount: stored, expirationSeconds: seconds, enabled: seconds > 0, source });
+    return stored > 0;
+}
+
+function getWhatsAppMessageEphemeralExpiration(message) {
+    const source = message?.message && typeof message.message === 'object' ? message.message : message;
+    const unwrapped = unwrapMessageContent(source);
+    const context = getMessageContextInfo(message);
+    const candidates = [
+        message?.ephemeralExpiration,
+        message?.ephemeralDuration,
+        message?.message?.ephemeralExpiration,
+        message?.message?.ephemeralDuration,
+        message?.messageContextInfo?.expiration,
+        message?.message?.messageContextInfo?.expiration,
+        source?.ephemeralExpiration,
+        source?.ephemeralDuration,
+        source?.messageContextInfo?.expiration,
+        unwrapped?.ephemeralExpiration,
+        unwrapped?.ephemeralDuration,
+        unwrapped?.messageContextInfo?.expiration,
+        context?.expiration
+    ];
+    for (const value of candidates) {
+        if (value === undefined || value === null || value === '') continue;
+        const numeric = Number(value);
+        if (Number.isFinite(numeric) && numeric >= 0) return { found: true, seconds: Math.floor(numeric) };
+    }
+    return { found: false, seconds: null };
+}
+
+function getWhatsAppChatEphemeralAliases(sessionId, jid, sock = null) {
+    const raw = String(jid || '').trim();
+    const aliases = new Set();
+    const normalized = normalizeChatEphemeralJid(raw);
+    if (normalized) aliases.add(normalized);
+    if (!raw || /@g\.us$|@newsletter$|@broadcast$/i.test(raw)) return [...aliases];
+    if (/@(?:hosted\.)?lid$/i.test(raw)) {
+        const mappedPhone = normalizeChatEphemeralJid(getRememberedPhoneForLid(sessionId, raw));
+        if (mappedPhone) aliases.add(mappedPhone);
+    } else {
+        const phone = normalizePhoneCacheJid(raw);
+        if (phone) {
+            const mappedLid = normalizeChatEphemeralJid(getRememberedLidForPhone(sessionId, phone));
+            if (mappedLid) aliases.add(mappedLid);
+        }
+    }
+    const runtime = activeSessions.get(sessionId);
+    const credentials = runtime?.authState?.creds || null;
+    const ownPhone = normalizeChatEphemeralJid(getAuthenticatedPhoneNumber(sock?.user || runtime?.sock?.user || null, credentials));
+    const ownLid = normalizeChatEphemeralJid(getAuthenticatedLid(sock?.user || runtime?.sock?.user || null, credentials));
+    if (ownPhone && ownLid && (aliases.has(ownPhone) || aliases.has(ownLid))) {
+        aliases.add(ownPhone);
+        aliases.add(ownLid);
+    }
+    return [...aliases];
+}
+
+function getWhatsAppChatEphemeralExpiration(sessionId, jid, sock = null) {
+    const id = String(sessionId || '').trim();
+    if (!id) return null;
+    const now = Date.now();
+    for (const alias of getWhatsAppChatEphemeralAliases(id, jid, sock)) {
+        const key = `${id}:${alias}`;
+        const cached = chatEphemeralExpirationCache.get(key);
+        if (!cached) continue;
+        if (now - Number(cached.updatedAt || 0) > CHAT_EPHEMERAL_CACHE_TTL_MS) {
+            chatEphemeralExpirationCache.delete(key);
+            continue;
+        }
+        return Number(cached.seconds) > 0 ? Number(cached.seconds) : 0;
+    }
+    if (/@g\.us$/i.test(String(jid || ''))) {
+        const metadata = getCachedGroupMetadata(id, jid, CHAT_EPHEMERAL_CACHE_TTL_MS);
+        const groupExpiration = metadata?.ephemeralDuration ?? metadata?.ephemeralExpiration;
+        if (groupExpiration !== undefined && groupExpiration !== null && Number.isFinite(Number(groupExpiration)) && Number(groupExpiration) >= 0) {
+            rememberWhatsAppChatEphemeralExpiration(id, [jid], Number(groupExpiration), 'cached_group_metadata');
+            return Number(groupExpiration) > 0 ? Math.floor(Number(groupExpiration)) : 0;
+        }
+    }
+    return null;
+}
+
+function withWhatsAppChatEphemeralOptions(sessionId, jid, options = {}, sock = null) {
+    const outgoing = options && typeof options === 'object' && !Array.isArray(options) ? { ...options } : {};
+    if (Object.prototype.hasOwnProperty.call(outgoing, 'ephemeralExpiration')) return outgoing;
+    const expiration = getWhatsAppChatEphemeralExpiration(sessionId, jid, sock);
+    if (Number.isFinite(Number(expiration)) && Number(expiration) > 0) {
+        outgoing.ephemeralExpiration = Math.floor(Number(expiration));
+    }
+    return outgoing;
+}
+
+async function resolveWhatsAppChatEphemeralSendOptions(sessionId, jid, options = {}, sock = null) {
+    let outgoing = withWhatsAppChatEphemeralOptions(sessionId, jid, options, sock);
+    if (Object.prototype.hasOwnProperty.call(outgoing, 'ephemeralExpiration')) return outgoing;
+    const knownExpiration = getWhatsAppChatEphemeralExpiration(sessionId, jid, sock);
+    if (knownExpiration !== null && knownExpiration !== undefined) return outgoing;
+    const groupJid = String(jid || '').trim();
+    if (!/@g\.us$/i.test(groupJid) || !sock?.groupMetadata) return outgoing;
+    try {
+        const metadata = await promiseWithTimeout(getGroupMetadataCached(sessionId, sock, groupJid), 1200, 'group disappearing-message setting lookup');
+        const rawExpiration = metadata?.ephemeralDuration ?? metadata?.ephemeralExpiration;
+        if (rawExpiration !== undefined && rawExpiration !== null && Number.isFinite(Number(rawExpiration)) && Number(rawExpiration) >= 0) {
+            rememberWhatsAppChatEphemeralExpiration(sessionId, [groupJid], Number(rawExpiration), 'send_preflight_group_metadata');
+            outgoing = withWhatsAppChatEphemeralOptions(sessionId, jid, options, sock);
+        }
+    } catch (error) {
+        console.warn('[whatsapp-chat-ephemeral-send-setting-unavailable]', { sessionId, chatType: 'group', error: String(error?.message || error).slice(0, 180), action: 'preserve_whatsapp_default_without_guessing_expiration' });
+    }
+    return outgoing;
+}
+
 function phoneFromCachedGroupMetadata(sessionId, lidValue) {
     const lid = normalizeLidCacheKey(lidValue);
     if (!lid || !/@lid$/i.test(lid)) return null;
@@ -2973,6 +3194,10 @@ function setCachedGroupMetadata(sessionId, groupJid, metadata) {
     const key = groupMetadataCacheKey(sessionId, groupJid);
     if (!key || !metadata || typeof metadata !== 'object') return false;
     groupMetadataCache.set(key, { data: metadata, ts: Date.now() });
+    const ephemeralExpiration = metadata.ephemeralDuration ?? metadata.ephemeralExpiration;
+    if (ephemeralExpiration !== undefined && ephemeralExpiration !== null && Number.isFinite(Number(ephemeralExpiration)) && Number(ephemeralExpiration) >= 0) {
+        rememberWhatsAppChatEphemeralExpiration(sessionId, [groupJid], Number(ephemeralExpiration), 'group_metadata');
+    }
     while (groupMetadataCache.size > 5000) groupMetadataCache.delete(groupMetadataCache.keys().next().value);
     return true;
 }
@@ -3789,6 +4014,8 @@ function cacheRecentMessage(sessionId, message, extraAliases = []) {
         ts: Number(message.messageTimestamp) || Math.floor(Date.now() / 1000),
         message: message.message
     };
+    const ephemeralInfo = getWhatsAppMessageEphemeralExpiration(message);
+    if (ephemeralInfo.found) rememberWhatsAppChatEphemeralExpiration(sessionId, [message.key.remoteJid, message.key.remoteJidAlt], ephemeralInfo.seconds, 'message_context');
     const now = Date.now();
     for (let index = recentMsgsCache.length - 1; index >= 0; index--) {
         const cached = recentMsgsCache[index];
@@ -4465,7 +4692,8 @@ async function sendFastMessageWithDiagnostics(sock, jid, content, options = {}, 
     const startedAt = Date.now();
     console.info('[whatsapp-send-fast-start]', { sessionId, source, destinationType: getWhatsAppDestinationType(destination), messageType: outgoingType, messageText: outgoingText || null, messageTextLength: outgoingText.length, route: 'direct_sock_sendMessage_without_pre_send_queue_or_identity_lookup' });
     try {
-        const result = await sock.sendMessage(destination, content, options);
+        const sendOptions = await resolveWhatsAppChatEphemeralSendOptions(sessionId, destination, options, sock);
+        const result = await sock.sendMessage(destination, content, sendOptions);
         if (!result?.key?.id) throw new Error('whatsapp_fast_send_result_message_id_missing');
         const retryPreflightStartedBeforeRelay = outgoingRetryPreflightIds.has(`${sessionId}:${result.key.id}`);
         rememberOutgoingMessageId(sessionId, result.key.id);
@@ -4662,7 +4890,8 @@ async function queuedSendMessageLegacy(sock, jid, content, options = {}, delayMs
             const echoToken = rememberOutgoingTextEcho(sessionId, sendTargetJid, outgoingContent);
             console.info('[whatsapp-send-attempt-start]', { sessionId, attempt: attemptNumber, destinationType: getWhatsAppDestinationType(sendTargetJid), isSelfChatDestination, messageType: outgoingDiagnosticType, messageText: outgoingDiagnosticText || null, messageTextLength: outgoingDiagnosticText.length });
             try {
-                const sentResult = await sock.sendMessage(sendTargetJid, outgoingContent, options);
+                const sendOptions = await resolveWhatsAppChatEphemeralSendOptions(expectedSessionId, sendTargetJid, options, sock);
+                const sentResult = await sock.sendMessage(sendTargetJid, outgoingContent, sendOptions);
                 console.info('[whatsapp-send-attempt-accepted]', { sessionId, attempt: attemptNumber, destinationType: getWhatsAppDestinationType(sendTargetJid), responseMessageId: sentResult?.key?.id || null, responseChatType: getWhatsAppDestinationType(sentResult?.key?.remoteJid || sendTargetJid), messageText: outgoingDiagnosticText || null, acceptedBySendMessage: true });
                 return sentResult;
             } catch (error) {
@@ -5983,7 +6212,7 @@ async function acquireSessionRuntimeLock(sessionId) {
         let heartbeatRunning = false;
         let timer;
         timer = setInterval(async () => {
-            if (heartbeatRunning || serverShuttingDown || tfbotWorkerStopping || workerDrainingSessionIds.has(sessionId)) return;
+            if (heartbeatRunning || serverShuttingDown || tfbotWorkerStopping) return;
             heartbeatRunning = true;
             try {
                 const nextLease = new Date(Date.now() + SESSION_RUNTIME_LOCK_LEASE_MS);
@@ -6039,7 +6268,7 @@ function sessionHasAccountRuntimeLocks(sessionId, identities) {
 }
 
 function hasFreshLocalExclusiveRuntimeOwnership(sessionId, sock, identities = []) {
-    if (!sessionId || !sock || serverShuttingDown || workerDrainingSessionIds.has(sessionId) || sessionFenceClosureInFlight.has(sessionId)) return false;
+    if (!sessionId || !sock || serverShuttingDown || sessionFenceClosureInFlight.has(sessionId)) return false;
     if (TFBOT_CLUSTER_COORDINATOR_ONLY || TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) return false;
     const runtime = activeSessions.get(sessionId);
     if (!runtime || runtime.sock !== sock || isSocketDefinitelyClosed(sock)) return false;
@@ -6243,7 +6472,7 @@ function activateAccountRuntimeLockState(sessionId, acquiredEntries, requestedKe
     let heartbeatRunning = false;
     const heartbeatEntries = acquiredEntries.map(entry => ({ key: entry.key, token: entry.token }));
     const timer = setInterval(async () => {
-        if (heartbeatRunning || serverShuttingDown || tfbotWorkerStopping || workerDrainingSessionIds.has(sessionId) || sessionFenceClosureInFlight.has(sessionId)) return;
+        if (heartbeatRunning || serverShuttingDown || tfbotWorkerStopping || sessionFenceClosureInFlight.has(sessionId)) return;
         heartbeatRunning = true;
         try {
             const nextLease = new Date(Date.now() + SESSION_RUNTIME_LOCK_LEASE_MS);
@@ -8548,7 +8777,10 @@ app.get('/logs.txt', (req, res) => {
     res.type('text/plain');
     fs.readFile(TFBOT_DIAGNOSTIC_LOG_PATH, 'utf8', (error, content) => {
         if (error && error.code !== 'ENOENT') return res.status(500).send('');
-        const rawLines = String(content || '').split('\n').filter(Boolean);
+        const allRawLines = String(content || '').split('\n').filter(Boolean);
+        const showAllLines = String(req.query?.all || '') === '1' || String(req.query?.all || '').toLowerCase() === 'true';
+        const maxPublicLines = Math.max(300, Math.min(5000, Number(req.query?.limit || 1600)));
+        const rawLines = showAllLines ? allRawLines : allRawLines.slice(-maxPublicLines);
         let latestStoredDate = null;
         const safeLines = rawLines.map(line => {
             try {
@@ -8590,9 +8822,19 @@ app.get('/logs.txt', (req, res) => {
                 workerHost: TFBOT_CLUSTER_INSTANCE_HOST || TFBOT_CLUSTER_INSTANCE_URL || null,
                 activeSessionCount: activeSessions.size,
                 authenticatedSessionCount: [...activeSessions.values()].filter(runtime => isAuthenticatedSocketOperational(runtime, runtime?.sock)).length,
+                inboundHandlersInFlight: [...sessionInboundUpsertActivity.values()].reduce((total, value) => total + Number(value?.active || 0), 0),
+                inboundCommandQueuesActive: [...inboundCommandQueues.values()].reduce((total, value) => total + Number(value?.active || 0), 0),
+                inboundCommandQueuesPending: [...inboundCommandQueues.values()].reduce((total, value) => total + Number(value?.pending || 0), 0),
+                reconnectTimers: reconnectTimers.size,
+                sessionLockRetryTimers: sessionLockRetryTimers.size,
+                sessionStartsInFlight: sessionStartPromises.size,
                 latestStoredLogDate: latestStoredDate ? latestStoredDate.toISOString() : null,
                 latestStoredLogDateAmerica: latestStoredDate ? formatTfbotAmericaTimestamp(latestStoredDate) : null,
-                latestStoredLogAgeMs: latestStoredDate ? Math.max(0, now.getTime() - latestStoredDate.getTime()) : null
+                latestStoredLogAgeMs: latestStoredDate ? Math.max(0, now.getTime() - latestStoredDate.getTime()) : null,
+                totalStoredLines: allRawLines.length,
+                returnedLines: safeLines.length,
+                truncated: safeLines.length < allRawLines.length,
+                fullLogQuery: showAllLines
             })
         };
         const safeContent = [JSON.stringify(headerRecord), ...safeLines].join('\n');
@@ -9930,30 +10172,29 @@ async function deactivateTfbotWorker(reason = 'not_selected') {
     }
     tfbotWorkerDeactivationPromise = (async () => {
         let sessionsToDrain = [...activeSessions.entries()];
-        for (const [sessionId] of sessionsToDrain) workerDrainingSessionIds.add(sessionId);
-        workerDrainExpectedClosedUntil = Date.now() + TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS + 60000;
         if (tfbotWorkerActivationPromise) await tfbotWorkerActivationPromise.catch(() => {});
         sessionsToDrain = [...activeSessions.entries()];
-        for (const [sessionId] of sessionsToDrain) workerDrainingSessionIds.add(sessionId);
-        console.info('[tfbot-worker-command-drain-start]', { host: TFBOT_CLUSTER_INSTANCE_HOST, reason, sessionCount: sessionsToDrain.length, timeoutMs: TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS, action: 'stop_new_upserts_then_wait_for_running_commands_before_socket_cleanup' });
+        console.info('[tfbot-worker-command-drain-start]', { host: TFBOT_CLUSTER_INSTANCE_HOST, reason, sessionCount: sessionsToDrain.length, timeoutMs: TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS, action: 'keep_new_upserts_enabled_while_running_commands_and_quote_persistence_drain' });
         const commandDrainResults = await Promise.all(sessionsToDrain.map(async ([sessionId]) => {
-            const result = await waitForInboundCommandQueueIdle(sessionId, TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS);
-            const quotePersistence = result.drained ? await waitForQuotedMessagePersistenceIdle(sessionId, TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS) : { drained: false, pending: 0, elapsedMs: 0 };
-            const drained = result.drained && quotePersistence.drained;
-            if (drained) console.info('[tfbot-worker-command-drain-completed]', { sessionId, elapsedMs: result.elapsedMs, active: result.active, pending: result.pending, dispatchPending: result.dispatchPending, quotedPersistencePending: quotePersistence.pending, quotedPersistenceWaitMs: quotePersistence.elapsedMs });
-            else console.error('[tfbot-worker-command-drain-timeout]', { sessionId, elapsedMs: result.elapsedMs, active: result.active, pending: result.pending, ready: result.ready, dispatchPending: result.dispatchPending, quotedPersistencePending: quotePersistence.pending, action: 'keep_current_sockets_open_and_cancel_handoff' });
-            return { sessionId, ...result, drained, quotePersistencePending: quotePersistence.pending };
+            const result = await waitForSessionInboundProcessingIdle(sessionId, TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS);
+            const drained = result.drained === true;
+            if (drained) console.info('[tfbot-worker-command-drain-completed]', { sessionId, elapsedMs: result.elapsedMs, activeUpserts: result.activeUpserts, activeCommands: result.activeCommands, pendingCommands: result.pendingCommands, dispatchPending: result.dispatchPending, quotedPersistencePending: result.quotedPersistencePending, quietMs: result.quietMs, action: 'handoff_only_after_all_inbound_handlers_commands_and_quote_writes_are_idle' });
+            else console.error('[tfbot-worker-command-drain-timeout]', { sessionId, elapsedMs: result.elapsedMs, activeUpserts: result.activeUpserts, activeCommands: result.activeCommands, pendingCommands: result.pendingCommands, readyCommands: result.readyCommands, dispatchPending: result.dispatchPending, quotedPersistencePending: result.quotedPersistencePending, action: 'keep_current_sockets_open_and_cancel_handoff' });
+            return { sessionId, ...result, drained };
         }));
         const commandDrainFailure = commandDrainResults.find(result => !result.drained);
         if (commandDrainFailure) {
             for (const [sessionId] of sessionsToDrain) workerDrainingSessionIds.delete(sessionId);
             workerDrainExpectedClosedUntil = 0;
-            throw new Error(`worker_inbound_command_drain_timeout:${commandDrainFailure.sessionId}:${commandDrainFailure.active}:${commandDrainFailure.pending}`);
+            throw new Error(`worker_inbound_processing_drain_timeout:${commandDrainFailure.sessionId}:${commandDrainFailure.activeUpserts}:${commandDrainFailure.activeCommands}:${commandDrainFailure.pendingCommands}`);
         }
+        workerDrainExpectedClosedUntil = Date.now() + TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS + 60000;
+        for (const [sessionId] of sessionsToDrain) workerDrainingSessionIds.add(sessionId);
         tfbotWorkerStopping = true;
         tfbotWorkerActive = false;
         tfbotWorkerStarting = false;
         tfbotWorkerState = 'stopping';
+        console.info('[tfbot-worker-handoff-barrier-engaged]', { host: TFBOT_CLUSTER_INSTANCE_HOST, reason, sessionCount: sessionsToDrain.length, action: 'stop_accepting_new_messages_only_after_all_command_and_quote_queues_are_idle' });
         if (clusterHeartbeatTimer) clearInterval(clusterHeartbeatTimer);
         clusterHeartbeatTimer = null;
         for (const timer of reconnectTimers.values()) clearTimeout(timer);
@@ -11269,7 +11510,7 @@ app.get('/sitemap.xml', (req, res) => res.sendFile(path.join(__dirname, 'sitemap
 app.get('/manifest.json', (req, res) => res.sendFile(path.join(__dirname, 'manifest.json')));
 app.get('/sw.js', (req, res) => res.sendFile(path.join(__dirname, 'sw.js')));
 app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s Us Bot (tfbot)"));
-app.get('/ok', (req, res) => res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Code-Version', TFBOT_CODE_VERSION).set('X-TFBOT-Time-Zone', TFBOT_LOG_TIME_ZONE).set('X-TFBOT-Revision', TFBOT_CLUSTER_CODE_REVISION).set('X-TFBOT-Release', TFBOT_CODE_RELEASE_ID).set('X-TFBOT-Worker-State', tfbotWorkerState).set('X-TFBOT-Worker-Active', String(tfbotWorkerActive)).set('X-TFBOT-Worker-Stopping', String(tfbotWorkerStopping)).set('X-TFBOT-Group-Sender-Key-Reset', GROUP_SENDER_KEY_RESET_EVERY_SEND ? 'every-send' : 'cooldown').set('X-TFBOT-Baileys-Companion-Reg-Refresh', baileysCompanionRegRefreshPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-PN-Decryption', baileysLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-PN-Decryption', baileysGroupLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-Addressing', baileysLidAwareGroupOutboundAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-Chat-Placeholder-Resend', baileysSelfChatPlaceholderResendPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Retry-Deduplication', baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Own-LID-Retry-Addressing', baileysOwnLidRetryAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Session-Readiness', 'open-event-and-authenticated-identity').send('ok'));
+app.get('/ok', (req, res) => res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Code-Version', TFBOT_CODE_VERSION).set('X-TFBOT-Time-Zone', TFBOT_LOG_TIME_ZONE).set('X-TFBOT-Revision', TFBOT_CLUSTER_CODE_REVISION).set('X-TFBOT-Release', TFBOT_CODE_RELEASE_ID).set('X-TFBOT-Worker-State', tfbotWorkerState).set('X-TFBOT-Worker-Active', String(tfbotWorkerActive)).set('X-TFBOT-Worker-Stopping', String(tfbotWorkerStopping)).set('X-TFBOT-Inbound-Upserts', String([...sessionInboundUpsertActivity.values()].reduce((total, value) => total + Number(value?.active || 0), 0))).set('X-TFBOT-Reconnect-Timers', String(reconnectTimers.size)).set('X-TFBOT-Session-Starts', String(sessionStartPromises.size)).set('X-TFBOT-Group-Sender-Key-Reset', GROUP_SENDER_KEY_RESET_EVERY_SEND ? 'every-send' : 'cooldown').set('X-TFBOT-Baileys-Companion-Reg-Refresh', baileysCompanionRegRefreshPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-PN-Decryption', baileysLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-PN-Decryption', baileysGroupLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-Addressing', baileysLidAwareGroupOutboundAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-Chat-Placeholder-Resend', baileysSelfChatPlaceholderResendPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Retry-Deduplication', baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Own-LID-Retry-Addressing', baileysOwnLidRetryAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Session-Readiness', 'open-event-and-authenticated-identity').send('ok'));
 
 
 const handleTFSlugRequest = (req, res) => {
@@ -11441,6 +11682,11 @@ function updateTfbotSessionInboundDiagnostics(sessionId, changes = {}) {
             lastCommandName: next.lastCommandName || null,
             lastCommandOutcome: next.lastCommandOutcome || null,
             lastCommandError: next.lastCommandError || null,
+            lastCommandWorkerState: next.lastCommandWorkerState || null,
+            lastCommandWorkerActive: typeof next.lastCommandWorkerActive === 'boolean' ? next.lastCommandWorkerActive : null,
+            lastCommandWorkerStopping: typeof next.lastCommandWorkerStopping === 'boolean' ? next.lastCommandWorkerStopping : null,
+            lastCommandSessionDraining: typeof next.lastCommandSessionDraining === 'boolean' ? next.lastCommandSessionDraining : null,
+            lastStartupStage: runtime?.startupStage || null,
             lastWorkerState: tfbotWorkerState,
             lastWorkerActive: !!tfbotWorkerActive,
             lastWorkerStopping: !!tfbotWorkerStopping,
@@ -11484,11 +11730,23 @@ function getTfbotSessionDiagnosticFields(sessionId, localSession, ownerDoc = {})
         LastCommandAtAmerica: lastCommandAt ? formatTfbotAmericaTimestamp(lastCommandAt) : null,
         LastCommand: cached.lastCommandName || ownerDoc.lastCommandName || null,
         LastCommandOutcome: cached.lastCommandOutcome || ownerDoc.lastCommandOutcome || null,
-        LastCommandError: cached.lastCommandError || ownerDoc.lastCommandError || null
+        LastCommandError: cached.lastCommandError || ownerDoc.lastCommandError || null,
+        LastCommandWorkerState: cached.lastCommandWorkerState || ownerDoc.lastCommandWorkerState || null,
+        LastCommandWorkerActive: typeof cached.lastCommandWorkerActive === 'boolean' ? cached.lastCommandWorkerActive : typeof ownerDoc.lastCommandWorkerActive === 'boolean' ? ownerDoc.lastCommandWorkerActive : null,
+        LastCommandWorkerStopping: typeof cached.lastCommandWorkerStopping === 'boolean' ? cached.lastCommandWorkerStopping : typeof ownerDoc.lastCommandWorkerStopping === 'boolean' ? ownerDoc.lastCommandWorkerStopping : null,
+        LastCommandSessionDraining: typeof cached.lastCommandSessionDraining === 'boolean' ? cached.lastCommandSessionDraining : typeof ownerDoc.lastCommandSessionDraining === 'boolean' ? ownerDoc.lastCommandSessionDraining : null,
+        SessionInboundUpsertInFlight: Number(sessionInboundUpsertActivity.get(String(sessionId || ''))?.active || 0),
+        SessionStartInFlight: sessionStartPromises.has(String(sessionId || '')),
+        SessionStartAgeMs: sessionStartPromises.has(String(sessionId || '')) ? Math.max(0, Date.now() - Number(sessionStartStartedAt.get(String(sessionId || '')) || Date.now())) : null,
+        SessionStartStage: localRuntime ? localSession?.startupStage || null : ownerDoc.lastStartupStage || null,
+        SessionStartStageAgeMs: localRuntime && localSession?.startupStageAt ? Math.max(0, Date.now() - Number(localSession.startupStageAt)) : null,
+        ReconnectTimerPending: reconnectTimers.has(String(sessionId || '')),
+        ReconnectLockRetryPending: sessionLockRetryTimers.has(String(sessionId || '')),
+        ReconnectStartDeferred: sessionReconnectDeferredStarts.has(String(sessionId || ''))
     };
 }
 
-async function buildSessionListSnapshot() {
+async function buildSessionListSnapshotUncached() {
     try {
 const sessionsList = [];
 const ownerCol = db?.collection ? db.collection('session_owners') : null;
@@ -11496,7 +11754,7 @@ const now = Date.now();
 let ownerDocs = [];
 if (ownerCol) {
     try {
-        ownerDocs = await ownerCol.find({}, { projection: { sessionId: 1, createdAt: 1, ownerLeaseUntil: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, connectionStatus: 1, status: 1, invalidStatusSinceAt: 1, invalidStatusExpiresAt: 1, socketAuthenticated: 1, socketReady: 1, connectionEverOpened: 1, connectionEverOpenedAt: 1, accountFirstConnectedAt: 1, connectedSince: 1, socketAuthenticatedAt: 1, everAuthenticated: 1, everConnected: 1, pairingProofPersisted: 1, pairingCredentialsConfirmedAt: 1, reauthRequired: 1, credentialsRevoked: 1, duplicateAccountOf: 1, duplicateOfSessionId: 1, format: 1, Format: 1, pairingChallengeStartedAt: 1, pairingStartedAt: 1, pairingPending: 1, pairingAttemptPending: 1, pairingCleanupPending: 1, pairingRestartFailed: 1, pairingRestartFailedAt: 1, pairingRestartRequiredAt: 1, PairingNumber: 1, nextRestoreRetryAt: 1, lastWhatsAppEvent: 1, lastWhatsAppEventAt: 1, lastDisconnectCode: 1, lastDisconnectReason: 1, DisconnectCode: 1, DisconnectReason: 1, lastAuthFailure: 1, lastAuthFailureAt: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, Name: 1, Number: 1, number: 1, OwnerNumber: 1, ownerNumber: 1, OwnerPhone: 1, ownerPhone: 1, DeployerNumber: 1, deployerNumber: 1, AccountJid: 1, OwnerLid: 1, mode: 1, Mode: 1, unconnectedSinceAt: 1, disconnectTime: 1, statusUpdatedAt: 1, lastInboundUpsertAt: 1, lastInboundUpsertType: 1, lastInboundUpsertCount: 1, lastCommandDetectedAt: 1, lastCommandName: 1, lastCommandOutcome: 1, lastCommandError: 1, lastWorkerState: 1, lastWorkerActive: 1, lastWorkerStopping: 1, lastSessionDraining: 1, lastMessageUpsertListenerCount: 1 } }).sort({ createdAt: -1 }).limit(5000).toArray();
+        ownerDocs = await ownerCol.find({}, { projection: { sessionId: 1, createdAt: 1, ownerLeaseUntil: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, connectionStatus: 1, status: 1, invalidStatusSinceAt: 1, invalidStatusExpiresAt: 1, socketAuthenticated: 1, socketReady: 1, connectionEverOpened: 1, connectionEverOpenedAt: 1, accountFirstConnectedAt: 1, connectedSince: 1, socketAuthenticatedAt: 1, everAuthenticated: 1, everConnected: 1, pairingProofPersisted: 1, pairingCredentialsConfirmedAt: 1, reauthRequired: 1, credentialsRevoked: 1, duplicateAccountOf: 1, duplicateOfSessionId: 1, format: 1, Format: 1, pairingChallengeStartedAt: 1, pairingStartedAt: 1, pairingPending: 1, pairingAttemptPending: 1, pairingCleanupPending: 1, pairingRestartFailed: 1, pairingRestartFailedAt: 1, pairingRestartRequiredAt: 1, PairingNumber: 1, nextRestoreRetryAt: 1, lastWhatsAppEvent: 1, lastWhatsAppEventAt: 1, lastDisconnectCode: 1, lastDisconnectReason: 1, DisconnectCode: 1, DisconnectReason: 1, lastAuthFailure: 1, lastAuthFailureAt: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, Name: 1, Number: 1, number: 1, OwnerNumber: 1, ownerNumber: 1, OwnerPhone: 1, ownerPhone: 1, DeployerNumber: 1, deployerNumber: 1, AccountJid: 1, OwnerLid: 1, mode: 1, Mode: 1, unconnectedSinceAt: 1, disconnectTime: 1, statusUpdatedAt: 1, lastInboundUpsertAt: 1, lastInboundUpsertType: 1, lastInboundUpsertCount: 1, lastCommandDetectedAt: 1, lastCommandName: 1, lastCommandOutcome: 1, lastCommandError: 1, lastWorkerState: 1, lastWorkerActive: 1, lastWorkerStopping: 1, lastSessionDraining: 1, lastMessageUpsertListenerCount: 1, lastCommandWorkerState: 1, lastCommandWorkerActive: 1, lastCommandWorkerStopping: 1, lastCommandSessionDraining: 1, lastStartupStage: 1 } }).sort({ createdAt: -1 }).limit(5000).toArray();
     } catch (ownerReadError) {
         console.error('[sessions-list-database-read-failed]', ownerReadError?.message || String(ownerReadError));
     }
@@ -11504,10 +11762,12 @@ if (ownerCol) {
 const ownerIds = new Set();
 const credentialDocsBySession = new Map();
 if (db?.collection) {
-    const authDocs = await db.collection('baileys_auth').find({ _id: { $regex: /^auth-.*-creds$/ } }, { projection: { 'creds.registered': 1, 'creds.me.id': 1, 'creds.me.lid': 1, 'creds.me.name': 1 } }).limit(5000).toArray().catch(error => {
+    const knownSessionIds = [...new Set([...ownerDocs.map(owner => String(owner?.sessionId || '').trim()), ...activeSessions.keys()].filter(Boolean))];
+    const authDocumentIds = knownSessionIds.map(sessionId => `auth-${sessionId}-creds`);
+    const authDocs = authDocumentIds.length ? await db.collection('baileys_auth').find({ _id: { $in: authDocumentIds } }, { projection: { 'creds.registered': 1, 'creds.me.id': 1, 'creds.me.lid': 1, 'creds.me.name': 1 } }).limit(5000).toArray().catch(error => {
         console.error('[sessions-list-credential-read-failed]', error?.message || String(error));
         return [];
-    });
+    }) : [];
     for (const authDoc of authDocs) {
         const match = String(authDoc?._id || '').match(/^auth-(.*)-creds$/);
         if (match && !match[1].startsWith('temp_')) credentialDocsBySession.set(match[1], authDoc);
@@ -11567,12 +11827,12 @@ for (const ownerDoc of ownerDocs) {
   const remoteOwner = !!(ownerDoc.ownerInstanceId && ownerDoc.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID);
   const remoteLeaseLive = remoteOwner && ownerLease > now;
   const localSocketOperational = !!(localSession && isAuthenticatedSocketOperational(localSession, localSession.sock));
-  const localWorkerReady = !TFBOT_CLUSTER_ENABLED || tfbotWorkerActive && !tfbotWorkerStopping && !workerDrainingSessionIds.has(sessionId);
+  const localWorkerReady = !TFBOT_CLUSTER_ENABLED || tfbotWorkerActive && !tfbotWorkerStopping;
   const ownerLastEvent = String(ownerDoc.lastWhatsAppEvent || '').toLowerCase();
   const ownerDisconnectCode = Number(ownerDoc.lastDisconnectCode || 0);
   const ownerDeviceRemoved = ownerDisconnectCode === 401 && /conflict|device[_ -]?removed/i.test(String(ownerDoc.lastDisconnectReason || ownerDoc.lastAuthFailure || ''));
   const remoteOpenProof = ownerDoc.connectionEverOpened === true || ownerDoc.everConnected === true || !!ownerDoc.connectionEverOpenedAt || !!ownerDoc.accountFirstConnectedAt || !!ownerDoc.connectedSince || !!ownerDoc.socketAuthenticatedAt || ownerDoc.socketAuthenticated === true && ownerLastEvent === 'open';
-  const remoteOwnerWorkerReady = ownerDoc.lastWorkerActive !== false && ownerDoc.lastWorkerStopping !== true && ownerDoc.lastSessionDraining !== true;
+  const remoteOwnerWorkerReady = ownerDoc.lastWorkerActive !== false && ownerDoc.lastWorkerStopping !== true;
   const remoteOwnerLive = remoteLeaseLive && remoteOpenProof && ownerDoc.socketAuthenticated === true && ownerDoc.socketReady === true && ownerLastEvent === 'open' && ownerDisconnectCode !== 515 && !ownerDeviceRemoved && remoteOwnerWorkerReady;
   const storedCredentials = credentialDocsBySession.get(sessionId)?.creds || null;
   const credentialsPresent = credentialDocsBySession.has(sessionId);
@@ -11722,7 +11982,7 @@ for (const [sessionId, authDoc] of credentialDocsBySession.entries()) {
   const storedCredentials = authDoc?.creds || null;
   const socketAuthenticated = !!(localSession && isAuthenticatedSocketOperational(localSession, localSession.sock));
   const socketReady = isWhatsAppSocketReady(localSession, localSession?.sock);
-  const localWorkerReady = !TFBOT_CLUSTER_ENABLED || tfbotWorkerActive && !tfbotWorkerStopping && !workerDrainingSessionIds.has(sessionId);
+  const localWorkerReady = !TFBOT_CLUSTER_ENABLED || tfbotWorkerActive && !tfbotWorkerStopping;
   const registered = hasRegisteredWhatsAppIdentity(localSession?.authState?.creds || storedCredentials, localSession?.sock?.user || null);
   const idTimestamp = getIdTimestamp(sessionId);
   const formatValue = String(localSession?.format || '').trim().toLowerCase();
@@ -11802,7 +12062,7 @@ for (const localSession of activeSessions.values()) {
   const retryAt = Math.max(reconnectTimers.has(localSession.id) ? Number(reconnectRetryDueAt.get(localSession.id) || 0) : 0, sessionLockRetryTimers.has(localSession.id) ? Number(sessionLockRetryDueAt.get(localSession.id) || 0) : 0);
   const activeRetryAt = retryAt > now ? retryAt : 0;
   const localSocketConnecting = !!(localSession.sock && !isSocketDefinitelyClosed(localSession.sock) && String(localSession.lastWhatsAppEvent || '').toLowerCase() !== 'close' && Number(localSession.lastDisconnectCode || 0) !== 515);
-  const localWorkerReady = !TFBOT_CLUSTER_ENABLED || tfbotWorkerActive && !tfbotWorkerStopping && !workerDrainingSessionIds.has(localSession.id);
+  const localWorkerReady = !TFBOT_CLUSTER_ENABLED || tfbotWorkerActive && !tfbotWorkerStopping;
   const localDisplayStatus = isAuthenticated && localWorkerReady ? 'connecte' : isAuthenticated ? 'synchronisation' : localSession.whatsappForbidden === true || Number(localSession.lastDisconnectCode || 0) === 403 ? 'forbidden_wait' : previouslyConnected ? activeRetryAt || !localSocketConnecting ? 'reconnexion' : 'synchronisation' : pairingPending ? localSession.qrString && !localRegistered ? 'qr_disponible' : localSocketConnecting || activeRetryAt || localRegistered ? 'synchronisation' : 'pairing' : localSocketConnecting || localRegistered ? 'synchronisation' : 'authentification_incomplete';
   const registered = localRegistered;
   const restoreError = activeRetryAt && !isAuthenticated ? String(localSession.lastRestoreError || '') || null : null;
@@ -11853,8 +12113,84 @@ for (const localSession of activeSessions.values()) {
     }
 }
 
+let sessionListSnapshotCacheInvalidationAt = 0;
+const SESSION_LIST_SNAPSHOT_CACHE_TTL_MS = Math.max(500, Math.min(5000, Number(process.env.SESSION_LIST_SNAPSHOT_CACHE_TTL_MS || 1800)));
+const SESSION_LIST_DATABASE_WAIT_MS = Math.max(500, Math.min(5000, Number(process.env.SESSION_LIST_DATABASE_WAIT_MS || 1800)));
+function invalidateSessionListSnapshotCache() {
+    sessionListSnapshotCacheInvalidationAt = Date.now();
+    sessionListSnapshotCacheAt = 0;
+}
+function buildFastLocalSessionListSnapshot() {
+    const now = Date.now();
+    const rows = new Map((Array.isArray(sessionListSnapshotCache) ? sessionListSnapshotCache : []).map(row => [String(row?.ID || ''), { ...row }]));
+    for (const [sessionId, runtime] of activeSessions.entries()) {
+        if (!sessionId || !runtime) continue;
+        const authenticated = isAuthenticatedSocketOperational(runtime, runtime.sock);
+        const registered = hasRegisteredWhatsAppIdentity(runtime.authState?.creds, runtime.sock?.user || null);
+        const historical = hasHistoricalWhatsAppConnection(null, runtime);
+        const startInFlight = sessionStartPromises.has(sessionId);
+        const reconnectAt = Math.max(reconnectTimers.has(sessionId) ? Number(reconnectRetryDueAt.get(sessionId) || 0) : 0, sessionLockRetryTimers.has(sessionId) ? Number(sessionLockRetryDueAt.get(sessionId) || 0) : 0);
+        const localWorkerReady = !TFBOT_CLUSTER_ENABLED || tfbotWorkerActive && !tfbotWorkerStopping;
+        const statusNow = String(runtime.status || '').toLowerCase();
+        const socketConnecting = !!(runtime.sock && !isSocketDefinitelyClosed(runtime.sock) && String(runtime.lastWhatsAppEvent || '').toLowerCase() !== 'close');
+        let status = authenticated && localWorkerReady ? 'connecte' : authenticated ? 'synchronisation' : runtime.whatsappForbidden === true || Number(runtime.lastDisconnectCode || 0) === 403 ? 'forbidden_wait' : historical && (reconnectAt > now || startInFlight || !socketConnecting) ? 'reconnexion' : socketConnecting || registered || startInFlight ? 'synchronisation' : statusNow || 'authentification_incomplete';
+        if (['connected'].includes(status)) status = 'connecte';
+        const activity = sessionInboundUpsertActivity.get(sessionId);
+        const signalState = runtime.authState?.getSignalTransactionState?.() || { pendingCount: 0, oldestAgeMs: 0 };
+        const existing = rows.get(sessionId) || {};
+        const aliveSince = getAccountAliveTimestamp(null, runtime, authenticated);
+        rows.set(sessionId, {
+            ...existing,
+            ID: sessionId,
+            Sessions: status,
+            Categorie: authenticated && localWorkerReady ? 'active' : status === 'forbidden_wait' ? 'forbidden' : historical && status === 'reconnexion' ? 'reconnexion' : registered || socketConnecting ? 'connexion' : 'authentification_incomplete',
+            Credentials: authenticated || registered ? 'recuperables' : runtime.authState?.creds ? 'incomplets' : existing.Credentials || 'absents',
+            Owner: TFBOT_CLUSTER_INSTANCE_URL || TFBOT_CLUSTER_INSTANCE_HOST || existing.Owner || null,
+            OwnerLeaseUntil: tfbotWorkerLeaseUntil > now ? new Date(tfbotWorkerLeaseUntil).toISOString() : existing.OwnerLeaseUntil || null,
+            SocketAuthenticated: authenticated,
+            SocketReady: isWhatsAppSocketReady(runtime, runtime.sock),
+            SignalTransactionsPending: Number(signalState.pendingCount || 0),
+            SignalTransactionOldestAgeMs: Number(signalState.oldestAgeMs || 0),
+            RestoreError: runtime.lastRestoreError || existing.RestoreError || null,
+            NextRetryAt: !authenticated && reconnectAt > now ? new Date(reconnectAt).toISOString() : null,
+            ...getTfbotSessionDiagnosticFields(sessionId, runtime, {}),
+            SessionInboundUpsertInFlight: Number(activity?.active || 0),
+            DuplicateOf: existing.DuplicateOf || null,
+            Numero: getAuthenticatedPhoneNumber(runtime.sock?.user || null, runtime.authState?.creds) || existing.Numero || 'N/A',
+            Name: sanitizeSessionDisplayName(runtime.sock?.user?.name || runtime.sock?.user?.notify || runtime.authState?.creds?.me?.name || existing.Name || 'Bot (tfbot)'),
+            Format: normalizeConnectionFormat(runtime.format || existing.Format || 'pair'),
+            Mode: existing.Mode || 'prive',
+            WhatsAppEvent: runtime.lastWhatsAppEvent || existing.WhatsAppEvent || null,
+            WhatsAppStateAt: runtime.lastWhatsAppEventAt || existing.WhatsAppStateAt || null,
+            DisconnectCode: !authenticated && String(runtime.lastWhatsAppEvent || '').toLowerCase() === 'close' ? runtime.lastDisconnectCode || null : null,
+            DisconnectReason: !authenticated && String(runtime.lastWhatsAppEvent || '').toLowerCase() === 'close' ? runtime.lastDisconnectReason || null : null,
+            Alive: authenticated ? getUptimeString(Math.max(1000, aliveSince ? now - aliveSince : 1000)) : null
+        });
+    }
+    return [...rows.values()].sort((a, b) => String(a.Name || '').localeCompare(String(b.Name || '')));
+}
+async function buildSessionListSnapshot() {
+    const now = Date.now();
+    if (sessionListSnapshotCache && now - sessionListSnapshotCacheAt < SESSION_LIST_SNAPSHOT_CACHE_TTL_MS && sessionListSnapshotCacheInvalidationAt <= sessionListSnapshotCacheAt) return buildFastLocalSessionListSnapshot();
+    if (!sessionListSnapshotPromise) {
+        sessionListSnapshotPromise = buildSessionListSnapshotUncached().then(sessions => {
+            sessionListSnapshotCache = sessions;
+            sessionListSnapshotCacheAt = Date.now();
+            return sessions;
+        }).finally(() => {
+            sessionListSnapshotPromise = null;
+        });
+    }
+    const timeout = new Promise(resolve => {
+        const timer = setTimeout(() => resolve(null), SESSION_LIST_DATABASE_WAIT_MS);
+        if (typeof timer.unref === 'function') timer.unref();
+    });
+    const result = await Promise.race([sessionListSnapshotPromise, timeout]);
+    return result || buildFastLocalSessionListSnapshot();
+}
+
 app.get('/list', (req, res) => {
-    res.set('Referrer-Policy', 'no-referrer').set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').type('html').send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;min-height:100%;background:#000;color:#fff;overscroll-behavior:none;overscroll-behavior-y:none;touch-action:pan-y}body{width:100%;height:100dvh;min-height:100svh;overflow:hidden;overscroll-behavior:none}#loader{position:fixed;inset:0;display:grid;place-items:center;background:#000}#loader svg{width:52px;height:52px;animation:tfbot-spin .85s linear infinite}#loader circle{fill:none;stroke:#fff;stroke-width:4;stroke-linecap:round;stroke-dasharray:92 160}#output{display:block;width:100%;height:100dvh;min-height:100svh;margin:0;padding:calc(env(safe-area-inset-top) + 12px) calc(env(safe-area-inset-right) + 12px) calc(env(safe-area-inset-bottom) + 12px) calc(env(safe-area-inset-left) + 12px);overflow:auto;overscroll-behavior:none;overscroll-behavior-y:none;overscroll-behavior-x:none;-webkit-overflow-scrolling:touch;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:clamp(12px,2.9vw,15px)/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}#output[hidden],#loader[hidden]{display:none}@media (hover:none) and (pointer:coarse){#output{scrollbar-width:none;-ms-overflow-style:none}#output::-webkit-scrollbar{display:none;width:0;height:0}}@keyframes tfbot-spin{to{transform:rotate(360deg)}}</style></head><body><div id="loader" aria-hidden="true"><svg viewBox="0 0 48 48" role="presentation"><circle cx="24" cy="24" r="19"></circle></svg></div><pre id="output" hidden></pre><script>if(location.search)history.replaceState(null,'',location.pathname);const loader=document.getElementById('loader');const output=document.getElementById('output');let hasSnapshot=false;const stream=new EventSource('/list/events');stream.addEventListener('snapshot',event=>{try{const data=JSON.parse(event.data);output.textContent=JSON.stringify(data,null,2);if(!hasSnapshot){hasSnapshot=true;loader.hidden=true;output.hidden=false;}}catch(error){}});</script></body></html>`);
+    res.set('Referrer-Policy', 'no-referrer').set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').type('html').send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;min-height:100%;background:#000;color:#fff;overscroll-behavior:none;overscroll-behavior-y:none;touch-action:pan-y}body{width:100%;height:100dvh;min-height:100svh;overflow:hidden;overscroll-behavior:none}#loader{position:fixed;inset:0;display:grid;place-items:center;background:#000}#loader svg{width:52px;height:52px;animation:tfbot-spin .85s linear infinite}#loader circle{fill:none;stroke:#fff;stroke-width:4;stroke-linecap:round;stroke-dasharray:92 160}#output{display:block;width:100%;height:100dvh;min-height:100svh;margin:0;padding:calc(env(safe-area-inset-top) + 12px) calc(env(safe-area-inset-right) + 12px) calc(env(safe-area-inset-bottom) + 12px) calc(env(safe-area-inset-left) + 12px);overflow:auto;overscroll-behavior:none;overscroll-behavior-y:none;overscroll-behavior-x:none;-webkit-overflow-scrolling:touch;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:clamp(12px,2.9vw,15px)/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}#output[hidden],#loader[hidden]{display:none}@media (hover:none) and (pointer:coarse){#output{scrollbar-width:none;-ms-overflow-style:none}#output::-webkit-scrollbar{display:none;width:0;height:0}}@keyframes tfbot-spin{to{transform:rotate(360deg)}}</style></head><body><div id="loader" aria-hidden="true"><svg viewBox="0 0 48 48" role="presentation"><circle cx="24" cy="24" r="19"></circle></svg></div><pre id="output" hidden></pre><script>if(location.search)history.replaceState(null,'',location.pathname);const loader=document.getElementById('loader');const output=document.getElementById('output');let hasSnapshot=false;let fallbackRunning=false;let lastFallbackAt=0;const render=data=>{output.textContent=JSON.stringify(data,null,2);hasSnapshot=true;loader.hidden=true;output.hidden=false;};const fallback=async(force=false)=>{const now=Date.now();if(fallbackRunning||!force&&now-lastFallbackAt<3500)return;fallbackRunning=true;lastFallbackAt=now;try{const response=await fetch('/list/snapshot.json?ts='+now,{cache:'no-store',headers:{'Accept':'application/json'}});if(!response.ok)throw new Error('snapshot_http_'+response.status);render(await response.json());}catch(error){if(!hasSnapshot){output.textContent='Liste temporairement indisponible. Nouvelle tentative automatique…';loader.hidden=true;output.hidden=false;}}finally{fallbackRunning=false;}};const stream=new EventSource('/list/events');stream.addEventListener('snapshot',event=>{try{render(JSON.parse(event.data));}catch(error){void fallback(true);}});stream.onerror=()=>{if(stream.readyState!==1)void fallback();};setTimeout(()=>{if(!hasSnapshot)void fallback(true);},1000);setInterval(()=>{if(stream.readyState!==1)void fallback();},12000);</script></body></html>`);
 });
 
 const sessionListStreamClients = new Set();
@@ -11914,6 +12250,7 @@ async function broadcastSessionListSnapshot(reason = 'runtime_change') {
 }
 
 function scheduleSessionListBroadcast(reason = 'runtime_change') {
+    invalidateSessionListSnapshotCache();
     if (!sessionListStreamClients.size || sessionListBroadcastTimer) return;
     sessionListBroadcastTimer = setTimeout(() => {
         sessionListBroadcastTimer = null;
@@ -11956,6 +12293,17 @@ async function ensureSessionListChangeStream() {
         sessionListChangeStreamPromise = null;
     }
 }
+
+app.get('/list/snapshot.json', async (req, res) => {
+    res.set({ 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', 'X-Accel-Buffering': 'no', 'X-TFBOT-Code-Version': TFBOT_CODE_VERSION, 'X-TFBOT-Revision': TFBOT_CLUSTER_CODE_REVISION });
+    try {
+        const sessions = await buildSessionListSnapshot();
+        return res.status(200).json(sanitizePublicSessionListSnapshot(sessions));
+    } catch (error) {
+        console.warn('[sessions-list-snapshot-http-failed]', { error: error?.message || String(error) });
+        return res.status(503).json([]);
+    }
+});
 
 app.get('/list/events', async (req, res) => {
     res.status(200).set({ 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no', 'X-TFBOT-Build': RUNTIME_FIX_BUILD });
@@ -12239,8 +12587,9 @@ function scheduleSessionReconnect(sessionId, autoExpire, format, options = {}) {
             return;
         }
         if (sessionStartPromises.has(sessionId)) {
-            console.info('[session-reconnect-deferred-current-start-in-flight]', { sessionId, status: latest.status || null, lastWhatsAppEvent: latest.lastWhatsAppEvent || null, disconnectCode: latest.lastDisconnectCode || null, retryInMs: 1000 });
-            scheduleSessionReconnect(sessionId, autoExpire, format, { delayMs: 1000, preserveAttempt: true });
+            const startedAt = Number(sessionStartStartedAt.get(sessionId) || 0);
+            sessionReconnectDeferredStarts.set(sessionId, { autoExpire: autoExpire === true, format: format || latest.format || 'pair', deferredAt: Date.now() });
+            console.info('[session-reconnect-deferred-current-start-in-flight]', { sessionId, status: latest.status || null, lastWhatsAppEvent: latest.lastWhatsAppEvent || null, disconnectCode: latest.lastDisconnectCode || null, startAgeMs: startedAt ? Date.now() - startedAt : null, retryPolicy: 'resume_once_when_existing_start_promise_settles', retryTimerCreated: false, credentialsPreserved: true });
             return;
         }
         const lastEvent = String(latest.lastWhatsAppEvent || '').toLowerCase();
@@ -12515,7 +12864,7 @@ function getMessageContextInfo(message) {
         if (value && typeof value === 'object' && value.contextInfo && typeof value.contextInfo === 'object') candidates.push(value.contextInfo);
     }
     if (!candidates.length) return {};
-    const score = context => (context?.quotedMessage ? 8 : 0) + (context?.stanzaId ? 4 : 0) + (Array.isArray(context?.mentionedJid) && context.mentionedJid.length ? 2 : 0) + (context?.participant ? 1 : 0);
+    const score = context => (context?.quotedMessage ? 8 : 0) + (context?.stanzaId ? 4 : 0) + (Array.isArray(context?.mentionedJid) && context.mentionedJid.length ? 2 : 0) + (context?.participant ? 1 : 0) + (context?.expiration !== undefined && context?.expiration !== null ? 3 : 0);
     return candidates.reduce((best, candidate) => score(candidate) > score(best) ? candidate : best, candidates[0]) || {};
 }
 
@@ -13311,11 +13660,25 @@ async function cleanupSocket(sessionId, options = {}) {
 function startAdamBot(sessionId, autoExpire = false, format = 'pair', expectExisting = false) {
     if (TFBOT_CLUSTER_COORDINATOR_ONLY || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || !db || tfbotWorkerStopping))) return Promise.reject(new Error('tfbot_worker_not_active'));
     if (sessionStartPromises.has(sessionId)) return sessionStartPromises.get(sessionId);
+    const startedAt = Date.now();
     const startPromise = startAdamBotInner(sessionId, autoExpire, format, expectExisting);
     sessionStartPromises.set(sessionId, startPromise);
-    return startPromise.finally(() => {
+    sessionStartStartedAt.set(sessionId, startedAt);
+    const finalPromise = startPromise.finally(() => {
         if (sessionStartPromises.get(sessionId) === startPromise) sessionStartPromises.delete(sessionId);
+        if (sessionStartStartedAt.get(sessionId) === startedAt) sessionStartStartedAt.delete(sessionId);
+        const deferred = sessionReconnectDeferredStarts.get(sessionId);
+        if (deferred) {
+            sessionReconnectDeferredStarts.delete(sessionId);
+            setImmediate(() => {
+                const runtime = activeSessions.get(sessionId);
+                if (!runtime || serverShuttingDown || tfbotWorkerStopping || TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive || isAuthenticatedSocketOperational(runtime, runtime.sock) || reconnectTimers.has(sessionId) || sessionLockRetryTimers.has(sessionId)) return;
+                console.warn('[session-reconnect-resumed-after-start-settled]', { sessionId, startupDurationMs: Date.now() - startedAt, status: runtime.status || null, lastWhatsAppEvent: runtime.lastWhatsAppEvent || null, disconnectCode: runtime.lastDisconnectCode || null, delayMs: 500, credentialsPreserved: true });
+                scheduleSessionReconnect(sessionId, deferred.autoExpire === true, deferred.format || runtime.format || 'pair', { delayMs: 500, preserveAttempt: true });
+            });
+        }
     });
+    return finalPromise;
 }
 
 async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair', expectExisting = false) {
@@ -13323,8 +13686,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
     const startupStartedAt = Date.now();
     const runStartStage = async (stage, operation, timeoutMs = 15000) => {
         startupStage = stage;
+        const runtimeForStage = activeSessions.get(sessionId);
+        if (runtimeForStage) {
+            runtimeForStage.startupStage = stage;
+            runtimeForStage.startupStageAt = Date.now();
+        }
         const stageStartedAt = Date.now();
-        console.info('[session-start-stage]', { sessionId, stage, state: 'started', timeoutMs });
+        console.info('[session-start-stage]', { sessionId, stage, state: 'started', timeoutMs, codeVersion: TFBOT_CODE_VERSION });
         try {
             const result = await promiseWithTimeout(Promise.resolve().then(() => typeof operation === 'function' ? operation() : operation), timeoutMs, `session_start_${stage}`);
             console.info('[session-start-stage]', { sessionId, stage, state: 'completed', durationMs: Date.now() - stageStartedAt });
@@ -13873,11 +14241,31 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         console.info('[auth-state-listener-attached]', { sessionId, event: 'creds.update', accountIdentityKnown: hasRegisteredWhatsAppIdentity(state.creds, sock.user || null), accountLockBootstrap: true });
         if (hasRegisteredWhatsAppIdentity(state.creds, sock.user || null)) void refreshAuthenticatedSessionOwnIdentity(sessionId, sock, state.creds, 'auth_listener_attached').catch(error => console.warn('[session-own-identity-refresh-failed]', { sessionId, source: 'auth_listener_attached', error: error?.message || String(error) }));
 
+        const rememberChatEphemeralUpdates = (updates, source) => {
+            const entries = Array.isArray(updates) ? updates : updates && typeof updates === 'object' ? [updates] : [];
+            for (const chat of entries) {
+                const chatJid = String(chat?.id || chat?.jid || chat?.key?.remoteJid || '').trim();
+                const hasExpiration = Object.prototype.hasOwnProperty.call(chat || {}, 'ephemeralExpiration') || Object.prototype.hasOwnProperty.call(chat || {}, 'ephemeralDuration');
+                if (!chatJid || !hasExpiration) continue;
+                const expiration = chat.ephemeralExpiration ?? chat.ephemeralDuration;
+                if (expiration === null || expiration === undefined || !Number.isFinite(Number(expiration)) || Number(expiration) < 0) continue;
+                const aliases = getWhatsAppChatEphemeralAliases(sessionId, chatJid, sock);
+                rememberWhatsAppChatEphemeralExpiration(sessionId, aliases.length ? aliases : [chatJid], Number(expiration), source);
+            }
+        };
+        sock.ev.on('chats.upsert', chats => rememberChatEphemeralUpdates(chats, 'chats_upsert'));
+        sock.ev.on('chats.update', chats => rememberChatEphemeralUpdates(chats, 'chats_update'));
+        sock.ev.on('messaging-history.set', history => rememberChatEphemeralUpdates(history?.chats, 'messaging_history'));
+
         sock.ev.on('messages.upsert', up => {
             try {
                 const earlyUpsertType = String(up?.type || '');
                 const earlyMessages = Array.isArray(up?.messages) ? up.messages : [];
                 const earlyReceivedAt = new Date();
+                for (const incomingEntry of earlyMessages) {
+                    const ephemeralInfo = getWhatsAppMessageEphemeralExpiration(incomingEntry);
+                    if (ephemeralInfo.found) rememberWhatsAppChatEphemeralExpiration(sessionId, [incomingEntry?.key?.remoteJid, incomingEntry?.key?.remoteJidAlt], ephemeralInfo.seconds, 'early_message_upsert');
+                }
                 updateTfbotSessionInboundDiagnostics(sessionId, {
                     lastInboundUpsertAt: earlyReceivedAt,
                     lastInboundUpsertType: earlyUpsertType || 'unknown',
@@ -15253,6 +15641,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         });
 
         sock.ev.on('messages.upsert', async (up) => {
+            const __tfbotUpsertFinished = beginSessionInboundUpsert(sessionId);
+            try {
             const messageUpsertEventStartedAt = Date.now();
             const initialUpsertType = String(up?.type || '');
             const initialBatchCount = Array.isArray(up?.messages) ? up.messages.length : 0;
@@ -15279,9 +15669,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             if (initialUpsertType === 'append') {
                 console.info('[message-upsert-historical-append-cache-only]', { sessionId, messageCount: initialBatchCount, receivedAt: messageUpsertEventStartedAt, action: 'validate_session_ownership_then_cache_outgoing_private_retry_copies_without_command_dispatch' });
             }
-            if (workerDrainingSessionIds.has(sessionId) || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping))) {
-                updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: 'ignored_worker_handoff' });
-                console.warn('[message-upsert-ignored-during-worker-handoff]', { sessionId, upsertType: String(up?.type || ''), messageCount: Array.isArray(up?.messages) ? up.messages.length : 0, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), runtimeSocketPresent: !!activeSessions.get(sessionId)?.sock, sameSocket: activeSessions.get(sessionId)?.sock === sock, socketReady: isWhatsAppSocketReady(activeSessions.get(sessionId), sock), action: 'leave_whatsapp_offline_sync_for_selected_worker' });
+            if (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) {
+                updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: 'ignored_worker_handoff', lastCommandWorkerState: tfbotWorkerState, lastCommandWorkerActive: !!tfbotWorkerActive, lastCommandWorkerStopping: !!tfbotWorkerStopping, lastCommandSessionDraining: workerDrainingSessionIds.has(sessionId), lastCommandError: null });
+                console.warn('[message-upsert-ignored-during-worker-handoff]', { sessionId, upsertType: String(up?.type || ''), messageCount: Array.isArray(up?.messages) ? up.messages.length : 0, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), runtimeSocketPresent: !!activeSessions.get(sessionId)?.sock, sameSocket: activeSessions.get(sessionId)?.sock === sock, socketReady: isWhatsAppSocketReady(activeSessions.get(sessionId), sock), inboundHandlersActive: Number(sessionInboundUpsertActivity.get(sessionId)?.active || 0), action: 'leave_whatsapp_offline_sync_for_selected_worker' });
                 return;
             }
             if (isPendingPairingReplacementSession(sessionId)) {
@@ -15314,7 +15704,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 for (let ownershipAttempt = 0; !ownershipReady && ownershipAttempt < 5; ownershipAttempt++) {
                     ownershipAttemptCount = ownershipAttempt + 1;
                     try {
-                        if (!TFBOT_CLUSTER_ENABLED || tfbotWorkerActive && !tfbotWorkerStopping && !workerDrainingSessionIds.has(sessionId)) {
+                        if (!TFBOT_CLUSTER_ENABLED || tfbotWorkerActive && !tfbotWorkerStopping) {
                             if (liveAccountLockKey && !sessionHasAccountRuntimeLocks(sessionId, [liveAccountPhone, liveAccountLid])) {
                                 const accountLock = await ensureAccountRuntimeLockForIdentity(sessionId, sock.user, state.creds);
                                 if (!accountLock.acquired) throw new Error('account_runtime_lock_not_owned');
@@ -15334,9 +15724,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 if (!ownershipReady) throw ownershipError || new Error('session_runtime_ownership_not_confirmed');
             } catch (finalOwnershipError) {
                 const reason = String(finalOwnershipError?.message || finalOwnershipError);
-                if (reason === 'tfbot_worker_not_active' || workerDrainingSessionIds.has(sessionId) || tfbotWorkerStopping || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive)) {
-                    updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: 'left_for_selected_worker' });
-                    console.warn('[message-upsert-left-for-selected-worker]', { sessionId, upsertType: String(up?.type || ''), messageCount: Array.isArray(up?.messages) ? up.messages.length : 0, reason, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), action: 'do_not_close_or_process_on_standby_worker' });
+                if (reason === 'tfbot_worker_not_active' || tfbotWorkerStopping || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive)) {
+                    updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: 'left_for_selected_worker', lastCommandWorkerState: tfbotWorkerState, lastCommandWorkerActive: !!tfbotWorkerActive, lastCommandWorkerStopping: !!tfbotWorkerStopping, lastCommandSessionDraining: workerDrainingSessionIds.has(sessionId), lastCommandError: reason.slice(0, 240) });
+                    console.warn('[message-upsert-left-for-selected-worker]', { sessionId, upsertType: String(up?.type || ''), messageCount: Array.isArray(up?.messages) ? up.messages.length : 0, reason, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), inboundHandlersActive: Number(sessionInboundUpsertActivity.get(sessionId)?.active || 0), action: 'do_not_close_or_process_on_standby_worker' });
                     return;
                 }
                 console.error('[message-upsert-blocked-without-exclusive-session-lock]', { sessionId, error: reason, ownershipValidationMs: Date.now() - ownershipValidationStartedAt, ownershipAttemptCount, messageEventAgeMs: Date.now() - messageUpsertEventStartedAt, action: 'retry_lock_failure_then_close_only_when_exclusive_ownership_cannot_be_verified' });
@@ -15347,9 +15737,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             if (ownershipValidationMs >= 150) console.warn('[message-upsert-ownership-validation-latency]', { sessionId, upsertType: initialUpsertType, messageCount: initialBatchCount, durationMs: ownershipValidationMs, attempts: ownershipAttemptCount, action: 'measure_time_before_detection_without_bypassing_session_or_account_locks' });
             const upsertType = String(up?.type || '');
             const rawBatch = Array.isArray(up?.messages) ? up.messages : [];
-            if (workerDrainingSessionIds.has(sessionId) || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping))) {
-                updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: 'ignored_worker_handoff_after_lock_check' });
-                console.warn('[message-upsert-ignored-during-worker-handoff]', { sessionId, upsertType, messageCount: rawBatch.length, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), ownershipValidationMs, ownershipAttemptCount, action: 'leave_whatsapp_offline_sync_for_selected_worker' });
+            if (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) {
+                updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: 'ignored_worker_handoff_after_lock_check', lastCommandWorkerState: tfbotWorkerState, lastCommandWorkerActive: !!tfbotWorkerActive, lastCommandWorkerStopping: !!tfbotWorkerStopping, lastCommandSessionDraining: workerDrainingSessionIds.has(sessionId), lastCommandError: null });
+                console.warn('[message-upsert-ignored-during-worker-handoff]', { sessionId, upsertType, messageCount: rawBatch.length, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), ownershipValidationMs, ownershipAttemptCount, inboundHandlersActive: Number(sessionInboundUpsertActivity.get(sessionId)?.active || 0), action: 'leave_whatsapp_offline_sync_for_selected_worker' });
                 return;
             }
             console.info('[messages-upsert-batch]', {
@@ -15420,7 +15810,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             }
 
             for (const m of rawBatch) {
-                if (workerDrainingSessionIds.has(sessionId) || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping))) {
+                if (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) {
                     console.info('[message-upsert-paused-before-message-dispatch-during-worker-handoff]', { sessionId, messageCountRemaining: Math.max(0, rawBatch.length - rawBatch.indexOf(m)), upsertType, action: 'leave_unprocessed_messages_for_selected_worker' });
                     break;
                 }
@@ -15704,7 +16094,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     continue;
                 }
                 if (receivedParsedCommand) {
-                    updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandDetectedAt: new Date(), lastCommandName: String(receivedParsedCommand.internalCommand || receivedParsedCommand.command || '').slice(0, 80), lastCommandOutcome: 'recognized_before_deduplication_and_dispatch', lastCommandError: null });
+                    updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandDetectedAt: new Date(), lastCommandName: String(receivedParsedCommand.internalCommand || receivedParsedCommand.command || '').slice(0, 80), lastCommandOutcome: 'recognized_before_deduplication_and_dispatch', lastCommandError: null, lastCommandWorkerState: tfbotWorkerState, lastCommandWorkerActive: !!tfbotWorkerActive, lastCommandWorkerStopping: !!tfbotWorkerStopping, lastCommandSessionDraining: workerDrainingSessionIds.has(sessionId) });
                     console.info('[command-recognized-on-receipt]', {
                         sessionId,
                         connectedAccountJid: sock.user?.id || null,
@@ -15858,7 +16248,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 }
                 cacheRecentMessage(sessionId, m);
 
-                updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: receivedParsedCommand ? 'queued_for_dispatch' : 'queued_non_command' });
+                updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: receivedParsedCommand ? 'queued_for_dispatch' : 'queued_non_command', lastCommandWorkerState: tfbotWorkerState, lastCommandWorkerActive: !!tfbotWorkerActive, lastCommandWorkerStopping: !!tfbotWorkerStopping, lastCommandSessionDraining: workerDrainingSessionIds.has(sessionId) });
                 console.info('[message-processing-queued]', {
                     sessionId,
                     messageId: msgId,
@@ -16775,7 +17165,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 safeSendActionError = async (...errorArgs) => {
                                     if (terminalResponseSent) return terminalResponsePromise;
                                     const currentCommandRuntime = activeSessions.get(sessionId);
-                                    const commandSocketUnavailable = !currentCommandRuntime || currentCommandRuntime.sock !== sock || isSocketDefinitelyClosed(sock) || workerDrainingSessionIds.has(sessionId) || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping));
+                                    const commandSocketUnavailable = !currentCommandRuntime || currentCommandRuntime.sock !== sock || isSocketDefinitelyClosed(sock) || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping));
                                     if (commandSocketUnavailable) {
                                         console.warn('[command-action-error-response-skipped-socket-unavailable]', { sessionId, messageId: msgId, command: internalCommand, runtimePresent: !!currentCommandRuntime, sameSocket: currentCommandRuntime?.sock === sock, workerDraining: workerDrainingSessionIds.has(sessionId), workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, action: 'finish_command_without_retrying_a_response_on_a_closed_or_replaced_socket' });
                                         return null;
@@ -18145,7 +18535,11 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                     else inboundMessagePreDispatchCounts.delete(sessionId);
                 }
             }
-        });
+        
+            } finally {
+                __tfbotUpsertFinished();
+            }
+});
         startupStage = 'socket_handlers_attached';
         console.info('[session-start-complete]', { sessionId, durationMs: Date.now() - startupStartedAt, pairing515Recovery: explicit515Restart, credentialsRegistered: state.creds?.registered === true, socketHandlersAttached: true });
         return sessionData;
@@ -18955,10 +19349,45 @@ setInterval(async () => {
         for (const [key, value] of outgoingTextEchoCache.entries()) {
             if (now - Number(value || 0) > OUTGOING_ECHO_TTL_MS) outgoingTextEchoCache.delete(key);
         }
+        for (const [key, value] of chatEphemeralExpirationCache.entries()) {
+            if (now - Number(value?.updatedAt || 0) > CHAT_EPHEMERAL_CACHE_TTL_MS) chatEphemeralExpirationCache.delete(key);
+        }
     } catch (e) {
         console.error('[maintenance]', e?.message || e);
     }
 }, 15000);
+
+const TFBOT_RECONNECT_WATCHDOG_INTERVAL_MS = Math.max(5000, Math.min(30000, Number(process.env.TFBOT_RECONNECT_WATCHDOG_INTERVAL_MS || 10000)));
+const tfbotReconnectWatchdogLastScheduledAt = new Map();
+setInterval(() => {
+    if (serverShuttingDown || tfbotWorkerStopping || TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive) return;
+    const now = Date.now();
+    for (const [sessionId, runtime] of activeSessions.entries()) {
+        if (!runtime || runtime.retiringDuplicateAccount === true || runtime.deviceRemoved === true || runtime.reauthRequired === true || runtime.whatsappForbidden === true) continue;
+        const status = String(runtime.status || '').toLowerCase();
+        if (status === 'forbidden_wait' || status === 'duplicate_account' || status === 'pairing_expired' || Number(runtime.lastDisconnectCode || 0) === 403) continue;
+        if (isAuthenticatedSocketOperational(runtime, runtime.sock)) continue;
+        if (runtime.sock && !isSocketDefinitelyClosed(runtime.sock) && String(runtime.lastWhatsAppEvent || '').toLowerCase() !== 'close' && !['deconnecte', 'disconnected', 'reconnexion', 'reconnection', 'reconnecting'].includes(status)) continue;
+        const credentials = runtime.authState?.creds || null;
+        const authenticatedIdentity = hasAuthenticatedWhatsAppCredentials(credentials, runtime.sock?.user || null) && !!(getAuthenticatedPhoneNumber(runtime.sock?.user || null, credentials) || getAuthenticatedLid(runtime.sock?.user || null, credentials));
+        if (!authenticatedIdentity) continue;
+        if (reconnectTimers.has(sessionId) || sessionLockRetryTimers.has(sessionId)) continue;
+        if (sessionStartPromises.has(sessionId)) {
+            const startAgeMs = Math.max(0, now - Number(sessionStartStartedAt.get(sessionId) || now));
+            if (startAgeMs >= 90000 && now - Number(tfbotReconnectWatchdogLastScheduledAt.get(`${sessionId}:start-stale`) || 0) >= 30000) {
+                tfbotReconnectWatchdogLastScheduledAt.set(`${sessionId}:start-stale`, now);
+                console.error('[session-reconnect-start-stale-diagnostic]', { sessionId, startAgeMs, startupStage: runtime.startupStage || null, startupStageAgeMs: runtime.startupStageAt ? Math.max(0, now - Number(runtime.startupStageAt)) : null, status: runtime.status || null, socketPresent: !!runtime.sock, socketClosed: runtime.sock ? isSocketDefinitelyClosed(runtime.sock) : null, action: 'do_not_create_duplicate_socket_while_start_promise_is_in_flight' });
+            }
+            continue;
+        }
+        const previousAt = Number(tfbotReconnectWatchdogLastScheduledAt.get(sessionId) || 0);
+        if (now - previousAt < Math.max(8000, TFBOT_RECONNECT_WATCHDOG_INTERVAL_MS - 1000)) continue;
+        tfbotReconnectWatchdogLastScheduledAt.set(sessionId, now);
+        while (tfbotReconnectWatchdogLastScheduledAt.size > 5000) tfbotReconnectWatchdogLastScheduledAt.delete(tfbotReconnectWatchdogLastScheduledAt.keys().next().value);
+        scheduleSessionReconnect(sessionId, false, runtime.format || 'pair', { delayMs: 1000, preserveAttempt: true });
+        if (reconnectTimers.has(sessionId)) console.warn('[session-reconnect-watchdog-rescheduled]', { sessionId, status: status || null, lastWhatsAppEvent: runtime.lastWhatsAppEvent || null, disconnectCode: runtime.lastDisconnectCode || null, delayMs: 1000, credentialsPreserved: true, reason: 'recoverable_session_had_no_live_socket_and_no_pending_retry_timer' });
+    }
+}, TFBOT_RECONNECT_WATCHDOG_INTERVAL_MS);
 
 setInterval(async () => {
     if (!db || serverShuttingDown || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive) || tfbotWorkerStopping) return;
