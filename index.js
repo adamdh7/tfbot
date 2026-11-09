@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r199-viewonce-cache-preservation-large-media-and-command-handoff-drain';
+const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r200-viewonce-context-command-and-direct-media-resend';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 
@@ -12578,19 +12578,60 @@ function resolveCommand(command, language) {
     return null;
 }
 
-function getCommandParsingContext(message) {
+function getCommandParsingContext(message, sessionId = '', chatJid = '') {
     const content = unwrapMessageContent(message);
     const contextInfo = getMessageContextInfo(message);
-    const quotedContent = unwrapMessageContent(contextInfo?.quotedMessage || {});
-    const quotedMediaFormat = getWhatsAppMessageFormat({ message: quotedContent });
+    const quotedSource = contextInfo?.quotedMessage && typeof contextInfo.quotedMessage === 'object' ? contextInfo.quotedMessage : null;
+    const quotedDirectInfo = quotedSource ? extractWhatsAppResendMedia(quotedSource) : null;
+    const quotedId = String(contextInfo?.stanzaId || '').trim();
+    let quotedCachedInfo = null;
+    if (sessionId && quotedId) {
+        const requestedChat = String(chatJid || '').trim();
+        const cachedQuote = recentMsgsCache.find(entry => {
+            if (entry?.sessionId !== sessionId || String(entry?.id || '') !== quotedId || !entry?.message) return false;
+            if (!requestedChat) return true;
+            const aliases = [entry.from, ...(Array.isArray(entry.chatAliases) ? entry.chatAliases : []), entry.key?.remoteJid, entry.key?.remoteJidAlt].filter(Boolean);
+            return aliases.some(alias => String(alias) === requestedChat || areEquivalentWhatsAppChatJids(sessionId, alias, requestedChat));
+        });
+        if (cachedQuote?.message) quotedCachedInfo = extractWhatsAppResendMedia(cachedQuote.message);
+    }
+    const supportedQuotedMedia = info => !!info?.payload && ['image', 'video', 'audio'].includes(info.type);
+    const quotedViewOnceInfo = [quotedDirectInfo, quotedCachedInfo].find(info => supportedQuotedMedia(info) && info.viewOnce === true) || null;
+    const quotedMediaFormat = quotedDirectInfo?.type || getWhatsAppMessageFormat({ message: unwrapMessageContent(quotedSource || {}) });
     const mediaKeys = ['imageMessage', 'videoMessage', 'ptvMessage', 'audioMessage', 'voiceMessage', 'documentMessage', 'stickerMessage', 'lottieStickerMessage', 'albumMessage'];
     return {
         hasQuotedMessage: !!(contextInfo?.stanzaId || contextInfo?.quotedMessage),
         hasMedia: mediaKeys.some(key => !!content?.[key]),
         hasQuotedMedia: ['image', 'video', 'audio', 'voice', 'document', 'sticker', 'album'].includes(quotedMediaFormat),
         hasQuotedHidetagTarget: ['text', 'video', 'audio', 'voice'].includes(quotedMediaFormat),
+        hasQuotedViewOnceMedia: !!quotedViewOnceInfo,
+        quotedMediaType: quotedViewOnceInfo?.type || quotedDirectInfo?.type || quotedCachedInfo?.type || '',
         mentionedJid: Array.isArray(contextInfo?.mentionedJid) ? contextInfo.mentionedJid.map(value => String(value || '').trim()).filter(Boolean) : []
     };
+}
+
+async function resolveCommandParsingContext(message, sessionId = '', chatJid = '', body = '', language = 'ht') {
+    const context = getCommandParsingContext(message, sessionId, chatJid);
+    if (context.hasQuotedViewOnceMedia === true) return context;
+    const source = String(body || '').trim().replace(/^\./u, '').trim();
+    const commandTokens = source.split(/\s+/u).filter(Boolean);
+    if (commandTokens.length !== 1 || !['vv', 'vv2'].includes(resolveCommand(commandTokens[0], language))) return context;
+    const quoted = getMessageContextInfo(message);
+    const quotedMessageId = String(quoted?.stanzaId || '').trim();
+    if (!quotedMessageId || !sessionId) return context;
+    try {
+        const records = await promiseWithTimeout(findQuotedMessageCandidatesForCommand(sessionId, chatJid, quotedMessageId, true), 4500, 'Quoted view-once marker lookup');
+        for (const record of Array.isArray(records) ? records : []) {
+            if (!record?.message) continue;
+            const info = extractWhatsAppResendMedia(record.message);
+            if (!info?.payload || !['image', 'video', 'audio'].includes(info.type) || info.viewOnce !== true) continue;
+            console.info('[quoted-media-view-once-marker-restored-for-command]', { sessionId, quotedMessageId, source: record.source || 'stored_quote', mediaType: info.type });
+            return { ...context, hasQuotedViewOnceMedia: true, quotedMediaType: info.type };
+        }
+    } catch (error) {
+        console.warn('[quoted-media-view-once-marker-lookup-failed]', { sessionId, quotedMessageId, error: String(error?.message || error).slice(0, 220), action: 'do_not_classify_unverified_quote_as_view_once_command' });
+    }
+    return context;
 }
 
 const commandsWithoutArguments = new Set([
@@ -12619,7 +12660,7 @@ function parseIncomingCommand(body, language, context = {}) {
     if (internalCommand === 'ai' && !hasExplicitAiCommandPrefix(body)) return null;
     if (commandsWithoutArguments.has(internalCommand) && args) return null;
     if ((internalCommand === 'del' || internalCommand === 'del3') && !context.hasQuotedMessage) return null;
-    if ((internalCommand === 'vv' || internalCommand === 'vv2') && !context.hasQuotedMedia && !context.hasQuotedMessage) return null;
+    if ((internalCommand === 'vv' || internalCommand === 'vv2') && context.hasQuotedViewOnceMedia !== true) return null;
     if (internalCommand === 'del2' && !args && !context.hasQuotedMessage) return null;
     if (internalCommand === 'code') {
         if (!/^\+?[0-9][0-9()]*$/u.test(args)) return null;
@@ -14921,7 +14962,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     const unsupportedChat = String(entry?.key?.remoteJid || entry?.key?.remoteJidAlt || 'unknown-chat');
                     const unsupportedGroup = unsupportedChat.endsWith('@g.us');
                     const unsupportedBody = String(unsupportedAudit.messageText || '');
-                    const unsupportedCommand = unsupportedBody.trim() ? parseIncomingCommand(unsupportedBody, globalLang, getCommandParsingContext(entry?.message)) : null;
+                    const unsupportedCommand = unsupportedBody.trim() ? parseIncomingCommand(unsupportedBody, globalLang, getCommandParsingContext(entry?.message, sessionId, entry?.key?.remoteJid || entry?.key?.remoteJidAlt || '')) : null;
                     console.info('[message-received-not-processed]', {
                         sessionId,
                         connectedAccountJid: sock.user?.id || null,
@@ -15059,8 +15100,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const receivedType = Object.keys(receivedContent || {})[0] || 'unknown';
                 const receivedChat = String(m?.key?.remoteJid || m?.key?.remoteJidAlt || (m?.key?.fromMe === true ? earlyReceivedChat : earlyReceivedPrivateIdentity) || 'unknown-chat');
                 const receivedId = String(m?.key?.id || 'missing-id');
+                const receivedCommandContext = String(receivedBody || '').trim()
+                    ? await resolveCommandParsingContext(m?.message, sessionId, m?.key?.remoteJid || m?.key?.remoteJidAlt || '', receivedBody, globalLang)
+                    : getCommandParsingContext(m?.message, sessionId, m?.key?.remoteJid || m?.key?.remoteJidAlt || '');
                 const receivedExplicitParsedCommand = String(receivedBody || '').trim()
-                    ? parseIncomingCommand(receivedBody, globalLang, getCommandParsingContext(m?.message))
+                    ? parseIncomingCommand(receivedBody, globalLang, receivedCommandContext)
                     : null;
                 const receivedParsedCommand = receivedExplicitParsedCommand;
                 const receivedBodyForAudit = String(receivedBody || '');
@@ -16074,7 +16118,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             }
                         }
 
-                        const parsedCommand = receivedParsedCommand || resolveIncomingMessageCommand(body, messageLang, getCommandParsingContext(m?.message));
+                        const parsedCommand = receivedParsedCommand || resolveIncomingMessageCommand(body, messageLang, getCommandParsingContext(m?.message, sessionId, m?.key?.remoteJid || m?.key?.remoteJidAlt || ''));
                         if (!parsedCommand) {
                             console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, senderAliases: senderJids, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', messageType, messageLang, messageClassification: String(body || '').trim() ? 'text_not_recognized_as_command' : 'no_text_or_caption', detectedCommand: null, isPublicMode, botMode, bodyLength: body.length, bodyPreview: body.slice(0, 240), aiDispatch: false, cloudflareAiEligible: false, action: 'display_and_ignore_without_response_or_ai_dispatch', reason: String(body || '').trim() ? 'not_a_command' : 'empty_message_body' });
                             return;
@@ -16086,9 +16130,10 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         console.info('[command-detected]', { sessionId, upsertType, messageId: msgId, senderName: sName, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: from, senderJid: sender, senderAliases: senderJids, messageType, messageClassification: 'recognized_command', command, internalCommand, argumentPreview: String(args || '').replace(/[\r\n\t]+/g, ' ').slice(0, 1000), isGroup, isPublicMode, isOwnerReal, mode: botMode, action: 'command_handler_started' });
                         console.info('[command-lifecycle]', { sessionId, messageId: msgId, command: internalCommand, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', phase: 'detected', state: 'running', stage: 'detection' });
 
+                        const commandTranslations = translations[messageLang] || translations.ht;
                         await (async () => {
                             let safeSendActionError = null;
-                            const t = translations[messageLang] || translations.ht;
+                            const t = commandTranslations;
                             try {
                                 const shouldSendTyping = isOwnerReal || isPublicMode || internalCommand === 'ai' || internalCommand === 'cheche';
                                 let isTyping = shouldSendTyping;
@@ -16997,75 +17042,79 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 await safeSendFormatted(sock, from, commandTitleVO, t.owner_required, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            if (!quotedMessage && !quoted?.stanzaId) {
-                                                console.warn('[quoted-media-command-missing-quote]', { sessionId, messageId: msgId, command: internalCommand, chatType: isGroup ? 'group' : 'private', hasContextInfo: !!quoted, quotedMessageAvailable: false, stanzaIdAvailable: false });
-                                                await safeSendFormatted(sock, from, commandTitleVO, internalCommand === 'vv2' ? (t.vv2_usage || t.vv_usage) : t.vv_usage, pushName, true, activeHostName);
+                                            const quotedSourceVO = quotedMessage && typeof quotedMessage === 'object' ? fixBuffers(quotedMessage) : null;
+                                            const quotedMessageIdVO = String(quoted?.stanzaId || '').trim();
+                                            if (!quotedSourceVO && !quotedMessageIdVO) {
+                                                console.info('[quoted-media-command-ignored]', { sessionId, messageId: msgId, command: internalCommand, reason: 'missing_view_once_quote_context' });
                                                 break;
                                             }
-                                            const quotedSourceVO = quotedMessage && typeof quotedMessage === 'object' ? fixBuffers(quotedMessage) : null;
-                                            const quotedRecordsVO = quoted?.stanzaId
-                                                ? await findQuotedMessageCandidatesForCommand(sessionId, from, String(quoted.stanzaId), true).catch(error => {
-                                                    console.warn('[quoted-media-all-sources-lookup-failed]', { sessionId, messageId: msgId, command: internalCommand, error: error?.message || String(error) });
-                                                    return [];
-                                                })
-                                                : [];
-                                            const quotedRecordVO = quotedRecordsVO[0] || null;
-                                            const mediaCandidatesVO = [];
-                                            if (quotedSourceVO) mediaCandidatesVO.push({ source: 'quoted_context', message: quotedSourceVO });
-                                            for (const recordVO of quotedRecordsVO) {
-                                                if (recordVO?.message) mediaCandidatesVO.push({ source: recordVO.source || 'stored_quote', message: fixBuffers(recordVO.message) });
-                                            }
                                             const mediaKeyLengthVO = value => {
-                                                if (Buffer.isBuffer(value) || value instanceof Uint8Array) return value.byteLength || value.length || 0;
-                                                if (Array.isArray(value)) return value.length;
-                                                if (typeof value === 'string') return value.trim().length;
-                                                if (value && typeof value === 'object') {
-                                                    if (value._bsontype === 'Binary') return Number(value.position) || value.buffer?.length || 0;
-                                                    if (value.type === 'Buffer' && Array.isArray(value.data)) return value.data.length;
+                                                const normalized = fixBuffers(value);
+                                                if (Buffer.isBuffer(normalized) || normalized instanceof Uint8Array) return normalized.byteLength || normalized.length || 0;
+                                                if (Array.isArray(normalized)) return normalized.length;
+                                                if (typeof normalized === 'string') return normalized.trim().length;
+                                                if (normalized && typeof normalized === 'object') {
+                                                    if (normalized._bsontype === 'Binary') return Number(normalized.position) || normalized.buffer?.length || 0;
+                                                    if (normalized.type === 'Buffer' && Array.isArray(normalized.data)) return normalized.data.length;
                                                 }
                                                 return 0;
                                             };
+                                            const mediaCandidatesVO = [];
+                                            const addMediaCandidateVO = (source, message) => {
+                                                if (!message || typeof message !== 'object') return;
+                                                const info = extractWhatsAppResendMedia(message);
+                                                if (!info?.payload || !['image', 'video', 'audio'].includes(info.type)) return;
+                                                if (mediaCandidatesVO.some(candidate => candidate.message === message || candidate.info?.payload === info.payload)) return;
+                                                mediaCandidatesVO.push({ source, message, info });
+                                            };
+                                            if (quotedSourceVO) addMediaCandidateVO('quoted_context', quotedSourceVO);
+                                            const directMediaInfoVO = mediaCandidatesVO[0]?.info || null;
+                                            const directMediaReadyVO = !!directMediaInfoVO?.payload && mediaKeyLengthVO(directMediaInfoVO.payload.mediaKey) > 0 && !!(directMediaInfoVO.payload.url || directMediaInfoVO.payload.directPath);
+                                            let quotedRecordsVO = [];
+                                            if (!directMediaReadyVO && quotedMessageIdVO) {
+                                                const memoryQuoteVO = recentMsgsCache.find(entry => {
+                                                    if (entry?.sessionId !== sessionId || String(entry?.id || '') !== quotedMessageIdVO || !entry?.message) return false;
+                                                    const aliases = [entry.from, ...(Array.isArray(entry.chatAliases) ? entry.chatAliases : []), entry.key?.remoteJid, entry.key?.remoteJidAlt].filter(Boolean);
+                                                    return !aliases.length || aliases.some(alias => String(alias) === String(from) || String(alias) === String(rawFrom) || areEquivalentWhatsAppChatJids(sessionId, alias, from) || areEquivalentWhatsAppChatJids(sessionId, alias, rawFrom));
+                                                });
+                                                if (memoryQuoteVO?.message) addMediaCandidateVO('session_memory', fixBuffers(memoryQuoteVO.message));
+                                                if (!mediaCandidatesVO.some(candidate => mediaKeyLengthVO(candidate.info.payload?.mediaKey) > 0 && (candidate.info.payload.url || candidate.info.payload.directPath))) {
+                                                    quotedRecordsVO = await findQuotedMessageCandidatesForCommand(sessionId, from, quotedMessageIdVO, true).catch(error => {
+                                                        console.warn('[quoted-media-cache-fallback-failed]', { sessionId, messageId: msgId, quotedMessageId: quotedMessageIdVO, command: internalCommand, error: error?.message || String(error) });
+                                                        return [];
+                                                    });
+                                                    for (const recordVO of quotedRecordsVO) if (recordVO?.message) addMediaCandidateVO(recordVO.source || 'stored_quote', fixBuffers(recordVO.message));
+                                                }
+                                            }
                                             const mediaMatchesVO = mediaCandidatesVO.map(candidate => ({
                                                 source: candidate.source,
-                                                info: extractWhatsAppResendMedia(candidate.message)
-                                            })).filter(candidate => candidate.info?.payload);
+                                                info: candidate.info || extractWhatsAppResendMedia(candidate.message)
+                                            })).filter(candidate => candidate.info?.payload && ['image', 'video', 'audio'].includes(candidate.info.type));
                                             mediaMatchesVO.sort((left, right) => {
-                                                const leftViewOnce = Number(left.info.viewOnce === true);
-                                                const rightViewOnce = Number(right.info.viewOnce === true);
                                                 const leftKey = mediaKeyLengthVO(left.info.payload.mediaKey);
                                                 const rightKey = mediaKeyLengthVO(right.info.payload.mediaKey);
                                                 const leftPath = Number(!!(left.info.payload.url || left.info.payload.directPath));
                                                 const rightPath = Number(!!(right.info.payload.url || right.info.payload.directPath));
-                                                return rightViewOnce - leftViewOnce || (rightKey > 0) - (leftKey > 0) || rightKey - leftKey || rightPath - leftPath;
+                                                const leftDirect = Number(left.source === 'quoted_context');
+                                                const rightDirect = Number(right.source === 'quoted_context');
+                                                return Number(rightKey > 0 && rightPath > 0) - Number(leftKey > 0 && leftPath > 0) || rightKey - leftKey || rightPath - leftPath || rightDirect - leftDirect;
                                             });
-                                            let selectedMediaVO = null;
-                                            let mediaInfoVO = null;
-                                            let mediaVO = null;
-                                            let dlTypeVO = '';
-                                            let sendTypeVO = '';
-                                            let bufferVO = null;
                                             const downloadableMediaMatchesVO = mediaMatchesVO.filter(candidate => {
                                                 const info = candidate.info;
-                                                return info?.viewOnce === true && ['image', 'video', 'audio', 'document', 'sticker'].includes(info.downloadType) && ['image', 'video', 'audio', 'document', 'sticker'].includes(info.sendType) && mediaKeyLengthVO(info.payload?.mediaKey) > 0;
+                                                return ['image', 'video', 'audio'].includes(info?.type) && ['image', 'video', 'audio'].includes(info?.downloadType) && ['image', 'video', 'audio'].includes(info?.sendType) && mediaKeyLengthVO(info.payload?.mediaKey) > 0 && !!(info.payload?.url || info.payload?.directPath);
                                             });
                                             if (!mediaMatchesVO.length) {
-                                                console.warn('[quoted-media-command-payload-not-found]', { sessionId, messageId: msgId, command: internalCommand, quotedMessageAvailable: !!quotedSourceVO, persistentQuoteAvailable: !!quotedRecordVO?.message, quoteRecordSource: quotedRecordVO?.source || null, quoteRecordFormat: quotedRecordVO?.messageFormat || null });
-                                                const unavailableMediaTextVO = ({ fr: 'Le média cité est introuvable dans les messages enregistrés.', ht: 'Mwen pa jwenn medya ou te site a nan mesaj ki anrejistre yo.', es: 'No se encontró el contenido citado en los mensajes guardados.', en: 'The quoted media could not be found in the stored messages.' })[messageLang] || 'Le média cité est introuvable dans les messages enregistrés.';
+                                                console.warn('[quoted-media-payload-not-found]', { sessionId, messageId: msgId, quotedMessageId: quotedMessageIdVO || null, command: internalCommand, directQuoteAvailable: !!quotedSourceVO, storedCandidateCount: quotedRecordsVO.length, supportedTypes: ['image', 'video', 'audio'] });
+                                                const unavailableMediaTextVO = ({ fr: 'Le média cité ne contient pas de données récupérables.', ht: 'Medya ou te site a pa gen done ki nesesè pou rekipere li.', es: 'El contenido citado no contiene datos recuperables.', en: 'The quoted media does not contain retrievable data.' })[messageLang] || 'Le média cité ne contient pas de données récupérables.';
                                                 await safeSendFormatted(sock, from, commandTitleVO, unavailableMediaTextVO, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            const viewOnceCandidatesVO = mediaMatchesVO.filter(candidate => candidate.info?.viewOnce === true);
-                                            if (!viewOnceCandidatesVO.length) {
-                                                console.info('[quoted-media-ignored-not-view-once]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, mediaType: mediaMatchesVO[0]?.info?.sourceType || null, reason: 'quoted_message_is_not_marked_view_once' });
-                                                break;
-                                            }
                                             if (!downloadableMediaMatchesVO.length) {
-                                                console.warn('[quoted-media-missing-download-data]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, candidateCount: mediaCandidatesVO.length, mediaCandidateCount: mediaMatchesVO.length, viewOnceCandidateCount: viewOnceCandidatesVO.length, sources: viewOnceCandidatesVO.map(candidate => ({ source: candidate.source, sourceType: candidate.info.sourceType, mediaKeyLength: mediaKeyLengthVO(candidate.info.payload?.mediaKey), mediaPathAvailable: !!(candidate.info.payload?.url || candidate.info.payload?.directPath) })) });
-                                                const missingMediaKeyTextVO = ({ fr: 'Les données du média cité sont incomplètes. Le bot n’a trouvé aucune copie contenant la clé média nécessaire.', ht: 'Done medya ou site a pa konplè. Bot la pa jwenn yon kopi ki gen kle medya ki nesesè a.', es: 'Los datos del contenido citado están incompletos. No se encontró una copia con la clave multimedia necesaria.', en: 'The quoted media data is incomplete. No available copy contains the required media key.' })[messageLang] || 'Les données du média cité sont incomplètes. Le bot n’a trouvé aucune copie contenant la clé média nécessaire.';
-                                                await safeSendFormatted(sock, from, commandTitleVO, missingMediaKeyTextVO, pushName, true, activeHostName);
+                                                console.warn('[quoted-media-download-data-incomplete]', { sessionId, messageId: msgId, quotedMessageId: quotedMessageIdVO || null, command: internalCommand, candidateCount: mediaMatchesVO.length, candidates: mediaMatchesVO.map(candidate => ({ source: candidate.source, mediaType: candidate.info.sourceType, mediaKeyAvailable: mediaKeyLengthVO(candidate.info.payload?.mediaKey) > 0, mediaPathAvailable: !!(candidate.info.payload?.url || candidate.info.payload?.directPath) })) });
+                                                const missingMediaDataTextVO = ({ fr: 'La citation contient le média, mais sa clé ou son chemin de téléchargement manque dans toutes les copies disponibles.', ht: 'Sitasyon an gen medya a, men kle medya a oswa chemen telechajman an manke nan tout kopi ki disponib yo.', es: 'La cita contiene el contenido, pero falta la clave o la ruta de descarga en todas las copias disponibles.', en: 'The quote contains the media, but every available copy is missing its media key or download path.' })[messageLang] || 'La citation contient le média, mais sa clé ou son chemin de téléchargement manque dans toutes les copies disponibles.';
+                                                await safeSendFormatted(sock, from, commandTitleVO, missingMediaDataTextVO, pushName, true, activeHostName);
                                                 break;
                                             }
-                                            console.info('[quoted-media-candidate-set]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, candidateCount: mediaCandidatesVO.length, mediaCandidateCount: mediaMatchesVO.length, downloadableCandidateCount: downloadableMediaMatchesVO.length, types: downloadableMediaMatchesVO.map(candidate => ({ source: candidate.source, mediaType: candidate.info.sourceType, keyLength: mediaKeyLengthVO(candidate.info.payload.mediaKey), hasPath: !!(candidate.info.payload.url || candidate.info.payload.directPath) })) });
                                             let resendTargetVO = from;
                                             if (internalCommand === 'vv2') {
                                                 const ownerCredentialsVO = activeSessions.get(sessionId)?.authState?.creds || state.creds || null;
@@ -17077,17 +17126,21 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 }
                                             }
                                             const downloadFailuresVO = [];
+                                            let selectedMediaVO = null;
+                                            let mediaInfoVO = null;
+                                            let mediaVO = null;
                                             let tempMediaPathVO = '';
                                             let downloadedBytesVO = 0;
+                                            let candidateStreamVO = null;
                                             for (const candidateVO of downloadableMediaMatchesVO) {
                                                 const candidateInfoVO = candidateVO.info;
                                                 const candidateMediaVO = candidateInfoVO.payload;
                                                 const candidateDownloadTypeVO = candidateInfoVO.downloadType;
-                                                let candidateStreamVO = null;
                                                 let candidatePathVO = '';
+                                                candidateStreamVO = null;
                                                 try {
-                                                    console.info('[quoted-media-download-attempt]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, source: candidateVO.source, mediaType: candidateInfoVO.sourceType, downloadType: candidateDownloadTypeVO, mediaKeyLength: mediaKeyLengthVO(candidateMediaVO.mediaKey), mediaPathAvailable: !!(candidateMediaVO.url || candidateMediaVO.directPath) });
-                                                    const extensionVO = candidateInfoVO.sendType === 'image' ? 'jpg' : candidateInfoVO.sendType === 'video' ? 'mp4' : candidateInfoVO.sendType === 'audio' ? (String(candidateMediaVO.mimetype || '').toLowerCase().includes('ogg') || candidateInfoVO.ptt === true || candidateMediaVO.ptt === true ? 'ogg' : 'audio') : candidateInfoVO.sendType === 'sticker' ? 'webp' : 'bin';
+                                                    console.info('[quoted-media-download-attempt]', { sessionId, messageId: msgId, quotedMessageId: quotedMessageIdVO || null, command: internalCommand, source: candidateVO.source, mediaType: candidateInfoVO.sourceType, downloadType: candidateDownloadTypeVO, mediaKeyAvailable: mediaKeyLengthVO(candidateMediaVO.mediaKey) > 0, mediaKeyLength: mediaKeyLengthVO(candidateMediaVO.mediaKey), mediaPathAvailable: !!(candidateMediaVO.url || candidateMediaVO.directPath) });
+                                                    const extensionVO = candidateInfoVO.type === 'image' ? (String(candidateMediaVO.mimetype || '').toLowerCase().includes('png') ? 'png' : 'jpg') : candidateInfoVO.type === 'video' ? 'mp4' : (String(candidateMediaVO.mimetype || '').toLowerCase().includes('ogg') || candidateInfoVO.ptt === true || candidateMediaVO.ptt === true ? 'ogg' : 'audio');
                                                     candidatePathVO = path.join(require('os').tmpdir(), `tfbot-vv-${crypto.randomBytes(12).toString('hex')}.${extensionVO}`);
                                                     candidateStreamVO = await downloadContentFromMessage(candidateMediaVO, candidateDownloadTypeVO);
                                                     if (!candidateStreamVO || typeof candidateStreamVO.pipe !== 'function') throw new Error('quoted_media_download_stream_unavailable');
@@ -17097,46 +17150,39 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                     selectedMediaVO = candidateVO;
                                                     mediaInfoVO = candidateInfoVO;
                                                     mediaVO = candidateMediaVO;
-                                                    dlTypeVO = candidateInfoVO.downloadType;
-                                                    sendTypeVO = candidateInfoVO.sendType;
                                                     tempMediaPathVO = candidatePathVO;
                                                     downloadedBytesVO = downloadedStatVO.size;
-                                                    console.info('[quoted-media-download-candidate-succeeded]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, source: candidateVO.source, mediaType: candidateInfoVO.sourceType, bytes: downloadedBytesVO, storage: 'temporary_file_stream' });
+                                                    console.info('[quoted-media-download-succeeded]', { sessionId, messageId: msgId, quotedMessageId: quotedMessageIdVO || null, command: internalCommand, source: candidateVO.source, mediaType: mediaInfoVO.sourceType, bytes: downloadedBytesVO, storage: 'temporary_file_stream' });
                                                     break;
                                                 } catch (downloadErrorVO) {
                                                     try { candidateStreamVO?.destroy?.(); } catch (destroyError) {}
                                                     if (candidatePathVO) await fs.promises.unlink(candidatePathVO).catch(() => {});
                                                     downloadFailuresVO.push({ source: candidateVO.source, mediaType: candidateInfoVO.sourceType, errorName: downloadErrorVO?.name || 'Error', error: String(downloadErrorVO?.message || downloadErrorVO).slice(0, 220) });
-                                                    console.warn('[quoted-media-download-candidate-failed]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, source: candidateVO.source, mediaType: candidateInfoVO.sourceType, errorName: downloadErrorVO?.name || 'Error', error: String(downloadErrorVO?.message || downloadErrorVO).slice(0, 220), remainingCandidates: downloadableMediaMatchesVO.length - downloadFailuresVO.length });
+                                                    console.warn('[quoted-media-download-candidate-failed]', { sessionId, messageId: msgId, quotedMessageId: quotedMessageIdVO || null, command: internalCommand, source: candidateVO.source, mediaType: candidateInfoVO.sourceType, errorName: downloadErrorVO?.name || 'Error', error: String(downloadErrorVO?.message || downloadErrorVO).slice(0, 220), remainingCandidates: downloadableMediaMatchesVO.length - downloadFailuresVO.length });
                                                 }
                                             }
                                             if (!tempMediaPathVO || !mediaInfoVO || !mediaVO) {
                                                 const finalDownloadErrorVO = new Error(downloadFailuresVO.length ? 'quoted_media_all_candidate_downloads_failed' : 'quoted_media_download_unavailable');
-                                                console.error('[quoted-media-all-download-candidates-failed]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, candidateCount: downloadableMediaMatchesVO.length, failures: downloadFailuresVO });
+                                                console.error('[quoted-media-all-download-candidates-failed]', { sessionId, messageId: msgId, quotedMessageId: quotedMessageIdVO || null, command: internalCommand, candidateCount: downloadableMediaMatchesVO.length, failures: downloadFailuresVO });
                                                 await safeSendActionError(sock, from, commandTitleVO, finalDownloadErrorVO, messageLang, pushName, m.messageTimestamp);
                                                 break;
                                             }
-                                            console.info('[quoted-media-candidate-selected]', { sessionId, messageId: msgId, quotedMessageId: String(quoted?.stanzaId || ''), command: internalCommand, source: selectedMediaVO.source, candidateCount: mediaCandidatesVO.length, mediaCandidateCount: mediaMatchesVO.length, mediaKeyAvailable: mediaKeyLengthVO(mediaVO.mediaKey) > 0, mediaKeyLength: mediaKeyLengthVO(mediaVO.mediaKey), mediaPathAvailable: !!(mediaVO.url || mediaVO.directPath), bytes: downloadedBytesVO, storage: 'temporary_file_stream' });
-                                            const sendOptsVO = { [sendTypeVO]: { url: tempMediaPathVO } };
+                                            const sendOptsVO = { [mediaInfoVO.sendType]: { url: tempMediaPathVO } };
                                             if (mediaVO.caption) sendOptsVO.caption = mediaVO.caption;
                                             if (mediaVO.mimetype) sendOptsVO.mimetype = mediaVO.mimetype;
-                                            else if (sendTypeVO === 'image') sendOptsVO.mimetype = 'image/jpeg';
-                                            else if (sendTypeVO === 'video') sendOptsVO.mimetype = 'video/mp4';
-                                            else if (sendTypeVO === 'audio') sendOptsVO.mimetype = mediaInfoVO.ptt === true || mediaVO.ptt === true ? 'audio/ogg; codecs=opus' : 'audio/mpeg';
-                                            else if (sendTypeVO === 'sticker') sendOptsVO.mimetype = 'image/webp';
-                                            else if (sendTypeVO === 'document') sendOptsVO.mimetype = 'application/octet-stream';
-                                            if (mediaVO.fileName && sendTypeVO === 'document') sendOptsVO.fileName = mediaVO.fileName;
+                                            else if (mediaInfoVO.type === 'image') sendOptsVO.mimetype = 'image/jpeg';
+                                            else if (mediaInfoVO.type === 'video') sendOptsVO.mimetype = 'video/mp4';
+                                            else sendOptsVO.mimetype = mediaInfoVO.ptt === true || mediaVO.ptt === true ? 'audio/ogg; codecs=opus' : 'audio/mpeg';
                                             if (mediaInfoVO.ptt === true || mediaVO.ptt === true) sendOptsVO.ptt = true;
-                                            if (mediaVO.gifPlayback === true && sendTypeVO === 'video') sendOptsVO.gifPlayback = true;
-                                            let resentVO = null;
+                                            if (mediaVO.gifPlayback === true && mediaInfoVO.type === 'video') sendOptsVO.gifPlayback = true;
                                             let sendErrorVO = null;
                                             try {
-                                                resentVO = await trackedQueuedSendMessage(sock, resendTargetVO, sendOptsVO, {}, 180, true);
+                                                const resentVO = await trackedQueuedSendMessage(sock, resendTargetVO, sendOptsVO, {}, 180, true);
                                                 if (!resentVO?.key?.id) throw new Error('quoted_media_send_unconfirmed');
-                                                console.info('[quoted-media-resent]', { sessionId, messageId: msgId, command: internalCommand, sourceChatHash: shortLogHash(from), destinationType: internalCommand === 'vv2' ? 'self_chat_pn' : isGroup ? 'group' : 'private', responseMessageId: resentVO.key.id, responseChatHash: shortLogHash(resentVO?.key?.remoteJid || resendTargetVO), mediaType: mediaInfoVO.sourceType, bytes: downloadedBytesVO, viewOnceUnwrapped: mediaInfoVO.viewOnce === true, transport: 'temporary_file_stream' });
+                                                console.info('[quoted-media-resent]', { sessionId, messageId: msgId, command: internalCommand, sourceChatHash: shortLogHash(from), destinationType: internalCommand === 'vv2' ? 'self_chat_pn' : isGroup ? 'group' : 'private', responseMessageId: resentVO.key.id, responseChatHash: shortLogHash(resentVO?.key?.remoteJid || resendTargetVO), mediaType: mediaInfoVO.sourceType, bytes: downloadedBytesVO, transport: 'temporary_file_stream' });
                                             } catch (sendError) {
                                                 sendErrorVO = sendError;
-                                                console.error('[quoted-media-send-failed]', { sessionId, messageId: msgId, command: internalCommand, destinationType: internalCommand === 'vv2' ? 'self_chat_pn' : isGroup ? 'group' : 'private', mediaType: mediaInfoVO.sourceType, bytes: downloadedBytesVO, viewOnceUnwrapped: mediaInfoVO.viewOnce === true, errorName: sendError?.name || 'Error', error: String(sendError?.message || sendError).slice(0, 300) });
+                                                console.error('[quoted-media-send-failed]', { sessionId, messageId: msgId, command: internalCommand, destinationType: internalCommand === 'vv2' ? 'self_chat_pn' : isGroup ? 'group' : 'private', mediaType: mediaInfoVO.sourceType, bytes: downloadedBytesVO, errorName: sendError?.name || 'Error', error: String(sendError?.message || sendError).slice(0, 300) });
                                                 await safeSendActionError(sock, from, commandTitleVO, sendError, messageLang, pushName, m.messageTimestamp);
                                             } finally {
                                                 if (tempMediaPathVO) {
@@ -17554,9 +17600,9 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                     logCommandLifecycle('failure', { stage: 'operation', action: 'command_handler_failed', error: String(e?.message || e).slice(0, 500), durationMs: Date.now() - commandStartedAt });
                                     console.error('[command-failed]', { sessionId, messageId: msgId, senderName: sName, senderJid: sender, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: from, command: internalCommand, durationMs: Date.now() - commandStartedAt, action: 'command_handler_failed', error: e?.message || String(e) });
                                     if (typeof safeSendActionError === 'function') {
-                                        await safeSendActionError(sock, from, getCommandActionTitle(t, internalCommand), e, messageLang, pushName, m.messageTimestamp);
+                                        await safeSendActionError(sock, from, getCommandActionTitle(commandTranslations, internalCommand), e, messageLang, pushName, m.messageTimestamp);
                                     } else {
-                                        const fallbackErrorText = errorFallbackText(getCommandActionTitle(t, internalCommand), messageLang, 'action_failure');
+                                        const fallbackErrorText = errorFallbackText(getCommandActionTitle(commandTranslations, internalCommand), messageLang, 'action_failure');
                                         console.error('[command-action-error-handler-unavailable]', { sessionId, messageId: msgId, command: internalCommand, action: 'send_plain_localized_fallback' });
                                         try {
                                             const fallbackResult = await trackedQueuedSendMessage(sock, from, { text: fallbackErrorText }, { quoted: m }, 220);
@@ -17576,7 +17622,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                 }
                             } catch (cmdError) {
                                 console.error('[command-handler]', { command: internalCommand, error: cmdError?.message || String(cmdError) });
-                                if (typeof safeSendActionError === 'function') await safeSendActionError(sock, from, getCommandActionTitle(t, internalCommand), cmdError, messageLang, pushName, m.messageTimestamp);
+                                if (typeof safeSendActionError === 'function') await safeSendActionError(sock, from, getCommandActionTitle(commandTranslations, internalCommand), cmdError, messageLang, pushName, m.messageTimestamp);
                                 else console.error('[command-action-error-handler-unavailable]', { sessionId, messageId: msgId, command: internalCommand, reason: 'handler_not_initialized' });
                             }
                         })();
@@ -17603,7 +17649,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                 });
                 } catch (messageDispatchError) {
                     const failedBody = String(extractBody(m) || '');
-                    const failedCommand = failedBody.trim() ? parseIncomingCommand(failedBody, globalLang, getCommandParsingContext(m?.message)) : null;
+                    const failedCommand = failedBody.trim() ? parseIncomingCommand(failedBody, globalLang, getCommandParsingContext(m?.message, sessionId, m?.key?.remoteJid || m?.key?.remoteJidAlt || '')) : null;
                     console.error('[message-pre-dispatch-failed]', {
                         sessionId,
                         connectedAccountJid: sock.user?.id || null,
