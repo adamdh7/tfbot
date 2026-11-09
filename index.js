@@ -5,9 +5,18 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r200-viewonce-context-command-and-direct-media-resend';
+const TFBOT_CODE_VERSION = 'r203';
+const TFBOT_LOG_TIME_ZONE = 'America/Chicago';
+const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r203-link-replies-and-command-confirmations';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+function formatTfbotAmericaTimestamp(value = Date.now()) {
+    const date = value instanceof Date ? value : new Date(value);
+    if (!Number.isFinite(date.getTime())) return null;
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone: TFBOT_LOG_TIME_ZONE, month: '2-digit', day: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h12', timeZoneName: 'short' }).formatToParts(date);
+    const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+    return `${values.month}/${values.day}/${values.year} ${values.hour}:${values.minute}:${values.second} ${values.dayPeriod} ${values.timeZoneName}`;
+}
 
 function shortLogHash(value) {
     try { return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 10); }
@@ -36,7 +45,7 @@ function getSignalLogText(args) {
         if (typeof value === 'string') return value;
         if (value instanceof Error) return `${value.name}: ${value.message} ${String(value.stack || '').slice(0, 800)}`;
         if (value && typeof value === 'object') {
-            const selected = [value.name, value.message, value.msg, value.err?.name, value.err?.message, value.error?.name, value.error?.message, value.key?.remoteJid, value.key?.remoteJidAlt, value.key?.participant, value.key?.participantAlt, value.key?.participantPn, value.key?.senderPn, value.fromJid, value.remoteJid, value.msgId, value.messageId, value.id]
+            const selected = [value.name, value.message, value.msg, value.type, value.failureClass, value.failureKind, value.errorName, value.errorMessage, value.err?.name, value.err?.type, value.err?.message, value.error?.name, value.error?.type, value.error?.message, value.key?.remoteJid, value.key?.remoteJidAlt, value.key?.participant, value.key?.participantAlt, value.key?.participantPn, value.key?.senderPn, value.fromJid, value.remoteJid, value.msgId, value.messageId, value.id]
                 .filter(item => item !== undefined && item !== null && typeof item !== 'object');
             return selected.join(' ');
         }
@@ -55,8 +64,10 @@ const SIGNAL_RECOVERY_THRESHOLD = Math.max(3, Math.min(10, Number(process.env.SI
 const SIGNAL_RECOVERY_WINDOW_MS = Math.max(10000, Math.min(180000, Number(process.env.SIGNAL_RECOVERY_WINDOW_MS || 60000)));
 const SIGNAL_RECOVERY_COOLDOWN_MS = Math.max(60000, Math.min(3600000, Number(process.env.SIGNAL_RECOVERY_COOLDOWN_MS || 120000)));
 const SIGNAL_GROUP_SENDER_KEY_RECOVERY_COOLDOWN_MS = Math.max(30000, Math.min(1800000, Number(process.env.SIGNAL_GROUP_SENDER_KEY_RECOVERY_COOLDOWN_MS || 120000)));
-const SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD = Math.max(1, Math.min(3, Number(process.env.SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD || 2)));
+const SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD = 2;
 const SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS = Math.max(15000, Math.min(600000, Number(process.env.SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS || 45000)));
+const SIGNAL_PEER_AUTO_HEAL_FAILURE_KINDS = new Set(['message_counter_error', 'bad_mac', 'signal_session_missing']);
+const SIGNAL_PEER_AUTO_HEAL_MAX_ALIASES = 2;
 
 function isSignalDecryptionFailure(args) {
     return /Failed to decrypt message|failed to decrypt message|Session error:.*Bad MAC|Bad MAC|SignalErrorBadMac|SignalErrorInvalidMessage|MessageCounterError|Key used already or never filled|SessionError:\s*No sessions|No session found to decrypt message|No sessions|Chain closed|Decrypted message with closed session|calculateMAC|Cannot read properties of null \(reading ['\"]constructor['\"]\)/i.test(getSignalLogText(args));
@@ -94,12 +105,14 @@ let tfbotDiagnosticTargetCacheAt = 0;
 let tfbotDiagnosticTargetCache = null;
 function enqueueTfbotDiagnosticRecord(record) {
     try {
+        const sourceDate = record?.date || new Date().toISOString();
+        const enrichedRecord = { ...record, date: sourceDate, dateAmerica: formatTfbotAmericaTimestamp(sourceDate), timeZone: TFBOT_LOG_TIME_ZONE, codeVersion: TFBOT_CODE_VERSION };
         if (tfbotDiagnosticQueue.length >= 4000) {
             const removeCount = tfbotDiagnosticQueue.length - 3000;
             tfbotDiagnosticQueue.splice(0, removeCount);
             tfbotDiagnosticDroppedEntries += removeCount;
         }
-        tfbotDiagnosticQueue.push(`${JSON.stringify(record)}\n`);
+        tfbotDiagnosticQueue.push(`${JSON.stringify(enrichedRecord)}\n`);
         if (!tfbotDiagnosticWriterRunning) {
             tfbotDiagnosticWriterRunning = true;
             setImmediate(flushTfbotDiagnosticQueue);
@@ -115,7 +128,8 @@ async function flushTfbotDiagnosticQueue() {
             if (tfbotDiagnosticDroppedEntries) {
                 const dropped = tfbotDiagnosticDroppedEntries;
                 tfbotDiagnosticDroppedEntries = 0;
-                content = `${JSON.stringify({ name: 'Bot (tfbot)', date: new Date().toISOString(), level: 'WARN', event: 'diagnostic-log-queue-overflow', content: `${dropped} entrée(s) de diagnostic ont été abandonnées pour protéger la latence du bot.` })}\n${content}`;
+                const overflowDate = new Date();
+                content = `${JSON.stringify({ name: 'Bot (tfbot)', date: overflowDate.toISOString(), dateAmerica: formatTfbotAmericaTimestamp(overflowDate), timeZone: TFBOT_LOG_TIME_ZONE, codeVersion: TFBOT_CODE_VERSION, level: 'WARN', event: 'diagnostic-log-queue-overflow', content: `${dropped} entrée(s) de diagnostic ont été abandonnées pour protéger la latence du bot.` })}\n${content}`;
             }
             try {
                 const currentStat = await fs.promises.stat(TFBOT_DIAGNOSTIC_LOG_PATH).catch(() => null);
@@ -215,7 +229,7 @@ for (const level of Object.keys(tfbotOriginalConsole)) {
     console[level] = (...args) => {
         try {
             const serialized = args.map(value => typeof value === 'string' ? value : tfbotDiagnosticSerialize(value)).join(' ');
-            const operationalLog = /tfbot-router|tfbot-worker|cluster-|session-(?:restore|orphan|expired|duplicate|runtime-lock|account-runtime-lock|reconnect|open|health|runtime-status)|signal-|whatsapp-signal|pairing-challenge|worker-handoff|send-failure|whatsapp-send|mongo-(?:connect|close)|storage-layout|messages-upsert|message-|command-|stale-command|tfserver-ai|del3-|quoted-media|view-once|group-status|whatsapp-presence-update|group-metadata|group-sender-key|sender-key-memory|group-participant|baileys-|message-receipt|message-status/i.test(serialized);
+            const operationalLog = /tfbot-health|tfbot-router|tfbot-worker|cluster-|session-(?:restore|orphan|expired|duplicate|runtime-lock|account-runtime-lock|reconnect|open|health|runtime-status)|signal-|whatsapp-signal|pairing-challenge|worker-handoff|send-failure|whatsapp-send|mongo-(?:connect|close)|storage-layout|messages-upsert|message-|command-|stale-command|tfserver-ai|del3-|quoted-media|view-once|group-status|whatsapp-presence-update|group-metadata|group-sender-key|sender-key-memory|group-participant|baileys-|message-receipt|message-status/i.test(serialized);
             if (isSignalDecryptionFailure(args)) {
                 const fallbackSessionMatch = serialized.match(/(?:sessionId|session_id)["'=:\s]+([A-Za-z0-9_-]{8,120})/i);
                 const diagnosticSession = fallbackSessionMatch?.[1] || getTfbotDiagnosticSession()?.sessionId || '';
@@ -1557,7 +1571,7 @@ console.info('[baileys-own-lid-retry-addressing-patch]', { ...baileysOwnLidRetry
 console.info('[baileys-pairing-code-protocol-patch]', baileysPairingCodeProtocolPatchStatus);
 console.info('[baileys-signal-transaction-patch]', { ...baileysSignalTransactionPatchStatus, action: baileysSignalTransactionPatchStatus.applied ? 'serialize_signal_crypto_methods_by_signal_peer_or_group_inside_session_store_transaction' : 'leave_installed_baileys_source_unchanged' });
 console.info('[baileys-per-chat-inbound-processing-patch]', baileysPerChatInboundProcessingPatchStatus);
-enqueueTfbotDiagnosticRecord({ name: 'Bot (tfbot)', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION }) });
+enqueueTfbotDiagnosticRecord({ name: 'Bot (tfbot)', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ codeVersion: TFBOT_CODE_VERSION, releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION, timeZone: TFBOT_LOG_TIME_ZONE, baileysVersion: TFBOT_BAILEYS_VERSION, signalPeerAutoHeal: { enabled: true, threshold: SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD, windowMs: SIGNAL_RECOVERY_WINDOW_MS, cooldownMs: SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS, failureKinds: [...SIGNAL_PEER_AUTO_HEAL_FAILURE_KINDS], scope: 'one_peer_signal_session_records_and_pn_lid_aliases_only', deleteMethod: 'signalRepository.deleteSession_or_authState.keys.set_session_category_fallback', baileysAuthCredentialsDeleted: false, accountLogout: false, groupSenderKeysDeleted: false, allPeersDeleted: false } }) });
 
 const {
     default: makeWASocket,
@@ -1593,7 +1607,7 @@ const zlib = require('zlib');
 function collectSignalJidHints(value, field = '', depth = 0, seen = new WeakSet(), output = []) {
     if (depth > 7 || value === null || value === undefined) return output;
     if (typeof value === 'string') {
-        const expression = /[A-Za-z0-9._-]{1,100}(?::[0-9]{1,4})?@(?:s\.whatsapp\.net|lid|g\.us)/gi;
+        const expression = /[A-Za-z0-9._-]{1,100}(?::[0-9]{1,4})?@(?:s\.whatsapp\.net|hosted\.lid|lid|g\.us)/gi;
         for (const match of value.matchAll(expression)) output.push({ jid: String(match[0]).trim(), field: String(field || '').toLowerCase() });
         return output;
     }
@@ -1610,37 +1624,53 @@ function collectSignalJidHints(value, field = '', depth = 0, seen = new WeakSet(
     return output;
 }
 
+function normalizeSignalRepairJid(value) {
+    const match = String(value || '').trim().match(/^(\d{3,20})(?::(\d{1,4}))?@(s\.whatsapp\.net|hosted\.lid|lid)$/i);
+    if (!match) return '';
+    return `${match[1]}${match[2] ? `:${match[2]}` : ''}@${match[3].toLowerCase()}`;
+}
+
 function getSignalRecoveryPeerDetails(parsed) {
     const key = parsed?.key && typeof parsed.key === 'object' ? parsed.key : {};
     const hints = collectSignalJidHints(parsed);
+    const validUserJid = value => !!normalizeSignalRepairJid(value);
     const directRemote = [key.remoteJid, key.remoteJidAlt, parsed?.remoteJid, parsed?.chatJid, parsed?.groupJid, parsed?.fromJid, parsed?.msgAttrs?.from, parsed?.node?.attrs?.from]
-        .map(value => String(value || '').trim()).find(value => /@(?:s\.whatsapp\.net|lid|g\.us)$/i.test(value)) || '';
-    const remoteJid = directRemote || hints.find(item => /@g\.us$/i.test(item.jid))?.jid || hints.find(item => /(?:remote|chat|group|from)/i.test(item.field))?.jid || '';
+        .map(value => String(value || '').trim()).find(value => /@(?:s\.whatsapp\.net|hosted\.lid|lid|g\.us)$/i.test(value)) || '';
+    const remoteJid = directRemote || hints.find(item => /@g\.us$/i.test(item.jid))?.jid || hints.find(item => /^(?:remotejid|remotejidalt|chatjid|groupjid|from|fromjid)$/i.test(item.field))?.jid || '';
     const isGroup = /@g\.us$/i.test(remoteJid);
     const participantCandidates = [
         key.participant,
         key.participantAlt,
         key.participantPn,
         key.senderPn,
+        key.participantLid,
+        key.senderLid,
         parsed?.participant,
         parsed?.participantJid,
+        parsed?.participantLid,
+        parsed?.senderLid,
         parsed?.senderJid,
         parsed?.authorJid,
         parsed?.peerJid,
         parsed?.msgAttrs?.participant,
         parsed?.node?.attrs?.participant
-    ].map(value => String(value || '').trim()).filter(value => /@(?:s\.whatsapp\.net|lid)$/i.test(value));
+    ].map(value => String(value || '').trim()).filter(validUserJid);
     for (const item of hints) {
-        if (!/@(?:s\.whatsapp\.net|lid)$/i.test(item.jid)) continue;
-        if (/participant|sender|author|peer|member/i.test(item.field)) participantCandidates.push(item.jid);
+        if (validUserJid(item.jid) && /^(?:participant|participantalt|participantpn|participantlid|senderpn|senderlid|author|authorjid|peer|peerjid)$/i.test(item.field)) participantCandidates.push(item.jid);
     }
-    const privateCandidates = [key.remoteJidAlt, key.senderPn, key.participantPn, parsed?.peerJid, parsed?.fromJid, parsed?.remoteJid, remoteJid]
-        .map(value => String(value || '').trim()).filter(value => /@(?:s\.whatsapp\.net|lid)$/i.test(value));
+    const privateCandidates = [key.remoteJid, key.remoteJidAlt, key.senderPn, key.participantPn, parsed?.peerJid, parsed?.fromJid, parsed?.remoteJid, remoteJid]
+        .map(value => String(value || '').trim()).filter(validUserJid);
     for (const item of hints) {
-        if (/@(?:s\.whatsapp\.net|lid)$/i.test(item.jid) && !/@g\.us$/i.test(item.jid)) privateCandidates.push(item.jid);
+        if (validUserJid(item.jid) && /^(?:remotejid|remotejidalt|chatjid|from|fromjid|peerjid)$/i.test(item.field)) privateCandidates.push(item.jid);
     }
-    const aliases = [...new Set((isGroup ? participantCandidates : [...participantCandidates, ...privateCandidates]).filter(Boolean))];
-    const peerJid = isGroup ? (aliases[0] || '') : (aliases.find(value => /@(?:s\.whatsapp\.net|lid)$/i.test(value)) || '');
+    const sourceCandidates = isGroup ? participantCandidates : [...privateCandidates, ...participantCandidates];
+    const uniqueCandidates = [...new Set(sourceCandidates.map(normalizeSignalRepairJid).filter(Boolean))];
+    const phoneAliases = uniqueCandidates.filter(value => /@s\.whatsapp\.net$/i.test(value));
+    const lidAliases = uniqueCandidates.filter(value => /@(?:hosted\.lid|lid)$/i.test(value));
+    const aliases = [...new Set([...phoneAliases.slice(0, 1), ...lidAliases.slice(0, 1)])].slice(0, SIGNAL_PEER_AUTO_HEAL_MAX_ALIASES);
+    const peerJid = isGroup
+        ? (aliases[0] || uniqueCandidates[0] || '')
+        : (phoneAliases[0] || lidAliases[0] || uniqueCandidates[0] || '');
     const resolvedRemoteJid = remoteJid || (!isGroup ? (peerJid || '') : '');
     return {
         remoteJid: resolvedRemoteJid,
@@ -1651,12 +1681,169 @@ function getSignalRecoveryPeerDetails(parsed) {
     };
 }
 
+function getSignalRecoveryPeerCounterIdentity(sessionId, details) {
+    const aliases = [...new Set([details?.peerJid, ...(Array.isArray(details?.aliases) ? details.aliases : []), ...(details?.isGroup ? [] : [details?.remoteJid])].map(value => String(value || '').trim()).filter(value => /@(?:s\.whatsapp\.net|hosted\.lid|lid)$/i.test(value)))];
+    const phones = aliases.map(normalizePhoneCacheJid).filter(Boolean);
+    const lids = aliases.map(normalizeLidCacheKey).filter(value => /@lid$/i.test(value));
+    const mappedPhone = lids.map(lid => normalizePhoneCacheJid(getRememberedPhoneForLid(sessionId, lid))).find(Boolean) || '';
+    const phone = phones[0] || mappedPhone;
+    if (phone) {
+        const lid = getRememberedLidForPhone(sessionId, phone) || lids[0] || '';
+        return lid ? `${phone}|${lid}` : phone;
+    }
+    return lids[0] || aliases[0] || '';
+}
+
+async function resolveSignalPeerSessionAliases(sessionId, sock, details, selfPeer) {
+    const sourceValues = [...new Set([details?.peerJid, ...(Array.isArray(details?.aliases) ? details.aliases : []), ...(details?.isGroup ? [] : [details?.remoteJid])].map(normalizeSignalRepairJid).filter(Boolean))];
+    let phoneJid = sourceValues.find(value => /@s\.whatsapp\.net$/i.test(value)) || '';
+    let lidJid = sourceValues.find(value => /@(?:hosted\.lid|lid)$/i.test(value)) || '';
+    const sourceDevice = sourceValues.map(value => value.match(/:(\d+)@/)?.[1] || '').find(Boolean) || '';
+    const runtime = activeSessions.get(sessionId);
+    const credentials = runtime?.authState?.creds || sock?.authState?.creds || null;
+    if (selfPeer) {
+        const ownPhone = getAuthenticatedPhoneNumber(sock?.user || null, credentials);
+        const ownPhoneJid = normalizeSignalRepairJid(ownPhone ? `${ownPhone}@s.whatsapp.net` : '');
+        const ownLidJid = normalizeSignalRepairJid(getAuthenticatedLid(sock?.user || null, credentials));
+        if (ownPhoneJid) phoneJid = ownPhoneJid;
+        if (/@lid$/i.test(ownLidJid)) lidJid = ownLidJid;
+    }
+    if (lidJid && !phoneJid) {
+        const resolved = await resolvePhoneForLid(sessionId, sock, lidJid).catch(() => null);
+        const mappedPhone = normalizeSignalRepairJid(resolved?.phone || '');
+        phoneJid = mappedPhone ? mappedPhone.replace(/(?=@s\.whatsapp\.net$)/i, sourceDevice ? `:${sourceDevice}` : '') : '';
+    }
+    if (phoneJid && !lidJid) {
+        const resolved = await resolveLidForPhone(sessionId, sock, phoneJid).catch(() => null);
+        const mappedLid = normalizeSignalRepairJid(resolved?.lid || '');
+        lidJid = mappedLid ? mappedLid.replace(/(?=@(?:hosted\.lid|lid)$)/i, sourceDevice ? `:${sourceDevice}` : '') : '';
+    }
+    if (phoneJid && lidJid) rememberLidPhonePair(sessionId, lidJid, phoneJid, 'message_key');
+    const jids = [...new Set([phoneJid, lidJid].filter(value => /^\d{3,20}(?::\d{1,4})?@s\.whatsapp\.net$/i.test(value) || /^\d{3,20}(?::\d{1,4})?@(?:hosted\.lid|lid)$/i.test(value)))].slice(0, SIGNAL_PEER_AUTO_HEAL_MAX_ALIASES);
+    return { jids, phoneJid, lidJid, selfPeer: selfPeer === true, groupParticipantOnly: details?.isGroup === true };
+}
+
+async function repairSignalPeerSessionAfterDecryptFailures(sessionId, details, failureKind, attempts, selfPeer, peerIdentity) {
+    const runtime = activeSessions.get(sessionId);
+    const sock = runtime?.sock;
+    if (!runtime || !sock || isSocketDefinitelyClosed(sock)) throw new Error('signal_peer_auto_heal_socket_unavailable');
+    const repository = sock.signalRepository;
+    if (!repository || typeof repository.jidToSignalProtocolAddress !== 'function') throw new Error('signal_repository_address_resolver_unavailable');
+    await assertSessionRuntimeOwnership(sessionId);
+    if (activeSessions.get(sessionId)?.sock !== sock) throw new Error('signal_peer_auto_heal_socket_replaced');
+    const resolved = await resolveSignalPeerSessionAliases(sessionId, sock, details, selfPeer);
+    const jids = resolved.jids;
+    if (!jids.length) throw new Error('signal_peer_auto_heal_no_valid_peer_alias');
+    const keyStore = runtime.signalKeyStore || runtime.authState?.keys || sock.authState?.keys || null;
+    if (typeof repository.deleteSession !== 'function' && (!keyStore || typeof keyStore.set !== 'function')) throw new Error('signal_peer_session_key_store_unavailable');
+    const addressEntries = [];
+    for (const jid of jids) {
+        const rawAddress = await Promise.resolve(repository.jidToSignalProtocolAddress(jid));
+        const address = String(rawAddress?.toString?.() || rawAddress || '').trim();
+        if (!address || /@(?:g\.us|broadcast|newsletter)$/i.test(address)) throw new Error('signal_peer_auto_heal_invalid_protocol_address');
+        if (!addressEntries.some(entry => entry.address === address)) addressEntries.push({ jid, address });
+    }
+    const signalAddresses = addressEntries.map(entry => entry.address);
+    if (!addressEntries.length || addressEntries.length > SIGNAL_PEER_AUTO_HEAL_MAX_ALIASES) throw new Error('signal_peer_auto_heal_invalid_address_set');
+    console.warn('[signal-peer-session-auto-heal-start]', {
+        sessionId,
+        peerIdentityHash: shortLogHash(peerIdentity),
+        peerAliasHashes: jids.map(shortLogHash),
+        peerAliasCount: jids.length,
+        signalAddressHashes: signalAddresses.map(shortLogHash),
+        signalAddressCount: signalAddresses.length,
+        groupMessage: details.isGroup === true,
+        groupParticipantOnly: resolved.groupParticipantOnly,
+        selfChat: resolved.selfPeer,
+        failureKind,
+        qualifyingFailures: attempts,
+        threshold: SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD,
+        cooldownMs: SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS,
+        deletionScope: 'only_signal_session_records_for_this_peer_pn_lid_aliases',
+        keyStoreMethod: typeof repository.deleteSession === 'function' ? 'signal_repository_deleteSession' : 'auth_keys_set_session_category',
+        baileysAuthCredentialsDeleted: false,
+        accountLoggedOut: false,
+        groupSenderKeysDeleted: false,
+        otherPeerSessionsDeleted: false
+    });
+    let deletionMethod = '';
+    if (typeof repository.deleteSession === 'function') {
+        await promiseWithTimeout(repository.deleteSession(jids), 10000, 'peer Signal session deletion');
+        deletionMethod = 'signalRepository.deleteSession';
+    } else {
+        const sessionUpdates = Object.fromEntries(signalAddresses.map(address => [address, null]));
+        if (Object.keys(sessionUpdates).length !== signalAddresses.length) throw new Error('signal_peer_auto_heal_session_update_scope_mismatch');
+        await promiseWithTimeout(keyStore.set({ session: sessionUpdates }), 10000, 'peer Signal session key deletion');
+        deletionMethod = 'authState.keys.set_session_only';
+    }
+    const validationResults = await Promise.all(addressEntries.map(async entry => {
+        const { jid, address } = entry;
+        try {
+            if (typeof repository.validateSession === 'function') {
+                const validation = await promiseWithTimeout(repository.validateSession(jid), 3500, 'peer Signal session validation');
+                return { jidHash: shortLogHash(jid), addressHash: shortLogHash(address), verified: validation?.exists === false, remains: validation?.exists === true, reason: validation?.reason || null };
+            }
+            if (typeof repository.getSessionInfo === 'function') {
+                const validation = await promiseWithTimeout(repository.getSessionInfo(jid), 3500, 'peer Signal session validation');
+                return { jidHash: shortLogHash(jid), addressHash: shortLogHash(address), verified: !validation, remains: !!validation, reason: validation ? 'session_still_present' : 'session_not_found' };
+            }
+            if (keyStore && typeof keyStore.get === 'function') {
+                const stored = await promiseWithTimeout(keyStore.get('session', [address]), 3500, 'peer Signal session key validation');
+                const remains = !!stored?.[address];
+                return { jidHash: shortLogHash(jid), addressHash: shortLogHash(address), verified: !remains, remains, reason: remains ? 'session_record_still_present' : 'session_record_missing' };
+            }
+            return { jidHash: shortLogHash(jid), addressHash: shortLogHash(address), verified: false, reason: 'validation_not_supported' };
+        } catch (error) {
+            return { jidHash: shortLogHash(jid), addressHash: shortLogHash(address), verified: false, error: String(error?.message || error).slice(0, 180) };
+        }
+    }));
+    const remaining = validationResults.filter(item => item.remains).length;
+    console.info('[signal-peer-session-auto-heal-completed]', {
+        sessionId,
+        peerIdentityHash: shortLogHash(peerIdentity),
+        peerAliasHashes: jids.map(shortLogHash),
+        signalAddressHashes: signalAddresses.map(shortLogHash),
+        deletedPeerAliasCount: jids.length,
+        deletedSignalSessionRecordCount: signalAddresses.length,
+        verifiedMissingCount: validationResults.filter(item => item.verified).length,
+        remainingPeerSessionCount: remaining,
+        validation: validationResults,
+        deletionMethod,
+        groupMessage: details.isGroup === true,
+        selfChat: resolved.selfPeer,
+        failureKind,
+        deletionScope: 'signal_session_category_only_for_one_peer_alias_set',
+        baileysAuthCredentialsDeleted: false,
+        accountLoggedOut: false,
+        groupSenderKeysDeleted: false,
+        otherPeerSessionsDeleted: false,
+        nextMessageCanEstablishOrRequestFreshPeerSession: true
+    });
+    return { deleted: true, jids, signalAddresses, deletionMethod, validationResults, sessionRecreatedBeforeValidation: remaining > 0 };
+}
+
 function scheduleSignalRecoveryFromLog(sessionId, parsed) {
     if (!sessionId || !parsed || typeof parsed !== 'object' || serverShuttingDown) return;
     const details = getSignalRecoveryPeerDetails(parsed);
     const now = Date.now();
-    const failureText = getSignalLogText([parsed?.msg || parsed?.message || '', parsed]);
-    const kind = /MessageCounterError|Key used already or never filled/i.test(failureText) ? 'message_counter_error'
+    const failureText = getSignalLogText([
+        parsed?.msg || parsed?.message || '',
+        parsed?.failureClass || '',
+        parsed?.failureKind || '',
+        parsed?.errorName || '',
+        parsed?.errorMessage || '',
+        parsed?.err?.name || '',
+        parsed?.err?.type || '',
+        parsed?.err?.message || '',
+        parsed?.error?.name || '',
+        parsed?.error?.type || '',
+        parsed?.error?.message || '',
+        parsed?.type || '',
+        parsed
+    ]);
+    const explicitFailureKind = String(parsed?.failureClass || parsed?.failureKind || '').trim().toLowerCase();
+    const kind = ['message_counter_error', 'signal_session_missing', 'bad_mac'].includes(explicitFailureKind) ? explicitFailureKind
+        : /MessageCounterError|Key used already or never filled/i.test(failureText) ? 'message_counter_error'
         : /SessionError:\s*No sessions|No sessions|No session found to decrypt message/i.test(failureText) ? 'signal_session_missing'
         : /Bad MAC|SignalErrorBadMac|SignalErrorInvalidMessage|retry.{0,20}(?:error|code).{0,8}(?:4|7)\b/i.test(failureText) ? 'bad_mac'
         : 'signal_decryption_error';
@@ -1664,30 +1851,109 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
     const runtime = activeSessions.get(sessionId);
     const credentials = runtime?.authState?.creds || null;
     const user = runtime?.sock?.user || null;
-    const ownJids = [getAuthenticatedPhoneNumber(user, credentials) ? `${getAuthenticatedPhoneNumber(user, credentials)}@s.whatsapp.net` : '', getAuthenticatedLid(user, credentials), user?.id, credentials?.me?.id, credentials?.me?.lid].map(value => String(value || '').trim()).filter(Boolean);
+    const ownPhone = getAuthenticatedPhoneNumber(user, credentials);
+    const ownJids = [ownPhone ? `${ownPhone}@s.whatsapp.net` : '', getAuthenticatedLid(user, credentials), user?.id, credentials?.me?.id, credentials?.me?.lid].map(value => String(value || '').trim()).filter(Boolean);
     const selfPeer = !details.isGroup && [details.remoteJid, details.peerJid, ...(details.aliases || [])].some(value => ownJids.some(own => areEquivalentWhatsAppChatJids(sessionId, value, own)));
-    const peerKey = `${sessionId}:${details.isGroup ? details.remoteJid : details.peerJid || details.remoteJid || 'unknown'}:${details.isGroup ? details.peerJid : 'private'}`;
-    const previous = signalRecoveryCounters.get(peerKey) || { count: 0, windowAt: now };
+    const peerIdentity = getSignalRecoveryPeerCounterIdentity(sessionId, details);
+    const peerKey = `${sessionId}:${peerIdentity || (details.isGroup ? `group:${details.remoteJid || 'unknown'}` : 'unknown')}`;
+    const previous = signalRecoveryCounters.get(peerKey) || { count: 0, windowAt: now, repairAttempts: 0, repairWindowAt: now };
     if (now - Number(previous.windowAt || 0) > SIGNAL_RECOVERY_WINDOW_MS) {
         previous.count = 0;
         previous.windowAt = now;
+        previous.repairAttempts = 0;
+        previous.repairWindowAt = now;
     }
     previous.count++;
     previous.lastKind = kind;
+    const repairEligible = SIGNAL_PEER_AUTO_HEAL_FAILURE_KINDS.has(kind) && !!details.peerJid && /@(?:s\.whatsapp\.net|hosted\.lid|lid)$/i.test(details.peerJid);
+    if (repairEligible) {
+        if (now - Number(previous.repairWindowAt || 0) > SIGNAL_RECOVERY_WINDOW_MS) {
+            previous.repairAttempts = 0;
+            previous.repairWindowAt = now;
+        }
+        previous.repairAttempts = Number(previous.repairAttempts || 0) + 1;
+    }
     signalRecoveryCounters.set(peerKey, previous);
     while (signalRecoveryCounters.size > 2000) signalRecoveryCounters.delete(signalRecoveryCounters.keys().next().value);
-    console.warn(details.isGroup ? '[signal-group-decrypt-failure-keys-preserved]' : selfPeer ? '[signal-self-chat-decrypt-failure-keys-preserved]' : '[signal-private-decrypt-failure-keys-preserved]', {
+    const repairThresholdReached = repairEligible && previous.repairAttempts >= SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD;
+    const repairKey = repairEligible ? `${sessionId}:${shortLogHash(peerIdentity || details.peerJid)}` : '';
+    const cooldownUntil = repairKey ? Number(signalPrivatePeerRepairCooldowns.get(repairKey) || 0) : 0;
+    const repairTimerKey = repairKey ? `${repairKey}:peer-repair` : '';
+    const repairPending = !!repairTimerKey && signalRecoveryTimers.has(repairTimerKey);
+    const repairCoolingDown = cooldownUntil > now;
+    const repairWillSchedule = repairThresholdReached && !repairPending && !repairCoolingDown;
+    const failureEvent = details.isGroup ? '[signal-group-decrypt-failure-peer-repair-tracked]' : selfPeer ? '[signal-self-chat-decrypt-failure-peer-repair-tracked]' : '[signal-private-decrypt-failure-peer-repair-tracked]';
+    console.warn(failureEvent, {
         sessionId,
-        peer: details.peerJid || null,
-        groupJid: details.isGroup ? details.remoteJid : null,
+        peerHash: details.peerJid ? shortLogHash(details.peerJid) : null,
+        peerIdentityHash: peerIdentity ? shortLogHash(peerIdentity) : null,
+        groupJidHash: details.isGroup && details.remoteJid ? shortLogHash(details.remoteJid) : null,
         messageId: details.messageId || null,
         attempts: previous.count,
+        qualifyingRepairAttempts: previous.repairAttempts,
         failureKind: kind,
-        automaticSessionDeletion: false,
-        automaticSessionMigration: false,
-        automaticSenderKeyReset: false,
-        action: 'preserve_signal_sessions_and_sender_keys_flush_pending_auth_writes_only'
+        repairEligible,
+        repairThreshold: SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD,
+        repairCooldownMs: SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS,
+        automaticPeerSessionRepair: repairWillSchedule,
+        repairPending,
+        repairCoolingDown,
+        baileysAuthCredentialsDeleted: false,
+        accountLoggedOut: false,
+        groupSenderKeysDeleted: false,
+        otherPeerSessionsDeleted: false,
+        action: !repairEligible ? 'preserve_keys_for_unclassified_or_unidentified_peer_failure' : !repairThresholdReached ? 'count_peer_scoped_signal_failure_until_threshold' : repairCoolingDown ? 'wait_for_peer_repair_cooldown' : repairPending ? 'peer_repair_already_pending' : 'schedule_peer_scoped_signal_session_repair'
     });
+    if (repairThresholdReached) {
+        if (repairCoolingDown) {
+            console.info('[signal-peer-session-auto-heal-cooldown]', { sessionId, peerIdentityHash: shortLogHash(peerIdentity), failureKind: kind, qualifyingFailures: previous.repairAttempts, cooldownRemainingMs: cooldownUntil - now, action: 'avoid_repeated_peer_session_deletion_during_cooldown' });
+        } else if (!repairPending) {
+            signalPrivatePeerRepairCooldowns.set(repairKey, now + SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS);
+            while (signalPrivatePeerRepairCooldowns.size > 4000) signalPrivatePeerRepairCooldowns.delete(signalPrivatePeerRepairCooldowns.keys().next().value);
+            const repairTimer = setTimeout(() => {
+                signalRecoveryTimers.delete(repairTimerKey);
+                void repairSignalPeerSessionAfterDecryptFailures(sessionId, details, kind, previous.repairAttempts, selfPeer, peerIdentity)
+                    .then(() => {
+                        previous.count = 0;
+                        previous.windowAt = Date.now();
+                        previous.repairAttempts = 0;
+                        previous.repairWindowAt = Date.now();
+                        signalRecoveryCounters.set(peerKey, previous);
+                    })
+                    .catch(error => {
+                        console.error('[signal-peer-session-auto-heal-failed]', {
+                            sessionId,
+                            peerIdentityHash: shortLogHash(peerIdentity),
+                            peerHash: details.peerJid ? shortLogHash(details.peerJid) : null,
+                            failureKind: kind,
+                            qualifyingFailures: previous.repairAttempts,
+                            cooldownMs: SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS,
+                            errorName: error?.name || 'Error',
+                            error: String(error?.message || error).slice(0, 300),
+                            baileysAuthCredentialsDeleted: false,
+                            accountLoggedOut: false,
+                            groupSenderKeysDeleted: false,
+                            otherPeerSessionsDeleted: false,
+                            action: 'retain_account_and_other_peers_retry_peer_repair_after_cooldown'
+                        });
+                    });
+            }, 150);
+            if (typeof repairTimer.unref === 'function') repairTimer.unref();
+            signalRecoveryTimers.set(repairTimerKey, repairTimer);
+            console.warn('[signal-peer-session-auto-heal-scheduled]', {
+                sessionId,
+                peerIdentityHash: shortLogHash(peerIdentity),
+                peerHash: details.peerJid ? shortLogHash(details.peerJid) : null,
+                groupMessage: details.isGroup === true,
+                selfChat: selfPeer,
+                failureKind: kind,
+                qualifyingFailures: previous.repairAttempts,
+                threshold: SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD,
+                cooldownMs: SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS,
+                action: 'delete_only_this_peers_signal_session_aliases_after_current_decrypt_transaction'
+            });
+        }
+    }
     const shouldFlush = previous.count === 1 || previous.count % SIGNAL_RECOVERY_THRESHOLD === 0;
     if (!shouldFlush) return;
     const flushKey = `${peerKey}:auth-flush`;
@@ -1698,13 +1964,13 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
             await flushAuthWritesForSession(sessionId);
             console.info('[signal-auth-flush-after-decrypt-failure]', {
                 sessionId,
-                peer: details.peerJid || null,
-                groupJid: details.isGroup ? details.remoteJid : null,
+                peerHash: details.peerJid ? shortLogHash(details.peerJid) : null,
+                groupJidHash: details.isGroup && details.remoteJid ? shortLogHash(details.remoteJid) : null,
                 attempts: previous.count,
-                action: 'persist_pending_auth_writes_without_mutating_sessions_or_sender_keys'
+                action: 'persist_pending_auth_writes_without_deleting_account_credentials_or_other_peer_sessions'
             });
         } catch (error) {
-            console.warn('[signal-auth-flush-after-decrypt-failure-failed]', { sessionId, peer: details.peerJid || null, error: error?.message || String(error) });
+            console.warn('[signal-auth-flush-after-decrypt-failure-failed]', { sessionId, peerHash: details.peerJid ? shortLogHash(details.peerJid) : null, error: error?.message || String(error) });
         }
     }, 100);
     if (typeof flushTimer.unref === 'function') flushTimer.unref();
@@ -1737,7 +2003,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-08-r198-forbidden-session-preservation-and-reconnect-circuit-breaker';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-09-r203-link-replies-and-command-confirmations';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -2046,6 +2312,9 @@ const retryMessageMissLogTimes = new Map();
 const MSG_RETRY_COUNTER_TTL_MS = Math.max(60000, Math.min(86400000, Number(process.env.BAILEYS_MSG_RETRY_COUNTER_TTL_MS || 3600000)));
 const MSG_RETRY_COUNTER_MAX_ENTRIES = Math.max(1000, Math.min(50000, Number(process.env.BAILEYS_MSG_RETRY_COUNTER_MAX_ENTRIES || 20000)));
 const activeSessions = new Map();
+const tfbotSessionInboundDiagnostics = new Map();
+const tfbotSessionDiagnosticPersistTimers = new Map();
+const tfbotSessionDiagnosticPendingWrites = new Map();
 const pairingConnectionSnapshots = new Map();
 function rememberPairingConnectionUpdate(sessionId, socket, update, runtime = activeSessions.get(sessionId)) {
     if (!sessionId || !socket || !update || runtime?.sock !== socket) return null;
@@ -2529,6 +2798,7 @@ function cleanupSessionVolatileCaches(sessionId) {
     sessionLockRetryAttempts.delete(id);
     for (const key of [...signalRecoveryCounters.keys()]) if (key.startsWith(`${id}:`)) signalRecoveryCounters.delete(key);
     for (const key of [...signalRecoveryCooldowns.keys()]) if (key.startsWith(`${id}:`)) signalRecoveryCooldowns.delete(key);
+    for (const key of [...signalPrivatePeerRepairCooldowns.keys()]) if (key.startsWith(`${id}:`)) signalPrivatePeerRepairCooldowns.delete(key);
     for (const [key, timer] of [...signalRecoveryTimers.entries()]) {
         if (!key.startsWith(`${id}:`)) continue;
         clearTimeout(timer);
@@ -8266,6 +8536,10 @@ process.on('uncaughtException', (error) => {
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 app.get('/logs.txt', (req, res) => {
+    res.setHeader('X-TFBOT-Code-Version', TFBOT_CODE_VERSION);
+    res.setHeader('X-TFBOT-Revision', TFBOT_CLUSTER_CODE_REVISION);
+    res.setHeader('X-TFBOT-Release', TFBOT_CODE_RELEASE_ID);
+    res.setHeader('X-TFBOT-Time-Zone', TFBOT_LOG_TIME_ZONE);
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
     res.setHeader('Pragma', 'no-cache');
@@ -8274,10 +8548,17 @@ app.get('/logs.txt', (req, res) => {
     res.type('text/plain');
     fs.readFile(TFBOT_DIAGNOSTIC_LOG_PATH, 'utf8', (error, content) => {
         if (error && error.code !== 'ENOENT') return res.status(500).send('');
-        const safeContent = String(content || '').split('\n').map(line => {
-            if (!line) return line;
+        const rawLines = String(content || '').split('\n').filter(Boolean);
+        let latestStoredDate = null;
+        const safeLines = rawLines.map(line => {
             try {
                 const record = JSON.parse(line);
+                if (record.date) {
+                    const parsedDate = new Date(record.date);
+                    if (Number.isFinite(parsedDate.getTime()) && (!latestStoredDate || parsedDate > latestStoredDate)) latestStoredDate = parsedDate;
+                    record.dateAmerica = formatTfbotAmericaTimestamp(record.date);
+                    record.timeZone = TFBOT_LOG_TIME_ZONE;
+                }
                 if (record.event !== undefined) record.event = sanitizeTfbotDiagnosticLog(record.event, '');
                 if (record.content !== undefined) record.content = sanitizeTfbotDiagnosticLog(record.content, '');
                 if (record.name !== undefined) record.name = String(record.name).slice(0, 80);
@@ -8285,7 +8566,36 @@ app.get('/logs.txt', (req, res) => {
             } catch (parseError) {
                 return sanitizeTfbotDiagnosticLog(line, '');
             }
-        }).join('\n');
+        });
+        const now = new Date();
+        const headerRecord = {
+            name: 'TFBot',
+            date: now.toISOString(),
+            dateAmerica: formatTfbotAmericaTimestamp(now),
+            timeZone: TFBOT_LOG_TIME_ZONE,
+            codeVersion: TFBOT_CODE_VERSION,
+            releaseId: TFBOT_CODE_RELEASE_ID,
+            revision: TFBOT_CLUSTER_CODE_REVISION,
+            level: 'INFO',
+            event: 'tfbot-log-header',
+            content: JSON.stringify({
+                codeVersion: TFBOT_CODE_VERSION,
+                releaseId: TFBOT_CODE_RELEASE_ID,
+                revision: TFBOT_CLUSTER_CODE_REVISION,
+                timeZone: TFBOT_LOG_TIME_ZONE,
+                serverTimeAmerica: formatTfbotAmericaTimestamp(now),
+                workerState: tfbotWorkerState,
+                workerActive: tfbotWorkerActive,
+                workerStopping: tfbotWorkerStopping,
+                workerHost: TFBOT_CLUSTER_INSTANCE_HOST || TFBOT_CLUSTER_INSTANCE_URL || null,
+                activeSessionCount: activeSessions.size,
+                authenticatedSessionCount: [...activeSessions.values()].filter(runtime => isAuthenticatedSocketOperational(runtime, runtime?.sock)).length,
+                latestStoredLogDate: latestStoredDate ? latestStoredDate.toISOString() : null,
+                latestStoredLogDateAmerica: latestStoredDate ? formatTfbotAmericaTimestamp(latestStoredDate) : null,
+                latestStoredLogAgeMs: latestStoredDate ? Math.max(0, now.getTime() - latestStoredDate.getTime()) : null
+            })
+        };
+        const safeContent = [JSON.stringify(headerRecord), ...safeLines].join('\n');
         return res.status(200).send(safeContent);
     });
 });
@@ -10349,7 +10659,7 @@ const translations = {
     mode_title: 'Mode',
     welcome_title: "Bienvenue", welcome_to: "Bienvenue dans",
     menu_title: "Menu", lang_changed: "La langue du bot est maintenant {lang}.", languages_available: "Langues disponibles : fr en es ht",
-    imaj_prompt: "Utilisation : image <description>.", imaj_generated: "*{prompt}*", imaj_error: "La génération de l’image n’a pas abouti. Réessaie dans quelques instants.", search_title: "Recherche", search_error: "La recherche n’a pas pu aboutir. Réessaie dans quelques instants.",
+    imaj_prompt: "Envoie image suivi de la description souhaitée.", imaj_generated: "*{prompt}*", imaj_error: "La génération de l’image n’a pas abouti. Réessaie dans quelques instants.", search_title: "Recherche", search_error: "La recherche n’a pas pu aboutir. Réessaie dans quelques instants.",
     lang_title: "Langue", lang_current: "Langue actuelle du bot : {lang}.", ai_title: "Message", imaj_title: "Image", image_generated_title: "Image Générée",
     ai_click_to_receive: "Cliquez ici pour recevoir la réponse de l'IA :\n{link}",
     imaj_click_to_receive: "Cliquez ici pour recevoir votre image :\n{link}",
@@ -10376,8 +10686,8 @@ const translations = {
     vv_usage: "Réponds à une image, une vidéo, un audio, un document ou un sticker avec vv pour le renvoyer dans cette conversation.", vv_media_required: "Le message sélectionné ne contient pas de média pris en charge.", vv_self_unavailable: "Le chat personnel de ce compte n’a pas pu être identifié.",
     del3_bot_admin_required: "Le bot doit être administrateur du groupe pour appliquer cette règle.",
     del_usage: "Réponds au message à supprimer avec del.",
-    del2_usage: "Utilisation : del2 suivi d’une mention ou d’un numéro international. Tu peux également répondre au message du membre.",
-    target_usage: "Utilisation : {command} suivi d’une mention ou d’un numéro international. Tu peux également répondre au message du membre.",
+    del2_usage: "Indique une mention ou un numéro international, ou réponds au message du membre.",
+    target_usage: "Indique une mention ou un numéro international, ou réponds au message du membre.",
     no_eligible_target: "Aucun membre correspondant et éligible n’a été trouvé dans ce groupe.",
     delete_failed: "La suppression n’a pas pu être effectuée. Vérifie les autorisations applicables et réessaie.",
     del_completed: "La demande de suppression a été traitée.",
@@ -10388,14 +10698,15 @@ const translations = {
     take_time: "Le chargement peut prendre quelques instants.",
     quota_error: "La limite d’utilisation du service a été atteinte. Réessaie plus tard.",
     ai_error: "L’assistant n’a pas pu traiter la demande. Réessaie dans quelques instants.",
-    ai_usage: "Utilisation : Asistan <question>.",
+    ai_usage: "Asistan suivi de ta question.",
     url_usage: "Réponds à une image, une vidéo, un audio, un document ou un sticker avec url pour obtenir son lien.",
     url_error: "Le média n’a pas pu être traité. Vérifie qu’il est toujours accessible, puis réessaie.",
-    qr_usage: "Utilisation : qr <texte ou lien>.", qr_too_long: "Le texte est trop long pour un QR code. Utilise un texte plus court ou un lien.", qr_generated: "QR code généré.",
-    search_usage: "Utilisation : chercher <question>.",
-    code_usage: "Utilisation : code suivi d’un numéro au format international (8 à 15 chiffres).",
+    qr_usage: "Envoie qr suivi du texte ou du lien à encoder.", qr_too_long: "Le texte est trop long pour un QR code. Utilise un texte plus court ou un lien.", qr_generated: "QR code généré.",
+    search_usage: "Chercher suivi de ta question.",
+    code_usage: "Envoie code suivi d’un numéro au format international (8 à 15 chiffres).",
     owner_required: "Cette commande est réservée au propriétaire du compte connecté.",
     group_required: "Cette commande est disponible uniquement dans un groupe WhatsApp.",
+    group_invite_admin_required: "Seuls les administrateurs du groupe peuvent récupérer son lien d’invitation.",
     admin_required: "Cette action est réservée aux administrateurs du groupe ou au propriétaire du compte connecté.",
     command_error: "L’action n’a pas pu être terminée. Vérifie les informations et autorisations requises, puis réessaie.",
 info_text: [
@@ -10443,7 +10754,7 @@ info_text: [
     mode_title: 'Mode',
     welcome_title: "Welcome", welcome_to: "Welcome to",
     menu_title: "Menu", lang_changed: "Bot language is now {lang}.", languages_available: "Available languages: fr en es ht",
-    imaj_prompt: "Usage: image <description>.", imaj_generated: "*{prompt}*", imaj_error: "Image generation could not be completed. Please try again shortly.", search_title: "Search", search_error: "The search could not be completed. Please try again shortly.",
+    imaj_prompt: "Send image followed by the description.", imaj_generated: "*{prompt}*", imaj_error: "Image generation could not be completed. Please try again shortly.", search_title: "Search", search_error: "The search could not be completed. Please try again shortly.",
     lang_title: "Language", lang_current: "Current bot language: {lang}.", ai_title: "Message", imaj_title: "Image", image_generated_title: "Generated Image",
     ai_click_to_receive: "Click here to receive the AI response:\n{link}",
     imaj_click_to_receive: "Click here to receive your image:\n{link}",
@@ -10470,8 +10781,8 @@ info_text: [
     vv_usage: "Reply to an image, video, audio, document, or sticker with vv to resend it in this chat.", vv_media_required: "The selected message does not contain supported media.", vv_self_unavailable: "The connected account’s personal chat could not be identified.",
     del3_bot_admin_required: "The bot must be a group administrator to apply this rule.",
     del_usage: "Reply to the message you want to delete with del.",
-    del2_usage: "Usage: del2 followed by a mention or international number. You can also reply to the member’s message.",
-    target_usage: "Usage: {command} followed by a mention or international number. You can also reply to the member’s message.",
+    del2_usage: "Provide a mention or an international number, or reply to the member’s message.",
+    target_usage: "Provide a mention or an international number, or reply to the member’s message.",
     no_eligible_target: "No eligible group member matched the supplied target.",
     delete_failed: "The deletion could not be completed. Check the applicable permissions and try again.",
     del_completed: "The deletion request has been processed.",
@@ -10482,15 +10793,16 @@ info_text: [
     take_time: "Loading may take a few moments.",
     quota_error: "The service usage limit has been reached. Please try again later.",
     ai_error: "The assistant could not process the request. Please try again shortly.",
-    ai_usage: "Usage: Asistan <question>.",
+    ai_usage: "Send Asistan followed by your question.",
     url_usage: "Reply to an image, video, audio, document, or sticker with url to obtain its link.",
     url_error: "The media could not be processed. Check that it is still available and try again.",
-    qr_usage: "Usage: qr <text or link>.", qr_too_long: "This text is too long for a QR code. Use shorter text or a URL.", qr_generated: "QR code generated.",
-    search_usage: "Usage: search <question>.",
-    code_usage: "Usage: code followed by a number in international format (8 to 15 digits).",
+    qr_usage: "Send qr followed by the text or link to encode.", qr_too_long: "This text is too long for a QR code. Use shorter text or a URL.", qr_generated: "QR code generated.",
+    search_usage: "Send search followed by your question.",
+    code_usage: "Send code followed by a number in international format (8 to 15 digits).",
     owner_required: "This command is available only to the owner of the connected account.",
-    group_required: "This command is available only in a WhatsApp group.",
-    admin_required: "This action is available to group administrators or the connected-account owner.",
+    group_required: "This command is only available in a WhatsApp group.",
+    group_invite_admin_required: "Only group administrators can retrieve this group’s invite link.",
+    admin_required: "This action is restricted to group administrators or the connected account owner.",
     command_error: "The action could not be completed. Check the supplied information and required permissions, then try again.",
 info_text: [
         "*AI & search*",
@@ -10537,7 +10849,7 @@ info_text: [
     mode_title: 'Modo',
     welcome_title: "Bienvenida", welcome_to: "Bienvenida a",
     menu_title: "Menú", lang_changed: "El idioma del bot es ahora {lang}.", languages_available: "Idiomas disponibles: fr en es ht",
-    imaj_prompt: "Uso: imagen <descripción>.", imaj_generated: "*{prompt}*", imaj_error: "No se pudo completar la generación de la imagen. Inténtalo de nuevo en unos momentos.", search_title: "Búsqueda", search_error: "No se pudo completar la búsqueda. Inténtalo de nuevo en unos momentos.",
+    imaj_prompt: "Envía imagen seguido de la descripción.", imaj_generated: "*{prompt}*", imaj_error: "No se pudo completar la generación de la imagen. Inténtalo de nuevo en unos momentos.", search_title: "Búsqueda", search_error: "No se pudo completar la búsqueda. Inténtalo de nuevo en unos momentos.",
     lang_title: "Idioma", lang_current: "Idioma actual del bot: {lang}.", ai_title: "Mensaje", imaj_title: "Imagen", image_generated_title: "Imagen Generada",
     ai_click_to_receive: "Haz clic aquí para recibir la respuesta de la IA:\n{link}",
     imaj_click_to_receive: "Haz clic aquí para recibir tu imagen:\n{link}",
@@ -10564,8 +10876,8 @@ info_text: [
     vv_usage: "Responde a una imagen, vídeo, audio, documento o sticker con vv para reenviarlo en este chat.", vv_media_required: "El mensaje seleccionado no contiene contenido multimedia compatible.", vv_self_unavailable: "No se pudo identificar el chat personal de la cuenta conectada.",
     del3_bot_admin_required: "El bot debe ser administrador del grupo para aplicar esta regla.",
     del_usage: "Responde al mensaje que deseas eliminar con del.",
-    del2_usage: "Uso: del2 seguido de una mención o un número internacional. También puedes responder al mensaje del miembro.",
-    target_usage: "Uso: {command} seguido de una mención o un número internacional. También puedes responder al mensaje del miembro.",
+    del2_usage: "Indica una mención o un número internacional, o responde al mensaje del miembro.",
+    target_usage: "Indica una mención o un número internacional, o responde al mensaje del miembro.",
     no_eligible_target: "No se encontró ningún miembro que cumpla los requisitos para esta acción.",
     delete_failed: "No se pudo completar la eliminación. Comprueba los permisos correspondientes e inténtalo de nuevo.",
     del_completed: "La solicitud de eliminación se ha procesado.",
@@ -10576,15 +10888,16 @@ info_text: [
     take_time: "La carga puede tardar unos momentos.",
     quota_error: "Se ha alcanzado el límite de uso del servicio. Inténtalo de nuevo más tarde.",
     ai_error: "El asistente no pudo procesar la solicitud. Inténtalo de nuevo en unos momentos.",
-    ai_usage: "Uso: Asistan <pregunta>.",
+    ai_usage: "Envía Asistan seguido de tu pregunta.",
     url_usage: "Responde a una imagen, vídeo, audio, documento o sticker con url para obtener su enlace.",
     url_error: "No se pudo procesar el archivo multimedia. Comprueba que siga disponible e inténtalo de nuevo.",
-    qr_usage: "Uso: qr <texto o enlace>.", qr_too_long: "El texto es demasiado largo para un código QR. Usa un texto más corto o un enlace.", qr_generated: "Código QR generado.",
-    search_usage: "Uso: buscar <pregunta>.",
-    code_usage: "Uso: código seguido de un número en formato internacional (de 8 a 15 dígitos).",
+    qr_usage: "Envía qr seguido del texto o enlace que deseas codificar.", qr_too_long: "El texto es demasiado largo para un código QR. Usa un texto más corto o un enlace.", qr_generated: "Código QR generado.",
+    search_usage: "Envía buscar seguido de tu pregunta.",
+    code_usage: "Envía código seguido de un número en formato internacional (de 8 a 15 dígitos).",
     owner_required: "Este comando está disponible únicamente para el propietario de la cuenta conectada.",
-    group_required: "Este comando solo está disponible en grupos de WhatsApp.",
-    admin_required: "Esta acción está disponible para los administradores del grupo o el propietario de la cuenta conectada.",
+    group_required: "Este comando solo está disponible en un grupo de WhatsApp.",
+    group_invite_admin_required: "Solo los administradores del grupo pueden obtener su enlace de invitación.",
+    admin_required: "Esta acción está reservada a los administradores del grupo o al propietario de la cuenta conectada.",
     command_error: "No se pudo completar la acción. Comprueba la información y los permisos necesarios e inténtalo de nuevo.",
 info_text: [
         "*IA y búsqueda*",
@@ -10631,7 +10944,7 @@ info_text: [
     mode_title: 'Mòd',
     welcome_title: "Byenveni", welcome_to: "Byenveni nan",
     menu_title: "Meni", lang_changed: "Lang bot la se kounye a {lang}.", languages_available: "Lang disponib : fr en es ht",
-    imaj_prompt: "Itilizasyon : imaj <deskripsyon>.", imaj_generated: "*{prompt}*", imaj_error: "Jenerasyon imaj la pa t kapab fini. Eseye ankò nan kèk moman.", search_title: "Rechèch", search_error: "Rechèch la pa t kapab fini. Eseye ankò nan kèk moman.",
+    imaj_prompt: "Voye imaj ansanm ak deskripsyon sa ou vle a.", imaj_generated: "*{prompt}*", imaj_error: "Jenerasyon imaj la pa t kapab fini. Eseye ankò nan kèk moman.", search_title: "Rechèch", search_error: "Rechèch la pa t kapab fini. Eseye ankò nan kèk moman.",
     lang_title: "Lang", lang_current: "Lang bot la kounye a: {lang}.", ai_title: "Mesaj", imaj_title: "Imaj", image_generated_title: "Imaj Jenere",
     ai_click_to_receive: "Klike isit pou resevwa repons IA a :\n{link}",
     imaj_click_to_receive: "Klike isit la pou w resevwa imaj ou a :\n{link}",
@@ -10658,8 +10971,8 @@ info_text: [
     vv_usage: "Reponn sou yon imaj, videyo, odyo, dokiman oswa sticker ak vv pou voye li ankò nan chat sa a.", vv_media_required: "Mesaj ou chwazi a pa gen yon medya ki sipòte.", vv_self_unavailable: "Li pa posib idantifye chat pèsonèl kont ki konekte a.",
     del3_bot_admin_required: "Bot la dwe administratè gwoup la pou aplike règ sa a.",
     del_usage: "Reponn sou mesaj ou vle efase a ak del.",
-    del2_usage: "Itilizasyon : del2 epi mete yon mansyon oswa yon nimewo entènasyonal. Ou kapab reponn tou sou mesaj manm nan.",
-    target_usage: "Itilizasyon : {command} epi mete yon mansyon oswa yon nimewo entènasyonal. Ou kapab reponn tou sou mesaj manm nan.",
+    del2_usage: "Mete yon mansyon oswa yon nimewo entènasyonal, oswa reponn sou mesaj manm nan.",
+    target_usage: "Mete yon mansyon oswa yon nimewo entènasyonal, oswa reponn sou mesaj manm nan.",
     no_eligible_target: "Pa gen manm ki kalifye pou aksyon sa a nan gwoup la.",
     delete_failed: "Efasman an pa t kapab fini. Verifye otorizasyon ki aplikab yo epi eseye ankò.",
     del_completed: "Demann efasman an trete.",
@@ -10670,15 +10983,16 @@ info_text: [
     take_time: "Chajman an ka pran kèk moman.",
     quota_error: "Limit itilizasyon sèvis la rive. Eseye ankò pita.",
     ai_error: "Asistan an pa t kapab trete demann lan. Eseye ankò nan kèk moman.",
-    ai_usage: "Itilizasyon : Asistan <kesyon>.",
+    ai_usage: "Voye Asistan ansanm ak kesyon ou an.",
     url_usage: "Reponn sou yon imaj, videyo, odyo, dokiman oswa sticker ak url pou jwenn lyen li.",
     url_error: "Medya a pa t kapab trete. Verifye si li toujou disponib epi eseye ankò.",
-    qr_usage: "Itilizasyon : qr <tèks oswa lyen>.", qr_too_long: "Tèks la twò long pou yon kòd QR. Sèvi ak yon tèks ki pi kout oswa yon lyen.", qr_generated: "Kòd QR la kreye.",
-    search_usage: "Itilizasyon : cheche <kesyon>.",
-    code_usage: "Itilizasyon : code epi mete yon nimewo nan fòma entènasyonal (8 a 15 chif).",
+    qr_usage: "Voye qr ansanm ak tèks oswa lyen ou vle mete nan kòd la.", qr_too_long: "Tèks la twò long pou yon kòd QR. Sèvi ak yon tèks ki pi kout oswa yon lyen.", qr_generated: "Kòd QR la kreye.",
+    search_usage: "Voye cheche ansanm ak kesyon ou an.",
+    code_usage: "Voye code ansanm ak yon nimewo nan fòma entènasyonal (8 a 15 chif).",
     owner_required: "Kòmand sa a disponib sèlman pou pwopriyetè kont ki konekte a.",
     group_required: "Kòmand sa a disponib sèlman nan yon gwoup WhatsApp.",
-    admin_required: "Aksyon sa a disponib pou administratè gwoup la oswa pwopriyetè kont ki konekte a.",
+    group_invite_admin_required: "Se administratè gwoup la sèlman ki ka jwenn lyen envitasyon gwoup la.",
+    admin_required: "Se administratè gwoup la oswa pwopriyetè kont ki konekte a sèlman ki ka fè aksyon sa a.",
     command_error: "Aksyon an pa t kapab fini. Verifye enfòmasyon yo ak otorizasyon ki nesesè yo, epi eseye ankò.",
 info_text: [
         "*IA ak rechèch*",
@@ -10847,7 +11161,6 @@ async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, 
         : splitCaptionBodies(type, text, userName, MAX_WHATSAPP_CAPTION_CHARS, preserveFormatting, ownerName, language);
     const selectedBodies = sendOptions.longTextMode === 'truncate' ? bodies.slice(0, 1) : bodies;
     const messageOptions = { ...(sendOptions.messageOptions || {}) };
-    if (sendOptions.commandFormat === true) delete messageOptions.quoted;
     const resolveCaption = body => exactCaptionMode ? body : buildCaption(type, body, userName, preserveFormatting, ownerName, language);
     const resolveMentions = body => Array.isArray(sendOptions.mentions) && sendOptions.mentions.length
         ? sendOptions.mentions.filter(mention => body.includes(`@${String(mention).split('@')[0]}`))
@@ -10956,7 +11269,7 @@ app.get('/sitemap.xml', (req, res) => res.sendFile(path.join(__dirname, 'sitemap
 app.get('/manifest.json', (req, res) => res.sendFile(path.join(__dirname, 'manifest.json')));
 app.get('/sw.js', (req, res) => res.sendFile(path.join(__dirname, 'sw.js')));
 app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s Us Bot (tfbot)"));
-app.get('/ok', (req, res) => res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Revision', TFBOT_CLUSTER_CODE_REVISION).set('X-TFBOT-Release', TFBOT_CODE_RELEASE_ID).set('X-TFBOT-Group-Sender-Key-Reset', GROUP_SENDER_KEY_RESET_EVERY_SEND ? 'every-send' : 'cooldown').set('X-TFBOT-Baileys-Companion-Reg-Refresh', baileysCompanionRegRefreshPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-PN-Decryption', baileysLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-PN-Decryption', baileysGroupLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-Addressing', baileysLidAwareGroupOutboundAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-Chat-Placeholder-Resend', baileysSelfChatPlaceholderResendPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Retry-Deduplication', baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Own-LID-Retry-Addressing', baileysOwnLidRetryAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Session-Readiness', 'open-event-and-authenticated-identity').send('ok'));
+app.get('/ok', (req, res) => res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Code-Version', TFBOT_CODE_VERSION).set('X-TFBOT-Time-Zone', TFBOT_LOG_TIME_ZONE).set('X-TFBOT-Revision', TFBOT_CLUSTER_CODE_REVISION).set('X-TFBOT-Release', TFBOT_CODE_RELEASE_ID).set('X-TFBOT-Worker-State', tfbotWorkerState).set('X-TFBOT-Worker-Active', String(tfbotWorkerActive)).set('X-TFBOT-Worker-Stopping', String(tfbotWorkerStopping)).set('X-TFBOT-Group-Sender-Key-Reset', GROUP_SENDER_KEY_RESET_EVERY_SEND ? 'every-send' : 'cooldown').set('X-TFBOT-Baileys-Companion-Reg-Refresh', baileysCompanionRegRefreshPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-PN-Decryption', baileysLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-PN-Decryption', baileysGroupLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-Addressing', baileysLidAwareGroupOutboundAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-Chat-Placeholder-Resend', baileysSelfChatPlaceholderResendPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Retry-Deduplication', baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Own-LID-Retry-Addressing', baileysOwnLidRetryAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Session-Readiness', 'open-event-and-authenticated-identity').send('ok'));
 
 
 const handleTFSlugRequest = (req, res) => {
@@ -11108,6 +11421,73 @@ function serializeSessionListForHtml(value) {
     return JSON.stringify(value).replace(/[<>&\u2028\u2029]/g, character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }
 
+function updateTfbotSessionInboundDiagnostics(sessionId, changes = {}) {
+    const id = String(sessionId || '').trim();
+    if (!id) return null;
+    const previous = tfbotSessionInboundDiagnostics.get(id) || {};
+    const next = { ...previous, ...changes, updatedAt: new Date() };
+    tfbotSessionInboundDiagnostics.set(id, next);
+    while (tfbotSessionInboundDiagnostics.size > 5000) tfbotSessionInboundDiagnostics.delete(tfbotSessionInboundDiagnostics.keys().next().value);
+    const runtime = activeSessions.get(id);
+    if (runtime) runtime.inboundDiagnostics = next;
+    if (db?.collection) {
+        const runtimeSocket = runtime?.sock || null;
+        const listenerCount = Number(runtimeSocket?.ev?.listenerCount?.('messages.upsert') ?? runtimeSocket?.ev?.rawListeners?.('messages.upsert')?.length ?? 0);
+        const persisted = {
+            lastInboundUpsertAt: next.lastInboundUpsertAt || null,
+            lastInboundUpsertType: next.lastInboundUpsertType || null,
+            lastInboundUpsertCount: Number(next.lastInboundUpsertCount || 0),
+            lastCommandDetectedAt: next.lastCommandDetectedAt || null,
+            lastCommandName: next.lastCommandName || null,
+            lastCommandOutcome: next.lastCommandOutcome || null,
+            lastCommandError: next.lastCommandError || null,
+            lastWorkerState: tfbotWorkerState,
+            lastWorkerActive: !!tfbotWorkerActive,
+            lastWorkerStopping: !!tfbotWorkerStopping,
+            lastSessionDraining: workerDrainingSessionIds.has(id),
+            lastMessageUpsertListenerCount: listenerCount
+        };
+        tfbotSessionDiagnosticPendingWrites.set(id, persisted);
+        if (!tfbotSessionDiagnosticPersistTimers.has(id)) {
+            const persistTimer = setTimeout(() => {
+                tfbotSessionDiagnosticPersistTimers.delete(id);
+                const latest = tfbotSessionDiagnosticPendingWrites.get(id);
+                tfbotSessionDiagnosticPendingWrites.delete(id);
+                if (!latest || !db?.collection) return;
+                void db.collection('session_owners').updateOne({ sessionId: id }, { $set: latest }).catch(error => console.warn('[session-inbound-diagnostics-persist-failed]', { sessionId: id, error: error?.message || String(error) }));
+            }, 350);
+            if (typeof persistTimer.unref === 'function') persistTimer.unref();
+            tfbotSessionDiagnosticPersistTimers.set(id, persistTimer);
+        }
+    }
+    return next;
+}
+function getTfbotSessionDiagnosticFields(sessionId, localSession, ownerDoc = {}) {
+    const cached = tfbotSessionInboundDiagnostics.get(String(sessionId || '')) || localSession?.inboundDiagnostics || {};
+    const localRuntime = !!(localSession && activeSessions.get(String(sessionId || '')) === localSession);
+    const lastUpsertAt = cached.lastInboundUpsertAt || ownerDoc.lastInboundUpsertAt || null;
+    const lastCommandAt = cached.lastCommandDetectedAt || ownerDoc.lastCommandDetectedAt || null;
+    const listenerCount = localRuntime
+        ? Number(localSession?.sock?.ev?.listenerCount?.('messages.upsert') ?? localSession?.sock?.ev?.rawListeners?.('messages.upsert')?.length ?? 0)
+        : Number(ownerDoc.lastMessageUpsertListenerCount || 0);
+    return {
+        WorkerState: localRuntime ? tfbotWorkerState : ownerDoc.lastWorkerState || null,
+        WorkerActive: localRuntime ? !!tfbotWorkerActive : typeof ownerDoc.lastWorkerActive === 'boolean' ? ownerDoc.lastWorkerActive : null,
+        WorkerStopping: localRuntime ? !!tfbotWorkerStopping : typeof ownerDoc.lastWorkerStopping === 'boolean' ? ownerDoc.lastWorkerStopping : null,
+        SessionDraining: localRuntime ? workerDrainingSessionIds.has(String(sessionId)) : typeof ownerDoc.lastSessionDraining === 'boolean' ? ownerDoc.lastSessionDraining : null,
+        MessageUpsertListeners: listenerCount || null,
+        LastUpsertAt: lastUpsertAt ? new Date(lastUpsertAt).toISOString() : null,
+        LastUpsertAtAmerica: lastUpsertAt ? formatTfbotAmericaTimestamp(lastUpsertAt) : null,
+        LastUpsertType: cached.lastInboundUpsertType || ownerDoc.lastInboundUpsertType || null,
+        LastUpsertCount: Number(cached.lastInboundUpsertCount ?? ownerDoc.lastInboundUpsertCount ?? 0),
+        LastCommandAt: lastCommandAt ? new Date(lastCommandAt).toISOString() : null,
+        LastCommandAtAmerica: lastCommandAt ? formatTfbotAmericaTimestamp(lastCommandAt) : null,
+        LastCommand: cached.lastCommandName || ownerDoc.lastCommandName || null,
+        LastCommandOutcome: cached.lastCommandOutcome || ownerDoc.lastCommandOutcome || null,
+        LastCommandError: cached.lastCommandError || ownerDoc.lastCommandError || null
+    };
+}
+
 async function buildSessionListSnapshot() {
     try {
 const sessionsList = [];
@@ -11116,7 +11496,7 @@ const now = Date.now();
 let ownerDocs = [];
 if (ownerCol) {
     try {
-        ownerDocs = await ownerCol.find({}, { projection: { sessionId: 1, createdAt: 1, ownerLeaseUntil: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, connectionStatus: 1, status: 1, invalidStatusSinceAt: 1, invalidStatusExpiresAt: 1, socketAuthenticated: 1, socketReady: 1, connectionEverOpened: 1, connectionEverOpenedAt: 1, accountFirstConnectedAt: 1, connectedSince: 1, socketAuthenticatedAt: 1, everAuthenticated: 1, everConnected: 1, pairingProofPersisted: 1, pairingCredentialsConfirmedAt: 1, reauthRequired: 1, credentialsRevoked: 1, duplicateAccountOf: 1, duplicateOfSessionId: 1, format: 1, Format: 1, pairingChallengeStartedAt: 1, pairingStartedAt: 1, pairingPending: 1, pairingAttemptPending: 1, pairingCleanupPending: 1, pairingRestartFailed: 1, pairingRestartFailedAt: 1, pairingRestartRequiredAt: 1, PairingNumber: 1, nextRestoreRetryAt: 1, lastWhatsAppEvent: 1, lastWhatsAppEventAt: 1, lastDisconnectCode: 1, lastDisconnectReason: 1, DisconnectCode: 1, DisconnectReason: 1, lastAuthFailure: 1, lastAuthFailureAt: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, Name: 1, Number: 1, number: 1, OwnerNumber: 1, ownerNumber: 1, OwnerPhone: 1, ownerPhone: 1, DeployerNumber: 1, deployerNumber: 1, AccountJid: 1, OwnerLid: 1, mode: 1, Mode: 1, unconnectedSinceAt: 1, disconnectTime: 1, statusUpdatedAt: 1 } }).sort({ createdAt: -1 }).limit(5000).toArray();
+        ownerDocs = await ownerCol.find({}, { projection: { sessionId: 1, createdAt: 1, ownerLeaseUntil: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, connectionStatus: 1, status: 1, invalidStatusSinceAt: 1, invalidStatusExpiresAt: 1, socketAuthenticated: 1, socketReady: 1, connectionEverOpened: 1, connectionEverOpenedAt: 1, accountFirstConnectedAt: 1, connectedSince: 1, socketAuthenticatedAt: 1, everAuthenticated: 1, everConnected: 1, pairingProofPersisted: 1, pairingCredentialsConfirmedAt: 1, reauthRequired: 1, credentialsRevoked: 1, duplicateAccountOf: 1, duplicateOfSessionId: 1, format: 1, Format: 1, pairingChallengeStartedAt: 1, pairingStartedAt: 1, pairingPending: 1, pairingAttemptPending: 1, pairingCleanupPending: 1, pairingRestartFailed: 1, pairingRestartFailedAt: 1, pairingRestartRequiredAt: 1, PairingNumber: 1, nextRestoreRetryAt: 1, lastWhatsAppEvent: 1, lastWhatsAppEventAt: 1, lastDisconnectCode: 1, lastDisconnectReason: 1, DisconnectCode: 1, DisconnectReason: 1, lastAuthFailure: 1, lastAuthFailureAt: 1, lastRestoreError: 1, lastRestoreErrorHash: 1, Name: 1, Number: 1, number: 1, OwnerNumber: 1, ownerNumber: 1, OwnerPhone: 1, ownerPhone: 1, DeployerNumber: 1, deployerNumber: 1, AccountJid: 1, OwnerLid: 1, mode: 1, Mode: 1, unconnectedSinceAt: 1, disconnectTime: 1, statusUpdatedAt: 1, lastInboundUpsertAt: 1, lastInboundUpsertType: 1, lastInboundUpsertCount: 1, lastCommandDetectedAt: 1, lastCommandName: 1, lastCommandOutcome: 1, lastCommandError: 1, lastWorkerState: 1, lastWorkerActive: 1, lastWorkerStopping: 1, lastSessionDraining: 1, lastMessageUpsertListenerCount: 1 } }).sort({ createdAt: -1 }).limit(5000).toArray();
     } catch (ownerReadError) {
         console.error('[sessions-list-database-read-failed]', ownerReadError?.message || String(ownerReadError));
     }
@@ -11187,11 +11567,13 @@ for (const ownerDoc of ownerDocs) {
   const remoteOwner = !!(ownerDoc.ownerInstanceId && ownerDoc.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID);
   const remoteLeaseLive = remoteOwner && ownerLease > now;
   const localSocketOperational = !!(localSession && isAuthenticatedSocketOperational(localSession, localSession.sock));
+  const localWorkerReady = !TFBOT_CLUSTER_ENABLED || tfbotWorkerActive && !tfbotWorkerStopping && !workerDrainingSessionIds.has(sessionId);
   const ownerLastEvent = String(ownerDoc.lastWhatsAppEvent || '').toLowerCase();
   const ownerDisconnectCode = Number(ownerDoc.lastDisconnectCode || 0);
   const ownerDeviceRemoved = ownerDisconnectCode === 401 && /conflict|device[_ -]?removed/i.test(String(ownerDoc.lastDisconnectReason || ownerDoc.lastAuthFailure || ''));
   const remoteOpenProof = ownerDoc.connectionEverOpened === true || ownerDoc.everConnected === true || !!ownerDoc.connectionEverOpenedAt || !!ownerDoc.accountFirstConnectedAt || !!ownerDoc.connectedSince || !!ownerDoc.socketAuthenticatedAt || ownerDoc.socketAuthenticated === true && ownerLastEvent === 'open';
-  const remoteOwnerLive = remoteLeaseLive && remoteOpenProof && ownerDoc.socketAuthenticated === true && ownerDoc.socketReady === true && ownerLastEvent === 'open' && ownerDisconnectCode !== 515 && !ownerDeviceRemoved;
+  const remoteOwnerWorkerReady = ownerDoc.lastWorkerActive !== false && ownerDoc.lastWorkerStopping !== true && ownerDoc.lastSessionDraining !== true;
+  const remoteOwnerLive = remoteLeaseLive && remoteOpenProof && ownerDoc.socketAuthenticated === true && ownerDoc.socketReady === true && ownerLastEvent === 'open' && ownerDisconnectCode !== 515 && !ownerDeviceRemoved && remoteOwnerWorkerReady;
   const storedCredentials = credentialDocsBySession.get(sessionId)?.creds || null;
   const credentialsPresent = credentialDocsBySession.has(sessionId);
   const establishedAccount = isEstablishedForList(ownerDoc, localSession, storedCredentials, localSocketOperational || remoteOwnerLive);
@@ -11231,7 +11613,7 @@ for (const ownerDoc of ownerDocs) {
   const retryScheduled = retryAt > now;
   const localSocketReady = !!(localSession && isWhatsAppSocketReady(localSession, localSession.sock));
   let status = 'deconnecte';
-  if (localSocketOperational || remoteOwnerLive) {
+  if (localSocketOperational && localWorkerReady || remoteOwnerLive) {
       status = 'connecte';
       if (localSocketOperational) {
           localSession.lastDisconnectCode = null;
@@ -11241,6 +11623,8 @@ for (const ownerDoc of ownerDocs) {
           }
           if (!['connecte', 'connected'].includes(localRuntimeStatus)) await restoreAuthenticatedSessionRuntimeStatus(sessionId, localSession, localSession.sock, 'sessions_list_verified_open_socket');
       }
+  } else if (localSocketOperational) {
+      status = 'synchronisation';
   } else if (duplicateSession) {
       status = 'duplicate_account';
   } else if (ownerDoc.whatsappForbidden === true || storedStatus === 'forbidden_wait' || ownerDisconnectCode === 403 && ownerLastEvent === 'close') {
@@ -11316,7 +11700,8 @@ const credentialStateValid = !incompletePairing515 && !credentialsRevoked && (lo
     SignalTransactionsPending: Number(signalTransactionState.pendingCount || 0),
     SignalTransactionOldestAgeMs: Number(signalTransactionState.oldestAgeMs || 0),
     RestoreError: restoreError,
-    NextRetryAt: retryScheduled ? new Date(retryAt).toISOString() : null,
+    NextRetryAt: retryScheduled && !localSocketOperational && !remoteOwnerLive ? new Date(retryAt).toISOString() : null,
+    ...getTfbotSessionDiagnosticFields(sessionId, localSession, ownerDoc),
     DuplicateOf: ownerDoc.duplicateAccountOf || ownerDoc.duplicateOfSessionId || null,
     Numero: getAuthenticatedPhoneNumber(localSession?.sock?.user || null, activeCredentialRecord) || getAuthenticatedPhoneNumber(null, storedCredentials) || normalizePhoneNumber(ownerDoc.Number || ownerDoc.number || ownerDoc.PairingNumber || '') || 'N/A',
     Name: sanitizeSessionDisplayName(localSession?.sock?.user?.name || localSession?.sock?.user?.notify || localSession?.sock?.user?.verifiedName || activeCredentialRecord?.me?.name || ownerDoc.Name || ownerDoc.name || 'Inconnu'),
@@ -11337,6 +11722,7 @@ for (const [sessionId, authDoc] of credentialDocsBySession.entries()) {
   const storedCredentials = authDoc?.creds || null;
   const socketAuthenticated = !!(localSession && isAuthenticatedSocketOperational(localSession, localSession.sock));
   const socketReady = isWhatsAppSocketReady(localSession, localSession?.sock);
+  const localWorkerReady = !TFBOT_CLUSTER_ENABLED || tfbotWorkerActive && !tfbotWorkerStopping && !workerDrainingSessionIds.has(sessionId);
   const registered = hasRegisteredWhatsAppIdentity(localSession?.authState?.creds || storedCredentials, localSession?.sock?.user || null);
   const idTimestamp = getIdTimestamp(sessionId);
   const formatValue = String(localSession?.format || '').trim().toLowerCase();
@@ -11354,7 +11740,7 @@ for (const [sessionId, authDoc] of credentialDocsBySession.entries()) {
   const localRetryAt = Math.max(reconnectTimers.has(sessionId) ? Number(reconnectRetryDueAt.get(sessionId) || 0) : 0, sessionLockRetryTimers.has(sessionId) ? Number(sessionLockRetryDueAt.get(sessionId) || 0) : 0);
   const retryAt = localRetryAt > now ? localRetryAt : 0;
   const localSocketConnecting = !!(localSession?.sock && !isSocketDefinitelyClosed(localSession.sock) && String(localSession?.lastWhatsAppEvent || '').toLowerCase() !== 'close' && Number(localSession?.lastDisconnectCode || 0) !== 515);
-  const status = socketAuthenticated ? 'connecte' : established ? retryAt || !localSocketConnecting ? 'reconnexion' : 'synchronisation' : pairingPending ? localSession?.qrString && !registered ? 'qr_disponible' : localSocketConnecting || retryAt || registered ? 'synchronisation' : 'pairing' : localSocketConnecting || registered ? 'synchronisation' : 'authentification_incomplete';
+  const status = socketAuthenticated && localWorkerReady ? 'connecte' : socketAuthenticated ? 'synchronisation' : established ? retryAt || !localSocketConnecting ? 'reconnexion' : 'synchronisation' : pairingPending ? localSession?.qrString && !registered ? 'qr_disponible' : localSocketConnecting || retryAt || registered ? 'synchronisation' : 'pairing' : localSocketConnecting || registered ? 'synchronisation' : 'authentification_incomplete';
   const restoreError = retryAt && !socketAuthenticated ? String(localSession?.lastRestoreError || '') || null : null;
   if (!restoreError && localSession?.lastRestoreError) localSession.lastRestoreError = null;
   const eventName = socketAuthenticated ? 'open' : localSession?.lastWhatsAppEvent || null;
@@ -11364,7 +11750,7 @@ for (const [sessionId, authDoc] of credentialDocsBySession.entries()) {
   sessionsList.push({
       ID: sessionId,
       Sessions: status,
-      Categorie: socketAuthenticated ? 'active' : established && status === 'reconnexion' ? 'reconnexion' : pairingPending || registered ? 'connexion' : 'authentification_incomplete',
+      Categorie: socketAuthenticated && localWorkerReady ? 'active' : established && status === 'reconnexion' ? 'reconnexion' : pairingPending || registered ? 'connexion' : 'authentification_incomplete',
       Credentials: registered || socketAuthenticated ? 'recuperables' : 'incomplets',
       Owner: localSession ? TFBOT_CLUSTER_INSTANCE_URL || TFBOT_CLUSTER_INSTANCE_HOST : null,
       OwnerLeaseUntil: localSession && tfbotWorkerLeaseUntil > now ? new Date(tfbotWorkerLeaseUntil).toISOString() : null,
@@ -11373,7 +11759,8 @@ for (const [sessionId, authDoc] of credentialDocsBySession.entries()) {
       SignalTransactionsPending: Number(signalTransactionState.pendingCount || 0),
       SignalTransactionOldestAgeMs: Number(signalTransactionState.oldestAgeMs || 0),
       RestoreError: restoreError,
-      NextRetryAt: retryAt ? new Date(retryAt).toISOString() : null,
+      NextRetryAt: socketAuthenticated ? null : retryAt ? new Date(retryAt).toISOString() : null,
+      ...getTfbotSessionDiagnosticFields(sessionId, localSession, {}),
       DuplicateOf: null,
       OrphanedOwnerRecord: true,
       Numero: getAuthenticatedPhoneNumber(localSession?.sock?.user || null, localSession?.authState?.creds || storedCredentials) || getAuthenticatedPhoneNumber(null, storedCredentials) || 'N/A',
@@ -11415,13 +11802,14 @@ for (const localSession of activeSessions.values()) {
   const retryAt = Math.max(reconnectTimers.has(localSession.id) ? Number(reconnectRetryDueAt.get(localSession.id) || 0) : 0, sessionLockRetryTimers.has(localSession.id) ? Number(sessionLockRetryDueAt.get(localSession.id) || 0) : 0);
   const activeRetryAt = retryAt > now ? retryAt : 0;
   const localSocketConnecting = !!(localSession.sock && !isSocketDefinitelyClosed(localSession.sock) && String(localSession.lastWhatsAppEvent || '').toLowerCase() !== 'close' && Number(localSession.lastDisconnectCode || 0) !== 515);
-  const localDisplayStatus = isAuthenticated ? 'connecte' : localSession.whatsappForbidden === true || Number(localSession.lastDisconnectCode || 0) === 403 ? 'forbidden_wait' : previouslyConnected ? activeRetryAt || !localSocketConnecting ? 'reconnexion' : 'synchronisation' : pairingPending ? localSession.qrString && !localRegistered ? 'qr_disponible' : localSocketConnecting || activeRetryAt || localRegistered ? 'synchronisation' : 'pairing' : localSocketConnecting || localRegistered ? 'synchronisation' : 'authentification_incomplete';
+  const localWorkerReady = !TFBOT_CLUSTER_ENABLED || tfbotWorkerActive && !tfbotWorkerStopping && !workerDrainingSessionIds.has(localSession.id);
+  const localDisplayStatus = isAuthenticated && localWorkerReady ? 'connecte' : isAuthenticated ? 'synchronisation' : localSession.whatsappForbidden === true || Number(localSession.lastDisconnectCode || 0) === 403 ? 'forbidden_wait' : previouslyConnected ? activeRetryAt || !localSocketConnecting ? 'reconnexion' : 'synchronisation' : pairingPending ? localSession.qrString && !localRegistered ? 'qr_disponible' : localSocketConnecting || activeRetryAt || localRegistered ? 'synchronisation' : 'pairing' : localSocketConnecting || localRegistered ? 'synchronisation' : 'authentification_incomplete';
   const registered = localRegistered;
   const restoreError = activeRetryAt && !isAuthenticated ? String(localSession.lastRestoreError || '') || null : null;
   if (!restoreError && localSession.lastRestoreError) localSession.lastRestoreError = null;
   const currentClose = String(localSession.lastWhatsAppEvent || '').toLowerCase() === 'close';
   const aliveSince = getAccountAliveTimestamp(null, localSession, isAuthenticated);
-  sessionsList.push({ ID: localSession.id, Sessions: localDisplayStatus, Categorie: isAuthenticated ? 'active' : localDisplayStatus === 'forbidden_wait' ? 'forbidden' : previouslyConnected && localDisplayStatus === 'reconnexion' ? 'reconnexion' : pairingPending || registered ? 'connexion' : 'authentification_incomplete', Credentials: isAuthenticated || registered ? 'recuperables' : 'incomplets', Owner: TFBOT_CLUSTER_INSTANCE_URL || TFBOT_CLUSTER_INSTANCE_HOST, OwnerLeaseUntil: tfbotWorkerLeaseUntil > now ? new Date(tfbotWorkerLeaseUntil).toISOString() : null, SocketAuthenticated: isAuthenticated, SocketReady: isWhatsAppSocketReady(localSession, localSession.sock), RestoreError: restoreError, NextRetryAt: activeRetryAt ? new Date(activeRetryAt).toISOString() : null, DuplicateOf: null, Numero: getAuthenticatedPhoneNumber(localSession.sock?.user || null, localSession.authState?.creds) || 'N/A', Name: sanitizeSessionDisplayName(localSession.sock?.user?.name || localSession.sock?.user?.notify || localSession.authState?.creds?.me?.name || 'Bot (tfbot)'), Format: format, Mode: 'prive', WhatsAppEvent: localSession.lastWhatsAppEvent || null, WhatsAppStateAt: localSession.lastWhatsAppEventAt || null, InvalidStatusSinceAt: isNonExpiringSessionStatus(localDisplayStatus) ? null : localSession.invalidStatusSinceAt || null, InvalidStatusExpiresAt: isNonExpiringSessionStatus(localDisplayStatus) ? null : localSession.invalidStatusSinceAt ? new Date(parseSessionStatusTimestamp(localSession.invalidStatusSinceAt) + SESSION_INVALID_STATUS_TTL_MS).toISOString() : null, DisconnectCode: currentClose && !isAuthenticated ? localSession.lastDisconnectCode || null : null, DisconnectReason: currentClose && !isAuthenticated ? localSession.lastDisconnectReason || null : null, Alive: isAuthenticated ? getUptimeString(Math.max(1000, aliveSince ? now - aliveSince : 1000)) : null });
+  sessionsList.push({ ID: localSession.id, Sessions: localDisplayStatus, Categorie: isAuthenticated && localWorkerReady ? 'active' : localDisplayStatus === 'forbidden_wait' ? 'forbidden' : previouslyConnected && localDisplayStatus === 'reconnexion' ? 'reconnexion' : pairingPending || registered ? 'connexion' : 'authentification_incomplete', Credentials: isAuthenticated || registered ? 'recuperables' : 'incomplets', Owner: TFBOT_CLUSTER_INSTANCE_URL || TFBOT_CLUSTER_INSTANCE_HOST, OwnerLeaseUntil: tfbotWorkerLeaseUntil > now ? new Date(tfbotWorkerLeaseUntil).toISOString() : null, SocketAuthenticated: isAuthenticated, SocketReady: isWhatsAppSocketReady(localSession, localSession.sock), RestoreError: restoreError, NextRetryAt: isAuthenticated ? null : activeRetryAt ? new Date(activeRetryAt).toISOString() : null, ...getTfbotSessionDiagnosticFields(localSession.id, localSession, {}), DuplicateOf: null, Numero: getAuthenticatedPhoneNumber(localSession.sock?.user || null, localSession.authState?.creds) || 'N/A', Name: sanitizeSessionDisplayName(localSession.sock?.user?.name || localSession.sock?.user?.notify || localSession.authState?.creds?.me?.name || 'Bot (tfbot)'), Format: format, Mode: 'prive', WhatsAppEvent: localSession.lastWhatsAppEvent || null, WhatsAppStateAt: localSession.lastWhatsAppEventAt || null, InvalidStatusSinceAt: isNonExpiringSessionStatus(localDisplayStatus) ? null : localSession.invalidStatusSinceAt || null, InvalidStatusExpiresAt: isNonExpiringSessionStatus(localDisplayStatus) ? null : localSession.invalidStatusSinceAt ? new Date(parseSessionStatusTimestamp(localSession.invalidStatusSinceAt) + SESSION_INVALID_STATUS_TTL_MS).toISOString() : null, DisconnectCode: currentClose && !isAuthenticated ? localSession.lastDisconnectCode || null : null, DisconnectReason: currentClose && !isAuthenticated ? localSession.lastDisconnectReason || null : null, Alive: isAuthenticated ? getUptimeString(Math.max(1000, aliveSince ? now - aliveSince : 1000)) : null });
 }
         return sessionsList;
     } catch (error) {
@@ -13489,6 +13877,16 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             try {
                 const earlyUpsertType = String(up?.type || '');
                 const earlyMessages = Array.isArray(up?.messages) ? up.messages : [];
+                const earlyReceivedAt = new Date();
+                updateTfbotSessionInboundDiagnostics(sessionId, {
+                    lastInboundUpsertAt: earlyReceivedAt,
+                    lastInboundUpsertType: earlyUpsertType || 'unknown',
+                    lastInboundUpsertCount: earlyMessages.length,
+                    lastWorkerState: tfbotWorkerState,
+                    lastWorkerActive: !!tfbotWorkerActive,
+                    lastWorkerStopping: !!tfbotWorkerStopping,
+                    lastSessionDraining: workerDrainingSessionIds.has(sessionId)
+                });
                 if (earlyUpsertType === 'append') {
                     console.info('[baileys-historical-append-ignored]', { sessionId, messageCount: earlyMessages.length, action: 'ignore_historical_sync_before_audit_or_command_dispatch' });
                     return;
@@ -13502,6 +13900,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     socketIsOpen: sock.ws?.isOpen === true || Number(sock.ws?.readyState ?? sock.ws?._socket?.readyState ?? sock.socket?.readyState) === 1,
                     upsertType: earlyUpsertType,
                     messageCount: earlyMessages.length,
+                    workerState: tfbotWorkerState,
+                    workerActive: tfbotWorkerActive,
+                    workerStopping: tfbotWorkerStopping,
+                    sessionDraining: workerDrainingSessionIds.has(sessionId),
+                    messageUpsertListenerCount: Number(sock.ev?.listenerCount?.('messages.upsert') ?? sock.ev?.rawListeners?.('messages.upsert')?.length ?? 0),
                     messages: earlyMessages.slice(0, 10).map(entry => ({
                         messageId: entry?.key?.id || null,
                         chatJid: entry?.key?.remoteJid || entry?.key?.remoteJidAlt || null,
@@ -13524,7 +13927,11 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             sessionId,
             connectedAccountJid: sock.user?.id || null,
             event: 'messages.upsert',
-            listener: 'early_diagnostic'
+            listener: 'early_diagnostic',
+            listenerCount: Number(sock.ev?.listenerCount?.('messages.upsert') ?? sock.ev?.rawListeners?.('messages.upsert')?.length ?? 0),
+            workerState: tfbotWorkerState,
+            workerActive: tfbotWorkerActive,
+            workerStopping: tfbotWorkerStopping
         });
 
         const sessionData = {
@@ -14846,15 +15253,35 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
         });
 
         sock.ev.on('messages.upsert', async (up) => {
-            if (activeSessions.get(sessionId)?.retiringDuplicateAccount === true || String(activeSessions.get(sessionId)?.status || '').toLowerCase() === 'duplicate_account') return;
             const messageUpsertEventStartedAt = Date.now();
             const initialUpsertType = String(up?.type || '');
             const initialBatchCount = Array.isArray(up?.messages) ? up.messages.length : 0;
+            const currentUpsertRuntime = activeSessions.get(sessionId);
+            console.info('[message-upsert-handler-entered]', {
+                sessionId,
+                upsertType: initialUpsertType,
+                messageCount: initialBatchCount,
+                currentRuntimePresent: !!currentUpsertRuntime,
+                sameSocket: currentUpsertRuntime?.sock === sock,
+                socketAuthenticated: isAuthenticatedSocketOperational(currentUpsertRuntime, sock),
+                socketReady: isWhatsAppSocketReady(currentUpsertRuntime, sock),
+                workerState: tfbotWorkerState,
+                workerActive: tfbotWorkerActive,
+                workerStopping: tfbotWorkerStopping,
+                sessionDraining: workerDrainingSessionIds.has(sessionId),
+                messageUpsertListenerCount: Number(sock.ev?.listenerCount?.('messages.upsert') ?? sock.ev?.rawListeners?.('messages.upsert')?.length ?? 0)
+            });
+            if (activeSessions.get(sessionId)?.retiringDuplicateAccount === true || String(activeSessions.get(sessionId)?.status || '').toLowerCase() === 'duplicate_account') {
+                updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: 'ignored_duplicate_account_runtime' });
+                console.warn('[message-upsert-ignored-duplicate-runtime]', { sessionId, upsertType: initialUpsertType, messageCount: initialBatchCount, action: 'do_not_dispatch_from_retiring_duplicate_session' });
+                return;
+            }
             if (initialUpsertType === 'append') {
                 console.info('[message-upsert-historical-append-cache-only]', { sessionId, messageCount: initialBatchCount, receivedAt: messageUpsertEventStartedAt, action: 'validate_session_ownership_then_cache_outgoing_private_retry_copies_without_command_dispatch' });
             }
             if (workerDrainingSessionIds.has(sessionId) || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping))) {
-                console.info('[message-upsert-ignored-during-worker-handoff]', { sessionId, upsertType: String(up?.type || ''), messageCount: Array.isArray(up?.messages) ? up.messages.length : 0, action: 'leave_whatsapp_offline_sync_for_selected_worker' });
+                updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: 'ignored_worker_handoff' });
+                console.warn('[message-upsert-ignored-during-worker-handoff]', { sessionId, upsertType: String(up?.type || ''), messageCount: Array.isArray(up?.messages) ? up.messages.length : 0, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), runtimeSocketPresent: !!activeSessions.get(sessionId)?.sock, sameSocket: activeSessions.get(sessionId)?.sock === sock, socketReady: isWhatsAppSocketReady(activeSessions.get(sessionId), sock), action: 'leave_whatsapp_offline_sync_for_selected_worker' });
                 return;
             }
             if (isPendingPairingReplacementSession(sessionId)) {
@@ -14908,7 +15335,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             } catch (finalOwnershipError) {
                 const reason = String(finalOwnershipError?.message || finalOwnershipError);
                 if (reason === 'tfbot_worker_not_active' || workerDrainingSessionIds.has(sessionId) || tfbotWorkerStopping || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive)) {
-                    console.info('[message-upsert-left-for-selected-worker]', { sessionId, upsertType: String(up?.type || ''), messageCount: Array.isArray(up?.messages) ? up.messages.length : 0, reason, action: 'do_not_close_or_process_on_standby_worker' });
+                    updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: 'left_for_selected_worker' });
+                    console.warn('[message-upsert-left-for-selected-worker]', { sessionId, upsertType: String(up?.type || ''), messageCount: Array.isArray(up?.messages) ? up.messages.length : 0, reason, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), action: 'do_not_close_or_process_on_standby_worker' });
                     return;
                 }
                 console.error('[message-upsert-blocked-without-exclusive-session-lock]', { sessionId, error: reason, ownershipValidationMs: Date.now() - ownershipValidationStartedAt, ownershipAttemptCount, messageEventAgeMs: Date.now() - messageUpsertEventStartedAt, action: 'retry_lock_failure_then_close_only_when_exclusive_ownership_cannot_be_verified' });
@@ -14920,7 +15348,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             const upsertType = String(up?.type || '');
             const rawBatch = Array.isArray(up?.messages) ? up.messages : [];
             if (workerDrainingSessionIds.has(sessionId) || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping))) {
-                console.info('[message-upsert-ignored-during-worker-handoff]', { sessionId, upsertType, messageCount: rawBatch.length, action: 'leave_whatsapp_offline_sync_for_selected_worker' });
+                updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: 'ignored_worker_handoff_after_lock_check' });
+                console.warn('[message-upsert-ignored-during-worker-handoff]', { sessionId, upsertType, messageCount: rawBatch.length, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), ownershipValidationMs, ownershipAttemptCount, action: 'leave_whatsapp_offline_sync_for_selected_worker' });
                 return;
             }
             console.info('[messages-upsert-batch]', {
@@ -15275,6 +15704,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     continue;
                 }
                 if (receivedParsedCommand) {
+                    updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandDetectedAt: new Date(), lastCommandName: String(receivedParsedCommand.internalCommand || receivedParsedCommand.command || '').slice(0, 80), lastCommandOutcome: 'recognized_before_deduplication_and_dispatch', lastCommandError: null });
                     console.info('[command-recognized-on-receipt]', {
                         sessionId,
                         connectedAccountJid: sock.user?.id || null,
@@ -15428,6 +15858,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 }
                 cacheRecentMessage(sessionId, m);
 
+                updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: receivedParsedCommand ? 'queued_for_dispatch' : 'queued_non_command' });
                 console.info('[message-processing-queued]', {
                     sessionId,
                     messageId: msgId,
@@ -16126,7 +16557,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const command = parsedCommand.command;
                         const args = parsedCommand.args;
                         const internalCommand = parsedCommand.internalCommand;
-                        console.info('[command-dispatch-ready]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, senderName: sName, senderJid: sender, chatJid: from, rawChatJid: rawFrom, command, internalCommand, messageLang, isPublicMode, isOwnerReal, sessionOwnerIdentitySource: sessionOwnerIdentitySource || null, mode: botMode, messageAgeMsAtDetection: receivedMessageAgeMs, upsertHandlerToDispatchMs: Date.now() - messageUpsertHandlerStartedAt, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid' });
+                        console.info('[command-dispatch-ready]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, senderName: sName, senderJid: sender, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: from, rawChatJid: rawFrom, command, internalCommand, messageLang, isPublicMode, isOwnerReal, sessionOwnerIdentitySource: sessionOwnerIdentitySource || null, mode: botMode, messageAgeMsAtDetection: receivedMessageAgeMs, upsertHandlerToDispatchMs: Date.now() - messageUpsertHandlerStartedAt, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid', replyContextAvailable: !!m?.key?.id, resolvedHandler: internalCommand });
                         console.info('[command-detected]', { sessionId, upsertType, messageId: msgId, senderName: sName, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: from, senderJid: sender, senderAliases: senderJids, messageType, messageClassification: 'recognized_command', command, internalCommand, argumentPreview: String(args || '').replace(/[\r\n\t]+/g, ' ').slice(0, 1000), isGroup, isPublicMode, isOwnerReal, mode: botMode, action: 'command_handler_started' });
                         console.info('[command-lifecycle]', { sessionId, messageId: msgId, command: internalCommand, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', phase: 'detected', state: 'running', stage: 'detection' });
 
@@ -16209,6 +16640,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     const forceLegacy = sendArgs[5] === true;
                                     const useLegacy = forceLegacy || useGroupLegacy || isSessionMessagingFallbackActive(sessionId);
                                     const baseSendArgs = sendArgs.slice(0, 5);
+                                    const queuedMessageOptions = { ...(baseSendArgs[3] || {}) };
+                                    if (!Object.prototype.hasOwnProperty.call(queuedMessageOptions, 'quoted') && destination === from) queuedMessageOptions.quoted = m;
+                                    baseSendArgs[3] = queuedMessageOptions;
                                     let transportUsed = forceLegacy ? 'queued_media_transport' : useGroupLegacy ? 'existing_queued_group_sender_key_transport' : useLegacy ? 'existing_queued_legacy_fallback' : 'simple_direct_send';
                                     markCommandSending(transportUsed, payloadType);
                                     try {
@@ -16218,7 +16652,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             if (!useGroupLegacy && result?.key?.id) recordSessionMessagingFallbackSuccess(sessionId, result.key.id);
                                         } else {
                                             try {
-                                                result = await sendFastMessageWithDiagnostics(sendArgs[0] || sock, destination, sendArgs[2] || {}, sendArgs[3] || {}, 'tracked_command_message');
+                                                result = await sendFastMessageWithDiagnostics(sendArgs[0] || sock, destination, sendArgs[2] || {}, baseSendArgs[3] || {}, 'tracked_command_message');
                                             } catch (directError) {
                                                 markCommandSendFailure('simple_direct_send', directError);
                                                 if (!shouldActivateLegacyMessagingFallback(directError)) throw directError;
@@ -16247,15 +16681,20 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     console.info('[command-response-sent]', { sessionId, messageId: msgId, command: internalCommand, sourceChatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null, replyTargetJid: rawFrom || from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid', responseMessageId: result?.key?.id || null, transport });
                                     return result;
                                 };
-                                const commandSendOptions = (options = {}, directSend = false) => ({
-                                    ...options,
-                                    commandFormat: true,
-                                    directSend,
-                                    ownerName: activeHostName,
-                                    language: messageLang,
-                                    preserveSourceImage: true,
-                                    longTextMode: internalCommand === 'lien' ? 'truncate' : (options.longTextMode || 'split')
-                                });
+                                const commandSendOptions = (options = {}, directSend = false, destination = from) => {
+                                    const messageOptions = { ...(options.messageOptions || {}) };
+                                    if (!Object.prototype.hasOwnProperty.call(messageOptions, 'quoted') && String(destination || '') === String(from || '')) messageOptions.quoted = m;
+                                    return {
+                                        ...options,
+                                        commandFormat: true,
+                                        directSend,
+                                        ownerName: activeHostName,
+                                        language: messageLang,
+                                        preserveSourceImage: true,
+                                        messageOptions,
+                                        longTextMode: internalCommand === 'lien' ? 'truncate' : (options.longTextMode || 'split')
+                                    };
+                                };
                                 const executeAdaptiveFormattedSend = async (send, responseType = 'text_or_media') => {
                                     const groupLegacyRequired = isGroup;
                                     const fallbackActive = isSessionMessagingFallbackActive(sessionId);
@@ -16359,7 +16798,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     const suppliedOptions = sendArgs[6] && typeof sendArgs[6] === 'object' ? sendArgs[6] : {};
                                     const directSend = !isGroup && !isSessionMessagingFallbackActive(sessionId);
                                     const preparedArgs = [...sendArgs];
-                                    preparedArgs[6] = commandSendOptions(suppliedOptions, directSend);
+                                    preparedArgs[6] = commandSendOptions(suppliedOptions, directSend, sendArgs[1] || from);
                                     const imageTransport = isGroup ? 'existing_queued_group_sender_key_transport' : directSend ? 'simple_direct_send' : 'existing_queued_legacy_fallback';
                                     markCommandSending(imageTransport, 'image_or_text');
                                     try {
@@ -16370,7 +16809,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             if (!directSend || !shouldActivateLegacyMessagingFallback(sendError)) throw sendError;
                                             markCommandSendFailure('simple_direct_send', sendError);
                                             markSessionMessagingFallback(sessionId, `image_captioned_signal_${classifyWhatsAppFailure(sendError)}`, msgId);
-                                            preparedArgs[6] = commandSendOptions(suppliedOptions, false);
+                                            preparedArgs[6] = commandSendOptions(suppliedOptions, false, sendArgs[1] || from);
                                             markCommandSending('existing_queued_legacy_fallback_after_signal_failure', 'image_or_text');
                                             result = await sendImageCaptioned(...preparedArgs);
                                         }
@@ -16573,23 +17012,36 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 break;
                                             }
                                             try {
-                                                const [metadataLien, c] = await Promise.all([
-                                                    promiseWithTimeout(sock.groupMetadata(from), GROUP_METADATA_FETCH_TIMEOUT_MS, 'Live WhatsApp group link metadata lookup'),
-                                                    sock.groupInviteCode(from)
-                                                ]);
-                                                console.info('[group-link-metadata-refreshed]', { sessionId, group: from, subjectAvailable: !!metadataLien?.subject, descriptionAvailable: !!metadataLien?.desc, metadataSource: 'live_group_metadata_not_cached_or_persisted' });
-                                                const link = `https://chat.whatsapp.com/${c}`;
+                                                console.info('[group-link-request-start]', { sessionId, messageId: msgId, groupHash: shortLogHash(from), chatType: 'group', inviteCodeMethodAvailable: typeof sock.groupInviteCode === 'function' });
+                                                if (typeof sock.groupInviteCode !== 'function') throw new Error('group_invite_code_method_unavailable');
+                                                const inviteCodeResult = await promiseWithTimeout(Promise.resolve().then(() => sock.groupInviteCode(from)), GROUP_METADATA_FETCH_TIMEOUT_MS, 'WhatsApp group invite code lookup');
+                                                const inviteCode = String(inviteCodeResult || '').trim();
+                                                if (!inviteCode || /\s/.test(inviteCode)) throw new Error('group_invite_code_empty_or_invalid');
+                                                const link = /^https:\/\/chat\.whatsapp\.com\//i.test(inviteCode) ? inviteCode : `https://chat.whatsapp.com/${encodeURIComponent(inviteCode)}`;
+                                                let metadataLien = getCachedGroupMetadata(sessionId, from, GROUP_METADATA_CACHE_TTL_MS);
+                                                if (!metadataLien) {
+                                                    try {
+                                                        metadataLien = await promiseWithTimeout(sock.groupMetadata(from), GROUP_METADATA_FETCH_TIMEOUT_MS, 'Live WhatsApp group link metadata lookup');
+                                                        if (metadataLien) setCachedGroupMetadata(sessionId, from, metadataLien);
+                                                    } catch (metadataError) {
+                                                        console.warn('[group-link-metadata-unavailable]', { sessionId, groupHash: shortLogHash(from), errorName: metadataError?.name || 'Error', error: String(metadataError?.message || metadataError).slice(0, 220), action: 'send_valid_invite_link_without_optional_group_metadata' });
+                                                    }
+                                                }
+                                                console.info('[group-link-invite-code-retrieved]', { sessionId, messageId: msgId, groupHash: shortLogHash(from), inviteCodeAvailable: true, metadataAvailable: !!metadataLien, subjectAvailable: !!metadataLien?.subject, descriptionAvailable: !!metadataLien?.desc });
                                                 let lienTextForm = '';
-                                                if (metadataLien && metadataLien.subject) lienTextForm += `*${metadataLien.subject}*\n`;
+                                                if (metadataLien?.subject) lienTextForm += `*${String(metadataLien.subject).replace(/[\r\n]+/g, ' ').trim()}*\n`;
                                                 lienTextForm += `> _${link}_`;
-                                                if (metadataLien && metadataLien.desc) lienTextForm += `\n\n${String(metadataLien.desc)}`;
+                                                if (metadataLien?.desc) lienTextForm += `\n\n${String(metadataLien.desc).trim()}`;
                                                 const lienCapTitle = t.cmd_lien.charAt(0).toUpperCase() + t.cmd_lien.slice(1);
                                                 const groupProfilePicture = await getWhatsAppGroupProfilePictureBuffer(sock, from, 2200);
                                                 const linkImage = groupProfilePicture || adamLogoBuffer;
                                                 if (Buffer.isBuffer(linkImage) && linkImage.length) await trackedSendImageCaptioned(sock, from, linkImage, lienCapTitle, lienTextForm, pushName);
-                                                else await safeSendFormatted(sock, from, lienCapTitle, lienTextForm, pushName, false, activeHostName);
+                                                else await safeSendFormatted(sock, from, lienCapTitle, lienTextForm, pushName, false, activeHostName, { preserveFormatting: true });
                                             } catch (e) {
-                                                await safeSendActionError(sock, from, t.cmd_lien, e, messageLang, pushName, m.messageTimestamp);
+                                                const rawLinkError = redactActionError(e);
+                                                console.error('[group-link-request-failed]', { sessionId, messageId: msgId, groupHash: shortLogHash(from), errorName: e?.name || 'Error', error: rawLinkError.slice(0, 500), likelyPermissionFailure: /(?:not-authorized|forbidden|permission|admin|403)/i.test(rawLinkError) });
+                                                if (/(?:not-authorized|forbidden|permission|admin|403)/i.test(rawLinkError)) await safeSendFormatted(sock, from, t.cmd_lien, t.group_invite_admin_required, pushName, false, activeHostName);
+                                                else await safeSendActionError(sock, from, t.cmd_lien, e, messageLang, pushName, m.messageTimestamp);
                                             }
                                             break;
                                         case 'tagall':
@@ -17283,17 +17735,25 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                         case 'lang':
                                             const langCode = normalizeText(args).split(/\s+/)[0] || '';
                                             if (['fr', 'en', 'es', 'ht'].includes(langCode)) {
-                                                messageLang = langCode;
-                                                userLanguageCache.set(languageCacheKey, messageLang);
-                                                userInfo.set(sender, { pseudo: sanitizeSessionDisplayName(pushName) || earlyIncomingName || 'Inconnu', number: sNum, lang: messageLang, updatedAt: Date.now() });
+                                                if (!db) throw new Error('language_preference_database_unavailable');
+                                                const languageUpdatedAt = Date.now();
                                                 await db.collection('user_preferences').updateOne(
                                                     { sessionId, sender: languageCacheKey },
-                                                    { $set: { lang: messageLang, updatedAt: Date.now(), expireAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) }, $setOnInsert: { createdAt: new Date() } },
+                                                    { $set: { lang: langCode, updatedAt: languageUpdatedAt, expireAt: new Date(languageUpdatedAt + 30 * 24 * 60 * 60 * 1000) }, $setOnInsert: { createdAt: new Date(languageUpdatedAt) } },
                                                     { upsert: true }
                                                 );
+                                                messageLang = langCode;
+                                                userLanguageCache.set(languageCacheKey, messageLang);
+                                                userInfo.set(sender, { pseudo: sanitizeSessionDisplayName(pushName) || earlyIncomingName || 'Inconnu', number: sNum, lang: messageLang, updatedAt: languageUpdatedAt });
+                                                const selectedLanguageTranslations = translations[messageLang] || translations.ht;
+                                                const selectedLanguageLabel = getLanguageLabel(messageLang, messageLang);
+                                                const languageConfirmation = selectedLanguageTranslations.lang_changed.replace('{lang}', `${messageLang.toUpperCase()} (${selectedLanguageLabel})`);
+                                                await safeSendFormatted(sock, from, selectedLanguageTranslations.lang_title, languageConfirmation, pushName, false, activeHostName);
+                                                console.info('[language-change-confirmed]', { sessionId, messageId: msgId, senderHash: shortLogHash(sender || rawFrom), language: messageLang, persisted: true, responseQuoted: true });
                                             } else if (!langCode) {
-                                                const currentLanguage = (translations[messageLang] || translations.ht).lang_current.replace('{lang}', `${messageLang.toUpperCase()} (${getLanguageLabel(messageLang, messageLang)})`);
-                                                await safeSendFormatted(sock, from, t.lang_title, currentLanguage, pushName, false, activeHostName);
+                                                const currentLanguageTranslations = translations[messageLang] || translations.ht;
+                                                const currentLanguage = currentLanguageTranslations.lang_current.replace('{lang}', `${messageLang.toUpperCase()} (${getLanguageLabel(messageLang, messageLang)})`);
+                                                await safeSendFormatted(sock, from, currentLanguageTranslations.lang_title, currentLanguage, pushName, false, activeHostName);
                                             } else {
                                                 await safeSendFormatted(sock, from, t.lang_title, t.languages_available, pushName, false, activeHostName);
                                             }
@@ -17594,6 +18054,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                     await commandExecute();
                                     if (commandOperationFailed) logCommandLifecycle('failure', { stage: 'operation', action: 'command_handler_completed_with_action_error', responseSent: !!(terminalResponseSent || responseSentForLog) });
                                     else logCommandLifecycle('success', { stage: 'operation', action: 'command_handler_completed', responseSent: !!(terminalResponseSent || responseSentForLog) });
+                                    updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: terminalResponseSent || responseSentForLog ? 'response_sent' : 'completed_without_confirmed_response', lastCommandError: commandOperationFailed ? 'command_action_failed' : null });
                                     console.info('[command-completed]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, senderName: sName, senderJid: sender, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: rawFrom, remoteJidAlt: m.key.remoteJidAlt || null, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid', command: internalCommand, durationMs: Date.now() - commandStartedAt, messageAgeMsAtCompletion: Math.abs(Date.now() - receivedTimestampMs), upsertHandlerToCompletionMs: Date.now() - messageUpsertHandlerStartedAt, action: terminalResponseSent || responseSentForLog ? 'command_completed_response_sent' : 'command_completed_without_confirmed_response', responseSent: !!(terminalResponseSent || responseSentForLog) });
                                 } catch (e) {
                                     commandOperationFailed = true;
@@ -17630,6 +18091,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                     } catch (cmdError) {
                         messageProcessingSucceeded = false;
                         messageProcessingError = cmdError?.message || String(cmdError);
+                        updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: 'message_handler_failed', lastCommandError: String(messageProcessingError || 'unknown').slice(0, 240) });
                         console.error('[message-handler]', { sessionId, upsertType, messageId: msgId, senderName: receivedDiagnostic?.senderName || String(m?.pushName || 'Inconnu').slice(0, 100), senderJid: receivedSenderJid || null, messageClassification: receivedClassification, detectedCommand: receivedParsedCommand?.internalCommand || receivedParsedCommand?.command || null, incomingChatJid: m?.key?.remoteJid || m?.key?.remoteJidAlt || null, replyTargetJid: receivedChat || m?.key?.remoteJid || null, action: 'message_handler_failed', error: messageProcessingError });
                     } finally {
                         messageProcessingCompleted = true;
@@ -18850,7 +19312,7 @@ async function main() {
             tfbotWorkerState = 'coordinator';
             await connectMongo({ coordinatorOnly: true });
             console.info('[tfbot-build-active]', { build: RUNTIME_FIX_BUILD, revision: TFBOT_CLUSTER_CODE_REVISION, releaseId: TFBOT_CODE_RELEASE_ID, baileysLidPnDecryptPatch: baileysLidPnDecryptPatchStatus, baileysGroupLidPnDecryptPatch: baileysGroupLidPnDecryptPatchStatus, baileysLidAwareGroupOutboundAddressingPatch: baileysLidAwareGroupOutboundAddressingPatchStatus, baileysSignalTransactionPatch: baileysSignalTransactionPatchStatus, baileysPerChatInboundProcessingPatch: baileysPerChatInboundProcessingPatchStatus, baileysOutgoingRetryPreflightPatch: baileysOutgoingRetryPreflightPatchStatus, baileysRetryResendDoubleEncryptionPatch: baileysRetryResendDoubleEncryptionPatchStatus, baileysOwnLidRetryAddressingPatch: baileysOwnLidRetryAddressingPatchStatus, baileysCompanionRegRefreshPatch: baileysCompanionRegRefreshPatchStatus, baileysPairingCodeProtocolPatch: baileysPairingCodeProtocolPatchStatus, host: TFBOT_CLUSTER_INSTANCE_HOST, coordinatorHost: TFBOT_COORDINATOR_HOST, coordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY, port: PORT });
-            httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
+            httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}; ${TFBOT_CODE_VERSION}; ${TFBOT_LOG_TIME_ZONE}`));
             const savedSelection = await db.collection('cluster_router').findOne({ _id: TFBOT_ROUTER_STATE_ID }).catch(() => null);
             const savedDomain = TFBOT_ROUTER_DOMAIN_BY_HOST.get(normalizeTfbotHost(savedSelection?.activeHost || ''));
             if (savedDomain && savedSelection?.activeHost) {
@@ -18881,7 +19343,7 @@ async function main() {
             await startTfbotCoordinatorMonitor();
             return;
         }
-        httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
+        httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}; ${TFBOT_CODE_VERSION}; ${TFBOT_LOG_TIME_ZONE}`));
         tfbotWorkerActive = false;
         tfbotWorkerState = 'standby';
         console.info('[tfbot-worker-standby]', { host: TFBOT_CLUSTER_INSTANCE_HOST, role: 'poll-tfbot7-for-selection', mongoConnected: false, sessionRestore: false, pollingIntervalMs: TFBOT_WORKER_COORDINATOR_POLL_MS });
@@ -18892,12 +19354,50 @@ async function main() {
     await inspectAdamLogo();
     tfbotWorkerActive = true;
     tfbotWorkerState = 'active';
-    httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
+    httpServer = app.listen(PORT, () => console.log(`[server] listening on ${PORT}; ${TFBOT_CODE_VERSION}; ${TFBOT_LOG_TIME_ZONE}`));
     try {
         await loadExistingSessions();
     } catch (error) {
         console.error('[session-restore]', error?.message || error);
     }
 }
+
+
+const tfbotHealthDiagnosticTimer = setInterval(() => {
+    try {
+        const now = Date.now();
+        const sessions = [...activeSessions.entries()].map(([sessionId, runtime]) => {
+            const lastUpsert = tfbotSessionInboundDiagnostics.get(sessionId)?.lastInboundUpsertAt || runtime?.inboundDiagnostics?.lastInboundUpsertAt || null;
+            const lastUpsertMs = lastUpsert ? new Date(lastUpsert).getTime() : 0;
+            return {
+                sessionHash: shortLogHash(sessionId),
+                status: String(runtime?.status || 'unknown'),
+                socketAuthenticated: isAuthenticatedSocketOperational(runtime, runtime?.sock),
+                socketReady: isWhatsAppSocketReady(runtime, runtime?.sock),
+                messageUpsertListeners: Number(runtime?.sock?.ev?.listenerCount?.('messages.upsert') ?? runtime?.sock?.ev?.rawListeners?.('messages.upsert')?.length ?? 0),
+                sessionDraining: workerDrainingSessionIds.has(sessionId),
+                lastUpsertAgeMs: lastUpsertMs ? Math.max(0, now - lastUpsertMs) : null,
+                lastUpsertType: tfbotSessionInboundDiagnostics.get(sessionId)?.lastInboundUpsertType || null
+            };
+        });
+        console.info('[tfbot-health-heartbeat]', {
+            codeVersion: TFBOT_CODE_VERSION,
+            revision: TFBOT_CLUSTER_CODE_REVISION,
+            releaseId: TFBOT_CODE_RELEASE_ID,
+            timeAmerica: formatTfbotAmericaTimestamp(now),
+            timeZone: TFBOT_LOG_TIME_ZONE,
+            workerState: tfbotWorkerState,
+            workerActive: tfbotWorkerActive,
+            workerStopping: tfbotWorkerStopping,
+            workerHost: TFBOT_CLUSTER_INSTANCE_HOST || TFBOT_CLUSTER_INSTANCE_URL || null,
+            sessionCount: sessions.length,
+            authenticatedSessionCount: sessions.filter(session => session.socketAuthenticated).length,
+            sessions
+        });
+    } catch (error) {
+        console.warn('[tfbot-health-heartbeat-failed]', { codeVersion: TFBOT_CODE_VERSION, error: String(error?.message || error).slice(0, 200) });
+    }
+}, 60000);
+if (typeof tfbotHealthDiagnosticTimer.unref === 'function') tfbotHealthDiagnosticTimer.unref();
 
 main().catch(error => { console.error('[startup]', error?.message || error); process.exit(1); });
