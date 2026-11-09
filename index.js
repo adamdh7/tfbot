@@ -5,17 +5,17 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'r205';
-const TFBOT_LOG_TIME_ZONE = 'America/Chicago';
-const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r205-upsert-aware-handoff-reconnect-recovery-fast-list-ephemeral-chat';
+const TFBOT_CODE_VERSION = 'r207';
+const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
+const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r207-all-chat-append-commands-spinner-retry-global-inbound';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
-function formatTfbotAmericaTimestamp(value = Date.now()) {
+function formatTfbotHaitiTimestamp(value = Date.now()) {
     const date = value instanceof Date ? value : new Date(value);
     if (!Number.isFinite(date.getTime())) return null;
-    const parts = new Intl.DateTimeFormat('en-US', { timeZone: TFBOT_LOG_TIME_ZONE, month: '2-digit', day: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h12', timeZoneName: 'short' }).formatToParts(date);
+    const parts = new Intl.DateTimeFormat('fr-HT', { timeZone: TFBOT_LOG_TIME_ZONE, day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(date);
     const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
-    return `${values.month}/${values.day}/${values.year} ${values.hour}:${values.minute}:${values.second} ${values.dayPeriod} ${values.timeZoneName}`;
+    return `${values.day}/${values.month}/${values.year} ${values.hour}:${values.minute}:${values.second} HT`;
 }
 
 function shortLogHash(value) {
@@ -83,8 +83,9 @@ const path = require('path');
 const EventEmitter = require('events');
 const { AsyncLocalStorage } = require('async_hooks');
 const TFBOT_DIAGNOSTIC_SESSION_ID = String(process.env.TFBOT_DIAGNOSTIC_SESSION_ID || '').trim();
-const TFBOT_DIAGNOSTIC_LOG_PATH = path.join(__dirname, 'logs.txt');
-const TFBOT_DIAGNOSTIC_LOG_MAX_BYTES = Math.max(1048576, Math.min(3145728, Number(process.env.TFBOT_DIAGNOSTIC_LOG_MAX_BYTES || 3145728)));
+const TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES = Math.max(524288, Math.min(3145728, Number(process.env.TFBOT_DIAGNOSTIC_LOG_MAX_BYTES || 2097152)));
+const TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES = Math.max(500, Math.min(8000, Number(process.env.TFBOT_DIAGNOSTIC_LOG_MAX_LINES || 5000)));
+const TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES = Math.max(262144, Math.min(2097152, Number(process.env.TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES || 1048576)));
 const tfbotOriginalConsole = { log: console.log.bind(console), info: console.info.bind(console), warn: console.warn.bind(console), error: console.error.bind(console), debug: console.debug.bind(console) };
 const tfbotDiagnosticSerialize = value => {
     try { return JSON.stringify(value, (key, item) => {
@@ -98,21 +99,46 @@ const tfbotDiagnosticSerialize = value => {
     catch (error) { return '[diagnostic-redaction-failed]'; }
 };
 const tfbotDiagnosticQueue = [];
+const tfbotDiagnosticRecentLines = [];
+let tfbotDiagnosticRecentBytes = 0;
+let tfbotDiagnosticQueuedBytes = 0;
+let tfbotDiagnosticTotalLines = 0;
+let tfbotDiagnosticEvictedLines = 0;
 let tfbotDiagnosticWriterRunning = false;
 let tfbotDiagnosticDroppedEntries = 0;
-let tfbotDiagnosticSanitizeReady = Promise.resolve();
 let tfbotDiagnosticTargetCacheAt = 0;
 let tfbotDiagnosticTargetCache = null;
+function appendTfbotDiagnosticMemoryLine(line) {
+    const value = String(line || '');
+    if (!value) return;
+    const bytes = Buffer.byteLength(value, 'utf8');
+    tfbotDiagnosticRecentLines.push(value);
+    tfbotDiagnosticRecentBytes += bytes;
+    tfbotDiagnosticTotalLines++;
+    while (tfbotDiagnosticRecentLines.length > TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES || tfbotDiagnosticRecentBytes > TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES) {
+        const removed = tfbotDiagnosticRecentLines.shift();
+        if (!removed) break;
+        tfbotDiagnosticRecentBytes = Math.max(0, tfbotDiagnosticRecentBytes - Buffer.byteLength(removed, 'utf8'));
+        tfbotDiagnosticEvictedLines++;
+    }
+}
 function enqueueTfbotDiagnosticRecord(record) {
     try {
         const sourceDate = record?.date || new Date().toISOString();
-        const enrichedRecord = { ...record, date: sourceDate, dateAmerica: formatTfbotAmericaTimestamp(sourceDate), timeZone: TFBOT_LOG_TIME_ZONE, codeVersion: TFBOT_CODE_VERSION };
-        if (tfbotDiagnosticQueue.length >= 4000) {
-            const removeCount = tfbotDiagnosticQueue.length - 3000;
-            tfbotDiagnosticQueue.splice(0, removeCount);
-            tfbotDiagnosticDroppedEntries += removeCount;
+        const enrichedRecord = { ...record, date: sourceDate, dateHaiti: formatTfbotHaitiTimestamp(sourceDate), timeZone: TFBOT_LOG_TIME_ZONE, codeVersion: TFBOT_CODE_VERSION };
+        const line = `${JSON.stringify(enrichedRecord)}\n`;
+        const lineBytes = Buffer.byteLength(line, 'utf8');
+        if (lineBytes > TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES) {
+            tfbotDiagnosticDroppedEntries++;
+            return;
         }
-        tfbotDiagnosticQueue.push(`${JSON.stringify(enrichedRecord)}\n`);
+        while (tfbotDiagnosticQueue.length && (tfbotDiagnosticQueue.length >= 1200 || tfbotDiagnosticQueuedBytes + lineBytes > TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES)) {
+            const removed = tfbotDiagnosticQueue.shift();
+            tfbotDiagnosticQueuedBytes = Math.max(0, tfbotDiagnosticQueuedBytes - Buffer.byteLength(removed || '', 'utf8'));
+            tfbotDiagnosticDroppedEntries++;
+        }
+        tfbotDiagnosticQueue.push(line);
+        tfbotDiagnosticQueuedBytes += lineBytes;
         if (!tfbotDiagnosticWriterRunning) {
             tfbotDiagnosticWriterRunning = true;
             setImmediate(flushTfbotDiagnosticQueue);
@@ -121,27 +147,16 @@ function enqueueTfbotDiagnosticRecord(record) {
 }
 async function flushTfbotDiagnosticQueue() {
     try {
-        await tfbotDiagnosticSanitizeReady;
         while (tfbotDiagnosticQueue.length) {
             const batch = tfbotDiagnosticQueue.splice(0, 48);
-            let content = batch.join('');
+            tfbotDiagnosticQueuedBytes = Math.max(0, tfbotDiagnosticQueuedBytes - batch.reduce((total, line) => total + Buffer.byteLength(line, 'utf8'), 0));
             if (tfbotDiagnosticDroppedEntries) {
                 const dropped = tfbotDiagnosticDroppedEntries;
                 tfbotDiagnosticDroppedEntries = 0;
                 const overflowDate = new Date();
-                content = `${JSON.stringify({ name: 'Bot (tfbot)', date: overflowDate.toISOString(), dateAmerica: formatTfbotAmericaTimestamp(overflowDate), timeZone: TFBOT_LOG_TIME_ZONE, codeVersion: TFBOT_CODE_VERSION, level: 'WARN', event: 'diagnostic-log-queue-overflow', content: `${dropped} entrée(s) de diagnostic ont été abandonnées pour protéger la latence du bot.` })}\n${content}`;
+                appendTfbotDiagnosticMemoryLine(`${JSON.stringify({ name: 'Bot (tfbot)', date: overflowDate.toISOString(), dateHaiti: formatTfbotHaitiTimestamp(overflowDate), timeZone: TFBOT_LOG_TIME_ZONE, codeVersion: TFBOT_CODE_VERSION, level: 'WARN', event: 'diagnostic-log-queue-overflow', content: `${dropped} entrée(s) de diagnostic ont été abandonnées pour protéger la mémoire et la latence du bot.` })}\n`);
             }
-            try {
-                const currentStat = await fs.promises.stat(TFBOT_DIAGNOSTIC_LOG_PATH).catch(() => null);
-                const contentBytes = Buffer.byteLength(content, 'utf8');
-                if (currentStat && currentStat.size + contentBytes > TFBOT_DIAGNOSTIC_LOG_MAX_BYTES) {
-                    const current = await fs.promises.readFile(TFBOT_DIAGNOSTIC_LOG_PATH).catch(() => Buffer.alloc(0));
-                    const keepBytes = Math.max(0, TFBOT_DIAGNOSTIC_LOG_MAX_BYTES - contentBytes - 65536);
-                    const tail = current.subarray(Math.max(0, current.length - keepBytes));
-                    await fs.promises.writeFile(TFBOT_DIAGNOSTIC_LOG_PATH, tail);
-                }
-                await fs.promises.appendFile(TFBOT_DIAGNOSTIC_LOG_PATH, content, 'utf8');
-            } catch (writeError) {}
+            for (const line of batch) appendTfbotDiagnosticMemoryLine(line);
         }
     } finally {
         tfbotDiagnosticWriterRunning = false;
@@ -206,25 +221,6 @@ function sanitizeTfbotDiagnosticLog(value, sessionId) {
     output = output.replace(/\b\d{8,15}\b/g, number => number === diagnosticPhone ? `[phone:${number.slice(-2).padStart(number.length, '*')}]` : `[number:${shortLogHash(number)}]`);
     return output.slice(0, 12000);
 }
-async function sanitizeExistingTfbotPublicLogFile() {
-    try {
-        const existing = await fs.promises.readFile(TFBOT_DIAGNOSTIC_LOG_PATH, 'utf8');
-        const sanitized = existing.split('\n').map(line => {
-            if (!line) return line;
-            try {
-                const record = JSON.parse(line);
-                if (record.event !== undefined) record.event = sanitizeTfbotDiagnosticLog(record.event, '');
-                if (record.content !== undefined) record.content = sanitizeTfbotDiagnosticLog(record.content, '');
-                if (record.name !== undefined) record.name = String(record.name).slice(0, 80);
-                return JSON.stringify(record);
-            } catch (error) {
-                return sanitizeTfbotDiagnosticLog(line, '');
-            }
-        }).join('\n');
-        if (sanitized !== existing) await fs.promises.writeFile(TFBOT_DIAGNOSTIC_LOG_PATH, sanitized, 'utf8');
-    } catch (error) {}
-}
-tfbotDiagnosticSanitizeReady = sanitizeExistingTfbotPublicLogFile();
 for (const level of Object.keys(tfbotOriginalConsole)) {
     console[level] = (...args) => {
         try {
@@ -1557,7 +1553,7 @@ const baileysOwnLidRetryAddressingPatchStatus = applyBaileysOwnLidRetryAddressin
 const baileysMessageRetryManagerDeviceJidPatchStatus = { applied: false, notApplicable: true, reason: 'Baileys_6_7_23_uses_getMessage_and_socket_retry_cache_not_MessageRetryManager' };
 const baileysCompanionRegRefreshPatchStatus = applyBaileysCompanionRegRefreshPatch();
 const baileysPairingCodeProtocolPatchStatus = applyBaileysPairingCodeProtocolPatch();
-console.info('[tfbot-local-diagnostics-ready]', { sessionId: TFBOT_DIAGNOSTIC_SESSION_ID || null, selector: TFBOT_DIAGNOSTIC_SESSION_ID ? 'configured_session' : 'most_recent_active_session', file: 'logs.txt', storage: 'local_filesystem_only', publicRead: true, access: 'public-redacted-log', writer: 'asynchronous' });
+console.info('[tfbot-local-diagnostics-ready]', { sessionId: TFBOT_DIAGNOSTIC_SESSION_ID || null, selector: TFBOT_DIAGNOSTIC_SESSION_ID ? 'configured_session' : 'most_recent_active_session', endpoint: '/logs.txt', storage: 'bounded_volatile_memory_only', persistentLocalWrites: false, publicRead: true, access: 'public-redacted-log', writer: 'asynchronous_memory_queue', timeZone: TFBOT_LOG_TIME_ZONE });
 console.info('[baileys-lid-pn-decrypt-retry-patch]', baileysLidPnDecryptPatchStatus);
 console.info('[baileys-group-lid-pn-decrypt-retry-patch]', baileysGroupLidPnDecryptPatchStatus);
 console.info('[baileys-self-chat-placeholder-resend-patch]', baileysSelfChatPlaceholderResendPatchStatus);
@@ -1598,7 +1594,7 @@ function getTfbotInstalledPackageVersion(packageName) {
     return null;
 }
 const TFBOT_BAILEYS_VERSION = getTfbotInstalledPackageVersion('@whiskeysockets/baileys');
-enqueueTfbotDiagnosticRecord({ name: 'Bot (tfbot)', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ codeVersion: TFBOT_CODE_VERSION, releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION, timeZone: TFBOT_LOG_TIME_ZONE, baileysVersion: TFBOT_BAILEYS_VERSION, signalPeerAutoHeal: { enabled: true, threshold: SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD, windowMs: SIGNAL_RECOVERY_WINDOW_MS, cooldownMs: SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS, failureKinds: [...SIGNAL_PEER_AUTO_HEAL_FAILURE_KINDS], scope: 'one_peer_signal_session_records_and_pn_lid_aliases_only', deleteMethod: 'signalRepository.deleteSession_or_authState.keys.set_session_category_fallback', baileysAuthCredentialsDeleted: false, accountLogout: false, groupSenderKeysDeleted: false, allPeersDeleted: false } }) });
+enqueueTfbotDiagnosticRecord({ name: 'Bot (tfbot)', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ codeVersion: TFBOT_CODE_VERSION, releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION, timeZone: TFBOT_LOG_TIME_ZONE, baileysVersion: TFBOT_BAILEYS_VERSION, signalPeerAutoHeal: { enabled: true, threshold: SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD, windowMs: SIGNAL_RECOVERY_WINDOW_MS, cooldownMs: SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS, failureKinds: [...SIGNAL_PEER_AUTO_HEAL_FAILURE_KINDS], scope: 'one_peer_signal_session_records_and_pn_lid_aliases_only', deleteMethod: 'signalRepository.deleteSession_or_authState.keys.set_session_category_fallback', baileysAuthCredentialsDeleted: false, accountLogout: false, groupSenderKeysDeleted: false, allPeersDeleted: false }, diagnosticLogStorage: 'bounded_volatile_memory_only', persistedLocalDisk: false, logTimeZone: TFBOT_LOG_TIME_ZONE, activeWorkerRouting: 'retain_current_healthy_worker_until_repeated_health_failure', appendCommandPolicy: 'authenticated_from_me_explicit_command_within_70_seconds_in_private_or_group_chat_and_not_known_outgoing_echo' }) });
 enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, baileysVersion: TFBOT_BAILEYS_VERSION, perChatInboundProcessing: baileysPerChatInboundProcessingPatchStatus, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, retryBaseKeyCollision: baileysRetryBaseKeyCollisionPatchStatus, groupLidOutboundAddressing: baileysLidAwareGroupOutboundAddressingPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, groupLidPnDecrypt: baileysGroupLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus, pairingCodeProtocol: baileysPairingCodeProtocolPatchStatus }) });
 const { MongoClient } = require('mongodb');
 const { Writable } = require('stream');
@@ -2003,7 +1999,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-09-r203-link-replies-and-command-confirmations';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-09-r207-all-chat-append-commands-spinner-retry-global-inbound';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -2113,7 +2109,7 @@ let tfbotCoordinatorPublicRefreshAt = 0;
 let tfbotCoordinatorResolveProbeAt = 0;
 let tfbotRouterUnavailableRetryAt = 0;
 let tfbotCoordinatorStorageReady = false;
-const BOT_TIME_ZONE = process.env.BOT_TIME_ZONE || 'America/Santo_Domingo';
+const BOT_TIME_ZONE = process.env.BOT_TIME_ZONE || 'America/Port-au-Prince';
 const AI_MAX_INPUT_CHARS = Math.max(1000, Number(process.env.AI_MAX_INPUT_CHARS || 12000));
 const SEARCH_QUERY_MAX_CHARS = Math.max(200, Number(process.env.SEARCH_QUERY_MAX_CHARS || 1200));
 const TFSERVER_AI_URL = String(process.env.TFSERVER_AI_URL || 'https://tfserver-ai.onrender.com').trim().replace(/\/+$/, '');
@@ -8769,77 +8765,81 @@ app.get('/logs.txt', (req, res) => {
     res.setHeader('X-TFBOT-Revision', TFBOT_CLUSTER_CODE_REVISION);
     res.setHeader('X-TFBOT-Release', TFBOT_CODE_RELEASE_ID);
     res.setHeader('X-TFBOT-Time-Zone', TFBOT_LOG_TIME_ZONE);
+    res.setHeader('X-TFBOT-Log-Storage', 'bounded-volatile-memory');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.type('text/plain');
-    fs.readFile(TFBOT_DIAGNOSTIC_LOG_PATH, 'utf8', (error, content) => {
-        if (error && error.code !== 'ENOENT') return res.status(500).send('');
-        const allRawLines = String(content || '').split('\n').filter(Boolean);
-        const showAllLines = String(req.query?.all || '') === '1' || String(req.query?.all || '').toLowerCase() === 'true';
-        const maxPublicLines = Math.max(300, Math.min(5000, Number(req.query?.limit || 1600)));
-        const rawLines = showAllLines ? allRawLines : allRawLines.slice(-maxPublicLines);
-        let latestStoredDate = null;
-        const safeLines = rawLines.map(line => {
-            try {
-                const record = JSON.parse(line);
-                if (record.date) {
-                    const parsedDate = new Date(record.date);
-                    if (Number.isFinite(parsedDate.getTime()) && (!latestStoredDate || parsedDate > latestStoredDate)) latestStoredDate = parsedDate;
-                    record.dateAmerica = formatTfbotAmericaTimestamp(record.date);
-                    record.timeZone = TFBOT_LOG_TIME_ZONE;
-                }
-                if (record.event !== undefined) record.event = sanitizeTfbotDiagnosticLog(record.event, '');
-                if (record.content !== undefined) record.content = sanitizeTfbotDiagnosticLog(record.content, '');
-                if (record.name !== undefined) record.name = String(record.name).slice(0, 80);
-                return JSON.stringify(record);
-            } catch (parseError) {
-                return sanitizeTfbotDiagnosticLog(line, '');
+    const pendingLines = tfbotDiagnosticQueue.slice();
+    const allRawLines = [...tfbotDiagnosticRecentLines, ...pendingLines].filter(Boolean);
+    const showAllLines = String(req.query?.all || '') === '1' || String(req.query?.all || '').toLowerCase() === 'true';
+    const maxPublicLines = Math.max(100, Math.min(TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES, Number(req.query?.limit || 1600)));
+    const rawLines = showAllLines ? allRawLines : allRawLines.slice(-maxPublicLines);
+    let latestStoredDate = null;
+    const safeLines = rawLines.map(line => {
+        try {
+            const record = JSON.parse(line);
+            if (record.date) {
+                const parsedDate = new Date(record.date);
+                if (Number.isFinite(parsedDate.getTime()) && (!latestStoredDate || parsedDate > latestStoredDate)) latestStoredDate = parsedDate;
+                record.dateHaiti = formatTfbotHaitiTimestamp(record.date);
+                record.timeZone = TFBOT_LOG_TIME_ZONE;
             }
-        });
-        const now = new Date();
-        const headerRecord = {
-            name: 'TFBot',
-            date: now.toISOString(),
-            dateAmerica: formatTfbotAmericaTimestamp(now),
-            timeZone: TFBOT_LOG_TIME_ZONE,
+            if (record.event !== undefined) record.event = sanitizeTfbotDiagnosticLog(record.event, '');
+            if (record.content !== undefined) record.content = sanitizeTfbotDiagnosticLog(record.content, '');
+            if (record.name !== undefined) record.name = String(record.name).slice(0, 80);
+            return JSON.stringify(record);
+        } catch (parseError) {
+            return sanitizeTfbotDiagnosticLog(line, '');
+        }
+    });
+    const now = new Date();
+    const headerRecord = {
+        name: 'TFBot',
+        date: now.toISOString(),
+        dateHaiti: formatTfbotHaitiTimestamp(now),
+        timeZone: TFBOT_LOG_TIME_ZONE,
+        codeVersion: TFBOT_CODE_VERSION,
+        releaseId: TFBOT_CODE_RELEASE_ID,
+        revision: TFBOT_CLUSTER_CODE_REVISION,
+        level: 'INFO',
+        event: 'tfbot-log-header',
+        content: JSON.stringify({
             codeVersion: TFBOT_CODE_VERSION,
             releaseId: TFBOT_CODE_RELEASE_ID,
             revision: TFBOT_CLUSTER_CODE_REVISION,
-            level: 'INFO',
-            event: 'tfbot-log-header',
-            content: JSON.stringify({
-                codeVersion: TFBOT_CODE_VERSION,
-                releaseId: TFBOT_CODE_RELEASE_ID,
-                revision: TFBOT_CLUSTER_CODE_REVISION,
-                timeZone: TFBOT_LOG_TIME_ZONE,
-                serverTimeAmerica: formatTfbotAmericaTimestamp(now),
-                workerState: tfbotWorkerState,
-                workerActive: tfbotWorkerActive,
-                workerStopping: tfbotWorkerStopping,
-                workerHost: TFBOT_CLUSTER_INSTANCE_HOST || TFBOT_CLUSTER_INSTANCE_URL || null,
-                activeSessionCount: activeSessions.size,
-                authenticatedSessionCount: [...activeSessions.values()].filter(runtime => isAuthenticatedSocketOperational(runtime, runtime?.sock)).length,
-                inboundHandlersInFlight: [...sessionInboundUpsertActivity.values()].reduce((total, value) => total + Number(value?.active || 0), 0),
-                inboundCommandQueuesActive: [...inboundCommandQueues.values()].reduce((total, value) => total + Number(value?.active || 0), 0),
-                inboundCommandQueuesPending: [...inboundCommandQueues.values()].reduce((total, value) => total + Number(value?.pending || 0), 0),
-                reconnectTimers: reconnectTimers.size,
-                sessionLockRetryTimers: sessionLockRetryTimers.size,
-                sessionStartsInFlight: sessionStartPromises.size,
-                latestStoredLogDate: latestStoredDate ? latestStoredDate.toISOString() : null,
-                latestStoredLogDateAmerica: latestStoredDate ? formatTfbotAmericaTimestamp(latestStoredDate) : null,
-                latestStoredLogAgeMs: latestStoredDate ? Math.max(0, now.getTime() - latestStoredDate.getTime()) : null,
-                totalStoredLines: allRawLines.length,
-                returnedLines: safeLines.length,
-                truncated: safeLines.length < allRawLines.length,
-                fullLogQuery: showAllLines
-            })
-        };
-        const safeContent = [JSON.stringify(headerRecord), ...safeLines].join('\n');
-        return res.status(200).send(safeContent);
-    });
+            timeZone: TFBOT_LOG_TIME_ZONE,
+            serverTimeHaiti: formatTfbotHaitiTimestamp(now),
+            workerState: tfbotWorkerState,
+            workerActive: tfbotWorkerActive,
+            workerStopping: tfbotWorkerStopping,
+            workerHost: TFBOT_CLUSTER_INSTANCE_HOST || TFBOT_CLUSTER_INSTANCE_URL || null,
+            activeSessionCount: activeSessions.size,
+            authenticatedSessionCount: [...activeSessions.values()].filter(runtime => isAuthenticatedSocketOperational(runtime, runtime?.sock)).length,
+            inboundHandlersInFlight: [...sessionInboundUpsertActivity.values()].reduce((total, value) => total + Number(value?.active || 0), 0),
+            inboundCommandQueuesActive: [...inboundCommandQueues.values()].reduce((total, value) => total + Number(value?.active || 0), 0),
+            inboundCommandQueuesPending: [...inboundCommandQueues.values()].reduce((total, value) => total + Number(value?.pending || 0), 0),
+            reconnectTimers: reconnectTimers.size,
+            sessionLockRetryTimers: sessionLockRetryTimers.size,
+            sessionStartsInFlight: sessionStartPromises.size,
+            latestStoredLogDate: latestStoredDate ? latestStoredDate.toISOString() : null,
+            latestStoredLogDateHaiti: latestStoredDate ? formatTfbotHaitiTimestamp(latestStoredDate) : null,
+            latestStoredLogAgeMs: latestStoredDate ? Math.max(0, now.getTime() - latestStoredDate.getTime()) : null,
+            totalLinesSinceProcessStart: tfbotDiagnosticTotalLines + pendingLines.length,
+            returnedLines: safeLines.length,
+            evictedLines: tfbotDiagnosticEvictedLines,
+            queueDroppedEntries: tfbotDiagnosticDroppedEntries,
+            memoryBytes: tfbotDiagnosticRecentBytes + tfbotDiagnosticQueuedBytes,
+            memoryMaxBytes: TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES + TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES,
+            truncated: tfbotDiagnosticEvictedLines > 0 || safeLines.length < allRawLines.length,
+            storageMode: 'bounded_volatile_memory_only',
+            persistedLocalDisk: false,
+            fullLogQuery: showAllLines
+        })
+    };
+    return res.status(200).send([JSON.stringify(headerRecord), ...safeLines].join('\n'));
 });
 function getAccessDeniedMessage(req) {
     const header = String(req.get('Accept-Language') || '').toLowerCase();
@@ -9327,9 +9327,16 @@ async function refreshTfbotActiveDomain(force = false) {
             const checked = await Promise.all(TFBOT_ROUTER_SERVING_DOMAINS.map(async domain => ({ domain, health: await probeTfbotServingDomain(domain), preparation: null })));
             const activeCheckedItem = checked.find(item => item.domain.host === previousHost) || null;
             const activeDomainHealth = activeCheckedItem?.health || null;
+            const activeWorkerOperational = !!(activeDomainHealth?.ok === true
+                && activeDomainHealth.suspended !== true
+                && activeDomainHealth.workerActive === true
+                && activeDomainHealth.workerState === 'active'
+                && activeDomainHealth.databasePing === true
+                && (!activeDomainHealth.activeHost || activeDomainHealth.activeHost === previousHost)
+                && activeDomainHealth.releaseCompatible === true);
             let activeFailureCount = 0;
             if (previousIndex >= 0 && previousSelection?.generation) {
-                if (activeDomainHealth?.ok === true && !activeDomainHealth.suspended) {
+                if (activeWorkerOperational) {
                     tfbotCoordinatorActiveProbeFailures.delete(previousHost);
                 } else {
                     const previousFailure = tfbotCoordinatorActiveProbeFailures.get(previousHost) || { count: 0, firstFailureAt: Date.now() };
@@ -9339,8 +9346,27 @@ async function refreshTfbotActiveDomain(force = false) {
                     activeFailureCount = previousFailure.count;
                 }
             }
-            let selectedItem = null;
+            let selectedItem = activeWorkerOperational ? { domain: activeCheckedItem.domain, health: activeDomainHealth, alreadyOperational: true, retainedActiveHost: true } : null;
+            if (activeWorkerOperational) console.info('[tfbot-router-current-worker-retained]', { host: previousHost, selectionGeneration: previousSelection.generation || null, workerGeneration: activeDomainHealth.generation || null, generationChangedDuringRollingDeploy: !!(previousSelection.generation && activeDomainHealth.generation && String(previousSelection.generation) !== String(activeDomainHealth.generation)), activeSessionCount: activeDomainHealth.activeSessionCount, reason: 'current_worker_health_http_active_state_database_ping_and_release_compatibility_confirmed', failbackSuppressed: true });
+            if (!selectedItem && previousIndex >= 0 && previousSelection?.generation && activeFailureCount > 0 && activeFailureCount < TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD) {
+                const heldSelection = {
+                    ...previousSelection,
+                    checkedAt: new Date(),
+                    healthy: true,
+                    workerActive: previousSelection.workerActive !== false,
+                    workerState: 'active_probe_retry_pending',
+                    source: 'tfbot7-current-worker-held-after-single-probe-failure',
+                    activeProbeFailureCount: activeFailureCount
+                };
+                tfbotCoordinatorSelectionCache = heldSelection;
+                tfbotActiveDomainCache = heldSelection;
+                tfbotCoordinatorSelectionAt = Date.now();
+                tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
+                console.warn('[tfbot-router-current-worker-held]', { activeHost: previousHost, consecutiveProbeFailures: activeFailureCount, requiredFailuresBeforeFallback: TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD, checkedHosts: checked.map(item => item.domain.host), action: 'do_not_switch_on_a_single_probe_failure_or_priority_order_difference' });
+                return heldSelection;
+            }
             for (const checkedItem of checked) {
+                if (selectedItem) break;
                 const domain = checkedItem.domain;
                 const domainHealth = checkedItem.health;
                 const domainIndex = TFBOT_ROUTER_SERVING_DOMAINS.findIndex(item => item.host === domain.host);
@@ -9374,29 +9400,6 @@ async function refreshTfbotActiveDomain(force = false) {
                 }
                 selectedItem = { domain, health: domainHealth, alreadyOperational };
                 break;
-            }
-            if (!selectedItem && previousIndex >= 0 && previousSelection?.generation && activeFailureCount > 0 && activeFailureCount < TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD) {
-                const heldSelection = {
-                    ...previousSelection,
-                    checkedAt: new Date(),
-                    healthy: true,
-                    workerActive: activeDomainHealth?.workerActive === true,
-                    workerState: activeDomainHealth?.workerState || 'probe_retry_pending',
-                    source: 'tfbot7-active-host-held-after-infrastructure-probe-failure',
-                    activeProbeFailureCount: activeFailureCount
-                };
-                tfbotCoordinatorSelectionCache = heldSelection;
-                tfbotActiveDomainCache = heldSelection;
-                tfbotCoordinatorSelectionAt = Date.now();
-                tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
-                console.warn('[tfbot-router-active-host-failure-held]', {
-                    activeHost: previousHost,
-                    consecutiveProbeFailures: activeFailureCount,
-                    requiredFailuresBeforeFallback: TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD,
-                    checkedHosts: checked.map(item => item.domain.host),
-                    action: 'keep_current_host_after_first_infrastructure_failure_and_recheck_all_priority_hosts'
-                });
-                return heldSelection;
             }
             if (!selectedItem) {
                 const checkedAt = new Date();
@@ -11723,11 +11726,11 @@ function getTfbotSessionDiagnosticFields(sessionId, localSession, ownerDoc = {})
         SessionDraining: localRuntime ? workerDrainingSessionIds.has(String(sessionId)) : typeof ownerDoc.lastSessionDraining === 'boolean' ? ownerDoc.lastSessionDraining : null,
         MessageUpsertListeners: listenerCount || null,
         LastUpsertAt: lastUpsertAt ? new Date(lastUpsertAt).toISOString() : null,
-        LastUpsertAtAmerica: lastUpsertAt ? formatTfbotAmericaTimestamp(lastUpsertAt) : null,
+        LastUpsertAtHaiti: lastUpsertAt ? formatTfbotHaitiTimestamp(lastUpsertAt) : null,
         LastUpsertType: cached.lastInboundUpsertType || ownerDoc.lastInboundUpsertType || null,
         LastUpsertCount: Number(cached.lastInboundUpsertCount ?? ownerDoc.lastInboundUpsertCount ?? 0),
         LastCommandAt: lastCommandAt ? new Date(lastCommandAt).toISOString() : null,
-        LastCommandAtAmerica: lastCommandAt ? formatTfbotAmericaTimestamp(lastCommandAt) : null,
+        LastCommandAtHaiti: lastCommandAt ? formatTfbotHaitiTimestamp(lastCommandAt) : null,
         LastCommand: cached.lastCommandName || ownerDoc.lastCommandName || null,
         LastCommandOutcome: cached.lastCommandOutcome || ownerDoc.lastCommandOutcome || null,
         LastCommandError: cached.lastCommandError || ownerDoc.lastCommandError || null,
@@ -12115,7 +12118,7 @@ for (const localSession of activeSessions.values()) {
 
 let sessionListSnapshotCacheInvalidationAt = 0;
 const SESSION_LIST_SNAPSHOT_CACHE_TTL_MS = Math.max(500, Math.min(5000, Number(process.env.SESSION_LIST_SNAPSHOT_CACHE_TTL_MS || 1800)));
-const SESSION_LIST_DATABASE_WAIT_MS = Math.max(500, Math.min(5000, Number(process.env.SESSION_LIST_DATABASE_WAIT_MS || 1800)));
+const SESSION_LIST_DATABASE_WAIT_MS = Math.max(250, Math.min(2500, Number(process.env.SESSION_LIST_DATABASE_WAIT_MS || 900)));
 function invalidateSessionListSnapshotCache() {
     sessionListSnapshotCacheInvalidationAt = Date.now();
     sessionListSnapshotCacheAt = 0;
@@ -12190,7 +12193,7 @@ async function buildSessionListSnapshot() {
 }
 
 app.get('/list', (req, res) => {
-    res.set('Referrer-Policy', 'no-referrer').set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').type('html').send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;min-height:100%;background:#000;color:#fff;overscroll-behavior:none;overscroll-behavior-y:none;touch-action:pan-y}body{width:100%;height:100dvh;min-height:100svh;overflow:hidden;overscroll-behavior:none}#loader{position:fixed;inset:0;display:grid;place-items:center;background:#000}#loader svg{width:52px;height:52px;animation:tfbot-spin .85s linear infinite}#loader circle{fill:none;stroke:#fff;stroke-width:4;stroke-linecap:round;stroke-dasharray:92 160}#output{display:block;width:100%;height:100dvh;min-height:100svh;margin:0;padding:calc(env(safe-area-inset-top) + 12px) calc(env(safe-area-inset-right) + 12px) calc(env(safe-area-inset-bottom) + 12px) calc(env(safe-area-inset-left) + 12px);overflow:auto;overscroll-behavior:none;overscroll-behavior-y:none;overscroll-behavior-x:none;-webkit-overflow-scrolling:touch;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:clamp(12px,2.9vw,15px)/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}#output[hidden],#loader[hidden]{display:none}@media (hover:none) and (pointer:coarse){#output{scrollbar-width:none;-ms-overflow-style:none}#output::-webkit-scrollbar{display:none;width:0;height:0}}@keyframes tfbot-spin{to{transform:rotate(360deg)}}</style></head><body><div id="loader" aria-hidden="true"><svg viewBox="0 0 48 48" role="presentation"><circle cx="24" cy="24" r="19"></circle></svg></div><pre id="output" hidden></pre><script>if(location.search)history.replaceState(null,'',location.pathname);const loader=document.getElementById('loader');const output=document.getElementById('output');let hasSnapshot=false;let fallbackRunning=false;let lastFallbackAt=0;const render=data=>{output.textContent=JSON.stringify(data,null,2);hasSnapshot=true;loader.hidden=true;output.hidden=false;};const fallback=async(force=false)=>{const now=Date.now();if(fallbackRunning||!force&&now-lastFallbackAt<3500)return;fallbackRunning=true;lastFallbackAt=now;try{const response=await fetch('/list/snapshot.json?ts='+now,{cache:'no-store',headers:{'Accept':'application/json'}});if(!response.ok)throw new Error('snapshot_http_'+response.status);render(await response.json());}catch(error){if(!hasSnapshot){output.textContent='Liste temporairement indisponible. Nouvelle tentative automatique…';loader.hidden=true;output.hidden=false;}}finally{fallbackRunning=false;}};const stream=new EventSource('/list/events');stream.addEventListener('snapshot',event=>{try{render(JSON.parse(event.data));}catch(error){void fallback(true);}});stream.onerror=()=>{if(stream.readyState!==1)void fallback();};setTimeout(()=>{if(!hasSnapshot)void fallback(true);},1000);setInterval(()=>{if(stream.readyState!==1)void fallback();},12000);</script></body></html>`);
+    res.set('Referrer-Policy', 'no-referrer').set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').type('html').send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;min-height:100%;background:#000;color:#fff;overscroll-behavior:none;overscroll-behavior-y:none;touch-action:pan-y}body{width:100%;height:100dvh;min-height:100svh;overflow:hidden;overscroll-behavior:none}#loader{position:fixed;inset:0;display:grid;place-items:center;background:#000}#loader svg{width:52px;height:52px;animation:tfbot-spin .85s linear infinite}#loader circle{fill:none;stroke:#fff;stroke-width:4;stroke-linecap:round;stroke-dasharray:92 160}#output{display:block;width:100%;height:100dvh;min-height:100svh;margin:0;padding:calc(env(safe-area-inset-top) + 12px) calc(env(safe-area-inset-right) + 12px) calc(env(safe-area-inset-bottom) + 12px) calc(env(safe-area-inset-left) + 12px);overflow:auto;overscroll-behavior:none;overscroll-behavior-y:none;overscroll-behavior-x:none;-webkit-overflow-scrolling:touch;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:clamp(12px,2.9vw,15px)/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}#output[hidden],#loader[hidden]{display:none}@media (hover:none) and (pointer:coarse){#output{scrollbar-width:none;-ms-overflow-style:none}#output::-webkit-scrollbar{display:none;width:0;height:0}}@keyframes tfbot-spin{to{transform:rotate(360deg)}}</style></head><body><div id="loader" aria-hidden="true"><svg viewBox="0 0 48 48" role="presentation"><circle cx="24" cy="24" r="19"></circle></svg></div><pre id="output" hidden></pre><script>if(location.search)history.replaceState(null,'',location.pathname);const loader=document.getElementById('loader');const output=document.getElementById('output');let hasSnapshot=false;let fallbackRunning=false;let lastFallbackAt=0;const render=data=>{output.textContent=JSON.stringify(data,null,2);hasSnapshot=true;loader.hidden=true;output.hidden=false;};const fallback=async(force=false)=>{const now=Date.now();if(fallbackRunning||!force&&now-lastFallbackAt<2500)return;fallbackRunning=true;lastFallbackAt=now;const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),7000);try{const response=await fetch('/list/snapshot.json?ts='+now,{cache:'no-store',headers:{'Accept':'application/json'},signal:controller.signal});if(!response.ok)throw new Error('snapshot_http_'+response.status);const data=await response.json();if(!Array.isArray(data))throw new Error('snapshot_invalid');render(data);}catch(error){if(!hasSnapshot){loader.hidden=false;output.hidden=true;}}finally{clearTimeout(timeout);fallbackRunning=false;}};const stream=new EventSource('/list/events');stream.addEventListener('snapshot',event=>{try{const data=JSON.parse(event.data);if(!Array.isArray(data))throw new Error('snapshot_invalid');render(data);}catch(error){void fallback(true);}});stream.onerror=()=>{void fallback();};setTimeout(()=>{if(!hasSnapshot)void fallback(true);},500);setInterval(()=>{if(!hasSnapshot||stream.readyState!==1)void fallback();},5000);</script></body></html>`);
 });
 
 const sessionListStreamClients = new Set();
@@ -12228,6 +12231,9 @@ function sanitizePublicSessionListSnapshot(sessions) {
         }
         output.RestoreError = output.RestoreError ? sanitizeTfbotDiagnosticLog(output.RestoreError, sessionId) : null;
         output.DisconnectReason = output.DisconnectReason ? sanitizeTfbotDiagnosticLog(output.DisconnectReason, sessionId) : null;
+        output.OwnerLeaseUntilHaiti = output.OwnerLeaseUntil ? formatTfbotHaitiTimestamp(output.OwnerLeaseUntil) : null;
+        output.NextRetryAtHaiti = output.NextRetryAt ? formatTfbotHaitiTimestamp(output.NextRetryAt) : null;
+        output.WhatsAppStateAtHaiti = output.WhatsAppStateAt ? formatTfbotHaitiTimestamp(output.WhatsAppStateAt) : null;
         return output;
     });
 }
@@ -12294,15 +12300,22 @@ async function ensureSessionListChangeStream() {
     }
 }
 
-app.get('/list/snapshot.json', async (req, res) => {
-    res.set({ 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', 'X-Accel-Buffering': 'no', 'X-TFBOT-Code-Version': TFBOT_CODE_VERSION, 'X-TFBOT-Revision': TFBOT_CLUSTER_CODE_REVISION });
+app.get('/list/snapshot.json', (req, res) => {
+    res.set({ 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', 'X-Accel-Buffering': 'no', 'X-TFBOT-Code-Version': TFBOT_CODE_VERSION, 'X-TFBOT-Revision': TFBOT_CLUSTER_CODE_REVISION, 'X-TFBOT-List-Source': 'immediate-volatile-snapshot' });
+    let immediate = [];
     try {
-        const sessions = await buildSessionListSnapshot();
-        return res.status(200).json(sanitizePublicSessionListSnapshot(sessions));
+        immediate = buildFastLocalSessionListSnapshot();
     } catch (error) {
-        console.warn('[sessions-list-snapshot-http-failed]', { error: error?.message || String(error) });
-        return res.status(503).json([]);
+        console.warn('[sessions-list-fast-snapshot-failed]', { error: error?.message || String(error), action: 'return_empty_successful_snapshot_and_refresh_in_background' });
     }
+    res.status(200).json(sanitizePublicSessionListSnapshot(immediate));
+    void buildSessionListSnapshot().then(sessions => {
+        if (Array.isArray(sessions)) {
+            sessionListSnapshotCache = sessions;
+            sessionListSnapshotCacheAt = Date.now();
+            if (sessionListStreamClients.size) scheduleSessionListBroadcast('http_snapshot_background_refresh');
+        }
+    }).catch(error => console.warn('[sessions-list-background-refresh-failed]', { error: error?.message || String(error) }));
 });
 
 app.get('/list/events', async (req, res) => {
@@ -12325,8 +12338,12 @@ app.get('/list/events', async (req, res) => {
     res.once('close', closeClient);
     req.once('aborted', closeClient);
     if (!client.closed) {
-        const snapshot = await buildSessionListSnapshot();
-        writeSessionListStreamSnapshot(client, snapshot);
+        let initialSnapshot = [];
+        try { initialSnapshot = buildFastLocalSessionListSnapshot(); } catch (error) {}
+        writeSessionListStreamSnapshot(client, initialSnapshot);
+        void buildSessionListSnapshot().then(snapshot => {
+            if (!client.closed && Array.isArray(snapshot)) writeSessionListStreamSnapshot(client, snapshot);
+        }).catch(error => console.warn('[sessions-list-initial-refresh-failed]', { error: error?.message || String(error) }));
     }
     if (!client.closed) {
         void ensureSessionListChangeStream().then(stream => {
@@ -14276,7 +14293,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     lastSessionDraining: workerDrainingSessionIds.has(sessionId)
                 });
                 if (earlyUpsertType === 'append') {
-                    console.info('[baileys-historical-append-ignored]', { sessionId, messageCount: earlyMessages.length, action: 'ignore_historical_sync_before_audit_or_command_dispatch' });
+                    console.info('[baileys-append-upsert-received]', { sessionId, messageCount: earlyMessages.length, action: 'main_handler_will_ignore_history_but_may_process_fresh_authenticated_own_device_commands' });
                     return;
                 }
                 console.info('[baileys-incoming-upsert]', {
@@ -15864,7 +15881,35 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const messageStubDiagnosticText = (Array.isArray(m?.messageStubParameters) ? m.messageStubParameters : []).map(value => String(value || '')).join(' ');
                 const isUndecryptableMessageStub = Number(m?.messageStubType) === 2 || /no matching sessions found for message|no session found to decrypt message|failed to decrypt message|waiting for this message/i.test(messageStubDiagnosticText);
                 const staleUndecryptableMessageStub = isUndecryptableMessageStub && earlyMessageAgeMs > TFBOT_MAX_COMMAND_AGE_MS;
-                const ignoreHistoricalMessage = upsertType === 'append' || messagePredatesCurrentSocket || staleUndecryptableMessageStub || (upsertType === 'notify' && sessionWasSynchronizingAtReceipt && earlyMessageAgeMs > 30000);
+                const appendChatCandidates = [earlyReceivedChat, m?.key?.remoteJidAlt, m?.key?.participant, m?.key?.participantAlt, m?.key?.participantPn, m?.key?.senderPn].map(value => String(value || '').trim()).filter(Boolean);
+                const appendOwnIdentityCandidates = [sock.user?.id, earlyReceivedOwnPhoneJid, earlyReceivedOwnLidJid, activeMessageSession?.ownPhoneJid, activeMessageSession?.ownLidJid].map(value => String(value || '').trim()).filter(Boolean);
+                const appendChatType = getWhatsAppDestinationType(earlyReceivedChat);
+                const appendIsAuthenticatedOwnDeviceMessage = m?.key?.fromMe === true
+                    && ['private_pn', 'private_lid', 'group'].includes(appendChatType)
+                    && !!(sock.user?.id || earlyReceivedOwnPhoneJid || earlyReceivedOwnLidJid || activeMessageSession?.ownPhoneJid || activeMessageSession?.ownLidJid);
+                const appendIsAuthenticatedSelfChat = ['private_pn', 'private_lid'].includes(appendChatType)
+                    && appendChatCandidates.some(chat => appendOwnIdentityCandidates.some(identity => chat === identity || areEquivalentWhatsAppChatJids(sessionId, chat, identity)));
+                let freshOwnAppendCommand = null;
+                if (upsertType === 'append' && appendIsAuthenticatedOwnDeviceMessage && earlyMessageAgeMs <= TFBOT_MAX_COMMAND_AGE_MS) {
+                    const earlyAppendBody = String(extractBody(m) || '').trim();
+                    if (earlyAppendBody) {
+                        let earlyAppendContext = getCommandParsingContext(m?.message, sessionId, earlyReceivedChat);
+                        const earlyAppendToken = earlyAppendBody.replace(/^\./u, '').trim().split(/[\s:：,]+/u)[0] || '';
+                        if (['vv', 'vv2'].includes(resolveCommand(earlyAppendToken, globalLang))) {
+                            earlyAppendContext = await resolveCommandParsingContext(m?.message, sessionId, earlyReceivedChat, earlyAppendBody, globalLang);
+                        }
+                        const earlyAppendParsed = parseIncomingCommand(earlyAppendBody, globalLang, earlyAppendContext);
+                        const outgoingEchoKnown = outgoingMessageCache.has(`${sessionId}:id:${earlyReceivedId}`)
+                            || outgoingMessageCache.has(`${sessionId}:${earlyReceivedChat}:${earlyReceivedId}`)
+                            || isRecentOutgoingMessageId(sessionId, earlyReceivedId);
+                        if (earlyAppendParsed && !outgoingEchoKnown) {
+                            freshOwnAppendCommand = earlyAppendParsed;
+                            console.info('[own-device-append-command-accepted]', { sessionId, messageId: earlyReceivedId, command: earlyAppendParsed.internalCommand || earlyAppendParsed.command, ageMs: earlyMessageAgeMs, maximumAgeMs: TFBOT_MAX_COMMAND_AGE_MS, chatType: appendChatType, fromMe: true, authenticatedOwnDeviceMessage: appendIsAuthenticatedOwnDeviceMessage, authenticatedSelfChatAliasMatched: appendIsAuthenticatedSelfChat, outgoingEchoKnown: false, action: 'dispatch_recent_explicit_authenticated_own_device_command_in_private_or_group_chat_without_replaying_history' });
+                        }
+                    }
+                }
+                const ignoreHistoricalAppend = upsertType === 'append' && !freshOwnAppendCommand;
+                const ignoreHistoricalMessage = ignoreHistoricalAppend || (messagePredatesCurrentSocket && !freshOwnAppendCommand) || staleUndecryptableMessageStub || (upsertType === 'notify' && sessionWasSynchronizingAtReceipt && earlyMessageAgeMs > 30000);
                 if (ignoreHistoricalMessage) {
                     const historyMessageId = String(m?.key?.id || '').trim();
                     const historyChat = String(m?.key?.remoteJid || m?.key?.remoteJidAlt || 'unknown-chat');
@@ -19825,7 +19870,7 @@ const tfbotHealthDiagnosticTimer = setInterval(() => {
             codeVersion: TFBOT_CODE_VERSION,
             revision: TFBOT_CLUSTER_CODE_REVISION,
             releaseId: TFBOT_CODE_RELEASE_ID,
-            timeAmerica: formatTfbotAmericaTimestamp(now),
+            timeHaiti: formatTfbotHaitiTimestamp(now),
             timeZone: TFBOT_LOG_TIME_ZONE,
             workerState: tfbotWorkerState,
             workerActive: tfbotWorkerActive,
