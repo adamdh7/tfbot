@@ -5,9 +5,9 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'r203';
+const TFBOT_CODE_VERSION = 'r204';
 const TFBOT_LOG_TIME_ZONE = 'America/Chicago';
-const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r203-link-replies-and-command-confirmations';
+const TFBOT_CLUSTER_CODE_REVISION = 'tfbot-r204-startup-order-and-reply-context-routing';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 function formatTfbotAmericaTimestamp(value = Date.now()) {
@@ -1571,7 +1571,6 @@ console.info('[baileys-own-lid-retry-addressing-patch]', { ...baileysOwnLidRetry
 console.info('[baileys-pairing-code-protocol-patch]', baileysPairingCodeProtocolPatchStatus);
 console.info('[baileys-signal-transaction-patch]', { ...baileysSignalTransactionPatchStatus, action: baileysSignalTransactionPatchStatus.applied ? 'serialize_signal_crypto_methods_by_signal_peer_or_group_inside_session_store_transaction' : 'leave_installed_baileys_source_unchanged' });
 console.info('[baileys-per-chat-inbound-processing-patch]', baileysPerChatInboundProcessingPatchStatus);
-enqueueTfbotDiagnosticRecord({ name: 'Bot (tfbot)', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ codeVersion: TFBOT_CODE_VERSION, releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION, timeZone: TFBOT_LOG_TIME_ZONE, baileysVersion: TFBOT_BAILEYS_VERSION, signalPeerAutoHeal: { enabled: true, threshold: SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD, windowMs: SIGNAL_RECOVERY_WINDOW_MS, cooldownMs: SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS, failureKinds: [...SIGNAL_PEER_AUTO_HEAL_FAILURE_KINDS], scope: 'one_peer_signal_session_records_and_pn_lid_aliases_only', deleteMethod: 'signalRepository.deleteSession_or_authState.keys.set_session_category_fallback', baileysAuthCredentialsDeleted: false, accountLogout: false, groupSenderKeysDeleted: false, allPeersDeleted: false } }) });
 
 const {
     default: makeWASocket,
@@ -1599,6 +1598,7 @@ function getTfbotInstalledPackageVersion(packageName) {
     return null;
 }
 const TFBOT_BAILEYS_VERSION = getTfbotInstalledPackageVersion('@whiskeysockets/baileys');
+enqueueTfbotDiagnosticRecord({ name: 'Bot (tfbot)', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ codeVersion: TFBOT_CODE_VERSION, releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION, timeZone: TFBOT_LOG_TIME_ZONE, baileysVersion: TFBOT_BAILEYS_VERSION, signalPeerAutoHeal: { enabled: true, threshold: SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD, windowMs: SIGNAL_RECOVERY_WINDOW_MS, cooldownMs: SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS, failureKinds: [...SIGNAL_PEER_AUTO_HEAL_FAILURE_KINDS], scope: 'one_peer_signal_session_records_and_pn_lid_aliases_only', deleteMethod: 'signalRepository.deleteSession_or_authState.keys.set_session_category_fallback', baileysAuthCredentialsDeleted: false, accountLogout: false, groupSenderKeysDeleted: false, allPeersDeleted: false } }) });
 enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, baileysVersion: TFBOT_BAILEYS_VERSION, perChatInboundProcessing: baileysPerChatInboundProcessingPatchStatus, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, retryBaseKeyCollision: baileysRetryBaseKeyCollisionPatchStatus, groupLidOutboundAddressing: baileysLidAwareGroupOutboundAddressingPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, groupLidPnDecrypt: baileysGroupLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus, pairingCodeProtocol: baileysPairingCodeProtocolPatchStatus }) });
 const { MongoClient } = require('mongodb');
 const { Writable } = require('stream');
@@ -16559,6 +16559,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const internalCommand = parsedCommand.internalCommand;
                         console.info('[command-dispatch-ready]', { sessionId, connectedAccountJid: sock.user?.id || null, messageId: msgId, senderName: sName, senderJid: sender, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: from, rawChatJid: rawFrom, command, internalCommand, messageLang, isPublicMode, isOwnerReal, sessionOwnerIdentitySource: sessionOwnerIdentitySource || null, mode: botMode, messageAgeMsAtDetection: receivedMessageAgeMs, upsertHandlerToDispatchMs: Date.now() - messageUpsertHandlerStartedAt, replyTargetJid: from, replyTargetResolution: !rawChatIsGroup && !rawChatIsChannel ? privateReplyTargetResolution : 'group_or_channel_chat_jid', replyContextAvailable: !!m?.key?.id, resolvedHandler: internalCommand });
                         console.info('[command-detected]', { sessionId, upsertType, messageId: msgId, senderName: sName, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', chatJid: from, senderJid: sender, senderAliases: senderJids, messageType, messageClassification: 'recognized_command', command, internalCommand, argumentPreview: String(args || '').replace(/[\r\n\t]+/g, ' ').slice(0, 1000), isGroup, isPublicMode, isOwnerReal, mode: botMode, action: 'command_handler_started' });
+                        console.info('[command-reply-context]', { sessionId, messageId: msgId, command: internalCommand, sourceMessageAvailable: !!(m?.key?.id), sourceChatAvailable: !!(from || rawFrom), replyEligibleInSourceChat: !!(m?.key?.id && (from || rawFrom)), crossChatReplyAllowed: false, action: 'quote_only_when_destination_matches_originating_chat' });
                         console.info('[command-lifecycle]', { sessionId, messageId: msgId, command: internalCommand, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', phase: 'detected', state: 'running', stage: 'detection' });
 
                         const commandTranslations = translations[messageLang] || translations.ht;
@@ -16616,12 +16617,26 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 }, commandTimeoutMs);
                                 if (typeof timeoutId.unref === 'function') timeoutId.unref();
 
+                                const commandReplyMessage = m && m.key && String(m.key.id || '').trim() ? m : null;
+                                const canQuoteCommandReply = destination => {
+                                    const target = String(destination || '').trim();
+                                    const source = String(from || rawFrom || '').trim();
+                                    if (!commandReplyMessage || !target || !source) return false;
+                                    if (target === source) return true;
+                                    try { return areEquivalentWhatsAppChatJids(sessionId, target, source); }
+                                    catch (error) { return false; }
+                                };
+                                const withCommandReply = (messageOptions = {}, destination = from) => {
+                                    const result = { ...(messageOptions || {}) };
+                                    if (!Object.prototype.hasOwnProperty.call(result, 'quoted') && canQuoteCommandReply(destination)) result.quoted = commandReplyMessage;
+                                    return result;
+                                };
                                 const sendBetaStyleText = async (targetSocket, targetText, sendOptions = {}) => {
                                     const targetJid = String(from || rawFrom || '').trim();
                                     if (!targetJid) throw new Error('whatsapp_reply_target_missing');
                                     const payload = { text: String(targetText ?? '') };
                                     if (Array.isArray(sendOptions.mentions) && sendOptions.mentions.length) payload.mentions = sendOptions.mentions;
-                                    const messageOptions = { ...(sendOptions.messageOptions || {}), quoted: m };
+                                    const messageOptions = withCommandReply(sendOptions.messageOptions || {}, targetJid);
                                     const groupTarget = /@g\.us$/i.test(targetJid);
                                     const transport = groupTarget ? 'existing_queued_group_sender_key_transport' : isSessionMessagingFallbackActive(sessionId) ? 'existing_queued_legacy_fallback' : 'simple_direct_send';
                                     markCommandSending(transport, 'text');
@@ -16640,9 +16655,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     const forceLegacy = sendArgs[5] === true;
                                     const useLegacy = forceLegacy || useGroupLegacy || isSessionMessagingFallbackActive(sessionId);
                                     const baseSendArgs = sendArgs.slice(0, 5);
-                                    const queuedMessageOptions = { ...(baseSendArgs[3] || {}) };
-                                    if (!Object.prototype.hasOwnProperty.call(queuedMessageOptions, 'quoted') && destination === from) queuedMessageOptions.quoted = m;
-                                    baseSendArgs[3] = queuedMessageOptions;
+                                    baseSendArgs[3] = withCommandReply(baseSendArgs[3] || {}, destination);
                                     let transportUsed = forceLegacy ? 'queued_media_transport' : useGroupLegacy ? 'existing_queued_group_sender_key_transport' : useLegacy ? 'existing_queued_legacy_fallback' : 'simple_direct_send';
                                     markCommandSending(transportUsed, payloadType);
                                     try {
@@ -16682,8 +16695,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                     return result;
                                 };
                                 const commandSendOptions = (options = {}, directSend = false, destination = from) => {
-                                    const messageOptions = { ...(options.messageOptions || {}) };
-                                    if (!Object.prototype.hasOwnProperty.call(messageOptions, 'quoted') && String(destination || '') === String(from || '')) messageOptions.quoted = m;
+                                    const messageOptions = withCommandReply(options.messageOptions || {}, destination);
                                     return {
                                         ...options,
                                         commandFormat: true,
