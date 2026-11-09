@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'tfbot-v207';
+const TFBOT_CODE_VERSION = 'tfbot-v208';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
 const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
 let tfbotBaileysSocketVersionCache = null;
@@ -13350,15 +13350,25 @@ function getCommandParsingContext(message, sessionId = '', chatJid = '') {
         if (cachedQuote?.message) quotedCachedInfo = extractWhatsAppResendMedia(cachedQuote.message);
     }
     const supportedQuotedMedia = info => !!info?.payload && ['image', 'video', 'audio'].includes(info.type);
-    const quotedViewOnceInfo = [quotedDirectInfo, quotedCachedInfo].find(info => supportedQuotedMedia(info) && info.viewOnce === true) || null;
+    const quotedViewOnceEntry = [
+        quotedDirectInfo ? { source: 'quoted_context', info: quotedDirectInfo } : null,
+        quotedCachedInfo ? { source: 'session_memory', info: quotedCachedInfo } : null
+    ].find(entry => supportedQuotedMedia(entry?.info) && entry.info.viewOnce === true) || null;
+    const quotedViewOnceInfo = quotedViewOnceEntry?.info || null;
     const quotedMediaFormat = quotedDirectInfo?.type || getWhatsAppMessageFormat({ message: unwrapMessageContent(quotedSource || {}) });
     const mediaKeys = ['imageMessage', 'videoMessage', 'ptvMessage', 'audioMessage', 'voiceMessage', 'documentMessage', 'stickerMessage', 'lottieStickerMessage', 'albumMessage'];
     return {
         hasQuotedMessage: !!(contextInfo?.stanzaId || contextInfo?.quotedMessage),
+        quotedMessageIdPresent: !!String(contextInfo?.stanzaId || '').trim(),
         hasMedia: mediaKeys.some(key => !!content?.[key]),
         hasQuotedMedia: ['image', 'video', 'audio', 'voice', 'document', 'sticker', 'album'].includes(quotedMediaFormat),
         hasQuotedHidetagTarget: ['text', 'video', 'audio', 'voice'].includes(quotedMediaFormat),
         hasQuotedViewOnceMedia: !!quotedViewOnceInfo,
+        quotedViewOnceSource: quotedViewOnceEntry?.source || '',
+        quotedDirectMediaAvailable: supportedQuotedMedia(quotedDirectInfo),
+        quotedDirectViewOnce: quotedDirectInfo?.viewOnce === true,
+        quotedCachedMediaAvailable: supportedQuotedMedia(quotedCachedInfo),
+        quotedCachedViewOnce: quotedCachedInfo?.viewOnce === true,
         quotedMediaType: quotedViewOnceInfo?.type || quotedDirectInfo?.type || quotedCachedInfo?.type || '',
         mentionedJid: Array.isArray(contextInfo?.mentionedJid) ? contextInfo.mentionedJid.map(value => String(value || '').trim()).filter(Boolean) : []
     };
@@ -13366,22 +13376,34 @@ function getCommandParsingContext(message, sessionId = '', chatJid = '') {
 
 async function resolveCommandParsingContext(message, sessionId = '', chatJid = '', body = '', language = 'ht') {
     const context = getCommandParsingContext(message, sessionId, chatJid);
-    if (context.hasQuotedViewOnceMedia === true) return context;
     const source = String(body || '').trim().replace(/^\./u, '').trim();
     const commandTokens = source.split(/\s+/u).filter(Boolean);
     if (commandTokens.length !== 1 || !['vv', 'vv2'].includes(resolveCommand(commandTokens[0], language))) return context;
+    if (context.hasQuotedViewOnceMedia === true) {
+        console.info('[quoted-media-command-classified]', { sessionId, command: resolveCommand(commandTokens[0], language), quotedMessageIdPresent: context.quotedMessageIdPresent, source: context.quotedViewOnceSource || 'direct_or_memory_quote', mediaType: context.quotedMediaType, directQuoteAvailable: context.quotedDirectMediaAvailable, directViewOnce: context.quotedDirectViewOnce, cachedQuoteAvailable: context.quotedCachedMediaAvailable, cachedViewOnce: context.quotedCachedViewOnce });
+        return context;
+    }
     const quoted = getMessageContextInfo(message);
     const quotedMessageId = String(quoted?.stanzaId || '').trim();
-    if (!quotedMessageId || !sessionId) return context;
+    if (!quotedMessageId || !sessionId) {
+        console.info('[quoted-media-command-rejected]', { sessionId: sessionId || null, command: resolveCommand(commandTokens[0], language), quotedMessageIdPresent: !!quotedMessageId, directQuoteAvailable: context.quotedDirectMediaAvailable, directViewOnce: context.quotedDirectViewOnce, cachedQuoteAvailable: context.quotedCachedMediaAvailable, cachedViewOnce: context.quotedCachedViewOnce, reason: 'no_quoted_message_id_or_session_for_view_once_verification' });
+        return context;
+    }
+    let candidateCount = 0;
+    let supportedCandidateCount = 0;
     try {
         const records = await promiseWithTimeout(findQuotedMessageCandidatesForCommand(sessionId, chatJid, quotedMessageId, true), 4500, 'Quoted view-once marker lookup');
+        candidateCount = Array.isArray(records) ? records.length : 0;
         for (const record of Array.isArray(records) ? records : []) {
             if (!record?.message) continue;
             const info = extractWhatsAppResendMedia(record.message);
-            if (!info?.payload || !['image', 'video', 'audio'].includes(info.type) || info.viewOnce !== true) continue;
-            console.info('[quoted-media-view-once-marker-restored-for-command]', { sessionId, quotedMessageId, source: record.source || 'stored_quote', mediaType: info.type });
-            return { ...context, hasQuotedViewOnceMedia: true, quotedMediaType: info.type };
+            if (!info?.payload || !['image', 'video', 'audio'].includes(info.type)) continue;
+            supportedCandidateCount++;
+            if (info.viewOnce !== true) continue;
+            console.info('[quoted-media-view-once-marker-restored-for-command]', { sessionId, quotedMessageId, source: record.source || 'stored_quote', mediaType: info.type, candidateCount, supportedCandidateCount });
+            return { ...context, hasQuotedViewOnceMedia: true, quotedViewOnceSource: record.source || 'stored_quote', quotedMediaType: info.type };
         }
+        console.info('[quoted-media-command-rejected]', { sessionId, command: resolveCommand(commandTokens[0], language), quotedMessageId, candidateCount, supportedCandidateCount, directQuoteAvailable: context.quotedDirectMediaAvailable, directViewOnce: context.quotedDirectViewOnce, cachedQuoteAvailable: context.quotedCachedMediaAvailable, cachedViewOnce: context.quotedCachedViewOnce, reason: 'no_verified_view_once_marker_in_direct_memory_or_persistent_quote' });
     } catch (error) {
         console.warn('[quoted-media-view-once-marker-lookup-failed]', { sessionId, quotedMessageId, error: String(error?.message || error).slice(0, 220), action: 'do_not_classify_unverified_quote_as_view_once_command' });
     }
@@ -17969,39 +17991,42 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                             if (quotedSourceVO) addMediaCandidateVO('quoted_context', quotedSourceVO);
                                             const directMediaInfoVO = mediaCandidatesVO[0]?.info || null;
                                             const directMediaReadyVO = !!directMediaInfoVO?.payload && mediaKeyLengthVO(directMediaInfoVO.payload.mediaKey) > 0 && !!(directMediaInfoVO.payload.url || directMediaInfoVO.payload.directPath);
+                                            const directViewOnceVerifiedVO = directMediaInfoVO?.viewOnce === true;
                                             let quotedRecordsVO = [];
-                                            if (!directMediaReadyVO && quotedMessageIdVO) {
+                                            if (quotedMessageIdVO && (!directMediaReadyVO || !directViewOnceVerifiedVO)) {
                                                 const memoryQuoteVO = recentMsgsCache.find(entry => {
                                                     if (entry?.sessionId !== sessionId || String(entry?.id || '') !== quotedMessageIdVO || !entry?.message) return false;
                                                     const aliases = [entry.from, ...(Array.isArray(entry.chatAliases) ? entry.chatAliases : []), entry.key?.remoteJid, entry.key?.remoteJidAlt].filter(Boolean);
                                                     return !aliases.length || aliases.some(alias => String(alias) === String(from) || String(alias) === String(rawFrom) || areEquivalentWhatsAppChatJids(sessionId, alias, from) || areEquivalentWhatsAppChatJids(sessionId, alias, rawFrom));
                                                 });
                                                 if (memoryQuoteVO?.message) addMediaCandidateVO('session_memory', fixBuffers(memoryQuoteVO.message));
-                                                if (!mediaCandidatesVO.some(candidate => mediaKeyLengthVO(candidate.info.payload?.mediaKey) > 0 && (candidate.info.payload.url || candidate.info.payload.directPath))) {
-                                                    quotedRecordsVO = await findQuotedMessageCandidatesForCommand(sessionId, from, quotedMessageIdVO, true).catch(error => {
-                                                        console.warn('[quoted-media-cache-fallback-failed]', { sessionId, messageId: msgId, quotedMessageId: quotedMessageIdVO, command: internalCommand, error: error?.message || String(error) });
-                                                        return [];
-                                                    });
-                                                    for (const recordVO of quotedRecordsVO) if (recordVO?.message) addMediaCandidateVO(recordVO.source || 'stored_quote', fixBuffers(recordVO.message));
-                                                }
+                                                quotedRecordsVO = await findQuotedMessageCandidatesForCommand(sessionId, from, quotedMessageIdVO, true).catch(error => {
+                                                    console.warn('[quoted-media-cache-fallback-failed]', { sessionId, messageId: msgId, quotedMessageId: quotedMessageIdVO, command: internalCommand, error: error?.message || String(error) });
+                                                    return [];
+                                                });
+                                                for (const recordVO of quotedRecordsVO) if (recordVO?.message) addMediaCandidateVO(recordVO.source || 'stored_quote', fixBuffers(recordVO.message));
                                             }
                                             const mediaMatchesVO = mediaCandidatesVO.map(candidate => ({
                                                 source: candidate.source,
                                                 info: candidate.info || extractWhatsAppResendMedia(candidate.message)
                                             })).filter(candidate => candidate.info?.payload && ['image', 'video', 'audio'].includes(candidate.info.type));
                                             mediaMatchesVO.sort((left, right) => {
+                                                const leftViewOnce = Number(left.info.viewOnce === true);
+                                                const rightViewOnce = Number(right.info.viewOnce === true);
                                                 const leftKey = mediaKeyLengthVO(left.info.payload.mediaKey);
                                                 const rightKey = mediaKeyLengthVO(right.info.payload.mediaKey);
                                                 const leftPath = Number(!!(left.info.payload.url || left.info.payload.directPath));
                                                 const rightPath = Number(!!(right.info.payload.url || right.info.payload.directPath));
                                                 const leftDirect = Number(left.source === 'quoted_context');
                                                 const rightDirect = Number(right.source === 'quoted_context');
-                                                return Number(rightKey > 0 && rightPath > 0) - Number(leftKey > 0 && leftPath > 0) || rightKey - leftKey || rightPath - leftPath || rightDirect - leftDirect;
+                                                return rightViewOnce - leftViewOnce || Number(rightKey > 0 && rightPath > 0) - Number(leftKey > 0 && leftPath > 0) || rightKey - leftKey || rightPath - leftPath || rightDirect - leftDirect;
                                             });
-                                            const downloadableMediaMatchesVO = mediaMatchesVO.filter(candidate => {
+                                            const verifiedViewOnceMatchesVO = mediaMatchesVO.filter(candidate => candidate.info.viewOnce === true);
+                                            const downloadableMediaMatchesVO = verifiedViewOnceMatchesVO.filter(candidate => {
                                                 const info = candidate.info;
                                                 return ['image', 'video', 'audio'].includes(info?.type) && ['image', 'video', 'audio'].includes(info?.downloadType) && ['image', 'video', 'audio'].includes(info?.sendType) && mediaKeyLengthVO(info.payload?.mediaKey) > 0 && !!(info.payload?.url || info.payload?.directPath);
                                             });
+                                            console.info('[quoted-media-candidates-selected]', { sessionId, messageId: msgId, quotedMessageId: quotedMessageIdVO || null, command: internalCommand, directQuoteAvailable: !!quotedSourceVO, directViewOnceVerified: directViewOnceVerifiedVO, directMediaReady: directMediaReadyVO, memoryOrDatabaseCandidates: quotedRecordsVO.length, candidateCount: mediaMatchesVO.length, verifiedViewOnceCandidateCount: verifiedViewOnceMatchesVO.length, downloadableCandidateCount: downloadableMediaMatchesVO.length, selectedSource: downloadableMediaMatchesVO[0]?.source || null, selectedMediaType: downloadableMediaMatchesVO[0]?.info?.sourceType || null });
                                             if (!mediaMatchesVO.length) {
                                                 console.warn('[quoted-media-payload-not-found]', { sessionId, messageId: msgId, quotedMessageId: quotedMessageIdVO || null, command: internalCommand, directQuoteAvailable: !!quotedSourceVO, storedCandidateCount: quotedRecordsVO.length, supportedTypes: ['image', 'video', 'audio'] });
                                                 const unavailableMediaTextVO = ({ fr: 'Le média cité ne contient pas de données récupérables.', ht: 'Medya ou te site a pa gen done ki nesesè pou rekipere li.', es: 'El contenido citado no contiene datos recuperables.', en: 'The quoted media does not contain retrievable data.' })[messageLang] || 'Le média cité ne contient pas de données récupérables.';
@@ -18009,8 +18034,8 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 break;
                                             }
                                             if (!downloadableMediaMatchesVO.length) {
-                                                console.warn('[quoted-media-download-data-incomplete]', { sessionId, messageId: msgId, quotedMessageId: quotedMessageIdVO || null, command: internalCommand, candidateCount: mediaMatchesVO.length, candidates: mediaMatchesVO.map(candidate => ({ source: candidate.source, mediaType: candidate.info.sourceType, mediaKeyAvailable: mediaKeyLengthVO(candidate.info.payload?.mediaKey) > 0, mediaPathAvailable: !!(candidate.info.payload?.url || candidate.info.payload?.directPath) })) });
-                                                const missingMediaDataTextVO = ({ fr: 'La citation contient le média, mais sa clé ou son chemin de téléchargement manque dans toutes les copies disponibles.', ht: 'Sitasyon an gen medya a, men kle medya a oswa chemen telechajman an manke nan tout kopi ki disponib yo.', es: 'La cita contiene el contenido, pero falta la clave o la ruta de descarga en todas las copias disponibles.', en: 'The quote contains the media, but every available copy is missing its media key or download path.' })[messageLang] || 'La citation contient le média, mais sa clé ou son chemin de téléchargement manque dans toutes les copies disponibles.';
+                                                console.warn('[quoted-media-download-data-incomplete]', { sessionId, messageId: msgId, quotedMessageId: quotedMessageIdVO || null, command: internalCommand, candidateCount: mediaMatchesVO.length, verifiedViewOnceCandidateCount: verifiedViewOnceMatchesVO.length, candidates: mediaMatchesVO.map(candidate => ({ source: candidate.source, mediaType: candidate.info.sourceType, viewOnceVerified: candidate.info.viewOnce === true, mediaKeyAvailable: mediaKeyLengthVO(candidate.info.payload?.mediaKey) > 0, mediaPathAvailable: !!(candidate.info.payload?.url || candidate.info.payload?.directPath) })) });
+                                                const missingMediaDataTextVO = ({ fr: 'Aucune copie vérifiée du média Vue unique ne contient une clé et un chemin de téléchargement utilisables.', ht: 'Pa gen kopi medya Wè yon sèl fwa ki verifye ki gen kle ak chemen telechajman ki ka sèvi.', es: 'Ninguna copia verificada del contenido de visualización única tiene una clave y una ruta de descarga utilizables.', en: 'No verified view-once copy has both a usable media key and download path.' })[messageLang] || 'Aucune copie vérifiée du média Vue unique ne contient une clé et un chemin de téléchargement utilisables.';
                                                 await safeSendFormatted(sock, from, commandTitleVO, missingMediaDataTextVO, pushName, true, activeHostName);
                                                 break;
                                             }
