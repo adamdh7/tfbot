@@ -17955,7 +17955,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 console.info('[del3-toggle-completed]', { sessionId, group: from, format: del3Format, ruleActive: !del3AlreadyEnabled, activationOrDeactivationVerified: true, selectedSamplePreserved: true, ownerMessagesExempt: true, botMessagesExempt: true });
                                             }
                                             break;
-                                                                                case 'vv':
+										case 'vv':
                                         case 'vv2': {
                                             const commandTitleVO = internalCommand === 'vv2' ? (t.cmd_vv2 || 'vv2') : (t.cmd_vv || 'vv');
                                             if (internalCommand === 'vv2' && !isOwnerReal) {
@@ -18163,10 +18163,8 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                     }
                                                 }
                                             }
-                                            break;
-										}
-                                        }
-                                        case 'url': {
+                                            break; 
+										}                            case 'url': {
                                             const mediaSourceURL = quotedMessage ? { message: quotedMessage } : m;
                                             const mediaInfoURL = extractWhatsAppResendMedia(mediaSourceURL);
                                             if (!mediaInfoURL?.payload) {
