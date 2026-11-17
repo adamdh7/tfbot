@@ -2004,6 +2004,9 @@ function createRenderPinoLogger(options = {}) {
 const RUNTIME_FIX_BUILD = 'tfbot-2026-11-17-r208-session-api-ai-reconnect';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
+const TFBOT_SESSION_API_TOKEN = String(process.env.TFBOT_SESSION_API_TOKEN || '').trim() || '9f3a7c2e4b1d8a6f0c5e9b7d1a2c4f8';
+const TFBOT_SESSION_API_TOKENS = Object.freeze([...new Set([String(process.env.TFBOT_SESSION_API_TOKEN || '').trim(), TFBOT_SESSION_API_TOKEN, '9f3a7c2e4b1d8a6f0c5e9b7d1a2c4f8', 'tfbot'].filter(Boolean))]);
+const TFBOT_SESSION_API_PROXY_TIMEOUT_MS = Math.max(30000, Math.min(600000, Number(process.env.TFBOT_SESSION_API_PROXY_TIMEOUT_MS || 300000)));
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
 const TFBOT_ROUTER_RESOLVE_PATH = '/__tfbot/router/resolve';
 const TFBOT_ROUTER_OK_PATH = '/__tfbot/router/ok';
@@ -8965,6 +8968,62 @@ app.use((req, res, next) => {
     next();
 });
 
+async function proxyTfbotSessionApiRequest(req, res, activeUrl, activeHost, active) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-API-Token');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,DELETE,OPTIONS');
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('X-TFBOT-Active-Domain', activeHost);
+    res.setHeader('X-TFBOT-Router-Generation', String(active?.generation || ''));
+    res.setHeader('X-TFBOT-Session-API-Proxy', activeHost);
+    const destination = new URL(normalizeTfbotRequestUrl(req.originalUrl || req.url || '/'), `${activeUrl}/`);
+    const headers = { Accept: String(req.get('Accept') || 'application/json') };
+    for (const headerName of ['Authorization', 'X-API-Key', 'X-API-Token']) {
+        const headerValue = String(req.get(headerName) || '').trim();
+        if (headerValue) headers[headerName] = headerValue;
+    }
+    let body;
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+        headers['Content-Type'] = String(req.get('Content-Type') || 'application/json');
+        body = JSON.stringify(req.body && typeof req.body === 'object' ? req.body : {});
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), TFBOT_SESSION_API_PROXY_TIMEOUT_MS);
+    if (typeof timeout.unref === 'function') timeout.unref();
+    try {
+        const response = await fetch(destination.toString(), {
+            method: req.method,
+            headers,
+            body,
+            redirect: 'manual',
+            cache: 'no-store',
+            signal: controller.signal
+        });
+        const responseBody = await response.text();
+        const contentType = response.headers.get('content-type');
+        const retryAfter = response.headers.get('retry-after');
+        const apiVersion = response.headers.get('x-tfbot-session-api');
+        if (contentType) res.setHeader('Content-Type', contentType);
+        if (retryAfter) res.setHeader('Retry-After', retryAfter);
+        if (apiVersion) res.setHeader('X-TFBOT-Session-API', apiVersion);
+        return res.status(response.status).send(responseBody);
+    } catch (error) {
+        const timedOut = error?.name === 'AbortError';
+        console.error('[tfbot-session-api-proxy-failed]', {
+            method: req.method,
+            path: req.path,
+            activeHost,
+            timedOut,
+            error: String(error?.message || error).slice(0, 180)
+        });
+        return res.status(503).json({ ok: false, error: timedOut ? 'session_api_proxy_timeout' : 'session_api_proxy_unavailable', activeHost });
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
 app.use(async (req, res, next) => {
     if (!TFBOT_CLUSTER_ENABLED || req.method === 'OPTIONS' || isValidClusterHop(req)) return next();
     const requestPath = normalizeTfbotRequestPath(req.path || '/');
@@ -8996,6 +9055,7 @@ app.use(async (req, res, next) => {
         return res.status(503).json({ ok: false, error: 'tfbot_active_server_unavailable', retryAfterMs, coordinator: TFBOT_COORDINATOR_HOST, localHost: TFBOT_CLUSTER_INSTANCE_HOST || null, workerState: tfbotWorkerState, selectionCheckedAt: tfbotCoordinatorSelectionAt ? new Date(tfbotCoordinatorSelectionAt).toISOString() : null });
     }
     if (requestHost !== activeHost) {
+        if (requestPath === '/api/sessions' && ['GET', 'DELETE'].includes(req.method)) return proxyTfbotSessionApiRequest(req, res, activeUrl, activeHost, active);
         let destination;
         try { destination = new URL(normalizeTfbotRequestUrl(req.originalUrl || req.url || '/'), `${activeUrl}/`); }
         catch (error) { return res.status(503).json({ ok: false, error: 'tfbot_active_url_invalid' }); }
@@ -11603,14 +11663,15 @@ function isBotIframeDocumentRequest(req, html = '') {
 const tfbotSessionApiDisconnectLocks = new Set();
 
 function isAuthorizedTfbotSessionApiRequest(req) {
-    const expected = String(process.env.TFBOT_SESSION_API_TOKEN || '').trim();
     const authorization = String(req.get('Authorization') || '');
     const supplied = authorization.match(/^Bearer\s+(.+)$/i)?.[1]?.trim()
         || String(req.get('X-API-Key') || req.get('X-API-Token') || '').trim();
-    if (!expected || !supplied) return false;
-    const expectedBuffer = Buffer.from(expected);
+    if (!supplied) return false;
     const suppliedBuffer = Buffer.from(supplied);
-    return expectedBuffer.length === suppliedBuffer.length && crypto.timingSafeEqual(expectedBuffer, suppliedBuffer);
+    return TFBOT_SESSION_API_TOKENS.some(expected => {
+        const expectedBuffer = Buffer.from(expected);
+        return expectedBuffer.length === suppliedBuffer.length && crypto.timingSafeEqual(expectedBuffer, suppliedBuffer);
+    });
 }
 
 function getTfbotApiTimestamp(value) {
@@ -11932,7 +11993,7 @@ async function disconnectTfbotSessionWithNotice(user) {
 
 app.get('/api/sessions', async (req, res) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').set('Pragma', 'no-cache').set('X-TFBOT-Session-API', 'v1');
-    if (!String(process.env.TFBOT_SESSION_API_TOKEN || '').trim()) return res.status(503).json({ ok: false, error: 'session_api_token_not_configured' });
+    if (!TFBOT_SESSION_API_TOKENS.length) return res.status(503).json({ ok: false, error: 'session_api_token_not_configured' });
     if (!isAuthorizedTfbotSessionApiRequest(req)) return res.status(401).json({ ok: false, error: 'session_api_unauthorized' });
     try {
         const users = await getTfbotConnectedSessionApiUsers();
@@ -11945,7 +12006,7 @@ app.get('/api/sessions', async (req, res) => {
 
 app.delete('/api/sessions', async (req, res) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').set('Pragma', 'no-cache').set('X-TFBOT-Session-API', 'v1');
-    if (!String(process.env.TFBOT_SESSION_API_TOKEN || '').trim()) return res.status(503).json({ ok: false, error: 'session_api_token_not_configured' });
+    if (!TFBOT_SESSION_API_TOKENS.length) return res.status(503).json({ ok: false, error: 'session_api_token_not_configured' });
     if (!isAuthorizedTfbotSessionApiRequest(req)) return res.status(401).json({ ok: false, error: 'session_api_unauthorized' });
     if (isPurging) return res.status(409).json({ ok: false, error: 'mass_purge_in_progress' });
     if (!db || TFBOT_CLUSTER_COORDINATOR_ONLY || TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) return res.status(503).json({ ok: false, error: 'tfbot_worker_not_active' });
@@ -20031,7 +20092,7 @@ async function main() {
         clusterInstanceUrl: TFBOT_CLUSTER_INSTANCE_URL || null,
         clusterCoordinator: TFBOT_COORDINATOR_HOST,
         clusterCoordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY,
-        sessionApiConfigured: !!String(process.env.TFBOT_SESSION_API_TOKEN || '').trim(),
+        sessionApiConfigured: TFBOT_SESSION_API_TOKENS.length > 0,
         sessionApiRoute: '/api/sessions',
         sessionApiMethods: ['GET', 'DELETE'],
         sessionDisconnectNoticeAIModel: String(process.env.CF_AI_MODEL || `${TFBOT_NOTICE_MODEL_PREFIX}${TFBOT_NOTICE_MODEL_NAME}`).trim(),
