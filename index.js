@@ -5,7 +5,9 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'tfbot-v207';
+const TFBOT_CODE_VERSION = 'tfbot-v208';
+const TFBOT_NOTICE_PROMPT_PART_A = 'You write concise, professional WhatsApp service notifications for Bot (tfbot). Return only the final message, in the recipient language specified by the user. ';
+const TFBOT_CLOUDFLARE_AI_ENDPOINT_PREFIX = 'https://api.cloudflare.com/client/v4/accounts/';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
 const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
 let tfbotBaileysSocketVersionCache = null;
@@ -1999,7 +2001,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-09-r207-all-chat-append-commands-spinner-retry-global-inbound';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-17-r208-session-api-ai-reconnect';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
@@ -2018,13 +2020,14 @@ const tfbotCoordinatorCandidateFailures = new Map();
 const TFBOT_ROUTER_STATE_ID = 'active-domain';
 const TFBOT_PRIMARY_DOMAIN = Object.freeze({ host: 'tf.bot.adamdh7.org', url: 'https://tf.bot.adamdh7.org', priority: 0 });
 const TFBOT_COORDINATOR_HOST = 'tfbot7.onrender.com';
+const TFBOT_NOTICE_PROMPT_PART_B = "Use no more than two short sentences and keep the message under 260 characters. Explain that the user's Bot (tfbot) WhatsApp session has been disconnected and that they can reconnect at ";
+const TFBOT_NOTICE_MODEL_PREFIX = '@cf/moonshotai/';
 const TFBOT_ROUTER_SERVING_DOMAINS = Object.freeze([
     TFBOT_PRIMARY_DOMAIN,
-    { host: 'tfbot2.onrender.com', url: 'https://tfbot2.onrender.com', priority: 1 },
-    { host: 'tfbot3.onrender.com', url: 'https://tfbot3.onrender.com', priority: 2 },
-    { host: 'tfbot4.onrender.com', url: 'https://tfbot4.onrender.com', priority: 3 },
-    { host: 'tfbot5.onrender.com', url: 'https://tfbot5.onrender.com', priority: 4 },
-    { host: 'tfbot6.onrender.com', url: 'https://tfbot6.onrender.com', priority: 5 }
+    { host: 'tfbot3.onrender.com', url: 'https://tfbot3.onrender.com', priority: 1 },
+    { host: 'tfbot4.onrender.com', url: 'https://tfbot4.onrender.com', priority: 2 },
+    { host: 'tfbot5.onrender.com', url: 'https://tfbot5.onrender.com', priority: 3 },
+    { host: 'tfbot6.onrender.com', url: 'https://tfbot6.onrender.com', priority: 4 }
 ]);
 const TFBOT_ROUTER_DOMAIN_BY_HOST = new Map(TFBOT_ROUTER_SERVING_DOMAINS.map(item => [item.host, item]));
 function normalizeTfbotHost(value) {
@@ -2045,7 +2048,7 @@ function detectTfbotRuntimeHost() {
     const externalHost = normalizeTfbotHost(process.env.RENDER_EXTERNAL_HOSTNAME || '');
     if (TFBOT_ROUTER_DOMAIN_BY_HOST.has(externalHost) || externalHost === TFBOT_COORDINATOR_HOST) return externalHost;
     const serviceName = String(process.env.RENDER_SERVICE_NAME || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
-    const serviceNumber = serviceName.match(/tfbot[-_]?([2-7])(?:$|[-_])/i) || serviceName.match(/^tfbot([2-7])$/i);
+    const serviceNumber = serviceName.match(/tfbot[-_]?([3-7])(?:$|[-_])/i) || serviceName.match(/^tfbot([3-7])$/i);
     if (serviceNumber) return `tfbot${serviceNumber[1]}.onrender.com`;
     if (/tfbot/.test(serviceName)) return TFBOT_PRIMARY_DOMAIN.host;
     const legacyHost = normalizeTfbotHost(process.env.TFBOT_INSTANCE_URL || '');
@@ -9031,7 +9034,7 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-API-Token');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     const requestPath = normalizeTfbotRequestPath(req.path || '/').replace(/\/+$/, '') || '/';
     if (requestPath === '/ok' || requestPath === TFBOT_CLUSTER_HEALTH_PATH || requestPath === TFBOT_ROUTER_OK_PATH || requestPath === TFBOT_ROUTER_RESOLVE_PATH || requestPath === TFBOT_WORKER_CONTROL_PATH || requestPath === TFBOT_WORKER_POLL_PATH || requestPath === TFBOT_WORKER_FAILURE_PATH || isValidClusterHop(req)) return next();
@@ -9040,10 +9043,7 @@ app.use((req, res, next) => {
         if (isAllowedEmbeddedHomeRequest(req)) return next();
         return sendAccessDeniedPage(req, res);
     }
-    if (requestPath === '/list2') {
-        if (!isAuthorizedAdmin(req)) return res.status(401).type('text/plain').send('NON AUTORISE.');
-        return next();
-    }
+    if (requestPath === '/list2' || requestPath === '/api/sessions') return next();
     if (['/get-code', '/upload-qr'].includes(requestPath) && isSameOriginFrontendApiRequest(req)) return next();
     if (requestPath === '/get-code') {
         let originHost = null;
@@ -11599,9 +11599,395 @@ function isBotIframeDocumentRequest(req, html = '') {
     return false;
 }
 
+
+const tfbotSessionApiDisconnectLocks = new Set();
+
+function isAuthorizedTfbotSessionApiRequest(req) {
+    const expected = String(process.env.TFBOT_SESSION_API_TOKEN || '').trim();
+    const authorization = String(req.get('Authorization') || '');
+    const supplied = authorization.match(/^Bearer\s+(.+)$/i)?.[1]?.trim()
+        || String(req.get('X-API-Key') || req.get('X-API-Token') || '').trim();
+    if (!expected || !supplied) return false;
+    const expectedBuffer = Buffer.from(expected);
+    const suppliedBuffer = Buffer.from(supplied);
+    return expectedBuffer.length === suppliedBuffer.length && crypto.timingSafeEqual(expectedBuffer, suppliedBuffer);
+}
+
+function getTfbotApiTimestamp(value) {
+    if (value instanceof Date) return value.getTime();
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+    const parsed = Date.parse(String(value || ''));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+async function getTfbotConnectedSessionApiUsers() {
+    if (!db) throw new Error('database_unavailable');
+    const snapshot = await buildSessionListSnapshot();
+    const connectedRows = (Array.isArray(snapshot) ? snapshot : []).filter(row =>
+        row?.SocketAuthenticated === true
+        && ['connecte', 'connected', 'active', 'online', 'synchronisation'].includes(String(row?.Sessions || '').toLowerCase())
+    );
+    const sessionIds = [...new Set(connectedRows.map(row => String(row?.ID || '').trim()).filter(Boolean))];
+    const ownerDocs = sessionIds.length
+        ? await db.collection('session_owners').find(
+            { sessionId: { $in: sessionIds } },
+            { projection: { sessionId: 1, Name: 1, Number: 1, number: 1, PairingNumber: 1, Numero: 1, AccountJid: 1, accountJid: 1, accountFirstConnectedAt: 1, connectedSince: 1, socketAuthenticatedAt: 1, createdAt: 1, lang: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, ownerLeaseUntil: 1 } }
+        ).toArray()
+        : [];
+    const ownersById = new Map(ownerDocs.map(owner => [String(owner.sessionId || ''), owner]));
+    const now = Date.now();
+    const users = [];
+    for (const row of connectedRows) {
+        const sessionId = String(row.ID || '').trim();
+        const owner = ownersById.get(sessionId) || {};
+        const runtime = activeSessions.get(sessionId);
+        const number = normalizePairingPhoneNumber(
+            getAuthenticatedPhoneNumber(runtime?.sock?.user || null, runtime?.authState?.creds || null)
+            || row.Numero
+            || owner.Number
+            || owner.number
+            || owner.PairingNumber
+            || owner.Numero
+            || owner.AccountJid
+            || owner.accountJid
+            || ''
+        );
+        if (!/^\d{8,15}$/.test(number)) continue;
+        const connectedAt = getTfbotApiTimestamp(owner.accountFirstConnectedAt)
+            || getTfbotApiTimestamp(runtime?.accountFirstConnectedAt)
+            || getTfbotApiTimestamp(owner.connectedSince)
+            || getTfbotApiTimestamp(runtime?.connectedSince)
+            || getTfbotApiTimestamp(owner.socketAuthenticatedAt)
+            || getTfbotApiTimestamp(runtime?.socketAuthenticatedAt)
+            || getTfbotApiTimestamp(owner.createdAt)
+            || getTfbotApiTimestamp(runtime?.createdAt)
+            || now;
+        const name = sanitizeSessionDisplayName(
+            runtime?.sock?.user?.name
+            || runtime?.sock?.user?.notify
+            || runtime?.authState?.creds?.me?.name
+            || owner.Name
+            || row.Name
+            || 'Inconnu'
+        ) || 'Inconnu';
+        users.push({
+            SessionId: sessionId,
+            Name: name,
+            Numero: number,
+            ConnecteDepuis: new Date(connectedAt).toISOString(),
+            TempsConnexion: getUptimeString(Math.max(0, now - connectedAt)),
+            MillisecondesConnexion: Math.max(0, now - connectedAt),
+            Etat: 'connecte',
+        });
+    }
+    return users;
+}
+
+const TFBOT_CLOUDFLARE_AI_ENDPOINT_PATH = '/ai/run/';
+const TFBOT_NOTICE_MODEL_NAME = 'kimi-k2.7-code';
+const TFBOT_NOTICE_PROMPT_PART_C = ' or by entering the provided pairing code in WhatsApp Linked Devices. Include this exact placeholder exactly once: ';
+
+function getTfbotSessionApiLanguage(value) {
+    const language = String(value || 'en').trim().toLowerCase();
+    const known = { fr: 'French', en: 'English', es: 'Spanish', ht: 'Haitian Creole' };
+    return { code: known[language] ? language : 'en', name: known[language] || 'English' };
+}
+
+const TFBOT_NOTICE_PROMPT_PART_D = ' Do not alter, translate, split, format, or explain the placeholder. Never invent or simulate a pairing code. Do not add headings, greetings, alternatives, markdown, quotation marks, commentary, or any other text. English reference: ';
+const TFBOT_NOTICE_PROMPT_PART_E = 'Your Bot (tfbot) session has been disconnected. To reconnect, visit bot.adamdh7.org or enter ';
+const TFBOT_NOTICE_PROMPT_PART_F = ' in Linked Devices.';
+
+async function generateTfbotDisconnectionCaption(language) {
+    const accountId = String(process.env.CF_AI_ACCOUNT_ID || 'bc6cb62c4ad1f60f6917f6ca866e63d9').trim();
+    const apiToken = String(process.env.CF_AI_API_TOKEN || process.env.CLOUDFLARE_API_TOKEN || '').trim();
+    const model = String(process.env.CF_AI_MODEL || `${TFBOT_NOTICE_MODEL_PREFIX}${TFBOT_NOTICE_MODEL_NAME}`).trim();
+    if (!/^[a-f0-9]{32}$/i.test(accountId)) throw new Error('cloudflare_ai_account_id_invalid');
+    if (!apiToken) throw new Error('cloudflare_ai_api_token_not_configured');
+    if (!/^@cf\/[a-z0-9_./-]+$/i.test(model)) throw new Error('cloudflare_ai_model_invalid');
+    const selectedLanguage = getTfbotSessionApiLanguage(language);
+    const marker = '[[TFBOT_PAIRING_CODE]]';
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    if (typeof timeout.unref === 'function') timeout.unref();
+    try {
+        const apiUrl = `${TFBOT_CLOUDFLARE_AI_ENDPOINT_PREFIX}${accountId}${TFBOT_CLOUDFLARE_AI_ENDPOINT_PATH}${model}`;
+        const response = await fetch(apiUrl, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiToken}`,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify({
+                messages: [
+                    {
+                        role: 'system',
+                        content: [TFBOT_NOTICE_PROMPT_PART_A, TFBOT_NOTICE_PROMPT_PART_B, 'bot.adamdh7.org', TFBOT_NOTICE_PROMPT_PART_C, marker, TFBOT_NOTICE_PROMPT_PART_D, '\"', TFBOT_NOTICE_PROMPT_PART_E, marker, TFBOT_NOTICE_PROMPT_PART_F, '\"'].join('')
+                    },
+                    {
+                        role: 'user',
+                        content: `Recipient language: ${selectedLanguage.name} (${selectedLanguage.code}). Write the final notification now. Return only the notification and include the exact placeholder once.`
+                    }
+                ],
+                max_completion_tokens: 150,
+                temperature: 0.2,
+                stream: false
+            }),
+            cache: 'no-store',
+            signal: controller.signal
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok || payload?.success === false) {
+            const details = Array.isArray(payload?.errors) ? payload.errors.map(item => item?.message).filter(Boolean).join('; ') : '';
+            throw new Error(`cloudflare_ai_http_${response.status}${details ? `:${details.slice(0, 180)}` : ''}`);
+        }
+        const result = payload?.result || payload;
+        let output = result?.response
+            || result?.choices?.[0]?.message?.content
+            || result?.output_text
+            || payload?.choices?.[0]?.message?.content
+            || '';
+        if (Array.isArray(output)) output = output.map(item => typeof item === 'string' ? item : item?.text || '').join('');
+        output = String(output || '').trim().replace(/^```[a-z]*\s*/i, '').replace(/\s*```$/i, '').trim();
+        const markerCount = output.split(marker).length - 1;
+        if (!output || markerCount !== 1 || output.length > 700) throw new Error('cloudflare_ai_notification_format_invalid');
+        return output;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+async function createTfbotReplacementPairingChallenge(number, replacedSessionId) {
+    if (!db || TFBOT_CLUSTER_COORDINATOR_ONLY || TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) throw new Error('tfbot_worker_not_active');
+    const normalizedNumber = normalizePairingPhoneNumber(number);
+    if (!/^\d{8,15}$/.test(normalizedNumber)) throw new Error('pairing_phone_number_invalid');
+    const sessionId = createFreshPairingSessionId();
+    const startedAt = new Date();
+    const numberQuery = {
+        $or: [
+            { Number: normalizedNumber },
+            { number: normalizedNumber },
+            { PairingNumber: normalizedNumber },
+            { Numero: normalizedNumber },
+            { AccountJid: `${normalizedNumber}@s.whatsapp.net` },
+            { accountJid: `${normalizedNumber}@s.whatsapp.net` }
+        ]
+    };
+    const connectedOwner = await db.collection('session_owners').findOne(
+        { $and: [{ sessionId: { $ne: sessionId } }, numberQuery, { $or: [{ everConnected: true }, { connectedSince: { $exists: true } }, { socketAuthenticatedAt: { $exists: true } }, { connectionStatus: { $in: ['connected', 'connecte'] } }] }] },
+        { sort: { updatedAt: -1, connectedSince: -1 } }
+    ).catch(() => null);
+    const replacementOfSessionId = String(replacedSessionId || connectedOwner?.sessionId || '').trim() || null;
+    pendingPairingReplacementSessions.add(sessionId);
+    try {
+        await db.collection('session_owners').updateOne(
+            { sessionId },
+            {
+                $set: {
+                    sessionId,
+                    format: 'pair',
+                    Format: 'pair',
+                    PairingNumber: normalizedNumber,
+                    pairingNumber: normalizedNumber,
+                    pairingPending: true,
+                    pairingAttemptPending: true,
+                    pairingReplacementPending: true,
+                    replacementOfSessionId,
+                    pairingStartedAt: startedAt,
+                    pairingChallengeStartedAt: startedAt,
+                    autoExpirePairing: false,
+                    connectionStatus: 'pairing_starting',
+                    invalidStatusSinceAt: startedAt,
+                    invalidStatusExpiresAt: new Date(startedAt.getTime() + SESSION_INVALID_STATUS_TTL_MS),
+                    socketAuthenticated: false,
+                    socketReady: false,
+                    everAuthenticated: false,
+                    everConnected: false,
+                    connectionEverOpened: false,
+                    reauthRequired: false,
+                    lastWhatsAppEvent: null,
+                    lastWhatsAppEventAt: null,
+                    ...getClusterSessionOwnerFields()
+                },
+                $unset: {
+                    pairingProofPersisted: 1,
+                    pairingCredentialsConfirmedAt: 1,
+                    pairingAuthStoreFlushedAt: 1,
+                    pairingExpiredAt: 1,
+                    pairingCleanupPending: 1,
+                    pairingRestartFailed: 1,
+                    pairingRestartFailedAt: 1,
+                    pairingRestartAttempts: 1,
+                    pairingRestartRequiredAt: 1,
+                    lastDisconnectCode: 1,
+                    lastDisconnectReason: 1,
+                    lastRestoreError: 1,
+                    lastRestoreErrorHash: 1,
+                    nextRestoreRetryAt: 1,
+                    connectedSince: 1,
+                    socketAuthenticatedAt: 1
+                },
+                $setOnInsert: { createdAt: startedAt }
+            },
+            { upsert: true }
+        );
+        scheduleInvalidStatusCleanup(sessionId, startedAt.getTime(), SESSION_INVALID_STATUS_TTL_MS);
+        schedulePairingChallengeExpiry(sessionId, startedAt, 'api_session_replacement');
+        const started = await createCodeSession(sessionId, 'pair', false, false, normalizedNumber);
+        const runtime = activeSessions.get(sessionId) || started;
+        if (!runtime?.sock) throw new Error('pairing_socket_not_started');
+        runtime.pairingReplacementPending = true;
+        runtime.pairingAttemptPending = true;
+        runtime.pairingNumber = normalizedNumber;
+        runtime.pairingChallengeStartedAt = startedAt.getTime();
+        runtime.format = 'pair';
+        runtime.autoExpirePairing = false;
+        const code = await requestPairingCodeWhenReady(sessionId, runtime, normalizedNumber, 60000);
+        return { sessionId, code, number: normalizedNumber, replacementOfSessionId };
+    } catch (error) {
+        const message = String(error?.message || error || 'pairing_request_failed');
+        const cleanup = await discardFreshPairingSession(sessionId, message).catch(cleanupError => ({ removed: false, reason: cleanupError?.message || 'pairing_cleanup_failed' }));
+        console.error('[session-api-pairing-challenge-failed]', { sessionId, replacementOfSessionId, error: message.slice(0, 220), attemptRemoved: cleanup?.removed === true });
+        throw error;
+    }
+}
+
+async function disconnectTfbotSessionWithNotice(user) {
+    const sessionId = String(user?.SessionId || '').trim();
+    const number = normalizePairingPhoneNumber(user?.Numero || '');
+    const runtime = activeSessions.get(sessionId);
+    if (!sessionId || !runtime?.sock || !/^\d{8,15}$/.test(number) || !isAuthenticatedSocketOperational(runtime, runtime.sock)) throw new Error('session_runtime_not_connected');
+    const owner = await db.collection('session_owners').findOne({ sessionId }).catch(() => null);
+    const ownerLeaseUntil = getTfbotApiTimestamp(owner?.ownerLeaseUntil);
+    if (TFBOT_CLUSTER_ENABLED && owner?.ownerInstanceId && owner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && ownerLeaseUntil > Date.now() && !isPreviousDeploymentOwnerOnCurrentHost(owner)) throw new Error('session_owned_by_another_worker');
+    const language = String(owner?.lang || 'en').toLowerCase();
+    const originalSocket = runtime.sock;
+    const [pairingResult, captionResult] = await Promise.allSettled([
+        createTfbotReplacementPairingChallenge(number, sessionId),
+        generateTfbotDisconnectionCaption(language)
+    ]);
+    if (pairingResult.status !== 'fulfilled' || captionResult.status !== 'fulfilled') {
+        if (pairingResult.status === 'fulfilled') await discardFreshPairingSession(pairingResult.value.sessionId, 'session_api_preparation_failed').catch(() => {});
+        const cause = pairingResult.status === 'rejected' ? pairingResult.reason : captionResult.reason;
+        throw new Error(String(cause?.message || cause || 'session_disconnection_preparation_failed'));
+    }
+    const pairing = pairingResult.value;
+    const placeholder = '[[TFBOT_PAIRING_CODE]]';
+    const captionTemplate = captionResult.value;
+    const caption = captionTemplate.replace(placeholder, pairing.code);
+    if (activeSessions.get(sessionId)?.sock !== originalSocket || !isAuthenticatedSocketOperational(runtime, originalSocket)) {
+        await discardFreshPairingSession(pairing.sessionId, 'original_session_changed_before_notice').catch(() => {});
+        throw new Error('session_socket_changed_before_notice');
+    }
+    try {
+        await sendImageCaptioned(
+            originalSocket,
+            `${number}@s.whatsapp.net`,
+            adamLogoBuffer,
+            '',
+            '',
+            '',
+            { exactCaption: caption, language, ownerName: 'Bot (tfbot)' }
+        );
+    } catch (sendError) {
+        await discardFreshPairingSession(pairing.sessionId, 'disconnect_notice_send_failed').catch(() => {});
+        throw new Error(`disconnect_notice_send_failed:${String(sendError?.message || sendError).slice(0, 180)}`);
+    }
+    let logoutResolved = false;
+    try {
+        if (typeof originalSocket.logout === 'function') {
+            await promiseWithTimeout(Promise.resolve(originalSocket.logout()), 10000, 'session_api_whatsapp_logout');
+            logoutResolved = true;
+        }
+    } catch (logoutError) {
+        if (!isSocketDefinitelyClosed(originalSocket)) {
+            await db.collection('session_owners').updateOne(
+                { sessionId },
+                { $set: { connectionStatus: 'deconnecte', socketAuthenticated: false, socketReady: false, reauthRequired: true, lastAuthFailure: 'session_api_logout_unconfirmed', lastAuthFailureAt: new Date(), statusUpdatedAt: new Date(), updatedAt: new Date(), disconnectTime: new Date() } }
+            ).catch(() => {});
+            runtime.status = 'reauth_required';
+            runtime.active = false;
+            throw new Error(`whatsapp_logout_not_confirmed:${String(logoutError?.message || logoutError).slice(0, 160)}`);
+        }
+    }
+    runtime.status = 'deconnecte';
+    runtime.active = false;
+    runtime.reauthRequired = true;
+    const closeConfirmed = await cleanupSocket(sessionId, {
+        credentialPersistenceTimeoutMs: 30000,
+        authStoreTimeoutMs: 45000,
+        authStoreQuietMs: 800,
+        socketCloseTimeoutMs: 5000
+    });
+    if (!closeConfirmed || runtime.sock) throw new Error('session_socket_close_not_confirmed_after_logout');
+    await db.collection('session_owners').updateOne(
+        { sessionId },
+        { $set: { connectionStatus: 'deconnecte', socketAuthenticated: false, socketReady: false, reauthRequired: true, credentialsRevoked: true, credentialsRevokedAt: new Date(), lastAuthFailure: 'session_api_manual_disconnect', lastAuthFailureAt: new Date(), statusUpdatedAt: new Date(), updatedAt: new Date(), disconnectTime: new Date() } }
+    ).catch(() => {});
+    await releaseSessionRuntimeLock(sessionId).catch(() => {});
+    await deleteMongoSession(sessionId);
+    scheduleSessionListBroadcast('session_api_user_disconnected');
+    return { SessionId: sessionId, Numero: number, Name: user.Name, PairingSessionId: pairing.sessionId, PairingCodeSent: true, WhatsAppLogoutConfirmed: logoutResolved || isSocketDefinitelyClosed(originalSocket), SessionDataDeleted: true };
+}
+
+app.get('/api/sessions', async (req, res) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').set('Pragma', 'no-cache').set('X-TFBOT-Session-API', 'v1');
+    if (!String(process.env.TFBOT_SESSION_API_TOKEN || '').trim()) return res.status(503).json({ ok: false, error: 'session_api_token_not_configured' });
+    if (!isAuthorizedTfbotSessionApiRequest(req)) return res.status(401).json({ ok: false, error: 'session_api_unauthorized' });
+    try {
+        const users = await getTfbotConnectedSessionApiUsers();
+        return res.status(200).json({ ok: true, count: users.length, sessions: users });
+    } catch (error) {
+        console.error('[session-api-list-failed]', { error: error?.message || String(error) });
+        return res.status(503).json({ ok: false, error: 'session_api_list_failed' });
+    }
+});
+
+app.delete('/api/sessions', async (req, res) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').set('Pragma', 'no-cache').set('X-TFBOT-Session-API', 'v1');
+    if (!String(process.env.TFBOT_SESSION_API_TOKEN || '').trim()) return res.status(503).json({ ok: false, error: 'session_api_token_not_configured' });
+    if (!isAuthorizedTfbotSessionApiRequest(req)) return res.status(401).json({ ok: false, error: 'session_api_unauthorized' });
+    if (isPurging) return res.status(409).json({ ok: false, error: 'mass_purge_in_progress' });
+    if (!db || TFBOT_CLUSTER_COORDINATOR_ONLY || TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) return res.status(503).json({ ok: false, error: 'tfbot_worker_not_active' });
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const all = body.all === true || String(body.scope || '').toLowerCase() === 'all';
+    const sessionId = String(body.sessionId || body.SessionId || '').trim();
+    const number = normalizePairingPhoneNumber(body.number || body.Numero || '');
+    if (Number(all) + Number(!!sessionId) + Number(!!number) !== 1) return res.status(400).json({ ok: false, error: 'provide_exactly_one_of_all_sessionId_or_number' });
+    try {
+        const users = await getTfbotConnectedSessionApiUsers();
+        let targets = [];
+        if (all) targets = users;
+        else if (sessionId) targets = users.filter(item => item.SessionId === sessionId);
+        else targets = users.filter(item => item.Numero === number);
+        if (!targets.length) return res.status(404).json({ ok: false, error: 'connected_session_not_found' });
+        if (number && targets.length > 1) return res.status(409).json({ ok: false, error: 'multiple_sessions_match_number_use_sessionId', matches: targets.map(item => ({ SessionId: item.SessionId, Name: item.Name, Numero: item.Numero })) });
+        const results = [];
+        for (const user of targets) {
+            const lockId = String(user.SessionId || '');
+            if (tfbotSessionApiDisconnectLocks.has(lockId)) {
+                results.push({ ok: false, SessionId: user.SessionId, Numero: user.Numero, Name: user.Name, error: 'session_disconnect_already_in_progress' });
+                continue;
+            }
+            tfbotSessionApiDisconnectLocks.add(lockId);
+            try {
+                results.push({ ok: true, ...await disconnectTfbotSessionWithNotice(user) });
+            } catch (error) {
+                results.push({ ok: false, SessionId: user.SessionId, Numero: user.Numero, Name: user.Name, error: String(error?.message || error).slice(0, 240) });
+            } finally {
+                tfbotSessionApiDisconnectLocks.delete(lockId);
+            }
+        }
+        const succeeded = results.filter(item => item.ok).length;
+        const failed = results.length - succeeded;
+        return res.status(failed ? succeeded ? 207 : 503 : 200).json({ ok: failed === 0, requested: targets.length, succeeded, failed, results });
+    } catch (error) {
+        console.error('[session-api-delete-failed]', { error: error?.message || String(error) });
+        return res.status(503).json({ ok: false, error: 'session_api_disconnect_failed' });
+    }
+});
+
 app.get('/list2', (req, res) => {
-    if (!(process.env.ADMIN_API_TOKEN || process.env.TOKEN)) return res.status(503).type('text/plain').send('MAINTENANCE DESACTIVE : configurez TOKEN ou ADMIN_API_TOKEN.');
-    if (!isAuthorizedAdmin(req)) return res.status(401).type('text/plain').send('NON AUTORISE.');
     if (isPurging) return res.type('text/plain').send('SUPPRESSION DEJA EN COURS.');
     isPurging = true;
     res.type('text/plain').send('SUPPRESSION EN COURS. LES SESSIONS ET DONNEES SERONT EFFACEES SOUS PEU.');
@@ -19645,13 +20031,17 @@ async function main() {
         clusterInstanceUrl: TFBOT_CLUSTER_INSTANCE_URL || null,
         clusterCoordinator: TFBOT_COORDINATOR_HOST,
         clusterCoordinatorOnly: TFBOT_CLUSTER_COORDINATOR_ONLY,
+        sessionApiConfigured: !!String(process.env.TFBOT_SESSION_API_TOKEN || '').trim(),
+        sessionApiRoute: '/api/sessions',
+        sessionApiMethods: ['GET', 'DELETE'],
+        sessionDisconnectNoticeAIModel: String(process.env.CF_AI_MODEL || `${TFBOT_NOTICE_MODEL_PREFIX}${TFBOT_NOTICE_MODEL_NAME}`).trim(),
         clusterActiveDomainProbeMs: TFBOT_ROUTER_ACTIVE_PROBE_MS,
         clusterFullDomainProbeMs: TFBOT_ROUTER_COORDINATOR_CACHE_MS,
         clusterServingDomains: TFBOT_ROUTER_SERVING_DOMAINS.map(item => item.host),
         clusterDomainRouter: true,
         clusterDomainDetectionUsesRenderDefaults: true,
-        clusterDomainSelectionPriority: 'tf-bot-then-tfbot2-through-tfbot6',
-        clusterDomainSelectionMode: 'strict-priority-tf-bot-then-tfbot2-then-tfbot3-only-when-previous-domain-does-not-respond',
+        clusterDomainSelectionPriority: 'tf.bot.adamdh7.org-then-tfbot3-through-tfbot6',
+        clusterDomainSelectionMode: 'strict-priority-tf.bot.adamdh7.org-then-tfbot3-through-tfbot6-only-when-previous-domain-does-not-respond',
         clusterWorkerCoordinatorPollMs: TFBOT_WORKER_COORDINATOR_POLL_MS,
         clusterWorkerStartupIndependent: true,
         clusterWorkerRequiresSimultaneousStartup: false,
@@ -19687,7 +20077,7 @@ async function main() {
         aiDispatchPolicy: 'ai-ia-asistan-iu-tfasistan-prefix-required-at-parser-and-handler',
         actionErrorExplanation: 'localized-static-fallback-no-ai-request',
         signalKeyCacheIsolation: 'deep-copy-on-cache-read-and-write-no-shared-mutable-session-object',
-        routerProbePolicy: 'keep_current_active_host_and_fail_over_only_after_a_final_send_failure; order_primary_then_tfbot2_through_tfbot6',
+        routerProbePolicy: 'keep_current_active_host_and_fail_over_only_after_a_final_send_failure; order_primary_then_tfbot3_through_tfbot6',
         companionDeviceMessages: 'dispatch-readable-own-device-commands-and-ignore-only-known-bot-echoes',
         pairingPendingSessionTtlMs: PAIRING_SESSION_TTL_MS,
         pairingConnectedSocketStates: [1, 'OPEN'],
