@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'tfbot-v208';
+const TFBOT_CODE_VERSION = 'tfbot-v217';
 const TFBOT_NOTICE_PROMPT_PART_A = 'You write concise, professional WhatsApp service notifications for Bot (tfbot). Return only the final message, in the recipient language specified by the user. ';
 const TFBOT_CLOUDFLARE_AI_ENDPOINT_PREFIX = 'https://api.cloudflare.com/client/v4/accounts/';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
@@ -15,7 +15,7 @@ const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID ||
 function formatTfbotHaitiTimestamp(value = Date.now()) {
     const date = value instanceof Date ? value : new Date(value);
     if (!Number.isFinite(date.getTime())) return null;
-    const parts = new Intl.DateTimeFormat('fr-HT', { timeZone: TFBOT_LOG_TIME_ZONE, day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(date);
+    const parts = new Intl.DateTimeFormat('ht-HT', { timeZone: TFBOT_LOG_TIME_ZONE, day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(date);
     const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
     return `${values.day}/${values.month}/${values.year} ${values.hour}:${values.minute}:${values.second} HT`;
 }
