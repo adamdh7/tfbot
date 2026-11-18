@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'tfbot-v219';
+const TFBOT_CODE_VERSION = 'tfbot-v220';
 const TFBOT_NOTICE_PROMPT_PART_A = 'You write concise, professional WhatsApp service notifications for Bot (tfbot). Return only the final message, in the recipient language specified by the user. ';
 const TFBOT_CLOUDFLARE_AI_ENDPOINT_PREFIX = 'https://api.cloudflare.com/client/v4/accounts/';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
@@ -2001,7 +2001,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-18-r210-session-api-ai-fallback-pairing-alphanumeric';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-18-r211-session-api-llama4-scout';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_SESSION_API_TOKEN = String(process.env.TFBOT_SESSION_API_TOKEN || '').trim() || '9f3a7c2e4b1d8a6f0c5e9b7d1a2c4f8';
@@ -2024,7 +2024,6 @@ const TFBOT_ROUTER_STATE_ID = 'active-domain';
 const TFBOT_PRIMARY_DOMAIN = Object.freeze({ host: 'tf.bot.adamdh7.org', url: 'https://tf.bot.adamdh7.org', priority: 0 });
 const TFBOT_COORDINATOR_HOST = 'tfbot7.onrender.com';
 const TFBOT_NOTICE_PROMPT_PART_B = "Use no more than two short sentences and keep the message under 260 characters. Explain that the user's Bot (tfbot) WhatsApp session has been disconnected and that they can reconnect at ";
-const TFBOT_NOTICE_MODEL_PREFIX = '@cf/moonshotai/';
 const TFBOT_ROUTER_SERVING_DOMAINS = Object.freeze([
     TFBOT_PRIMARY_DOMAIN,
     { host: 'tfbot3.onrender.com', url: 'https://tfbot3.onrender.com', priority: 1 },
@@ -11762,7 +11761,7 @@ async function getTfbotConnectedSessionApiUsers() {
 }
 
 const TFBOT_CLOUDFLARE_AI_ENDPOINT_PATH = '/ai/run/';
-const TFBOT_NOTICE_MODEL_NAME = 'kimi-k2.7-code';
+const TFBOT_NOTICE_MODEL_ID = '@cf/meta/llama-4-scout-17b-16e-instruct';
 const TFBOT_NOTICE_PROMPT_PART_C = ' or by entering the provided pairing code in WhatsApp Linked Devices. Include this exact placeholder exactly once: ';
 
 function getTfbotSessionApiLanguage(value) {
@@ -11824,7 +11823,7 @@ function getTfbotNoticeAIAccounts() {
 
 async function generateTfbotDisconnectionCaption(language) {
     const accounts = getTfbotNoticeAIAccounts();
-    const model = String(process.env.CF_AI_MODEL || `${TFBOT_NOTICE_MODEL_PREFIX}${TFBOT_NOTICE_MODEL_NAME}`).trim();
+    const model = TFBOT_NOTICE_MODEL_ID;
     if (!accounts.length) throw new Error('cloudflare_ai_no_account_credentials_available');
     if (!/^@cf\/[a-z0-9_./-]+$/i.test(model)) throw new Error('cloudflare_ai_model_invalid');
     const selectedLanguage = getTfbotSessionApiLanguage(language);
@@ -12097,12 +12096,12 @@ async function disconnectTfbotSessionWithNotice(user) {
 
 app.get('/api/sessions', async (req, res) => {
     const noticeAiAccounts = getTfbotNoticeAIAccounts();
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').set('Pragma', 'no-cache').set('X-TFBOT-Session-API', 'v1').set('X-TFBOT-Code-Version', TFBOT_CODE_VERSION).set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Notice-AI-Accounts', String(noticeAiAccounts.length)).set('X-TFBOT-Notice-Model', String(process.env.CF_AI_MODEL || `${TFBOT_NOTICE_MODEL_PREFIX}${TFBOT_NOTICE_MODEL_NAME}`).trim());
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').set('Pragma', 'no-cache').set('X-TFBOT-Session-API', 'v1').set('X-TFBOT-Code-Version', TFBOT_CODE_VERSION).set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Notice-AI-Accounts', String(noticeAiAccounts.length)).set('X-TFBOT-Notice-Model', TFBOT_NOTICE_MODEL_ID);
     if (!TFBOT_SESSION_API_TOKENS.length) return res.status(503).json({ ok: false, error: 'session_api_token_not_configured' });
     if (!isAuthorizedTfbotSessionApiRequest(req)) return res.status(401).json({ ok: false, error: 'session_api_unauthorized' });
     try {
         const users = await getTfbotConnectedSessionApiUsers();
-        return res.status(200).json({ ok: true, count: users.length, sessions: users, codeVersion: TFBOT_CODE_VERSION, noticeAiAccountsAvailable: noticeAiAccounts.length });
+        return res.status(200).json({ ok: true, count: users.length, sessions: users, codeVersion: TFBOT_CODE_VERSION, noticeAiModel: TFBOT_NOTICE_MODEL_ID, noticeAiAccountsAvailable: noticeAiAccounts.length });
     } catch (error) {
         console.error('[session-api-list-failed]', { error: error?.message || String(error) });
         return res.status(503).json({ ok: false, error: 'session_api_list_failed' });
@@ -12111,7 +12110,7 @@ app.get('/api/sessions', async (req, res) => {
 
 app.delete('/api/sessions', async (req, res) => {
     const noticeAiAccounts = getTfbotNoticeAIAccounts();
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').set('Pragma', 'no-cache').set('X-TFBOT-Session-API', 'v1').set('X-TFBOT-Code-Version', TFBOT_CODE_VERSION).set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Notice-AI-Accounts', String(noticeAiAccounts.length)).set('X-TFBOT-Notice-Model', String(process.env.CF_AI_MODEL || `${TFBOT_NOTICE_MODEL_PREFIX}${TFBOT_NOTICE_MODEL_NAME}`).trim());
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').set('Pragma', 'no-cache').set('X-TFBOT-Session-API', 'v1').set('X-TFBOT-Code-Version', TFBOT_CODE_VERSION).set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Notice-AI-Accounts', String(noticeAiAccounts.length)).set('X-TFBOT-Notice-Model', TFBOT_NOTICE_MODEL_ID);
     if (!TFBOT_SESSION_API_TOKENS.length) return res.status(503).json({ ok: false, error: 'session_api_token_not_configured' });
     if (!isAuthorizedTfbotSessionApiRequest(req)) return res.status(401).json({ ok: false, error: 'session_api_unauthorized' });
     if (isPurging) return res.status(409).json({ ok: false, error: 'mass_purge_in_progress' });
@@ -12140,14 +12139,14 @@ app.delete('/api/sessions', async (req, res) => {
             try {
                 results.push({ ok: true, ...await disconnectTfbotSessionWithNotice(user) });
             } catch (error) {
-                results.push({ ok: false, SessionId: user.SessionId, Numero: user.Numero, Name: user.Name, codeVersion: TFBOT_CODE_VERSION, noticeAiAccountsAvailable: getTfbotNoticeAIAccounts().length, error: String(error?.message || error).slice(0, 2400) });
+                results.push({ ok: false, SessionId: user.SessionId, Numero: user.Numero, Name: user.Name, codeVersion: TFBOT_CODE_VERSION, noticeAiModel: TFBOT_NOTICE_MODEL_ID, noticeAiAccountsAvailable: getTfbotNoticeAIAccounts().length, error: String(error?.message || error).slice(0, 2400) });
             } finally {
                 tfbotSessionApiDisconnectLocks.delete(lockId);
             }
         }
         const succeeded = results.filter(item => item.ok).length;
         const failed = results.length - succeeded;
-        return res.status(failed ? succeeded ? 207 : 503 : 200).json({ ok: failed === 0, codeVersion: TFBOT_CODE_VERSION, noticeAiAccountsAvailable: noticeAiAccounts.length, requested: targets.length, succeeded, failed, results });
+        return res.status(failed ? succeeded ? 207 : 503 : 200).json({ ok: failed === 0, codeVersion: TFBOT_CODE_VERSION, noticeAiModel: TFBOT_NOTICE_MODEL_ID, noticeAiAccountsAvailable: noticeAiAccounts.length, requested: targets.length, succeeded, failed, results });
     } catch (error) {
         console.error('[session-api-delete-failed]', { error: error?.message || String(error) });
         return res.status(503).json({ ok: false, error: 'session_api_disconnect_failed' });
@@ -20201,7 +20200,7 @@ async function main() {
         sessionApiConfigured: TFBOT_SESSION_API_TOKENS.length > 0,
         sessionApiRoute: '/api/sessions',
         sessionApiMethods: ['GET', 'DELETE'],
-        sessionDisconnectNoticeAIModel: String(process.env.CF_AI_MODEL || `${TFBOT_NOTICE_MODEL_PREFIX}${TFBOT_NOTICE_MODEL_NAME}`).trim(),
+        sessionDisconnectNoticeAIModel: TFBOT_NOTICE_MODEL_ID,
         clusterActiveDomainProbeMs: TFBOT_ROUTER_ACTIVE_PROBE_MS,
         clusterFullDomainProbeMs: TFBOT_ROUTER_COORDINATOR_CACHE_MS,
         clusterServingDomains: TFBOT_ROUTER_SERVING_DOMAINS.map(item => item.host),
