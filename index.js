@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'tfbot-v211';
+const TFBOT_CODE_VERSION = 'tfbot-v212';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
 const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
 let tfbotBaileysSocketVersionCache = null;
@@ -2036,6 +2036,7 @@ function createRenderPinoLogger(options = {}) {
 
 const RUNTIME_FIX_BUILD = 'tfbot-2026-11-09-r207-all-chat-append-commands-spinner-retry-global-inbound';
 const PORT = process.env.PORT || 7000;
+const TFBOT_ADMIN_API_TOKEN = 'Bot (tfbot)';
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
 const TFBOT_ROUTER_RESOLVE_PATH = '/__tfbot/router/resolve';
@@ -2148,7 +2149,7 @@ const BOT_TIME_ZONE = process.env.BOT_TIME_ZONE || 'America/Port-au-Prince';
 const AI_MAX_INPUT_CHARS = Math.max(1000, Number(process.env.AI_MAX_INPUT_CHARS || 12000));
 const SEARCH_QUERY_MAX_CHARS = Math.max(200, Number(process.env.SEARCH_QUERY_MAX_CHARS || 1200));
 const TFSERVER_AI_URL = String(process.env.TFSERVER_AI_URL || 'https://tfserver-ai.onrender.com').trim().replace(/\/+$/, '');
-const TFSERVER_AI_TOKEN = String(process.env.TFSERVER_AI_TOKEN || process.env.TOKEN || '').trim();
+
 const TFBOT_MAX_COMMAND_AGE_MS = Math.max(1000, Math.min(70000, Number(process.env.TFBOT_MAX_COMMAND_AGE_MS || 70000)));
 
 function getTfbotTimestampMilliseconds(value) {
@@ -7140,8 +7141,15 @@ async function postTfServerAi(payload, timeoutMs = TFSERVER_AI_TIMEOUT_MS) {
             cache: 'no-store'
         });
         if (!response.ok) {
-            try { await response.body?.cancel?.(); } catch (error) {}
-            throw new Error(`tfserver_ai_http_${response.status}`);
+            const responseText = await response.text().catch(() => '');
+            let responseError = '';
+            try {
+                const responseJson = JSON.parse(responseText || '{}');
+                responseError = String(responseJson.error || responseJson.message || responseJson.status || '');
+            } catch (error) {
+                responseError = String(responseText || '').replace(/\s+/g, ' ').trim();
+            }
+            throw new Error(`tfserver_ai_http_${response.status}${responseError ? `:${responseError.slice(0, 240)}` : ''}`);
         }
         const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase();
         if (contentType.includes('text/event-stream')) {
@@ -7149,7 +7157,13 @@ async function postTfServerAi(payload, timeoutMs = TFSERVER_AI_TIMEOUT_MS) {
             return { response, bodyText: '', finalMessage, streamed: true };
         }
         const bodyText = await response.text();
+        let bodyJson = null;
+        try { bodyJson = JSON.parse(bodyText || '{}'); } catch (error) {}
+        if (bodyJson && (bodyJson.ok === false || bodyJson.status === 'maintenance' || bodyJson.error)) {
+            throw new Error(`tfserver_ai_response_rejected:${String(bodyJson.error || bodyJson.message || bodyJson.status || 'request_rejected').slice(0, 240)}`);
+        }
         const finalMessage = buildTfServerAiEventText(bodyText);
+        if (!finalMessage) throw new Error('tfserver_ai_non_stream_response_empty');
         return { response, bodyText, finalMessage, streamed: false };
     } catch (error) {
         if (error?.name === 'AbortError') throw new Error('tfserver_ai_timeout');
@@ -7193,17 +7207,12 @@ const tfServerAiBackgroundContextSent = new Map();
 const tfServerAiBackgroundContextPending = new Map();
 
 function getTfServerAiRequestHeaders(accept = 'text/event-stream, application/json') {
-    const headers = {
+    return {
         'Content-Type': 'application/json',
         'Accept': accept,
         'Cache-Control': 'no-cache',
         'x-caller-host': 'dh7.adamdh7.org'
     };
-    if (TFSERVER_AI_TOKEN) {
-        headers['x-api-token'] = TFSERVER_AI_TOKEN;
-        headers.Authorization = `Bearer ${TFSERVER_AI_TOKEN}`;
-    }
-    return headers;
 }
 
 async function sendTfServerAiBackgroundContext(sessionId, userPhone, language = 'en', displayName = '') {
@@ -7307,43 +7316,91 @@ Number : ${normalizedNumber}
         if (tfServerAiBackgroundContextPending.get(stateKey) === requestPromise) tfServerAiBackgroundContextPending.delete(stateKey);
     }
 }
-async function callTfServerAiMessage(sessionId, userPhone, text, useSearch = false, language = 'en', displayName = '') {
-    const query = clipLongText(String(text || '').trim(), useSearch ? SEARCH_QUERY_MAX_CHARS : AI_MAX_INPUT_CHARS);
-    if (!query) throw new Error(useSearch ? 'search_query_empty' : 'ai_prompt_empty');
+async function callTfServerAiMessage(sessionId, userPhone, text, useSearch = false, language = 'en', displayName = '', requestedAction = '') {
+    const actionName = String(requestedAction || (useSearch ? 'search' : '')).trim().toLowerCase();
+    const maxInput = actionName === 'search' || useSearch ? SEARCH_QUERY_MAX_CHARS : AI_MAX_INPUT_CHARS;
+    const query = clipLongText(String(text || '').trim(), maxInput);
+    if (!query) throw new Error(actionName === 'search' || useSearch ? 'search_query_empty' : actionName === 'image' ? 'image_prompt_empty' : 'ai_prompt_empty');
     const tfid = await getTfServerAiConversationId(sessionId, userPhone);
     await sendTfServerAiBackgroundContext(sessionId, tfid, language, displayName);
-    const payload = useSearch
-        ? { tfid, text: query, action: { name: 'search', params: { query } } }
+    const payload = actionName
+        ? { tfid, text: query, action: { name: actionName, params: actionName === 'image' || actionName === 'code' ? { prompt: query } : { query } } }
         : { tfid, text: query };
+    console.info('[tfserver-ai-user-request-started]', { sessionId, conversationHash: shortLogHash(tfid), mode: actionName || 'chat', inputLength: query.length, sendsOnlyCurrentUserMessage: true, localHistoryForwarded: false });
     const aiResult = await postTfServerAi(payload, TFSERVER_AI_TIMEOUT_MS);
     const answer = String(aiResult.finalMessage || buildTfServerAiEventText(aiResult.bodyText) || '').trim();
     if (!answer) throw new Error('tfserver_ai_empty_response');
-    console.info('[tfserver-ai-request-completed]', { sessionId, conversationHash: shortLogHash(tfid), mode: useSearch ? 'search' : 'chat', inputLength: query.length, responseLength: answer.length });
+    console.info('[tfserver-ai-request-completed]', { sessionId, conversationHash: shortLogHash(tfid), mode: actionName || 'chat', inputLength: query.length, responseLength: answer.length, streamed: aiResult.streamed === true });
     return answer;
 }
 
-function normalizeTfServerAiGeneratedImageLinks(value) {
-    const source = String(value || '');
-    const generatedImageCount = (source.match(/https:\/\/bref\.adamdh7\.org\/TF-[A-Za-z0-9_-]+\//gi) || []).length;
-    const text = source.replace(/!\[[^\]]*\]\((https:\/\/bref\.adamdh7\.org\/TF-[A-Za-z0-9_-]+\/[^\s)]+)\)/gi, '$1');
-    return { text, generatedImageCount };
+function extractTfServerAiGeneratedImageUrl(value) {
+    const source = String(value || '').replace(/&amp;/gi, '&').replace(/&quot;/gi, '"').replace(/&#39;/gi, "'");
+    const candidates = [
+        source.match(/<result_url>\s*(https:\/\/[^\s<]+)\s*<\/result_url>/i)?.[1],
+        source.match(/!\[[^\]]*\]\((https:\/\/[^\s)]+)\)/i)?.[1],
+        source.match(/<result>\s*(https:\/\/[^\s<]+)\s*<\/result>/i)?.[1],
+        source.match(/https:\/\/bref\.adamdh7\.org\/[^\s<>()\"']+/i)?.[0]
+    ].filter(Boolean);
+    for (const candidate of candidates) {
+        try {
+            const parsed = new URL(String(candidate).replace(/[.,!?;:]+$/g, ''));
+            if (parsed.protocol === 'https:' && parsed.hostname.toLowerCase() === 'bref.adamdh7.org') return parsed.toString();
+        } catch (error) {}
+    }
+    return '';
+}
+
+async function downloadTfServerAiGeneratedImage(url) {
+    let parsed;
+    try { parsed = new URL(String(url || '')); } catch (error) { throw new Error('tfserver_ai_image_url_invalid'); }
+    if (parsed.protocol !== 'https:' || parsed.hostname.toLowerCase() !== 'bref.adamdh7.org') throw new Error('tfserver_ai_image_host_rejected');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 25000);
+    try {
+        const response = await fetch(parsed, { method: 'GET', headers: { Accept: 'image/*' }, redirect: 'error', cache: 'no-store', signal: controller.signal });
+        const contentType = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+        const contentLength = Number(response.headers.get('content-length') || 0);
+        if (!response.ok) throw new Error(`tfserver_ai_image_http_${response.status}`);
+        if (!contentType.startsWith('image/')) throw new Error('tfserver_ai_image_content_type_invalid');
+        if (contentLength > 15 * 1024 * 1024) throw new Error('tfserver_ai_image_too_large');
+        const buffer = Buffer.from(await response.arrayBuffer());
+        if (!buffer.length || buffer.length > 15 * 1024 * 1024) throw new Error('tfserver_ai_image_size_invalid');
+        const mimeType = detectImageMimeType(buffer);
+        if (!String(mimeType || '').startsWith('image/')) throw new Error('tfserver_ai_image_decode_invalid');
+        return { buffer, mimeType };
+    } catch (error) {
+        if (error?.name === 'AbortError') throw new Error('tfserver_ai_image_download_timeout');
+        throw error;
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 function formatTfServerAiWhatsAppText(value) {
-    return String(value || '').replace(/https?:\/\/[^\s<>]+/g, url => `*_${url}_*`).trim();
+    return String(value || '')
+        .replace(/<CONTEXT_EVENT\b[^>]*>[\s\S]*?<\/CONTEXT_EVENT>/gi, ' ')
+        .replace(/<\/?(?:final_message|answer|result_url|result)\b[^>]*>/gi, ' ')
+        .replace(/https?:\/\/[^\s<>]+/g, url => `*_${url}_*`)
+        .replace(/\s{3,}/g, '\n\n')
+        .trim();
 }
 
 async function sendTfServerAiReply(sock, jid, answer, sendMessage, quotedMessage) {
-    const normalized = normalizeTfServerAiGeneratedImageLinks(answer);
-    const replyText = formatTfServerAiWhatsAppText(normalized.text);
+    const imageUrl = extractTfServerAiGeneratedImageUrl(answer);
+    let visibleText = String(answer || '');
+    if (imageUrl) visibleText = visibleText.replace(/!\[[^\]]*\]\(https:\/\/[^\s)]+\)/gi, '').replace(imageUrl, '');
+    const replyText = formatTfServerAiWhatsAppText(visibleText);
+    if (imageUrl) {
+        const image = await downloadTfServerAiGeneratedImage(imageUrl);
+        const sent = await sendMessage(sock, jid, { image: image.buffer, caption: replyText || 'Asistan' }, { quoted: quotedMessage }, 180);
+        if (!sent?.key?.id) throw new Error('tfserver_ai_image_send_unconfirmed');
+        return { sent: true, type: 'generated_image', generatedImageCount: 1, mimeType: image.mimeType };
+    }
     if (!replyText) throw new Error('tfserver_ai_response_empty_after_formatting');
     const sent = await sendMessage(sock, jid, { text: replyText }, { quoted: quotedMessage }, 180);
     if (!sent?.key?.id) throw new Error('tfserver_ai_text_send_unconfirmed');
-    return {
-        sent: true,
-        type: normalized.generatedImageCount ? 'text_with_generated_image_url' : 'text',
-        generatedImageCount: normalized.generatedImageCount
-    };
+    return { sent: true, type: 'text', generatedImageCount: 0 };
 }
 
 async function clearTfServerAiConversationForUser(sessionId, userPhone) {
@@ -11651,18 +11708,10 @@ app.get('/TF-:id', handleTFSlugRequest);
 app.get(/^\/(?:.*\/)?TF-[A-Za-z0-9_-]{1,80}(?:\/.*)?$/i, handleTFSlugRequest);
 
 function isAuthorizedAdmin(req) {
-    if (isValidClusterHop(req)) return true;
-    const expected = String(process.env.ADMIN_API_TOKEN || process.env.TOKEN || '');
     const authorization = String(req.get('Authorization') || '');
-    const cookieToken = String(req.headers?.cookie || '').split(';').map(value => value.trim()).find(value => value.startsWith('tfbot_admin='))?.slice('tfbot_admin='.length) || '';
-    let decodedCookie = cookieToken;
-    try { decodedCookie = decodeURIComponent(cookieToken); } catch (error) {}
-    const supplied = authorization.match(/^Bearer\s+(.+)$/i)?.[1]?.trim()
-        || String(req.get('X-API-Key') || req.get('X-API-Token') || '').trim()
-        || String(req.query?.token || '').trim()
-        || decodedCookie;
-    if (!expected || !supplied) return false;
-    const expectedBuffer = Buffer.from(expected);
+    const supplied = authorization.match(/^Bearer\s+(.+)$/i)?.[1]?.trim() || '';
+    if (!supplied) return false;
+    const expectedBuffer = Buffer.from(TFBOT_ADMIN_API_TOKEN);
     const suppliedBuffer = Buffer.from(supplied);
     return expectedBuffer.length === suppliedBuffer.length && crypto.timingSafeEqual(expectedBuffer, suppliedBuffer);
 }
@@ -11719,6 +11768,78 @@ async function getAdminSessionOwner(sessionId) {
     return adminMongoRead('admin_session_owner_read', () => db.collection('session_owners').findOne({ sessionId }, { maxTimeMS: 8000 }));
 }
 
+const ADMIN_SESSION_RUNTIME_READY_TIMEOUT_MS = 240000;
+
+async function ensureAdminSessionRuntimeOperational(sessionId, ownerHint = null) {
+    const id = String(sessionId || '').trim();
+    if (!id) throw new Error('invalid_session_id');
+    if (TFBOT_CLUSTER_COORDINATOR_ONLY || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping || !db))) throw new Error('tfbot_worker_not_active');
+    const deadline = Date.now() + ADMIN_SESSION_RUNTIME_READY_TIMEOUT_MS;
+    let owner = ownerHint || null;
+    let lastOwnerReadAt = 0;
+    let lastAuthReadAt = 0;
+    let credentials = null;
+    let restoreRequestedAt = 0;
+    let restoreRequestCount = 0;
+    let lastRestoreError = '';
+    while (Date.now() < deadline) {
+        if (TFBOT_CLUSTER_COORDINATOR_ONLY || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping || !db))) throw new Error('tfbot_worker_not_active_during_admin_session_restore');
+        const runtime = activeSessions.get(id) || null;
+        if (runtime?.sock && sessionRuntimeLockTokens.has(id) && isAuthenticatedSocketOperational(runtime, runtime.sock)) {
+            console.info('[admin-session-runtime-ready]', { sessionId: id, elapsedMs: ADMIN_SESSION_RUNTIME_READY_TIMEOUT_MS - (deadline - Date.now()), restoreRequestCount, socketAuthenticated: true, fencingTokenPresent: true, path: 'existing_startAdamBot_session_restore' });
+            return runtime;
+        }
+        if (Date.now() - lastOwnerReadAt >= 1500 || !owner) {
+            lastOwnerReadAt = Date.now();
+            try {
+                owner = await db.collection('session_owners').findOne({ sessionId: id }, { projection: { sessionId: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, ownerLeaseUntil: 1, connectionStatus: 1, reauthRequired: 1, credentialsRevoked: 1, format: 1, Format: 1, Number: 1, number: 1, PairingNumber: 1, pairingNumber: 1, everConnected: 1, everAuthenticated: 1, connectionEverOpened: 1 }, maxTimeMS: 4000 });
+            } catch (error) {
+                lastRestoreError = String(error?.message || error).slice(0, 180);
+            }
+        }
+        if (!owner && !activeSessions.has(id)) throw new Error('session_not_found_during_admin_restore');
+        const ownerStatus = String(owner?.connectionStatus || '').toLowerCase();
+        if (owner?.reauthRequired === true || owner?.credentialsRevoked === true || ['reauth_required', 'logged_out', 'auth_error', 'pairing_expired', 'duplicate_account'].includes(ownerStatus)) throw new Error('session_requires_reauthentication_preserve_existing_data');
+        if (Date.now() - lastAuthReadAt >= 3000) {
+            lastAuthReadAt = Date.now();
+            try {
+                const authDoc = await db.collection('baileys_auth').findOne({ _id: `auth-${id}-creds` }, { projection: { creds: 1 }, maxTimeMS: 4000 });
+                credentials = authDoc?.creds ? fixBuffers(authDoc.creds) : activeSessions.get(id)?.authState?.creds || null;
+            } catch (error) {
+                lastRestoreError = String(error?.message || error).slice(0, 180);
+            }
+        }
+        if (!hasRegisteredWhatsAppIdentity(credentials, runtime?.sock?.user || null) && !hasEstablishedWhatsAppAccount(owner, runtime, credentials)) throw new Error('session_registered_credentials_unavailable_preserve_existing_data');
+        const ownerInstanceId = String(owner?.ownerInstanceId || '');
+        const ownerLeaseUntil = new Date(owner?.ownerLeaseUntil || 0).getTime();
+        const remoteLeaseActive = TFBOT_CLUSTER_ENABLED && ownerInstanceId && ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && ownerLeaseUntil > Date.now() && !isPreviousDeploymentOwnerOnCurrentHost(owner);
+        const notBeforeAt = remoteLeaseActive ? ownerLeaseUntil : 0;
+        const format = normalizeConnectionFormat(runtime?.format || owner?.format || owner?.Format || 'pair', 'pair');
+        const restoreAlreadyScheduled = sessionStartPromises.has(id) || reconnectTimers.has(id) || sessionLockRetryTimers.has(id);
+        if (!restoreAlreadyScheduled && Date.now() - restoreRequestedAt >= 1200) {
+            restoreRequestedAt = Date.now();
+            restoreRequestCount++;
+            if (notBeforeAt > Date.now()) {
+                const retryInMs = scheduleSessionLockRetry(id, false, format, notBeforeAt);
+                console.info('[admin-session-restore-queued-after-owner-lease]', { sessionId: id, ownerInstanceId, ownerLeaseUntil: new Date(notBeforeAt).toISOString(), retryInMs: retryInMs || null, restoreRequestCount, action: 'reuse_existing_session_lock_retry_and_startAdamBot' });
+            } else {
+                console.info('[admin-session-restore-requested]', { sessionId: id, format, restoreRequestCount, localRuntimePresent: !!runtime, runtimeSocketPresent: !!runtime?.sock, action: 'reuse_existing_startAdamBot_without_new_pairing_session' });
+                startAdamBot(id, false, format, true).catch(error => {
+                    lastRestoreError = String(error?.message || error).slice(0, 180);
+                    console.warn('[admin-session-restore-request-failed]', { sessionId: id, restoreRequestCount, error: lastRestoreError, credentialsPreserved: true });
+                    if (!sessionStartPromises.has(id) && !reconnectTimers.has(id) && !sessionLockRetryTimers.has(id) && tfbotWorkerActive && !tfbotWorkerStopping) {
+                        const currentOwnerLease = new Date(owner?.ownerLeaseUntil || 0).getTime();
+                        scheduleSessionLockRetry(id, false, format, currentOwnerLease > Date.now() ? currentOwnerLease : 0);
+                    }
+                });
+            }
+        }
+        await sleep(500);
+    }
+    console.error('[admin-session-runtime-restore-timeout]', { sessionId: id, timeoutMs: ADMIN_SESSION_RUNTIME_READY_TIMEOUT_MS, restoreRequestCount, lastRestoreError: lastRestoreError || null, ownerInstanceId: owner?.ownerInstanceId || null, ownerLeaseUntil: owner?.ownerLeaseUntil || null, localRuntimePresent: activeSessions.has(id), action: 'preserve_existing_whatsapp_auth_and_do_not_delete_session' });
+    throw new Error('admin_session_runtime_restore_timeout_preserve_existing_data');
+}
+
 async function getTfServerAiOwnerLanguage(sessionId, owner, fallbackLanguage = 'en') {
     const ownerPhone = normalizePhoneNumber(owner?.Number || owner?.number || owner?.OwnerNumber || owner?.ownerNumber || owner?.PairingNumber || owner?.pairingNumber || '');
     if (!/^\d{6,20}$/.test(ownerPhone) || /^0+$/.test(ownerPhone)) {
@@ -11738,10 +11859,8 @@ async function prepareAdminSessionDeletion(sessionId, operationId = '') {
     let freshPairingSessionId = '';
     let savedPreparation = false;
     try {
-        const [owner, runtime] = await Promise.all([
-            getAdminSessionOwner(id),
-            Promise.resolve(activeSessions.get(id) || null)
-        ]);
+        let owner = await getAdminSessionOwner(id);
+        let runtime = activeSessions.get(id) || null;
         console.info('[admin-session-delete-prepare-started]', { sessionId: id, operationId: String(operationId || '').slice(0, 120) || null, workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, workerState: tfbotWorkerState, localRuntimePresent: !!runtime, localSocketPresent: !!runtime?.sock, localRuntimeLockPresent: sessionRuntimeLockTokens.has(id), recordedOwnerPresent: !!owner, recordedOwnerInstanceId: owner?.ownerInstanceId || null, recordedOwnerLeaseActive: new Date(owner?.ownerLeaseUntil || 0).getTime() > Date.now() });
         if (TFBOT_CLUSTER_COORDINATOR_ONLY || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping))) throw new Error('admin_session_prepare_requires_active_worker');
         if (!owner && !runtime) return { ok: true, prepared: true, alreadyRemoved: true, mode: 'already_removed', messageSent: false };
@@ -11758,8 +11877,13 @@ async function prepareAdminSessionDeletion(sessionId, operationId = '') {
             }
             throw new Error('session_account_not_verified_preserve_existing_data');
         }
+        if (!runtime?.sock || !isAuthenticatedSocketOperational(runtime, runtime.sock) || !sessionRuntimeLockTokens.has(id)) {
+            await ensureAdminSessionRuntimeOperational(id, owner);
+            runtime = activeSessions.get(id) || null;
+            owner = await getAdminSessionOwner(id);
+        }
         const originalSocket = runtime?.sock || null;
-        if (!originalSocket || !isAuthenticatedSocketOperational(runtime, originalSocket)) throw new Error('session_socket_not_operational_preserve_existing_data');
+        if (!originalSocket || !sessionRuntimeLockTokens.has(id) || !isAuthenticatedSocketOperational(runtime, originalSocket)) throw new Error('session_socket_not_operational_preserve_existing_data');
         const phoneCandidate = getAuthenticatedPhoneNumber(originalSocket.user || null, credentials) || getStoredSessionOwnerPhone(owner || {}) || owner?.PairingNumber || owner?.pairingNumber || '';
         const phone = normalizePairingPhoneNumber(phoneCandidate);
         if (!/^\d{8,15}$/.test(phone)) throw new Error('session_phone_unavailable_for_pairing');
@@ -11768,8 +11892,7 @@ async function prepareAdminSessionDeletion(sessionId, operationId = '') {
         ) || 'Not provided';
         const pairingApiBase = TFBOT_INTERNAL_API_BASE_URL || TFBOT_CLUSTER_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || TF_BOT_BASE_URL;
         if (!pairingApiBase) throw new Error('admin_pairing_api_not_configured');
-        const internalApiToken = String(process.env.ADMIN_API_TOKEN || process.env.TOKEN || '').trim();
-        if (!internalApiToken) throw new Error('admin_pairing_internal_token_not_configured');
+        const internalApiToken = TFBOT_ADMIN_API_TOKEN;
         const pairingApiUrl = new URL('/get-code', `${pairingApiBase}/`).toString();
         console.info('[admin-session-existing-get-code-route-started]', { sessionId: id, workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null, pairingRoute: '/get-code', phoneLength: phone.length, operationId: String(operationId || '').slice(0, 120) || null });
         const pairingResponse = await fetch(pairingApiUrl, {
@@ -11963,68 +12086,75 @@ async function finalizeAdminSessionDeletion(sessionId) {
 async function runAdminSessionOwnerAction(owner, action, sessionId, operationId = '') {
     const id = String(sessionId || '').trim();
     const ownerRecord = owner || await getAdminSessionOwner(id);
+    if (action === 'finalize' && adminSessionDeletionPreparations.has(id)) {
+        if (TFBOT_CLUSTER_COORDINATOR_ONLY || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping))) throw new Error('tfbot_worker_not_active');
+        return finalizeAdminSessionDeletion(id);
+    }
     const ownerId = String(ownerRecord?.ownerInstanceId || '');
     const ownerLease = new Date(ownerRecord?.ownerLeaseUntil || 0).getTime();
     const canRunOnCurrentWorker = () => {
         const runtime = activeSessions.get(id);
         return !TFBOT_CLUSTER_COORDINATOR_ONLY && tfbotWorkerActive && !tfbotWorkerStopping && !!runtime?.sock && sessionRuntimeLockTokens.has(id) && isAuthenticatedSocketOperational(runtime, runtime.sock);
     };
-    const runLocally = () => action === 'prepare' ? prepareAdminSessionDeletion(id, operationId) : finalizeAdminSessionDeletion(id);
+    const runLocally = async () => {
+        if (action === 'prepare') {
+            await ensureAdminSessionRuntimeOperational(id, ownerRecord);
+            return prepareAdminSessionDeletion(id, operationId);
+        }
+        return finalizeAdminSessionDeletion(id);
+    };
     const localOwner = !TFBOT_CLUSTER_ENABLED || !ownerId || ownerId === TFBOT_CLUSTER_INSTANCE_ID || isPreviousDeploymentOwnerOnCurrentHost(ownerRecord) || canRunOnCurrentWorker();
     if (localOwner) {
-        console.info('[admin-session-owner-action-local]', { sessionId: id, action, ownerInstanceId: ownerId || null, currentInstanceId: TFBOT_CLUSTER_INSTANCE_ID || null, localRuntimeOperational: canRunOnCurrentWorker() });
+        console.info('[admin-session-owner-action-local]', { sessionId: id, action, ownerInstanceId: ownerId || null, currentInstanceId: TFBOT_CLUSTER_INSTANCE_ID || null, localRuntimeOperational: canRunOnCurrentWorker(), existingPreparationPresent: adminSessionDeletionPreparations.has(id) });
         return runLocally();
     }
-    if (ownerLease <= Date.now()) throw new Error('session_owner_lease_expired_worker_unavailable');
-    const clusterRecord = await adminMongoRead('admin_session_owner_instance_read', () => db.collection('cluster_instances').findOne(
-        { _id: ownerId },
-        { projection: { url: 1, host: 1, status: 1, draining: 1, leaseUntil: 1, activeSessionCount: 1 }, maxTimeMS: 8000 }
-    ));
-    const workerLease = new Date(clusterRecord?.leaseUntil || 0).getTime();
-    const workerStatus = String(clusterRecord?.status || '').toLowerCase();
-    const workerCanReceive = !!clusterRecord && ['ready', 'active'].includes(workerStatus) && clusterRecord.draining !== true && workerLease > Date.now();
-    if (!workerCanReceive) {
-        if (canRunOnCurrentWorker()) {
-            console.warn('[admin-session-owner-stale-rerouted-local]', { sessionId: id, action, ownerInstanceId: ownerId, ownerWorkerStatus: workerStatus || 'unknown', ownerWorkerLeaseActive: workerLease > Date.now(), currentInstanceId: TFBOT_CLUSTER_INSTANCE_ID || null });
-            return runLocally();
-        }
-        console.error('[admin-session-owner-worker-unavailable]', { sessionId: id, action, ownerInstanceId: ownerId, ownerWorkerStatus: workerStatus || 'unknown', ownerWorkerDraining: clusterRecord?.draining === true, ownerWorkerLeaseActive: workerLease > Date.now(), localRuntimePresent: activeSessions.has(id), localSocketPresent: !!activeSessions.get(id)?.sock, currentWorkerActive: tfbotWorkerActive });
-        throw new Error('session_owner_worker_inactive_runtime_unavailable');
-    }
-    const baseUrl = String(clusterRecord?.url || ownerRecord?.ownerInstanceUrl || '').replace(/\/+$/, '');
-    if (!baseUrl) throw new Error('session_owner_worker_url_unavailable');
-    let target;
-    try { target = new URL(action === 'prepare' ? '/__tfbot/admin/session-prepare' : '/__tfbot/admin/session-finalize', baseUrl); }
-    catch (error) { throw new Error('session_owner_worker_url_invalid'); }
-    if (target.protocol !== 'https:' && !(target.protocol === 'http:' && TFBOT_CLUSTER_PRIVATE_NETWORK) && !['localhost', '127.0.0.1'].includes(target.hostname)) throw new Error('session_owner_worker_protocol_rejected');
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 420000);
-    try {
-        console.info('[admin-session-owner-action-forwarded]', { sessionId: id, action, ownerInstanceId: ownerId, ownerHost: clusterRecord.host || null, ownerWorkerStatus: workerStatus, workerLeaseActive: true });
-        const response = await fetch(target, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-TFBOT-Cluster-Token': TFBOT_CLUSTER_TOKEN, 'X-TFBOT-Cluster-Hop': '1', 'X-TFBOT-Origin-Instance': TFBOT_CLUSTER_INSTANCE_ID },
-            body: JSON.stringify({ sessionId: id, operationId }),
-            signal: controller.signal,
-            cache: 'no-store',
-            redirect: 'error'
-        });
-        const result = await response.json().catch(() => ({}));
-        if (!response.ok || result?.ok !== true) {
-            const remoteError = String(result?.error || `session_owner_worker_http_${response.status}`).slice(0, 240);
-            if (/tfbot_worker_not_active|admin_session_prepare_requires_active_worker/i.test(remoteError) && canRunOnCurrentWorker()) {
-                console.warn('[admin-session-owner-inactive-forward-fallback]', { sessionId: id, action, ownerInstanceId: ownerId, remoteError, fallback: 'current_active_runtime' });
-                return runLocally();
+    if (ownerLease > Date.now()) {
+        const clusterRecord = await adminMongoRead('admin_session_owner_instance_read', () => db.collection('cluster_instances').findOne(
+            { _id: ownerId },
+            { projection: { url: 1, host: 1, status: 1, draining: 1, leaseUntil: 1, activeSessionCount: 1, role: 1 }, maxTimeMS: 8000 }
+        ));
+        const workerLease = new Date(clusterRecord?.leaseUntil || 0).getTime();
+        const workerStatus = String(clusterRecord?.status || '').toLowerCase();
+        const workerCanReceive = !!clusterRecord && ['ready', 'active'].includes(workerStatus) && clusterRecord.draining !== true && workerLease > Date.now();
+        const health = workerCanReceive ? await probeClusterInstance({ ...clusterRecord, _id: ownerId }) : null;
+        if (workerCanReceive && health?.ok === true) {
+            const baseUrl = String(clusterRecord?.url || ownerRecord?.ownerInstanceUrl || '').replace(/\/+$/, '');
+            if (!baseUrl) throw new Error('session_owner_worker_url_unavailable');
+            let target;
+            try { target = new URL(action === 'prepare' ? '/__tfbot/admin/session-prepare' : '/__tfbot/admin/session-finalize', baseUrl); }
+            catch (error) { throw new Error('session_owner_worker_url_invalid'); }
+            if (target.protocol !== 'https:' && !(target.protocol === 'http:' && TFBOT_CLUSTER_PRIVATE_NETWORK) && !['localhost', '127.0.0.1'].includes(target.hostname)) throw new Error('session_owner_worker_protocol_rejected');
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 420000);
+            try {
+                console.info('[admin-session-owner-action-forwarded]', { sessionId: id, action, ownerInstanceId: ownerId, ownerHost: clusterRecord.host || null, ownerWorkerStatus: workerStatus, workerLeaseActive: true, workerHealthConfirmed: true, workerActiveSessionCount: health.activeSessionCount });
+                const response = await fetch(target, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-TFBOT-Cluster-Token': TFBOT_CLUSTER_TOKEN, 'X-TFBOT-Cluster-Hop': '1', 'X-TFBOT-Origin-Instance': TFBOT_CLUSTER_INSTANCE_ID },
+                    body: JSON.stringify({ sessionId: id, operationId }),
+                    signal: controller.signal,
+                    cache: 'no-store',
+                    redirect: 'error'
+                });
+                const result = await response.json().catch(() => ({}));
+                if (response.ok && result?.ok === true) return result;
+                const remoteError = String(result?.error || `session_owner_worker_http_${response.status}`).slice(0, 240);
+                if (!/tfbot_worker_not_active|admin_session_prepare_requires_active_worker|session_socket_not_operational_preserve_existing_data|session_runtime_lock_owned_elsewhere|session_owner_worker_inactive/i.test(remoteError)) throw new Error(remoteError);
+                console.warn('[admin-session-owner-remote-runtime-not-ready]', { sessionId: id, action, ownerInstanceId: ownerId, remoteError, currentWorkerActive: tfbotWorkerActive, actionAfterFallback: 'restore_existing_session_through_startAdamBot_after_owner_lease' });
+            } catch (error) {
+                if (error?.name === 'AbortError') throw new Error('session_owner_worker_timeout');
+                if (!/tfbot_worker_not_active|admin_session_prepare_requires_active_worker|session_socket_not_operational_preserve_existing_data|session_runtime_lock_owned_elsewhere|session_owner_worker_inactive/i.test(String(error?.message || error))) throw error;
+                console.warn('[admin-session-owner-forward-failed-over]', { sessionId: id, action, ownerInstanceId: ownerId, error: String(error?.message || error).slice(0, 220), fallback: 'current_active_worker_existing_restore' });
+            } finally {
+                clearTimeout(timer);
             }
-            throw new Error(remoteError);
+        } else {
+            console.warn('[admin-session-owner-health-unavailable]', { sessionId: id, action, ownerInstanceId: ownerId, ownerWorkerStatus: workerStatus || 'unknown', workerLeaseActive: workerLease > Date.now(), ownerLeaseUntil: ownerRecord?.ownerLeaseUntil || null, localWorkerActive: tfbotWorkerActive, action: 'wait_for_existing_session_lock_and_restore_on_current_selected_worker' });
         }
-        return result;
-    } catch (error) {
-        if (error?.name === 'AbortError') throw new Error('session_owner_worker_timeout');
-        throw error;
-    } finally {
-        clearTimeout(timer);
     }
+    if (TFBOT_CLUSTER_COORDINATOR_ONLY || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping || !db))) throw new Error('tfbot_worker_not_active');
+    console.info('[admin-session-owner-action-local-recovery]', { sessionId: id, action, previousOwnerInstanceId: ownerId || null, previousOwnerLeaseUntil: ownerRecord?.ownerLeaseUntil || null, localRuntimePresent: activeSessions.has(id), localRuntimeOperational: canRunOnCurrentWorker(), action: 'reuse_normal_session_restore_and_runtime_lock_without_creating_a_new_pairing_session' });
+    return runLocally();
 }
 
 async function mapAdminSessionsWithConcurrency(items, concurrency, operation) {
@@ -12069,7 +12199,14 @@ async function getAdminSessionRows() {
         const authenticated = !!(runtime?.sock && isAuthenticatedSocketOperational(runtime, runtime.sock));
         const connectedAtValue = owner?.accountFirstConnectedAt || runtime?.accountFirstConnectedAt || owner?.connectedSince || runtime?.connectedSince || owner?.socketAuthenticatedAt || runtime?.socketAuthenticatedAt || owner?.createdAt || runtime?.createdAt || 0;
         const connectedAt = connectedAtValue instanceof Date ? connectedAtValue.getTime() : new Date(connectedAtValue || 0).getTime();
-        const elapsed = authenticated ? getUptimeString(Math.max(1000, Number.isFinite(connectedAt) && connectedAt > 0 ? now - connectedAt : 1000)) : String(owner?.connectionStatus || owner?.status || runtime?.status || 'Non connecté');
+        const storedStatus = String(runtime?.status || owner?.connectionStatus || owner?.status || 'Non connecté');
+        const storedStatusNormalized = storedStatus.toLowerCase();
+        const ownerLeaseActive = new Date(owner?.ownerLeaseUntil || 0).getTime() > now;
+        const elapsed = authenticated
+            ? getUptimeString(Math.max(1000, Number.isFinite(connectedAt) && connectedAt > 0 ? now - connectedAt : 1000))
+            : ['connected', 'connecte', 'online', 'active'].includes(storedStatusNormalized)
+                ? ownerLeaseActive ? 'Restauration en cours' : 'Non connecté'
+                : storedStatus;
         rows.push({ SessionId: id, Name: displayName || 'Bot (tfbot)', Numero: phone || 'N/A', TempsConnexion: elapsed });
     }
     rows.sort((a, b) => String(a.Name || '').localeCompare(String(b.Name || '')));
@@ -12191,8 +12328,7 @@ function isEmbeddedStaticAssetRequest(req) {
 }
 
 function signTFConfirmation(id) {
-    const secret = String(process.env.TOKEN || process.env.ADMIN_API_TOKEN || '').trim();
-    if (!secret) throw new Error('TOKEN is required to sign confirmation links');
+    const secret = TFBOT_ADMIN_API_TOKEN;
     return crypto.createHmac('sha256', secret).update(`tf-confirm:${String(id)}`).digest('hex');
 }
 
@@ -12221,7 +12357,6 @@ function isBotIframeDocumentRequest(req, html = '') {
 }
 
 app.get('/list2', (req, res) => {
-    if (!(process.env.ADMIN_API_TOKEN || process.env.TOKEN)) return res.status(503).type('text/plain').send('MAINTENANCE DESACTIVE : configurez TOKEN ou ADMIN_API_TOKEN.');
     if (!isAuthorizedAdmin(req)) return res.status(401).type('text/plain').send('NON AUTORISE.');
     if (isPurging) return res.type('text/plain').send('SUPPRESSION DEJA EN COURS.');
     isPurging = true;
@@ -18789,6 +18924,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 responseSentForLog = true;
                                                 console.info('[tfserver-ai-whatsapp-delivered]', { sessionId, messageId: msgId, mode: 'chat', deliveryType: aiDelivery.type, generatedImage: aiDelivery.generatedImageCount > 0, language: aiActionLanguage });
                                             } catch (e) {
+                                                console.error('[tfserver-ai-chat-command-failed]', { sessionId, messageId: msgId, language: aiActionLanguage, error: redactActionError(e).slice(0, 500) });
                                                 await safeSendActionError(sock, from, (translations[aiActionLanguage] || translations.ht).ai_title, e, aiActionLanguage, pushName, m.messageTimestamp);
                                             }
                                             break;
@@ -18833,28 +18969,26 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 break;
                                             }
                                             const imagePrompt = clipLongText(args, Math.min(2048, Number(process.env.IMAGE_PROMPT_MAX_CHARS || 2048)));
+                                            let imageActionLanguage = messageLang;
                                             try {
-                                                const imageBuffer = await generateCloudflareImage(imagePrompt);
+                                                const imageUserPhone = await getTfServerAiUserPhoneNumber(sessionId, sock, [sender, ...senderJids], sNum, isOwnerReal ? authenticatedAccountNumber : '');
+                                                imageActionLanguage = await getTfServerAiOwnerLanguage(sessionId, sOwnerTop || {}, messageLang);
+                                                const imageResponse = await callTfServerAiMessage(sessionId, imageUserPhone, imagePrompt, false, imageActionLanguage, profileDisplayName || validIncomingDisplayName || pushName, 'image');
                                                 if (isCancelled) return;
-                                                const imageMimeType = detectImageMimeType(imageBuffer);
-                                                const imageExtension = imageMimeType === 'image/png' ? 'png' : imageMimeType === 'image/webp' ? 'webp' : 'jpg';
-                                                let publicImageUrl = '';
-                                                let uploadError = null;
-                                                try {
-                                                    const uploadedImage = await uploadToBref(imageBuffer, `tfbot.${imageExtension}`, imageMimeType);
-                                                    publicImageUrl = uploadedImage.url;
-                                                } catch (error) {
-                                                    uploadError = error;
-                                                    console.error('[image-upload-to-bref]', { error: redactActionError(error).slice(0, 700), imageBytes: imageBuffer.length, mimeType: imageMimeType });
-                                                }
+                                                const generatedImageUrl = extractTfServerAiGeneratedImageUrl(imageResponse);
+                                                if (!generatedImageUrl) throw new Error('tfserver_ai_image_result_url_missing');
+                                                const generatedImage = await downloadTfServerAiGeneratedImage(generatedImageUrl);
                                                 if (isCancelled) return;
-                                                const capText = uploadError
-                                                    ? await explainActionError(uploadError, messageLang, t.image_generated_title, pushName, m.messageTimestamp)
-                                                    : `${t.imaj_generated.replace('{prompt}', imagePrompt)}${publicImageUrl ? `\n${publicImageUrl}` : ''}`;
-                                                await trackedSendImageCaptioned(sock, from, imageBuffer, t.image_generated_title, capText, pushName);
+                                                const imageTranslations = translations[imageActionLanguage] || translations.ht;
+                                                const captionText = imageTranslations.imaj_generated.replace('{prompt}', imagePrompt);
+                                                const sentImage = await trackedSendImageCaptioned(sock, from, generatedImage.buffer, imageTranslations.image_generated_title, captionText, pushName);
+                                                if (!sentImage?.key?.id) throw new Error('tfserver_ai_image_send_unconfirmed');
                                                 terminalResponseSent = true;
+                                                responseSentForLog = true;
+                                                console.info('[tfserver-ai-image-whatsapp-delivered]', { sessionId, messageId: msgId, language: imageActionLanguage, imageBytes: generatedImage.buffer.length, mimeType: generatedImage.mimeType, imageHost: 'bref.adamdh7.org' });
                                             } catch (e) {
-                                                await safeSendActionError(sock, from, t.imaj_title, e, messageLang, pushName, m.messageTimestamp);
+                                                console.error('[tfserver-ai-image-command-failed]', { sessionId, messageId: msgId, language: imageActionLanguage, error: redactActionError(e).slice(0, 500) });
+                                                await safeSendActionError(sock, from, (translations[imageActionLanguage] || translations.ht).imaj_title, e, imageActionLanguage, pushName, m.messageTimestamp);
                                             }
                                             break;
                                         case 'code':
@@ -18868,8 +19002,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                             try {
                                                 const pairingApiBase = TFBOT_INTERNAL_API_BASE_URL || TFBOT_CLUSTER_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || TF_BOT_BASE_URL;
                                                 if (!pairingApiBase) throw new Error('pairing_api_not_configured');
-                                                const internalApiToken = String(process.env.ADMIN_API_TOKEN || process.env.TOKEN || '').trim();
-                                                if (!internalApiToken) throw new Error('internal_api_token_not_configured');
+                                                const internalApiToken = TFBOT_ADMIN_API_TOKEN;
                                                 const pairingApiUrl = new URL('/get-code', `${pairingApiBase}/`).toString();
                                                 let response;
                                                 let responseText;
@@ -19109,6 +19242,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 responseSentForLog = true;
                                                 console.info('[tfserver-ai-whatsapp-delivered]', { sessionId, messageId: msgId, mode: 'search', deliveryType: searchDelivery.type, generatedImage: searchDelivery.generatedImageCount > 0, language: searchActionLanguage });
                                             } catch (e) {
+                                                console.error('[tfserver-ai-search-command-failed]', { sessionId, messageId: msgId, language: searchActionLanguage, error: redactActionError(e).slice(0, 500) });
                                                 await safeSendActionError(sock, from, (translations[searchActionLanguage] || translations.ht).search_title, e, searchActionLanguage, pushName, m.messageTimestamp);
                                             }
                                             break;
