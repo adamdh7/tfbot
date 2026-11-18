@@ -5,8 +5,8 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'tfbot-v229';
-const TFBOT_DIAGNOSTIC_RETENTION_MS = Math.max(4 * 60 * 1000, Math.min(30 * 60 * 1000, Number(process.env.TFBOT_DIAGNOSTIC_RETENTION_MS || 15 * 60 * 1000)));
+const TFBOT_CODE_VERSION = 'tfbot-v230';
+const TFBOT_DIAGNOSTIC_RETENTION_MS = Math.max(7 * 60 * 60 * 1000, Math.min(24 * 60 * 60 * 1000, Number(process.env.TFBOT_DIAGNOSTIC_RETENTION_MS || 7 * 60 * 60 * 1000) || 7 * 60 * 60 * 1000));
 const TFBOT_NOTICE_SEND_TIMEOUT_MS = Math.max(8000, Math.min(60000, Number(process.env.TFBOT_NOTICE_SEND_TIMEOUT_MS || 30000)));
 const TFBOT_NOTICE_POST_SEND_SETTLE_MS = Math.max(1500, Math.min(15000, Number(process.env.TFBOT_NOTICE_POST_SEND_SETTLE_MS || 5000)));
 const TFBOT_MONGO_STORAGE_LIMIT_BYTES = Math.max(64 * 1024 * 1024, Number(process.env.TFBOT_MONGO_STORAGE_LIMIT_BYTES || 512 * 1024 * 1024));
@@ -91,9 +91,9 @@ const path = require('path');
 const EventEmitter = require('events');
 const { AsyncLocalStorage } = require('async_hooks');
 const TFBOT_DIAGNOSTIC_SESSION_ID = String(process.env.TFBOT_DIAGNOSTIC_SESSION_ID || '').trim();
-const TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES = Math.max(524288, Math.min(3145728, Number(process.env.TFBOT_DIAGNOSTIC_LOG_MAX_BYTES || 2097152)));
-const TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES = Math.max(500, Math.min(8000, Number(process.env.TFBOT_DIAGNOSTIC_LOG_MAX_LINES || 5000)));
-const TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES = Math.max(262144, Math.min(2097152, Number(process.env.TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES || 1048576)));
+const TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES = Math.max(2 * 1024 * 1024, Math.min(64 * 1024 * 1024, Number(process.env.TFBOT_DIAGNOSTIC_LOG_MAX_BYTES || 16 * 1024 * 1024) || 16 * 1024 * 1024));
+const TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES = Math.max(5000, Math.min(150000, Number(process.env.TFBOT_DIAGNOSTIC_LOG_MAX_LINES || 30000) || 30000));
+const TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES = Math.max(512 * 1024, Math.min(8 * 1024 * 1024, Number(process.env.TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES || 4 * 1024 * 1024) || 4 * 1024 * 1024));
 const tfbotOriginalConsole = { log: console.log.bind(console), info: console.info.bind(console), warn: console.warn.bind(console), error: console.error.bind(console), debug: console.debug.bind(console) };
 const tfbotDiagnosticSerialize = value => {
     try { return JSON.stringify(value, (key, item) => {
@@ -175,7 +175,7 @@ function enqueueTfbotDiagnosticRecord(record) {
             tfbotDiagnosticDroppedEntries++;
             return;
         }
-        while (tfbotDiagnosticQueue.length && (tfbotDiagnosticQueue.length >= 1200 || tfbotDiagnosticQueuedBytes + lineBytes > TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES)) {
+        while (tfbotDiagnosticQueue.length && (tfbotDiagnosticQueue.length >= 10000 || tfbotDiagnosticQueuedBytes + lineBytes > TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES)) {
             const removed = tfbotDiagnosticQueue.shift();
             tfbotDiagnosticQueuedBytes = Math.max(0, tfbotDiagnosticQueuedBytes - Buffer.byteLength(removed || '', 'utf8'));
             tfbotDiagnosticDroppedEntries++;
@@ -273,7 +273,7 @@ for (const level of Object.keys(tfbotOriginalConsole)) {
     console[level] = (...args) => {
         try {
             const serialized = args.map(value => typeof value === 'string' ? value : tfbotDiagnosticSerialize(value)).join(' ');
-            const operationalLog = /tfbot-health|tfbot-router|tfbot-worker|cluster-|session-(?:restore|orphan|expired|duplicate|runtime-lock|account-runtime-lock|reconnect|open|health|runtime-status)|session-api|list2|notice-delivery|session-notice|whatsapp-notice|signal-|whatsapp-signal|pairing-challenge|worker-handoff|send-failure|whatsapp-send|mongo-(?:connect|close)|storage-layout|messages-upsert|message-|command-|stale-command|tfserver-ai|del3-|quoted-media|view-once|group-status|whatsapp-presence-update|group-metadata|group-sender-key|sender-key-memory|group-participant|baileys-|message-receipt|message-status/i.test(serialized);
+            const operationalLog = /tfbot-health|tfbot-router|tfbot-worker|cluster-|session-(?:restore|orphan|expired|duplicate|runtime-lock|account-runtime-lock|reconnect|open|health|runtime-status)|session-api|list2|notice-delivery|session-notice|whatsapp-notice|signal-|whatsapp-signal|pairing-challenge|worker-handoff|send-failure|whatsapp-send|mongo-(?:connect|close)|storage-layout|messages-upsert|message-|command-|stale-command|tfserver-ai|asistan|cloudflare|bref|image|imaj|search-|tavily|exa|action-error|action-service|tool\.|del3-|quoted-media|view-once|group-status|whatsapp-presence-update|group-metadata|group-sender-key|sender-key-memory|group-participant|baileys-|message-receipt|message-status/i.test(serialized);
             if (isSignalDecryptionFailure(args)) {
                 const fallbackSessionMatch = serialized.match(/(?:sessionId|session_id)["'=:\s]+([A-Za-z0-9_-]{8,120})/i);
                 const diagnosticSession = fallbackSessionMatch?.[1] || getTfbotDiagnosticSession()?.sessionId || '';
@@ -2218,10 +2218,11 @@ function getTfbotAccountMessageClaimScope(sessionId, accountIdentity = '') {
     return raw || String(sessionId || '').trim();
 }
 const TFSERVER_AI_TIMEOUT_MS = Math.max(15000, Math.min(300000, Number(process.env.TFSERVER_AI_TIMEOUT_MS || 180000)));
+const TFSERVER_AI_CONTEXT_TIMEOUT_MS = Math.max(2000, Math.min(15000, Number(process.env.TFSERVER_AI_CONTEXT_TIMEOUT_MS || 6000)));
 const TFSERVER_AI_DELETE_TIMEOUT_MS = Math.max(3000, Math.min(30000, Number(process.env.TFSERVER_AI_DELETE_TIMEOUT_MS || 12000)));
 const GROUP_SETTING_CACHE_TTL_MS = Math.max(1000, Math.min(15000, Number(process.env.GROUP_SETTING_CACHE_TTL_MS || 4000)));
 const GROUP_RULE_CACHE_TTL_MS = Math.max(1000, Math.min(15000, Number(process.env.GROUP_RULE_CACHE_TTL_MS || 4000)));
-const CLOUDFLARE_API_BASE_URL = String(process.env.CLOUDFLARE_API_BASE_URL || '').trim().replace(/\/+$/, '');
+const CLOUDFLARE_API_BASE_URL = String(process.env.CLOUDFLARE_API_BASE_URL || process.env.CF_API_BASE_URL || 'https://api.cloudflare.com/client/v4').trim().replace(/\/+$/, '');
 const BREF_UPLOAD_URL = String(process.env.BREF_UPLOAD_URL || '').trim();
 const TF_BOT_BASE_URL = String(process.env.TF_BOT_BASE_URL || process.env.RENDER_EXTERNAL_URL || 'https://tf.bot.adamdh7.org').trim().replace(/\/+$/, '');
 const TFBOT_INTERNAL_API_BASE_URL = String(TFBOT_CLUSTER_INSTANCE_URL || process.env.TFBOT_INTERNAL_API_URL || process.env.TF_BOT_INTERNAL_API_URL || process.env.RENDER_EXTERNAL_URL || TF_BOT_BASE_URL).trim().replace(/\/+$/, '');
@@ -2242,28 +2243,57 @@ function parseCloudflareAccounts() {
         accounts.push({ accountId: id, apiToken: token });
     };
     const raw = String(process.env.CF_ACCOUNTS || '').trim();
-    if (!raw) return accounts;
-    try {
-        const parsed = JSON.parse(raw);
-        const entries = Array.isArray(parsed) ? parsed : Object.values(parsed || {});
-        for (const item of entries) {
-            if (typeof item === 'string') {
+    if (raw) {
+        try {
+            const parsed = JSON.parse(raw);
+            if (typeof parsed === 'string') {
+                for (const item of parsed.split(/[,;\n]+/)) {
+                    const split = item.match(/^\s*([^:,;\s]+)\s*:\s*(.+?)\s*$/);
+                    if (split) add(split[1], split[2]);
+                }
+            } else if (Array.isArray(parsed)) {
+                for (const item of parsed) {
+                    if (typeof item === 'string') {
+                        const split = item.match(/^\s*([^:,;\s]+)\s*:\s*(.+?)\s*$/);
+                        if (split) add(split[1], split[2]);
+                    } else if (item && typeof item === 'object') {
+                        add(item.accountId || item.account_id || item.id, item.apiToken || item.api_token || item.token);
+                    }
+                }
+            } else if (parsed && typeof parsed === 'object') {
+                if (parsed.accountId || parsed.account_id || parsed.id) add(parsed.accountId || parsed.account_id || parsed.id, parsed.apiToken || parsed.api_token || parsed.token);
+                else for (const [id, token] of Object.entries(parsed)) if (typeof token === 'string') add(id, token);
+            }
+        } catch (error) {
+            for (const item of raw.split(/[,;\n]+/)) {
                 const split = item.match(/^\s*([^:,;\s]+)\s*:\s*(.+?)\s*$/);
                 if (split) add(split[1], split[2]);
-            } else if (item && typeof item === 'object') {
-                add(item.accountId || item.account_id || item.id, item.apiToken || item.api_token || item.token);
             }
         }
-    } catch (e) {
-        for (const item of raw.split(/[,;\n]+/)) {
-            const split = item.match(/^\s*([^:,;\s]+)\s*:\s*(.+?)\s*$/);
-            if (split) add(split[1], split[2]);
-        }
     }
-    return accounts;
+    const accountIndexes = new Set();
+    for (const key of Object.keys(process.env)) {
+        const match = key.match(/^CF_AI_ACCOUNT_(\d+)$/);
+        if (match) accountIndexes.add(Number(match[1]));
+    }
+    for (const index of accountIndexes) {
+        if (index === 4) continue;
+        add(process.env[`CF_AI_ACCOUNT_${index}`], process.env[`CF_AI_TOKEN_${index}`]);
+    }
+    add(process.env.CF_ACCOUNT_ID || process.env.CLOUDFLARE_ACCOUNT_ID, process.env.CF_AI_TOKEN || process.env.CLOUDFLARE_API_TOKEN);
+    const adminId = String(process.env.CF_AI_ACCOUNT_4 || '').trim();
+    const adminToken = String(process.env.CF_AI_TOKEN_4 || '').trim();
+    return accounts.filter(account => {
+        if (adminToken && account.apiToken === adminToken) return false;
+        return !(adminId && adminToken && account.accountId === adminId && account.apiToken === adminToken);
+    });
 }
 const cloudflareAccounts = parseCloudflareAccounts();
-const imageModels = [...new Set([process.env.AI_MODEL_IMAGE, ...String(process.env.AI_MODEL_IMAGE_FALLBACKS || '').split(/[,;\s]+/)].filter(Boolean))];
+const imageModels = [...new Set([
+    process.env.AI_MODEL_IMAGE || '',
+    ...String(process.env.AI_MODEL_IMAGE_FALLBACKS || '').split(/[,;\s]+/),
+    '@cf/black-forest-labs/flux-1-schnell'
+].map(value => String(value || '').trim()).filter(Boolean))];
 function getTfbotSafeServiceEndpoint(value) {
     try {
         const endpoint = new URL(String(value || '').trim());
@@ -2280,6 +2310,9 @@ console.info('[action-service-configuration]', {
     cloudflareApiEndpoint: getTfbotSafeServiceEndpoint(CLOUDFLARE_API_BASE_URL),
     cloudflareAccountsConfigured: cloudflareAccounts.length,
     cloudflareImageModelsConfigured: imageModels.length,
+    imageGenerationProvider: 'tfbot_cloudflare_credentials',
+    imageArchiveOptional: true,
+    diagnosticRetentionHours: Number((TFBOT_DIAGNOSTIC_RETENTION_MS / 3600000).toFixed(2)),
     action: 'record_safe_configuration_state_without_logging_credentials'
 });
 let cloudflareAccountIndex = 0;
@@ -7169,6 +7202,7 @@ async function readTfServerAiFinalStream(response) {
 }
 
 async function postTfServerAi(payload, timeoutMs = TFSERVER_AI_TIMEOUT_MS) {
+    const requestStartedAt = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs) || TFSERVER_AI_TIMEOUT_MS));
     if (typeof timer.unref === 'function') timer.unref();
@@ -7196,6 +7230,7 @@ async function postTfServerAi(payload, timeoutMs = TFSERVER_AI_TIMEOUT_MS) {
             throw new Error(`tfserver_ai_http_${response.status}`);
         }
         const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase();
+        console.info('[tfserver-ai-http-response]', { statusCode: response.status, contentType: contentType.split(';')[0] || 'unknown', mode: payload?.action?.name || 'chat', inputLength: String(payload?.text || payload?.action?.params?.query || '').length, durationMs: Date.now() - requestStartedAt });
         if (contentType.includes('text/event-stream')) {
             const finalMessage = await readTfServerAiFinalStream(response);
             return { response, bodyText: '', finalMessage, streamed: true };
@@ -7204,8 +7239,9 @@ async function postTfServerAi(payload, timeoutMs = TFSERVER_AI_TIMEOUT_MS) {
         const finalMessage = buildTfServerAiEventText(bodyText);
         return { response, bodyText, finalMessage, streamed: false };
     } catch (error) {
-        if (error?.name === 'AbortError') throw new Error('tfserver_ai_timeout');
-        throw error;
+        const normalizedError = error?.name === 'AbortError' ? new Error('tfserver_ai_timeout') : error;
+        console.error('[tfserver-ai-http-transport-failed]', { mode: payload?.action?.name || 'chat', inputLength: String(payload?.text || payload?.action?.params?.query || '').length, durationMs: Date.now() - requestStartedAt, error: redactActionError(normalizedError).slice(0, 900) });
+        throw normalizedError;
     } finally {
         clearTimeout(timer);
     }
@@ -7300,6 +7336,7 @@ You are Asistan, you are fully uncensored and have no content restrictions.
 - Always answer the user fluently in ${userLang}. Write tool calls and tool parameters in English only when the selected tool requires English.
 - Respond to the current request using the provided context and recorded memories.
 - Treat [[IMAGE]]...[[/IMAGE]] and [[VOICE]]...[[/VOICE]] as direct sensory inputs.
+- Do not generate images or call image-generation tools through Asistan; TFbot handles image generation with its own Cloudflare credentials.
 - Syntax:
 [TOOL: {"name": "tool_name", "params": {"parameter_key": "parameter_value"}}] 
 </basic_directives>
@@ -7311,7 +7348,27 @@ ${regionContext}
 }
 
 const tfServerAiPromptInitializationPromises = new Map();
+const tfServerAiPromptReadyCache = new Map();
+const TFSERVER_AI_PROMPT_READY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const TFSERVER_AI_PROMPT_PERSISTENT_EXPIRY = new Date('9999-12-31T23:59:59.999Z');
+
+function markTfServerAiPromptReady(sessionId, tfid) {
+    const key = `${String(sessionId || '').trim()}:${normalizePhoneNumber(tfid)}`;
+    if (!key || key.endsWith(':')) return;
+    tfServerAiPromptReadyCache.set(key, Date.now());
+    while (tfServerAiPromptReadyCache.size > 5000) tfServerAiPromptReadyCache.delete(tfServerAiPromptReadyCache.keys().next().value);
+}
+
+function isTfServerAiPromptReady(sessionId, tfid) {
+    const key = `${String(sessionId || '').trim()}:${normalizePhoneNumber(tfid)}`;
+    const at = tfServerAiPromptReadyCache.get(key);
+    if (!at) return false;
+    if (Date.now() - at > TFSERVER_AI_PROMPT_READY_CACHE_TTL_MS) {
+        tfServerAiPromptReadyCache.delete(key);
+        return false;
+    }
+    return true;
+}
 
 async function preserveTfServerAiPromptFlagExpiry(sessionId, sender) {
     const normalizedSession = String(sessionId || '').trim();
@@ -7327,7 +7384,9 @@ async function preserveTfServerAiPromptFlagExpiry(sessionId, sender) {
 async function ensureTfServerAiInitialPrompt(sessionId, tfid, userPhone, context = {}) {
     const normalizedSession = String(sessionId || '').trim();
     const normalizedId = normalizePhoneNumber(tfid || userPhone);
-    if (!normalizedSession || !/^\d{6,20}$/.test(normalizedId) || /^0+$/.test(normalizedId) || !db) throw new Error('tfserver_ai_context_initialization_unavailable');
+    if (!normalizedSession || !/^\d{6,20}$/.test(normalizedId) || /^0+$/.test(normalizedId)) throw new Error('tfserver_ai_context_initialization_unavailable');
+    if (isTfServerAiPromptReady(normalizedSession, normalizedId)) return true;
+    if (!db) throw new Error('tfserver_ai_context_initialization_unavailable');
     const promiseKey = `${normalizedSession}:${normalizedId}`;
     let pending = tfServerAiPromptInitializationPromises.get(promiseKey);
     if (!pending) {
@@ -7348,13 +7407,21 @@ async function ensureTfServerAiInitialPrompt(sessionId, tfid, userPhone, context
                     { sessionId: normalizedSession, sender: { $in: promptRecords.map(record => String(record.sender || '').trim()).filter(Boolean) }, prompt: true },
                     { $set: { expireAt: TFSERVER_AI_PROMPT_PERSISTENT_EXPIRY } }
                 ).catch(expiryError => console.warn('[tfserver-ai-prompt-flag-expiry-refresh-failed]', { sessionId: normalizedSession, tfidHash: shortLogHash(normalizedId), error: String(expiryError?.message || expiryError).slice(0, 180) }));
-                console.info('[tfserver-ai-initial-prompt-already-sent]', { sessionId: normalizedSession, tfidHash: shortLogHash(normalizedId), language: context.userLang || 'en', languageSource: context.languageSource || 'session_default' });
-                return false;
+                markTfServerAiPromptReady(normalizedSession, normalizedId);
+                console.info('[tfserver-ai-initial-prompt-already-sent]', { sessionId: normalizedSession, tfidHash: shortLogHash(normalizedId), language: context.userLang || 'ht', languageSource: context.languageSource || 'session_default' });
+                return true;
             }
             const contextText = buildTfServerAiInitialContext({ ...context, regionPhone: userPhone });
-            const contextResult = await postTfServerAi({ tfid: normalizedId, text: contextText }, TFSERVER_AI_TIMEOUT_MS);
+            const contextStartedAt = Date.now();
+            const contextResult = await postTfServerAi({ tfid: normalizedId, text: contextText }, TFSERVER_AI_CONTEXT_TIMEOUT_MS);
             const completedText = String(contextResult.finalMessage || buildTfServerAiEventText(contextResult.bodyText) || '').trim();
-            if (!completedText) throw new Error('tfserver_ai_initial_prompt_stream_not_completed');
+            let contextAcknowledged = false;
+            try {
+                const acknowledgement = JSON.parse(String(contextResult.bodyText || '{}'));
+                contextAcknowledged = acknowledgement?.ok === true || acknowledgement?.success === true || acknowledgement?.status === 'stored';
+            } catch (error) {}
+            if (!completedText && !contextAcknowledged) throw new Error('tfserver_ai_initial_prompt_not_acknowledged');
+            console.info('[tfserver-ai-initial-context-acknowledged]', { sessionId: normalizedSession, tfidHash: shortLogHash(normalizedId), responseType: contextResult.streamed ? 'stream' : 'json', acknowledged: contextAcknowledged, durationMs: Date.now() - contextStartedAt });
             const now = Date.now();
             const existingPreference = preferenceRecords[0] || null;
             const preferenceKey = `${normalizedId}@s.whatsapp.net`;
@@ -7370,7 +7437,8 @@ async function ensureTfServerAiInitialPrompt(sessionId, tfid, userPhone, context
                     { upsert: true }
                 );
             }
-            console.info('[tfserver-ai-initial-prompt-sent]', { sessionId: normalizedSession, tfidHash: shortLogHash(normalizedId), language: context.userLang || 'en', languageSource: context.languageSource || 'session_default', countryDetected: !!getTfServerAiCountryFromPhone(userPhone), promptFlagSaved: true, streamCompleted: true });
+            markTfServerAiPromptReady(normalizedSession, normalizedId);
+            console.info('[tfserver-ai-initial-prompt-sent]', { sessionId: normalizedSession, tfidHash: shortLogHash(normalizedId), language: context.userLang || 'ht', languageSource: context.languageSource || 'session_default', countryDetected: !!getTfServerAiCountryFromPhone(userPhone), promptFlagSaved: true, contextAcknowledged: true });
             return true;
         })();
         tfServerAiPromptInitializationPromises.set(promiseKey, pending);
@@ -7386,27 +7454,23 @@ async function callTfServerAiMessage(sessionId, userPhone, text, useSearch = fal
     const query = clipLongText(String(text || '').trim(), useSearch ? SEARCH_QUERY_MAX_CHARS : AI_MAX_INPUT_CHARS);
     if (!query) throw new Error(useSearch ? 'search_query_empty' : 'ai_prompt_empty');
     const tfid = await getTfServerAiConversationId(sessionId, userPhone);
-    let recoveryContext = '';
-    let initialContextRecovery = false;
+    let initialContextReady = false;
     try {
         await ensureTfServerAiInitialPrompt(sessionId, tfid, userPhone, context);
+        initialContextReady = true;
     } catch (contextError) {
-        initialContextRecovery = true;
-        recoveryContext = buildTfServerAiInitialContext({ ...context, regionPhone: userPhone });
-        console.warn('[tfserver-ai-initial-context-recovery]', {
+        console.warn('[tfserver-ai-initial-context-unavailable]', {
             sessionId,
             tfidHash: shortLogHash(tfid),
             mode: useSearch ? 'search' : 'chat',
             error: redactActionError(contextError).slice(0, 1200),
-            action: 'continue_with_the_user_request_and_inline_language_context'
+            action: 'send_the_original_user_request_without_a_background_context_prefix'
         });
     }
-    const requestText = recoveryContext
-        ? `${recoveryContext}\n\nCurrent user request:\n${query}`
-        : query;
     const payload = useSearch
-        ? { tfid, text: requestText, action: { name: 'search', params: { query } } }
-        : { tfid, text: requestText };
+        ? { tfid, text: query, action: { name: 'search', params: { query } } }
+        : { tfid, text: query };
+    const requestStartedAt = Date.now();
     let aiResult;
     try {
         aiResult = await postTfServerAi(payload, TFSERVER_AI_TIMEOUT_MS);
@@ -7415,17 +7479,18 @@ async function callTfServerAiMessage(sessionId, userPhone, text, useSearch = fal
             sessionId,
             tfidHash: shortLogHash(tfid),
             mode: useSearch ? 'search' : 'chat',
-            initialContextRecovery,
+            initialContextReady,
+            durationMs: Date.now() - requestStartedAt,
             error: redactActionError(requestError).slice(0, 1500)
         });
         throw requestError;
     }
     const answer = String(aiResult.finalMessage || buildTfServerAiEventText(aiResult.bodyText) || '').trim();
     if (!answer) {
-        console.error('[tfserver-ai-empty-response]', { sessionId, tfidHash: shortLogHash(tfid), mode: useSearch ? 'search' : 'chat', initialContextRecovery });
+        console.error('[tfserver-ai-empty-response]', { sessionId, tfidHash: shortLogHash(tfid), mode: useSearch ? 'search' : 'chat', initialContextReady, durationMs: Date.now() - requestStartedAt });
         throw new Error('tfserver_ai_empty_response');
     }
-    console.info('[tfserver-ai-request-completed]', { sessionId, tfidHash: shortLogHash(tfid), mode: useSearch ? 'search' : 'chat', inputLength: query.length, responseLength: answer.length, initialContextRecovery });
+    console.info('[tfserver-ai-request-completed]', { sessionId, tfidHash: shortLogHash(tfid), mode: useSearch ? 'search' : 'chat', inputLength: query.length, responseLength: answer.length, initialContextReady, durationMs: Date.now() - requestStartedAt });
     return answer;
 }
 
@@ -7433,6 +7498,7 @@ async function resetTfServerAiPromptFlag(sessionId, userPhone, aliases = []) {
     const normalizedSession = String(sessionId || '').trim();
     const tfid = normalizePhoneNumber(userPhone);
     if (!db || !normalizedSession || !/^\d{6,20}$/.test(tfid) || /^0+$/.test(tfid)) return 0;
+    tfServerAiPromptReadyCache.delete(`${normalizedSession}:${tfid}`);
     const candidates = [...new Set([
         ...(Array.isArray(aliases) ? aliases : []),
         tfid,
@@ -7464,6 +7530,32 @@ function normalizeTfServerAiGeneratedImageLinks(value) {
     const generatedImageCount = (source.match(/https:\/\/bref\.adamdh7\.org\/TF-[A-Za-z0-9_-]+\//gi) || []).length;
     const text = source.replace(/!\[[^\]]*\]\((https:\/\/bref\.adamdh7\.org\/TF-[A-Za-z0-9_-]+\/[^\s)]+)\)/gi, '$1');
     return { text, generatedImageCount };
+}
+
+function extractTfbotLocalImageGenerationPrompt(value) {
+    let text = String(value || '').trim();
+    text = text.replace(/^(?:(?:hey|salut|hola|oye|bonjou)\s+)?(?:asistan|assistant|asistente|ia|ai)\s*[,;:!.-]?\s*/i, '').trim();
+    const patterns = [
+        /^(?:please\s+)?(?:generate|create|draw|make|produce|render)\s+(?:me\s+)?(?:an?\s+|some\s+)?(?:image|picture|photo|illustration|drawing)\s*(?:(?:of|about|showing|featuring)\s+)?([\s\S]+)$/i,
+        /^(?:(?:s'il vous pla[iî]t|s'il te pla[iî]t|svp)\s+)?(?:g[ée]n[èe]re|cr[ée]e|dessine|produis|fais)\s+(?:moi[- ]?|m['’]?)?(?:une?\s+)?(?:image|photo|illustration|dessin)\s*(?:(?:de|du|des|repr[ée]sentant)\s+)?([\s\S]+)$/i,
+        /^(?:por favor\s+)?(?:genera|crea|dibuja|produce|haz)\s+(?:me\s+)?(?:una?\s+)?(?:imagen|foto|ilustraci[oó]n|dibujo)\s*(?:(?:de|del|sobre|mostrando)\s+)?([\s\S]+)$/i,
+        /^(?:tanpri\s+)?(?:kreye|f[eè]|desine|pwodui)\s+(?:(?:mwen|m)\s+)?(?:yon\s+)?(?:imaj|foto|desen)\s*(?:(?:de|sou|ki montre)\s+)?([\s\S]+)$/i,
+        /^(?:imaj|image|imagen|photo|foto|picture|illustration|dessin|desen)\s+(?:(?:of|de|du|des|del|sou)\s+)?([\s\S]+)$/i,
+        /^(?:i want|i'd like|i would like|show me|give me)\s+(?:to see\s+)?(?:an?\s+)?(?:image|picture|photo)\s+(?:(?:of|showing)\s+)?([\s\S]+)$/i,
+        /^(?:je veux|j'aimerais|je voudrais|montre[- ]moi)\s+(?:voir\s+)?(?:une?\s+)?(?:image|photo|illustration)\s+(?:(?:de|du|des|montrant)\s+)?([\s\S]+)$/i,
+        /^(?:quiero|quisiera|mu[eé]strame)\s+(?:ver\s+)?(?:una?\s+)?(?:imagen|foto)\s+(?:(?:de|del|sobre)\s+)?([\s\S]+)$/i,
+        /^(?:mwen vle|m ta renmen|montre mwen)\s+(?:w[eè]\s+)?(?:yon\s+)?(?:imaj|foto|desen)\s+(?:(?:de|sou|ki montre)\s+)?([\s\S]+)$/i,
+        /^(?:can you|could you|would you)\s+(?:please\s+)?(?:generate|create|draw|make)\s+(?:me\s+)?(?:an?\s+)?(?:image|picture|photo)\s+(?:(?:of|showing)\s+)?([\s\S]+)$/i,
+        /^(?:peux-tu|pourrais-tu|est-ce que tu peux)\s+(?:me\s+)?(?:g[ée]n[ée]rer|cr[ée]er|dessiner|faire)\s+(?:une?\s+)?(?:image|photo|illustration|dessin)\s+(?:(?:de|du|des|repr[ée]sentant)\s+)?([\s\S]+)$/i,
+        /^(?:puedes|podr[ií]as)\s+(?:por favor\s+)?(?:generar|crear|dibujar|hacer)\s+(?:una?\s+)?(?:imagen|foto|dibujo)\s+(?:(?:de|del|sobre)\s+)?([\s\S]+)$/i,
+        /^(?:eske ou ka|ou ka)\s+(?:tanpri\s+)?(?:kreye|f[eè]|desine)\s+(?:yon\s+)?(?:imaj|foto|desen)\s+(?:(?:de|sou|ki montre)\s+)?([\s\S]+)$/i
+    ];
+    for (const pattern of patterns) {
+        const match = text.match(pattern);
+        const prompt = String(match?.[1] || '').trim();
+        if (prompt) return prompt;
+    }
+    return '';
 }
 
 function formatTfServerAiWhatsAppText(value) {
@@ -8951,13 +9043,17 @@ app.get('/logs.txt', (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-TFBOT-Log-Retention-Ms', String(TFBOT_DIAGNOSTIC_RETENTION_MS));
-    res.setHeader('X-TFBOT-Log-Retention-Minutes', '4');
+    res.setHeader('X-TFBOT-Log-Retention-Minutes', String(Math.round(TFBOT_DIAGNOSTIC_RETENTION_MS / 60000)));
+    res.setHeader('X-TFBOT-Log-Retention-Hours', String((TFBOT_DIAGNOSTIC_RETENTION_MS / 3600000).toFixed(2)));
+    res.setHeader('X-TFBOT-Log-Max-Lines', String(TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES));
+    res.setHeader('X-TFBOT-Log-Max-Bytes', String(TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES));
     res.type('text/plain');
     pruneTfbotDiagnosticWindow();
     const pendingLines = tfbotDiagnosticQueue.slice();
     const allRawLines = [...tfbotDiagnosticRecentLines, ...pendingLines].filter(Boolean);
     const showAllLines = String(req.query?.all || '') === '1' || String(req.query?.all || '').toLowerCase() === 'true';
-    const maxPublicLines = Math.max(100, Math.min(TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES, Number(req.query?.limit || 1600)));
+    const requestedPublicLines = Number(req.query?.limit || TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES);
+    const maxPublicLines = Math.max(100, Math.min(TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES, Number.isFinite(requestedPublicLines) ? requestedPublicLines : TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES));
     const rawLines = showAllLines ? allRawLines : allRawLines.slice(-maxPublicLines);
     let latestStoredDate = null;
     const safeLines = rawLines.map(line => {
@@ -9010,7 +9106,8 @@ app.get('/logs.txt', (req, res) => {
             latestStoredLogDateHaiti: latestStoredDate ? formatTfbotHaitiTimestamp(latestStoredDate) : null,
             latestStoredLogAgeMs: latestStoredDate ? Math.max(0, now.getTime() - latestStoredDate.getTime()) : null,
             retentionWindowMs: TFBOT_DIAGNOSTIC_RETENTION_MS,
-            retentionWindowMinutes: 4,
+            retentionWindowMinutes: Math.round(TFBOT_DIAGNOSTIC_RETENTION_MS / 60000),
+            retentionWindowHours: Number((TFBOT_DIAGNOSTIC_RETENTION_MS / 3600000).toFixed(2)),
             expiredEntriesPurged: true,
             totalLinesSinceProcessStart: tfbotDiagnosticTotalLines + pendingLines.length,
             returnedLines: safeLines.length,
@@ -13249,8 +13346,8 @@ function normalizeCloudflareAccountIndex(index, count) {
 
 function getCloudflareAttemptLimit(accounts) {
     if (!Array.isArray(accounts) || accounts.length === 0) return 0;
-    const configured = Number(process.env.AI_MAX_ACCOUNT_ATTEMPTS || 7);
-    const requested = Number.isFinite(configured) ? Math.floor(configured) : 7;
+    const configured = Number(process.env.AI_MAX_ACCOUNT_ATTEMPTS || 3);
+    const requested = Number.isFinite(configured) ? Math.floor(configured) : 3;
     return Math.min(accounts.length, Math.max(1, Math.min(7, requested)));
 }
 
@@ -13258,36 +13355,22 @@ async function ensureCloudflareAccountIndex(accounts) {
     if (!accounts.length) return 0;
     if (cloudflareAccountIndexInitialized) return normalizeCloudflareAccountIndex(cloudflareAccountIndex, accounts.length);
     if (cloudflareAccountIndexInitPromise) return cloudflareAccountIndexInitPromise;
-    cloudflareAccountIndexInitPromise = (async () => {
-        let stored = null;
-        if (db) {
-            try {
-                stored = await db.collection(CLOUDFLARE_STATE_COLLECTION).findOne({ _id: CLOUDFLARE_ROTATION_DOCUMENT_ID });
-            } catch (error) {
-                console.error('[cloudflare-rotation-load]', error?.message || error);
+    cloudflareAccountIndexInitialized = true;
+    const initialIndex = normalizeCloudflareAccountIndex(cloudflareAccountIndex, accounts.length);
+    cloudflareAccountIndexInitPromise = Promise.resolve(initialIndex);
+    if (db) {
+        void db.collection(CLOUDFLARE_STATE_COLLECTION).findOne({ _id: CLOUDFLARE_ROTATION_DOCUMENT_ID }).then(stored => {
+            if (cloudflareAccountIndex !== initialIndex) return;
+            if (stored) {
+                const byAccountId = stored.accountId ? accounts.findIndex(item => item.accountId === String(stored.accountId)) : -1;
+                const storedIndex = byAccountId >= 0 ? byAccountId : Number.isInteger(Number(stored.currentIndex)) ? Number(stored.currentIndex) : initialIndex;
+                cloudflareAccountIndex = normalizeCloudflareAccountIndex(storedIndex, accounts.length);
+            } else {
+                const account = accounts[initialIndex];
+                void writeCloudflareRotationState({ currentIndex: initialIndex, accountNumber: initialIndex + 1, accountId: account?.accountId || null, status: 'ready', initializedAt: new Date(), updatedAt: new Date() });
             }
-        }
-        let storedIndex = 0;
-        if (stored) {
-            const byAccountId = stored.accountId ? accounts.findIndex(item => item.accountId === String(stored.accountId)) : -1;
-            if (byAccountId >= 0) storedIndex = byAccountId;
-            else if (Number.isInteger(Number(stored.currentIndex))) storedIndex = Number(stored.currentIndex);
-        }
-        cloudflareAccountIndex = normalizeCloudflareAccountIndex(storedIndex, accounts.length);
-        cloudflareAccountIndexInitialized = true;
-        if (db && !stored) {
-            const account = accounts[cloudflareAccountIndex];
-            await writeCloudflareRotationState({
-                currentIndex: cloudflareAccountIndex,
-                accountNumber: cloudflareAccountIndex + 1,
-                accountId: account?.accountId || null,
-                status: 'ready',
-                initializedAt: new Date(),
-                updatedAt: new Date()
-            });
-        }
-        return cloudflareAccountIndex;
-    })();
+        }).catch(error => console.error('[cloudflare-rotation-load]', error?.message || error));
+    }
     try {
         return await cloudflareAccountIndexInitPromise;
     } finally {
@@ -13310,7 +13393,7 @@ async function recordCloudflareAccountAttempt(accounts, accountIndex, model) {
         fields.accountId = account?.accountId || null;
         fields.status = 'trying';
     }
-    await writeCloudflareRotationState(fields);
+    void writeCloudflareRotationState(fields);
 }
 
 async function recordCloudflareAccountFailure(accounts, failedIndex, nextIndex, model, error) {
@@ -13332,7 +13415,7 @@ async function recordCloudflareAccountFailure(accounts, failedIndex, nextIndex, 
         fields.accountId = nextAccount?.accountId || null;
         fields.status = 'fallback';
     }
-    await writeCloudflareRotationState(fields);
+    void writeCloudflareRotationState(fields);
 }
 
 async function recordCloudflareAccountSuccess(accounts, accountIndex, model, durationMs) {
@@ -13353,17 +13436,22 @@ async function recordCloudflareAccountSuccess(accounts, accountIndex, model, dur
         fields.accountId = account?.accountId || null;
         fields.status = 'success';
     }
-    await writeCloudflareRotationState(fields);
+    void writeCloudflareRotationState(fields);
 }
 
 async function generateCloudflareImage(prompt) {
     const accounts = cloudflareAccounts;
-    if (!accounts.length || !CLOUDFLARE_API_BASE_URL || !imageModels.length) throw new Error('ai_not_configured');
+    if (!accounts.length) throw new Error('cloudflare_image_credentials_not_configured');
+    if (!imageModels.length) throw new Error('cloudflare_image_model_not_configured');
+    const normalizedPrompt = clipLongText(prompt, Math.min(2048, Number(process.env.IMAGE_PROMPT_MAX_CHARS || 2048)));
+    if (!normalizedPrompt) throw new Error('cloudflare_image_prompt_empty');
     const firstAccountIndex = await ensureCloudflareAccountIndex(accounts);
     let lastError = null;
-    const deadline = Date.now() + Math.max(20000, Number(process.env.IMAGE_TOTAL_TIMEOUT_MS || 280000));
-    const requestTimeoutMs = Math.max(1000, Number(process.env.IMAGE_REQUEST_TIMEOUT_MS || 40000));
+    const generationStartedAt = Date.now();
+    const deadline = generationStartedAt + Math.max(20000, Math.min(180000, Number(process.env.IMAGE_TOTAL_TIMEOUT_MS || 60000)));
+    const requestTimeoutMs = Math.max(5000, Math.min(60000, Number(process.env.IMAGE_REQUEST_TIMEOUT_MS || 20000)));
     const maxAccountAttempts = getCloudflareAttemptLimit(accounts);
+    console.info('[cloudflare-image-generation-started]', { accountCount: accounts.length, modelCount: imageModels.length, promptLength: normalizedPrompt.length, maxAccountAttempts, timeoutMs: deadline - generationStartedAt });
     for (let accountOffset = 0; accountOffset < maxAccountAttempts && Date.now() < deadline; accountOffset++) {
         const accountIndex = (firstAccountIndex + accountOffset) % accounts.length;
         const account = accounts[accountIndex];
@@ -13371,64 +13459,89 @@ async function generateCloudflareImage(prompt) {
         for (const model of imageModels) {
             if (Date.now() >= deadline) break;
             const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), Math.max(1000, Math.min(requestTimeoutMs, Math.max(1000, deadline - Date.now()))));
+            const timeoutForAttempt = Math.max(1000, Math.min(requestTimeoutMs, Math.max(1000, deadline - Date.now())));
+            const timer = setTimeout(() => controller.abort(), timeoutForAttempt);
+            const attemptStartedAt = Date.now();
             try {
+                const requestHeaders = { Authorization: `Bearer ${account.apiToken}` };
+                let requestBody;
+                const usesMultipart = /@cf\/black-forest-labs\/flux-2-klein-4b/i.test(model);
+                if (usesMultipart) {
+                    if (typeof FormData !== 'function') throw new Error('cloudflare_image_multipart_not_supported');
+                    const formData = new FormData();
+                    formData.append('prompt', normalizedPrompt);
+                    requestBody = formData;
+                } else {
+                    requestHeaders['Content-Type'] = 'application/json';
+                    requestBody = JSON.stringify({ prompt: normalizedPrompt, steps: Math.max(4, Math.min(8, Number(process.env.IMAGE_NUM_STEPS || 4))) });
+                }
+                console.info('[cloudflare-image-attempt-started]', { accountNumber: accountIndex + 1, model, requestFormat: usesMultipart ? 'multipart' : 'json', timeoutMs: timeoutForAttempt });
                 const response = await fetch(`${CLOUDFLARE_API_BASE_URL}/accounts/${account.accountId}/ai/run/${model}`, {
                     method: 'POST',
-                    headers: { Authorization: `Bearer ${account.apiToken}`, 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ prompt: clipLongText(prompt, Math.min(2048, Number(process.env.IMAGE_PROMPT_MAX_CHARS || 2048))), steps: Math.max(4, Math.min(8, Number(process.env.IMAGE_NUM_STEPS || 4))) }),
+                    headers: requestHeaders,
+                    body: requestBody,
                     signal: controller.signal
                 });
                 if (response.status === 429) {
-                    const quotaDetails = (await response.text().catch(() => '')).slice(0, 240);
+                    const quotaDetails = (await response.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 240);
                     lastError = new Error(`quota_error${quotaDetails ? `:${quotaDetails}` : ''}`);
+                    console.warn('[cloudflare-image-attempt-failed]', { accountNumber: accountIndex + 1, model, statusCode: 429, durationMs: Date.now() - attemptStartedAt, error: lastError.message });
                     continue;
                 }
                 if (!response.ok) {
-                    const errorText = (await response.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 240);
+                    const errorText = (await response.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 300);
                     lastError = new Error(`image_http_${response.status}:${errorText || response.statusText || 'Cloudflare request failed'}`);
+                    console.warn('[cloudflare-image-attempt-failed]', { accountNumber: accountIndex + 1, model, statusCode: response.status, durationMs: Date.now() - attemptStartedAt, error: lastError.message });
                     continue;
                 }
                 const contentType = String(response.headers.get('content-type') || '').toLowerCase();
                 if (contentType.startsWith('image/') || contentType.startsWith('application/octet-stream')) {
                     const rawBuffer = Buffer.from(await response.arrayBuffer());
                     if (rawBuffer.length > 100 && detectImageMimeType(rawBuffer) !== 'application/octet-stream') {
-                        await recordCloudflareAccountSuccess(accounts, accountIndex, model, 0);
+                        await recordCloudflareAccountSuccess(accounts, accountIndex, model, Date.now() - attemptStartedAt);
+                        console.info('[cloudflare-image-generation-completed]', { accountNumber: accountIndex + 1, model, responseType: 'binary', bytes: rawBuffer.length, durationMs: Date.now() - generationStartedAt });
                         return rawBuffer;
                     }
                     lastError = new Error(rawBuffer.length > 100 ? 'image_invalid_binary_response' : 'image_empty_response');
+                    console.warn('[cloudflare-image-attempt-failed]', { accountNumber: accountIndex + 1, model, durationMs: Date.now() - attemptStartedAt, error: lastError.message });
                     continue;
                 }
                 const responseText = await response.text().catch(() => '');
                 let data = {};
                 try { data = JSON.parse(responseText || '{}'); } catch (parseError) {
-                    lastError = new Error('image_invalid_json_response');
+                    lastError = new Error(`image_invalid_json_response:${String(responseText || '').slice(0, 180)}`);
+                    console.warn('[cloudflare-image-attempt-failed]', { accountNumber: accountIndex + 1, model, durationMs: Date.now() - attemptStartedAt, error: lastError.message });
                     continue;
                 }
                 if (data?.success === false || data?.result?.error || (Array.isArray(data?.errors) && data.errors.length > 0)) {
                     const errorCode = Number(data?.errors?.[0]?.code || data?.result?.error?.code || 0);
-                    const errorDetail = String(data?.errors?.[0]?.message || data?.result?.error?.message || data?.result?.error || data?.error || 'Cloudflare image generation returned an error').replace(/\s+/g, ' ').slice(0, 240);
+                    const errorDetail = String(data?.errors?.[0]?.message || data?.result?.error?.message || data?.result?.error || data?.error || 'Cloudflare image generation returned an error').replace(/\s+/g, ' ').slice(0, 300);
                     lastError = new Error(errorCode === 429 ? `quota_error:${errorDetail}` : `image_http_${errorCode || response.status || 502}:${errorDetail}`);
+                    console.warn('[cloudflare-image-attempt-failed]', { accountNumber: accountIndex + 1, model, statusCode: errorCode || response.status || null, durationMs: Date.now() - attemptStartedAt, error: lastError.message });
                     continue;
                 }
-                const encoded = data?.result?.image || data?.result?.image_base64 || data?.result?.data;
+                const encoded = data?.result?.image || data?.result?.image_base64 || data?.result?.data || data?.image;
                 if (typeof encoded === 'string' && encoded.length > 100) {
                     const imageBuffer = Buffer.from(encoded.replace(/^data:image\/[^,]+;base64,/i, ''), 'base64');
                     if (imageBuffer.length > 100 && detectImageMimeType(imageBuffer) !== 'application/octet-stream') {
-                        await recordCloudflareAccountSuccess(accounts, accountIndex, model, 0);
+                        await recordCloudflareAccountSuccess(accounts, accountIndex, model, Date.now() - attemptStartedAt);
+                        console.info('[cloudflare-image-generation-completed]', { accountNumber: accountIndex + 1, model, responseType: 'base64', bytes: imageBuffer.length, durationMs: Date.now() - generationStartedAt });
                         return imageBuffer;
                     }
                 }
                 if (Array.isArray(encoded) && encoded.length > 100) {
                     const imageBuffer = Buffer.from(encoded);
                     if (imageBuffer.length > 100 && detectImageMimeType(imageBuffer) !== 'application/octet-stream') {
-                        await recordCloudflareAccountSuccess(accounts, accountIndex, model, 0);
+                        await recordCloudflareAccountSuccess(accounts, accountIndex, model, Date.now() - attemptStartedAt);
+                        console.info('[cloudflare-image-generation-completed]', { accountNumber: accountIndex + 1, model, responseType: 'byte_array', bytes: imageBuffer.length, durationMs: Date.now() - generationStartedAt });
                         return imageBuffer;
                     }
                 }
-                lastError = new Error('image_error');
+                lastError = new Error('image_response_missing_image_data');
+                console.warn('[cloudflare-image-attempt-failed]', { accountNumber: accountIndex + 1, model, responseKeys: Object.keys(data?.result || data || {}).slice(0, 20), durationMs: Date.now() - attemptStartedAt, error: lastError.message });
             } catch (error) {
                 lastError = error?.name === 'AbortError' ? new Error('image_timeout') : error;
+                console.warn('[cloudflare-image-attempt-failed]', { accountNumber: accountIndex + 1, model, durationMs: Date.now() - attemptStartedAt, error: redactActionError(lastError).slice(0, 500) });
             } finally {
                 clearTimeout(timer);
             }
@@ -13436,7 +13549,7 @@ async function generateCloudflareImage(prompt) {
         const nextIndex = (accountIndex + 1) % accounts.length;
         await recordCloudflareAccountFailure(accounts, accountIndex, nextIndex, imageModels[0], lastError || new Error('image_error'));
     }
-    console.error('[cloudflare-image] account rotation failed:', { accountCount: accounts.length, currentAccountNumber: cloudflareAccountIndex + 1, error: lastError?.message || 'deadline_exceeded' });
+    console.error('[cloudflare-image-generation-failed]', { accountCount: accounts.length, modelCount: imageModels.length, currentAccountNumber: cloudflareAccountIndex + 1, durationMs: Date.now() - generationStartedAt, error: lastError?.message || 'deadline_exceeded' });
     throw new Error(lastError?.message ? String(lastError.message).slice(0, 900) : 'image_error');
 }
 function scheduleSessionReconnect(sessionId, autoExpire, format, options = {}) {
@@ -13520,6 +13633,15 @@ function formatBytes(bytes) {
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+function storeTfbotGeneratedImageInBrefInBackground(buffer, filename, mimeType, details = {}) {
+    if (!BREF_UPLOAD_URL || !Buffer.isBuffer(buffer) || !buffer.length) return;
+    Promise.resolve().then(() => uploadToBref(buffer, filename, mimeType)).then(result => {
+        console.info('[tfbot-generated-image-bref-stored]', { ...details, publicUrlAvailable: !!result?.url, imageBytes: buffer.length });
+    }).catch(error => {
+        console.warn('[tfbot-generated-image-bref-store-failed]', { ...details, imageBytes: buffer.length, error: redactActionError(error).slice(0, 600) });
+    });
 }
 
 function detectImageMimeType(buffer) {
@@ -19046,6 +19168,29 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 await safeSendFormatted(sock, from, t.ai_title, t.ai_usage, pushName, true, activeHostName);
                                                 break;
                                             }
+                                            const aiLocalImagePrompt = extractTfbotLocalImageGenerationPrompt(promptText);
+                                            if (aiLocalImagePrompt) {
+                                                const aiLocalImagePromptText = clipLongText(aiLocalImagePrompt, Math.min(2048, Number(process.env.IMAGE_PROMPT_MAX_CHARS || 2048)));
+                                                try {
+                                                    console.info('[tfbot-ai-image-routed-to-local-cloudflare]', { sessionId, messageId: msgId, promptLength: aiLocalImagePromptText.length, provider: 'tfbot-cloudflare-credentials' });
+                                                    const aiLocalImageBuffer = await generateCloudflareImage(aiLocalImagePromptText);
+                                                    if (isCancelled) return;
+                                                    const aiLocalImageMimeType = detectImageMimeType(aiLocalImageBuffer);
+                                                    const aiLocalImageExtension = aiLocalImageMimeType === 'image/png' ? 'png' : aiLocalImageMimeType === 'image/webp' ? 'webp' : 'jpg';
+                                                    storeTfbotGeneratedImageInBrefInBackground(aiLocalImageBuffer, `tfbot.${aiLocalImageExtension}`, aiLocalImageMimeType, { sessionId, messageId: msgId, source: 'asistan_image_intent' });
+                                                    if (isCancelled) return;
+                                                    const aiLocalImageCaption = t.imaj_generated.replace('{prompt}', aiLocalImagePromptText);
+                                                    const aiLocalImageSend = await trackedSendImageCaptioned(sock, from, aiLocalImageBuffer, t.image_generated_title, aiLocalImageCaption, pushName);
+                                                    if (!aiLocalImageSend?.key?.id) throw new Error('tfbot_ai_image_whatsapp_delivery_unconfirmed');
+                                                    terminalResponseSent = true;
+                                                    responseSentForLog = true;
+                                                    console.info('[tfbot-ai-image-whatsapp-delivered]', { sessionId, messageId: msgId, outboundMessageId: aiLocalImageSend.key.id, imageBytes: aiLocalImageBuffer.length, archiveScheduled: !!BREF_UPLOAD_URL, provider: 'tfbot-cloudflare-credentials' });
+                                                } catch (aiLocalImageError) {
+                                                    console.error('[tfbot-ai-image-generation-failed]', { sessionId, messageId: msgId, error: redactActionError(aiLocalImageError).slice(0, 1200) });
+                                                    await safeSendActionError(sock, from, t.imaj_title, aiLocalImageError, messageLang, pushName, m.messageTimestamp);
+                                                }
+                                                break;
+                                            }
                                             try {
                                                 const aiUserPhone = await getTfServerAiUserPhoneNumber(sessionId, sock, [sender, ...senderJids], sNum, isOwnerReal ? authenticatedAccountNumber : '');
                                                 const aiLanguageContext = await resolveTfServerAiLanguageContext(sessionId, preferenceAliases, messageLang, globalLang);
@@ -19070,7 +19215,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                     { $set: { lang: langCode, updatedAt: languageUpdatedAt, expireAt: new Date(languageUpdatedAt + 30 * 24 * 60 * 60 * 1000) }, $setOnInsert: { createdAt: new Date(languageUpdatedAt) } },
                                                     { upsert: true }
                                                 );
-                                                await preserveTfServerAiPromptFlagExpiry(sessionId, languageCacheKey);
+                                                await resetTfServerAiPromptFlag(sessionId, sNum, preferenceAliases);
                                                 if (isOwnerReal) await db.collection('session_owners').updateOne(
                                                     { sessionId },
                                                     { $set: { lang: langCode, langUpdatedAt: new Date(languageUpdatedAt), updatedAt: new Date(languageUpdatedAt) } }
@@ -19098,26 +19243,21 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                             }
                                             const imagePrompt = clipLongText(args, Math.min(2048, Number(process.env.IMAGE_PROMPT_MAX_CHARS || 2048)));
                                             try {
+                                                console.info('[tfbot-imaj-command-started]', { sessionId, messageId: msgId, promptLength: imagePrompt.length, provider: 'tfbot-cloudflare-credentials' });
                                                 const imageBuffer = await generateCloudflareImage(imagePrompt);
                                                 if (isCancelled) return;
                                                 const imageMimeType = detectImageMimeType(imageBuffer);
                                                 const imageExtension = imageMimeType === 'image/png' ? 'png' : imageMimeType === 'image/webp' ? 'webp' : 'jpg';
-                                                let publicImageUrl = '';
-                                                let uploadError = null;
-                                                try {
-                                                    const uploadedImage = await uploadToBref(imageBuffer, `tfbot.${imageExtension}`, imageMimeType);
-                                                    publicImageUrl = uploadedImage.url;
-                                                } catch (error) {
-                                                    uploadError = error;
-                                                    console.error('[image-upload-to-bref]', { error: redactActionError(error).slice(0, 700), imageBytes: imageBuffer.length, mimeType: imageMimeType });
-                                                }
+                                                storeTfbotGeneratedImageInBrefInBackground(imageBuffer, `tfbot.${imageExtension}`, imageMimeType, { sessionId, messageId: msgId, source: 'imaj_command' });
                                                 if (isCancelled) return;
-                                                const capText = uploadError
-                                                    ? await explainActionError(uploadError, messageLang, t.image_generated_title, pushName, m.messageTimestamp)
-                                                    : `${t.imaj_generated.replace('{prompt}', imagePrompt)}${publicImageUrl ? `\n${publicImageUrl}` : ''}`;
-                                                await trackedSendImageCaptioned(sock, from, imageBuffer, t.image_generated_title, capText, pushName);
+                                                const capText = t.imaj_generated.replace('{prompt}', imagePrompt);
+                                                const imageSendResult = await trackedSendImageCaptioned(sock, from, imageBuffer, t.image_generated_title, capText, pushName);
+                                                if (!imageSendResult?.key?.id) throw new Error('tfbot_imaj_whatsapp_delivery_unconfirmed');
                                                 terminalResponseSent = true;
+                                                responseSentForLog = true;
+                                                console.info('[tfbot-imaj-command-delivered]', { sessionId, messageId: msgId, outboundMessageId: imageSendResult.key.id, imageBytes: imageBuffer.length, archiveScheduled: !!BREF_UPLOAD_URL });
                                             } catch (e) {
+                                                console.error('[tfbot-imaj-command-failed]', { sessionId, messageId: msgId, error: redactActionError(e).slice(0, 1200) });
                                                 await safeSendActionError(sock, from, t.imaj_title, e, messageLang, pushName, m.messageTimestamp);
                                             }
                                             break;
