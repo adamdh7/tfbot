@@ -5,11 +5,14 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'tfbot-v220';
-const TFBOT_NOTICE_PROMPT_PART_A = 'You write concise, professional WhatsApp service notifications for Bot (tfbot). Return only the final message, in the recipient language specified by the user. ';
+const TFBOT_CODE_VERSION = 'tfbot-v222';
+const TFBOT_DIAGNOSTIC_RETENTION_MS = 4 * 60 * 1000;
+const TFBOT_NOTICE_DELIVERY_ACK_TIMEOUT_MS = Math.max(8000, Math.min(60000, Number(process.env.TFBOT_NOTICE_DELIVERY_ACK_TIMEOUT_MS || 30000)));
+const TFBOT_NOTICE_POST_ACK_SETTLE_MS = Math.max(3000, Math.min(30000, Number(process.env.TFBOT_NOTICE_POST_ACK_SETTLE_MS || 8000)));
+const TFBOT_NOTICE_PROMPT_PART_A = 'You write the body text only for a concise, professional WhatsApp service notification for Bot (tfbot). Return only the notification body in the recipient language. ';
 const TFBOT_CLOUDFLARE_AI_ENDPOINT_PREFIX = 'https://api.cloudflare.com/client/v4/accounts/';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
-const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot) 220';
+const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 function formatTfbotHaitiTimestamp(value = Date.now()) {
@@ -110,13 +113,48 @@ let tfbotDiagnosticWriterRunning = false;
 let tfbotDiagnosticDroppedEntries = 0;
 let tfbotDiagnosticTargetCacheAt = 0;
 let tfbotDiagnosticTargetCache = null;
+function getTfbotDiagnosticLineTimestamp(line) {
+    try {
+        const record = JSON.parse(String(line || ''));
+        const timestamp = Date.parse(String(record?.date || ''));
+        return Number.isFinite(timestamp) ? timestamp : 0;
+    } catch (error) {
+        return 0;
+    }
+}
+
+function pruneTfbotDiagnosticWindow(now = Date.now()) {
+    const cutoff = Number(now) - TFBOT_DIAGNOSTIC_RETENTION_MS;
+    const keep = line => {
+        const timestamp = getTfbotDiagnosticLineTimestamp(line);
+        return timestamp >= cutoff && timestamp <= Number(now) + 60000;
+    };
+    const previousRecentLength = tfbotDiagnosticRecentLines.length;
+    const recent = tfbotDiagnosticRecentLines.filter(keep);
+    if (recent.length !== previousRecentLength) {
+        tfbotDiagnosticRecentLines.splice(0, tfbotDiagnosticRecentLines.length, ...recent);
+        tfbotDiagnosticRecentBytes = recent.reduce((total, line) => total + Buffer.byteLength(line, 'utf8'), 0);
+        tfbotDiagnosticEvictedLines += previousRecentLength - recent.length;
+    }
+    const previousQueueLength = tfbotDiagnosticQueue.length;
+    const queued = tfbotDiagnosticQueue.filter(keep);
+    if (queued.length !== previousQueueLength) {
+        tfbotDiagnosticQueue.splice(0, tfbotDiagnosticQueue.length, ...queued);
+        tfbotDiagnosticQueuedBytes = queued.reduce((total, line) => total + Buffer.byteLength(line, 'utf8'), 0);
+        tfbotDiagnosticEvictedLines += previousQueueLength - queued.length;
+    }
+    return previousRecentLength + previousQueueLength - recent.length - queued.length;
+}
+
 function appendTfbotDiagnosticMemoryLine(line) {
     const value = String(line || '');
     if (!value) return;
+    pruneTfbotDiagnosticWindow();
     const bytes = Buffer.byteLength(value, 'utf8');
     tfbotDiagnosticRecentLines.push(value);
     tfbotDiagnosticRecentBytes += bytes;
     tfbotDiagnosticTotalLines++;
+    pruneTfbotDiagnosticWindow();
     while (tfbotDiagnosticRecentLines.length > TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES || tfbotDiagnosticRecentBytes > TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES) {
         const removed = tfbotDiagnosticRecentLines.shift();
         if (!removed) break;
@@ -149,6 +187,7 @@ function enqueueTfbotDiagnosticRecord(record) {
 }
 async function flushTfbotDiagnosticQueue() {
     try {
+        pruneTfbotDiagnosticWindow();
         while (tfbotDiagnosticQueue.length) {
             const batch = tfbotDiagnosticQueue.splice(0, 48);
             tfbotDiagnosticQueuedBytes = Math.max(0, tfbotDiagnosticQueuedBytes - batch.reduce((total, line) => total + Buffer.byteLength(line, 'utf8'), 0));
@@ -168,6 +207,10 @@ async function flushTfbotDiagnosticQueue() {
         }
     }
 }
+const tfbotDiagnosticPruneTimer = setInterval(() => {
+    try { pruneTfbotDiagnosticWindow(); } catch (error) {}
+}, 10000);
+if (typeof tfbotDiagnosticPruneTimer.unref === 'function') tfbotDiagnosticPruneTimer.unref();
 function getTfbotDiagnosticSession() {
     const now = Date.now();
     if (now - tfbotDiagnosticTargetCacheAt < 750) return tfbotDiagnosticTargetCache;
@@ -227,7 +270,7 @@ for (const level of Object.keys(tfbotOriginalConsole)) {
     console[level] = (...args) => {
         try {
             const serialized = args.map(value => typeof value === 'string' ? value : tfbotDiagnosticSerialize(value)).join(' ');
-            const operationalLog = /tfbot-health|tfbot-router|tfbot-worker|cluster-|session-(?:restore|orphan|expired|duplicate|runtime-lock|account-runtime-lock|reconnect|open|health|runtime-status)|signal-|whatsapp-signal|pairing-challenge|worker-handoff|send-failure|whatsapp-send|mongo-(?:connect|close)|storage-layout|messages-upsert|message-|command-|stale-command|tfserver-ai|del3-|quoted-media|view-once|group-status|whatsapp-presence-update|group-metadata|group-sender-key|sender-key-memory|group-participant|baileys-|message-receipt|message-status/i.test(serialized);
+            const operationalLog = /tfbot-health|tfbot-router|tfbot-worker|cluster-|session-(?:restore|orphan|expired|duplicate|runtime-lock|account-runtime-lock|reconnect|open|health|runtime-status)|session-api|list2|notice-delivery|session-notice|whatsapp-notice|signal-|whatsapp-signal|pairing-challenge|worker-handoff|send-failure|whatsapp-send|mongo-(?:connect|close)|storage-layout|messages-upsert|message-|command-|stale-command|tfserver-ai|del3-|quoted-media|view-once|group-status|whatsapp-presence-update|group-metadata|group-sender-key|sender-key-memory|group-participant|baileys-|message-receipt|message-status/i.test(serialized);
             if (isSignalDecryptionFailure(args)) {
                 const fallbackSessionMatch = serialized.match(/(?:sessionId|session_id)["'=:\s]+([A-Za-z0-9_-]{8,120})/i);
                 const diagnosticSession = fallbackSessionMatch?.[1] || getTfbotDiagnosticSession()?.sessionId || '';
@@ -1555,7 +1598,7 @@ const baileysOwnLidRetryAddressingPatchStatus = applyBaileysOwnLidRetryAddressin
 const baileysMessageRetryManagerDeviceJidPatchStatus = { applied: false, notApplicable: true, reason: 'Baileys_6_7_23_uses_getMessage_and_socket_retry_cache_not_MessageRetryManager' };
 const baileysCompanionRegRefreshPatchStatus = applyBaileysCompanionRegRefreshPatch();
 const baileysPairingCodeProtocolPatchStatus = applyBaileysPairingCodeProtocolPatch();
-console.info('[tfbot-local-diagnostics-ready]', { sessionId: TFBOT_DIAGNOSTIC_SESSION_ID || null, selector: TFBOT_DIAGNOSTIC_SESSION_ID ? 'configured_session' : 'most_recent_active_session', endpoint: '/logs.txt', storage: 'bounded_volatile_memory_only', persistentLocalWrites: false, publicRead: true, access: 'public-redacted-log', writer: 'asynchronous_memory_queue', timeZone: TFBOT_LOG_TIME_ZONE });
+console.info('[tfbot-local-diagnostics-ready]', { sessionId: TFBOT_DIAGNOSTIC_SESSION_ID || null, selector: TFBOT_DIAGNOSTIC_SESSION_ID ? 'configured_session' : 'most_recent_active_session', endpoint: '/logs.txt', storage: 'bounded_volatile_memory_only', retentionMs: TFBOT_DIAGNOSTIC_RETENTION_MS, retentionMinutes: 4, expiredEntriesPurged: true, persistentLocalWrites: false, publicRead: true, access: 'public-redacted-log', writer: 'asynchronous_memory_queue', timeZone: TFBOT_LOG_TIME_ZONE });
 console.info('[baileys-lid-pn-decrypt-retry-patch]', baileysLidPnDecryptPatchStatus);
 console.info('[baileys-group-lid-pn-decrypt-retry-patch]', baileysGroupLidPnDecryptPatchStatus);
 console.info('[baileys-self-chat-placeholder-resend-patch]', baileysSelfChatPlaceholderResendPatchStatus);
@@ -2001,7 +2044,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-18-r211-session-api-llama4-scout';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-18-r213-notice-format-four-minute-logs';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_SESSION_API_TOKEN = String(process.env.TFBOT_SESSION_API_TOKEN || '').trim() || '9f3a7c2e4b1d8a6f0c5e9b7d1a2c4f8';
@@ -2023,7 +2066,7 @@ const tfbotCoordinatorCandidateFailures = new Map();
 const TFBOT_ROUTER_STATE_ID = 'active-domain';
 const TFBOT_PRIMARY_DOMAIN = Object.freeze({ host: 'tf.bot.adamdh7.org', url: 'https://tf.bot.adamdh7.org', priority: 0 });
 const TFBOT_COORDINATOR_HOST = 'tfbot7.onrender.com';
-const TFBOT_NOTICE_PROMPT_PART_B = "Use no more than two short sentences and keep the message under 260 characters. Explain that the user's Bot (tfbot) WhatsApp session has been disconnected and that they can reconnect at ";
+const TFBOT_NOTICE_PROMPT_PART_B = "Write no more than two short sentences and keep the body under 260 characters. Explain that the user's Bot (tfbot) WhatsApp session is being disconnected and that they can reconnect at ";
 const TFBOT_ROUTER_SERVING_DOMAINS = Object.freeze([
     TFBOT_PRIMARY_DOMAIN,
     { host: 'tfbot3.onrender.com', url: 'https://tfbot3.onrender.com', priority: 1 },
@@ -8764,6 +8807,12 @@ process.on('uncaughtException', (error) => {
 });
 
 app.use(express.json({ limit: '2mb' }));
+app.use((error, req, res, next) => {
+    if (error?.type === 'entity.parse.failed' && String(req.path || '') === '/api/sessions' && req.method === 'DELETE') {
+        return res.status(400).json({ ok: false, error: 'invalid_json_body', message: 'JSON invalide. Utilisez {\"sessionId\":\"SESSION_ID\"}, {\"SessionId\":\"SESSION_ID\"}, {\"number\":\"PHONE_NUMBER\"} ou {\"all\":true}.' });
+    }
+    return next(error);
+});
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 app.get('/logs.txt', (req, res) => {
     res.setHeader('X-TFBOT-Code-Version', TFBOT_CODE_VERSION);
@@ -8776,7 +8825,10 @@ app.get('/logs.txt', (req, res) => {
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-TFBOT-Log-Retention-Ms', String(TFBOT_DIAGNOSTIC_RETENTION_MS));
+    res.setHeader('X-TFBOT-Log-Retention-Minutes', '4');
     res.type('text/plain');
+    pruneTfbotDiagnosticWindow();
     const pendingLines = tfbotDiagnosticQueue.slice();
     const allRawLines = [...tfbotDiagnosticRecentLines, ...pendingLines].filter(Boolean);
     const showAllLines = String(req.query?.all || '') === '1' || String(req.query?.all || '').toLowerCase() === 'true';
@@ -8832,6 +8884,9 @@ app.get('/logs.txt', (req, res) => {
             latestStoredLogDate: latestStoredDate ? latestStoredDate.toISOString() : null,
             latestStoredLogDateHaiti: latestStoredDate ? formatTfbotHaitiTimestamp(latestStoredDate) : null,
             latestStoredLogAgeMs: latestStoredDate ? Math.max(0, now.getTime() - latestStoredDate.getTime()) : null,
+            retentionWindowMs: TFBOT_DIAGNOSTIC_RETENTION_MS,
+            retentionWindowMinutes: 4,
+            expiredEntriesPurged: true,
             totalLinesSinceProcessStart: tfbotDiagnosticTotalLines + pendingLines.length,
             returnedLines: safeLines.length,
             evictedLines: tfbotDiagnosticEvictedLines,
@@ -11371,6 +11426,30 @@ function hasWhatsAppFormatting(value) {
         || /```|`[^`\n]+`/.test(source);
 }
 
+function getTfbotDisconnectionDisplayName(...candidates) {
+    const genericNames = /^(?:compte connect[ée]|connected account|account connected|cuenta conectada|kont ki konekte|bot \(tfbot\)|unknown|inconnu|n\/?a|none|null|undefined)$/i;
+    for (const candidate of candidates) {
+        const name = sanitizeSessionDisplayName(candidate);
+        if (name && !genericNames.test(name.trim())) return name;
+    }
+    return '';
+}
+
+function buildTfbotSystemDisconnectionNotice(userName, bodyText) {
+    const cleanName = getTfbotDisconnectionDisplayName(userName).replace(/\"/g, '');
+    if (!cleanName) throw new Error('disconnection_user_name_unavailable');
+    const marker = '[[TFBOT_PAIRING_CODE]]';
+    let cleanBody = normalizeCaptionText(bodyText).replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+    if (!cleanBody) throw new Error('disconnection_notice_body_empty');
+    if (cleanBody.includes(marker)) {
+        const markerPlaceholder = 'TFBOTNOTICEPAIRINGMARKERXYZ';
+        cleanBody = cleanBody.replace(marker, markerPlaceholder).replace(/[*_~`]/g, '').replace(markerPlaceholder, marker);
+    } else {
+        cleanBody = cleanBody.replace(/[*_~`]/g, '');
+    }
+    return `*○ System Disconnection*\n\n*Bot (tfbot)*\nItilizatè : \"${cleanName}\"\nPwopriyetè : ${cleanName}\n\n*_${cleanBody}_*\n\n> *_Bot (tfbot)_*`;
+}
+
 function buildCaption(type, text, userName, preserveFormatting = null, ownerName = '', language = 'ht') {
     const cleanType = String(type || 'Message').replace(/[\r\n]+/g, ' ').trim().slice(0, 48) || 'Message';
     const cleanText = normalizeCaptionText(text);
@@ -11770,7 +11849,7 @@ function getTfbotSessionApiLanguage(value) {
     return { code: known[language] ? language : 'en', name: known[language] || 'English' };
 }
 
-const TFBOT_NOTICE_PROMPT_PART_D = ' Do not alter, translate, split, format, or explain the placeholder. Never invent or simulate a pairing code. Do not add headings, greetings, alternatives, markdown, quotation marks, commentary, or any other text. English reference: ';
+const TFBOT_NOTICE_PROMPT_PART_D = ' Do not alter, translate, split, format, or explain the placeholder. Never invent or simulate a pairing code. Do not include a title, username, owner label, greeting, sign-off, markdown, quotation marks, commentary, or any other text. Return only the body sentence(s). English reference: ';
 const TFBOT_NOTICE_PROMPT_PART_E = 'Your Bot (tfbot) session has been disconnected. To reconnect, visit bot.adamdh7.org or enter ';
 const TFBOT_NOTICE_PROMPT_PART_F = ' in Linked Devices.';
 
@@ -11876,9 +11955,11 @@ async function generateTfbotDisconnectionCaption(language) {
                 || payload?.choices?.[0]?.message?.content
                 || '';
             if (Array.isArray(output)) output = output.map(item => typeof item === 'string' ? item : item?.text || '').join('');
-            output = String(output || '').trim().replace(/^```[a-z]*\s*/i, '').replace(/\s*```$/i, '').trim();
+            output = String(output || '').trim().replace(/^```[a-z]*\s*/i, '').replace(/\s*```$/i, '').replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
             const markerCount = output.split(marker).length - 1;
             if (!output || markerCount !== 1 || output.length > 700) throw new Error('notification_format_invalid');
+            const markerPlaceholder = 'TFBOTNOTICEPAIRINGMARKERXYZ';
+            output = output.replace(marker, markerPlaceholder).replace(/[*_~`]/g, '').replace(markerPlaceholder, marker).trim();
             tfbotNoticeAiAccountCursor = (index + 1) % accounts.length;
             console.info('[session-api-cloudflare-ai-success]', { accountId: account.accountId, source: account.source, fallbackAttempt: offset, accountsAvailable: accounts.length, model });
             return output;
@@ -11988,6 +12069,114 @@ async function createTfbotReplacementPairingChallenge(number, replacedSessionId)
     }
 }
 
+async function sendTfbotNoticeAndAwaitDelivery(sock, sendOperation, options = {}) {
+    if (!sock?.ev || typeof sock.ev.on !== 'function') throw new Error('whatsapp_notice_ack_listener_unavailable');
+    if (typeof sendOperation !== 'function') throw new Error('whatsapp_notice_send_operation_missing');
+    const timeoutMs = Math.max(8000, Math.min(60000, Number(options.timeoutMs || TFBOT_NOTICE_DELIVERY_ACK_TIMEOUT_MS)));
+    let messageId = '';
+    let serverAckObserved = false;
+    let settled = false;
+    let resolveAcknowledgement;
+    let rejectAcknowledgement;
+    const earlyUpdates = [];
+    const earlyReceipts = [];
+    const acknowledgementPromise = new Promise((resolve, reject) => {
+        resolveAcknowledgement = resolve;
+        rejectAcknowledgement = reject;
+    });
+    const finish = (error, acknowledgement) => {
+        if (settled) return;
+        settled = true;
+        if (error) rejectAcknowledgement(error);
+        else resolveAcknowledgement(acknowledgement);
+    };
+    const processUpdate = item => {
+        if (String(item?.key?.id || '') !== messageId) return;
+        const update = item?.update || {};
+        const status = Number(update.status);
+        if (status === 2) serverAckObserved = true;
+        if (update.error || status === 0) {
+            const reason = String(update.error?.message || update.error || update.messageStubParameters || 'server_rejected_message').replace(/[\r\n\t]+/g, ' ').slice(0, 240);
+            finish(new Error(`whatsapp_notice_server_rejected:${reason}`));
+            return;
+        }
+        if (Number.isFinite(status) && status >= 3 && status <= 5) {
+            finish(null, { source: 'messages.update', status });
+        }
+    };
+    const hasReceiptTimestamp = value => {
+        if (value && typeof value.toNumber === 'function') return Number(value.toNumber()) > 0;
+        return Number(value || 0) > 0;
+    };
+    const processReceipt = item => {
+        if (String(item?.key?.id || '') !== messageId) return;
+        const receipt = item?.receipt || {};
+        const receiptType = String(receipt.type || item?.type || '').toLowerCase();
+        const delivered = hasReceiptTimestamp(receipt.receiptTimestamp)
+            || hasReceiptTimestamp(receipt.readTimestamp)
+            || hasReceiptTimestamp(receipt.playedTimestamp)
+            || /^(?:delivery|delivered|read|played)$/.test(receiptType);
+        if (delivered) finish(null, { source: 'message-receipt.update', status: null, receiptType: receiptType || null });
+    };
+    const onMessageUpdate = updates => {
+        for (const item of Array.isArray(updates) ? updates : []) {
+            if (!messageId) {
+                earlyUpdates.push(item);
+                if (earlyUpdates.length > 120) earlyUpdates.shift();
+            } else {
+                processUpdate(item);
+            }
+        }
+    };
+    const onReceiptUpdate = updates => {
+        for (const item of Array.isArray(updates) ? updates : []) {
+            if (!messageId) {
+                earlyReceipts.push(item);
+                if (earlyReceipts.length > 120) earlyReceipts.shift();
+            } else {
+                processReceipt(item);
+            }
+        }
+    };
+    sock.ev.on('messages.update', onMessageUpdate);
+    sock.ev.on('message-receipt.update', onReceiptUpdate);
+    let timeoutHandle = null;
+    try {
+        const sent = await promiseWithTimeout(Promise.resolve().then(sendOperation), Math.max(timeoutMs, 30000), 'whatsapp_notice_send');
+        messageId = String(sent?.key?.id || '').trim();
+        if (!messageId) throw new Error('whatsapp_notice_send_result_message_id_missing');
+        for (const item of earlyUpdates) processUpdate(item);
+        for (const item of earlyReceipts) processReceipt(item);
+        if (!settled) {
+            const timeoutPromise = new Promise((_, reject) => {
+                timeoutHandle = setTimeout(() => reject(new Error(`whatsapp_notice_delivery_ack_timeout:messageId=${messageId}:serverAckObserved=${serverAckObserved}:waitMs=${timeoutMs}`)), timeoutMs);
+                if (typeof timeoutHandle.unref === 'function') timeoutHandle.unref();
+            });
+            const acknowledgement = await Promise.race([acknowledgementPromise, timeoutPromise]);
+            return { sent, messageId, ...acknowledgement, serverAckObserved };
+        }
+        const acknowledgement = await acknowledgementPromise;
+        return { sent, messageId, ...acknowledgement, serverAckObserved };
+    } catch (error) {
+        const message = String(error?.message || error || 'whatsapp_notice_delivery_failed');
+        if (/timed out after|delivery_ack_timeout/i.test(message)) {
+            throw new Error(`whatsapp_notice_delivery_not_confirmed:messageId=${messageId || 'missing'}:serverAckObserved=${serverAckObserved}:detail=${message.slice(0, 420)}`);
+        }
+        throw error;
+    } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        try {
+            if (typeof sock.ev.off === 'function') {
+                sock.ev.off('messages.update', onMessageUpdate);
+                sock.ev.off('message-receipt.update', onReceiptUpdate);
+            } else if (typeof sock.ev.removeListener === 'function') {
+                sock.ev.removeListener('messages.update', onMessageUpdate);
+                sock.ev.removeListener('message-receipt.update', onReceiptUpdate);
+            }
+        } catch (error) {}
+    }
+}
+
 async function disconnectTfbotSessionWithNotice(user) {
     const sessionId = String(user?.SessionId || '').trim();
     const number = normalizePairingPhoneNumber(user?.Numero || '');
@@ -11998,6 +12187,15 @@ async function disconnectTfbotSessionWithNotice(user) {
     if (TFBOT_CLUSTER_ENABLED && owner?.ownerInstanceId && owner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && ownerLeaseUntil > Date.now() && !isPreviousDeploymentOwnerOnCurrentHost(owner)) throw new Error('session_owned_by_another_worker');
     const language = String(owner?.lang || 'en').toLowerCase();
     const originalSocket = runtime.sock;
+    const disconnectionName = getTfbotDisconnectionDisplayName(
+        originalSocket?.user?.name,
+        originalSocket?.user?.notify,
+        originalSocket?.user?.verifiedName,
+        runtime?.authState?.creds?.me?.name,
+        owner?.Name,
+        user?.Name
+    );
+    if (!disconnectionName) throw new Error('disconnection_user_name_unavailable');
     let pairing = null;
     let logoutCompleted = false;
     let noticeMessageId = '';
@@ -12013,34 +12211,31 @@ async function disconnectTfbotSessionWithNotice(user) {
         throw new Error(`pairing_code_generation_failed:${String(error?.message || error || 'whatsapp_pairing_code_generation_failed').slice(0, 600)}`);
     }
     const placeholder = '[[TFBOT_PAIRING_CODE]]';
-    const caption = captionTemplate.replace(placeholder, pairing.code);
+    const caption = buildTfbotSystemDisconnectionNotice(disconnectionName, captionTemplate.replace(placeholder, pairing.code));
     if (activeSessions.get(sessionId)?.sock !== originalSocket || !isAuthenticatedSocketOperational(runtime, originalSocket)) {
         await discardFreshPairingSession(pairing.sessionId, 'original_session_changed_before_notice').catch(() => {});
         throw new Error('session_socket_changed_before_notice');
     }
+    let noticeAcknowledgement;
     try {
-        const sendResult = await sendImageCaptioned(
+        noticeAcknowledgement = await sendTfbotNoticeAndAwaitDelivery(
             originalSocket,
-            `${number}@s.whatsapp.net`,
-            adamLogoBuffer,
-            '',
-            '',
-            '',
-            { exactCaption: caption, language, ownerName: 'Bot (tfbot)' }
+            () => queuedSendMessage(originalSocket, `${number}@s.whatsapp.net`, { text: caption }, {}, 0),
+            { sessionId, timeoutMs: TFBOT_NOTICE_DELIVERY_ACK_TIMEOUT_MS }
         );
-        noticeMessageId = String(sendResult?.key?.id || '').trim();
-        if (!noticeMessageId) throw new Error('whatsapp_notice_send_result_message_id_missing');
+        noticeMessageId = noticeAcknowledgement.messageId;
+        console.info('[session-api-notice-delivery-acknowledged]', { sessionId, messageId: noticeMessageId, acknowledgementSource: noticeAcknowledgement.source, acknowledgementStatus: noticeAcknowledgement.status ?? null, serverAckObserved: noticeAcknowledgement.serverAckObserved });
     } catch (sendError) {
-        await discardFreshPairingSession(pairing.sessionId, 'disconnect_notice_send_failed').catch(cleanupError => console.error('[session-api-pairing-cleanup-after-send-failure]', { sessionId: pairing.sessionId, error: cleanupError?.message || String(cleanupError) }));
-        throw new Error(`whatsapp_notice_send_failed:${String(sendError?.message || sendError).slice(0, 500)}`);
+        await discardFreshPairingSession(pairing.sessionId, 'disconnect_notice_delivery_not_confirmed').catch(cleanupError => console.error('[session-api-pairing-cleanup-after-notice-failure]', { sessionId: pairing.sessionId, error: cleanupError?.message || String(cleanupError) }));
+        throw new Error(`whatsapp_notice_delivery_failed:${String(sendError?.message || sendError).slice(0, 900)}`);
     }
-    const noticeSettleMs = Math.max(1500, Math.min(15000, Number(process.env.TFBOT_SESSION_API_NOTICE_SETTLE_MS || 5000)));
+    const noticeSettleMs = Math.max(8000, Math.min(30000, Number(process.env.TFBOT_SESSION_API_NOTICE_SETTLE_MS || TFBOT_NOTICE_POST_ACK_SETTLE_MS)));
     await new Promise(resolve => setTimeout(resolve, noticeSettleMs));
     if (activeSessions.get(sessionId)?.sock !== originalSocket || !isAuthenticatedSocketOperational(runtime, originalSocket)) {
         await discardFreshPairingSession(pairing.sessionId, 'original_session_changed_after_notice').catch(cleanupError => console.error('[session-api-pairing-cleanup-after-socket-change]', { sessionId: pairing.sessionId, error: cleanupError?.message || String(cleanupError) }));
         throw new Error(`session_socket_changed_after_notice_before_logout:messageId=${noticeMessageId}`);
     }
-    console.info('[session-api-disconnect-notice-settled]', { sessionId, messageId: noticeMessageId, settleMs: noticeSettleMs, sendAccepted: true, logoutStarted: false });
+    console.info('[session-api-disconnect-notice-settled]', { sessionId, messageId: noticeMessageId, settleMs: noticeSettleMs, deliveryAcknowledged: true, acknowledgementSource: noticeAcknowledgement.source, acknowledgementStatus: noticeAcknowledgement.status ?? null, logoutStarted: false });
     try {
         if (typeof originalSocket.logout === 'function') {
             await promiseWithTimeout(Promise.resolve(originalSocket.logout()), 15000, 'session_api_whatsapp_logout');
@@ -12091,7 +12286,7 @@ async function disconnectTfbotSessionWithNotice(user) {
     }
     scheduleSessionListBroadcast('session_api_user_disconnected');
     console.info('[session-api-disconnect-confirmed]', { sessionId, numberHash: shortLogHash(number), noticeMessageId, pairingSessionId: pairing.sessionId, whatsappLogoutConfirmed: true, socketClosed: true, sessionDataDeleted: true });
-    return { SessionId: sessionId, Numero: number, Name: user.Name, PairingSessionId: pairing.sessionId, PairingCodeSent: true, NoticeMessageId: noticeMessageId, NoticeSettleMs: noticeSettleMs, WhatsAppLogoutConfirmed: true, SessionDataDeleted: true, DisconnectionConfirmed: true };
+    return { SessionId: sessionId, Numero: number, Name: user.Name, PairingSessionId: pairing.sessionId, PairingCodeSent: true, NoticeMessageId: noticeMessageId, NoticeDeliveryAcknowledged: true, NoticeAcknowledgementSource: noticeAcknowledgement.source, NoticeAcknowledgementStatus: noticeAcknowledgement.status ?? null, NoticeSettleMs: noticeSettleMs, WhatsAppLogoutConfirmed: true, SessionDataDeleted: true, DisconnectionConfirmed: true };
 }
 
 app.get('/api/sessions', async (req, res) => {
@@ -12154,48 +12349,121 @@ app.delete('/api/sessions', async (req, res) => {
 });
 
 app.get('/list2', (req, res) => {
-    if (isPurging) return res.type('text/plain').send('SUPPRESSION DEJA EN COURS.');
+    if (isPurging) return res.status(409).type('text/plain').send('SUPPRESSION DEJA EN COURS.');
+    if (!db || TFBOT_CLUSTER_COORDINATOR_ONLY || TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) return res.status(503).type('text/plain').send('SUPPRESSION IMPOSSIBLE : WORKER INACTIF.');
     isPurging = true;
-    res.type('text/plain').send('SUPPRESSION EN COURS. LES SESSIONS ET DONNEES SERONT EFFACEES SOUS PEU.');
-    (async () => {
-        try {
-            const ownerCol = db.collection('session_owners');
-            for (const [sId, session] of activeSessions.entries()) {
-                if (session.sock && session.number) {
-                    try {
-                        const doc = await ownerCol.findOne({ sessionId: sId });
-                        const lang = (doc && doc.lang && translations[doc.lang]) ? doc.lang : 'en';
-                        const t = translations[lang];
-                        const hostName = doc && doc.Name ? doc.Name : "Bot (tfbot)";
-                        await sendImageCaptioned(session.sock, session.number + '@s.whatsapp.net', adamLogoBuffer, t.disconnect_sys_title, t.disconnect_sys_msg, hostName);
-                        await new Promise(resolve => setTimeout(resolve, 2500));
-                    } catch (err) {}
-                    try {
-                        await Promise.resolve(session.sock.logout()).catch(() => {});
-                        if (session.sock.ws) session.sock.ws.close();
-                    } catch (err) {}
-                }
+    let list2Stage = 'collect_sessions';
+    res.status(202).set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').type('text/plain').send('SUPPRESSION DEMARREE. LES AVIS DOIVENT ETRE CONFIRMES AVANT LA FERMETURE DES SESSIONS. CONSULTEZ /logs.txt POUR LE RESULTAT.');
+    void (async () => {
+        list2Stage = 'collect_sessions';
+        const entries = [...activeSessions.entries()];
+        const noticeTargets = [];
+        const ownerCol = db.collection('session_owners');
+        for (const [sessionId, session] of entries) {
+            const sock = session?.sock;
+            if (!sock || !isAuthenticatedSocketOperational(session, sock)) continue;
+            const number = normalizePairingPhoneNumber(
+                getAuthenticatedPhoneNumber(sock?.user || null, session?.authState?.creds || null)
+                || session?.number
+                || sock?.user?.id
+                || sock?.user?.phoneNumber
+                || ''
+            );
+            if (!/^\d{8,15}$/.test(number)) {
+                console.warn('[list2-notice-skipped-invalid-account-number]', { sessionId, action: 'abort_purge_before_logout_because_notice_target_is_unavailable' });
+                throw new Error(`list2_notice_target_number_missing:${sessionId}`);
             }
-            for (const sId of [...sessionRuntimeLockTimers.keys()]) await releaseSessionRuntimeLock(sId);
-            await db.collection('session_runtime_locks').deleteMany({ owner: processInstanceId });
-            await db.collection('baileys_auth').deleteMany({});
-            await db.collection('session_owners').deleteMany({});
-            await db.collection('group_settings').deleteMany({});
-            await db.collection('processed_messages').deleteMany({});
-            await db.collection('group_del2').deleteMany({});
-            await db.collection('group_del3').deleteMany({});
-            sessionOwnersCache.clear();
-            groupMetadataCache.clear();
-            groupSettingsCache.clear();
-            msgRetryCounterCache.clear();
-            msgRetryCounterExpiryCache.clear();
-            activeSessions.clear();
-            activeDel2UsersCache.clear();
-            activeDel3RulesCache.clear();
-            processedLocalCache.clear();
-        } catch (e) {}
+            const owner = await ownerCol.findOne({ sessionId }).catch(error => {
+                throw new Error(`list2_owner_lookup_failed:${sessionId}:${String(error?.message || error).slice(0, 180)}`);
+            });
+            const language = owner && translations[owner.lang] ? owner.lang : 'en';
+            const translationsForLanguage = translations[language] || translations.en;
+            const hostName = getTfbotDisconnectionDisplayName(
+                sock?.user?.name,
+                sock?.user?.notify,
+                sock?.user?.verifiedName,
+                session?.authState?.creds?.me?.name,
+                owner?.Name
+            );
+            noticeTargets.push({ sessionId, session, sock, number, language, translationsForLanguage, hostName });
+        }
+        console.info('[list2-notice-delivery-phase-started]', { authenticatedSessions: noticeTargets.length, activeRuntimeCount: entries.length, acknowledgementTimeoutMs: TFBOT_NOTICE_DELIVERY_ACK_TIMEOUT_MS });
+        list2Stage = 'send_and_confirm_all_notices';
+        const noticeResults = await Promise.allSettled(noticeTargets.map(async target => {
+            const noticeText = buildTfbotSystemDisconnectionNotice(
+                target.hostName,
+                target.translationsForLanguage.disconnect_sys_msg
+            );
+            const acknowledgement = await sendTfbotNoticeAndAwaitDelivery(
+                target.sock,
+                () => queuedSendMessage(target.sock, `${target.number}@s.whatsapp.net`, { text: noticeText }, {}, 0),
+                { sessionId: target.sessionId, timeoutMs: TFBOT_NOTICE_DELIVERY_ACK_TIMEOUT_MS }
+            );
+            console.info('[list2-notice-delivery-acknowledged]', { sessionId: target.sessionId, messageId: acknowledgement.messageId, acknowledgementSource: acknowledgement.source, acknowledgementStatus: acknowledgement.status ?? null, serverAckObserved: acknowledgement.serverAckObserved });
+            return { sessionId: target.sessionId, messageId: acknowledgement.messageId, source: acknowledgement.source, status: acknowledgement.status ?? null };
+        }));
+        const noticeFailures = noticeResults.map((result, index) => result.status === 'rejected' ? { sessionId: noticeTargets[index]?.sessionId || null, error: String(result.reason?.message || result.reason || 'notice_delivery_failed').slice(0, 700) } : null).filter(Boolean);
+        if (noticeFailures.length) {
+            console.error('[list2-notice-delivery-failed]', { attempted: noticeTargets.length, succeeded: noticeTargets.length - noticeFailures.length, failed: noticeFailures.length, failures: noticeFailures, action: 'abort_before_logout_and_preserve_all_session_credentials' });
+            throw new Error(`list2_notice_delivery_failed:${noticeFailures.map(item => `${item.sessionId}:${item.error}`).join('|').slice(0, 1800)}`);
+        }
+        const settleMs = Math.max(8000, Math.min(30000, Number(process.env.TFBOT_LIST2_NOTICE_SETTLE_MS || TFBOT_NOTICE_POST_ACK_SETTLE_MS)));
+        if (noticeTargets.length && settleMs) await new Promise(resolve => setTimeout(resolve, settleMs));
+        console.info('[list2-notice-settle-completed]', { noticeCount: noticeTargets.length, settleMs, allNoticesDeliveryAcknowledged: true });
+        list2Stage = 'logout_and_close_all_sockets';
+        let logoutCount = 0;
+        for (const [sessionId, originalSession] of entries) {
+            const session = activeSessions.get(sessionId) || originalSession;
+            const sock = session?.sock;
+            if (!sock) continue;
+            try {
+                if (typeof sock.logout === 'function') {
+                    await promiseWithTimeout(Promise.resolve(sock.logout()), 15000, 'list2_whatsapp_logout');
+                } else if (!isSocketDefinitelyClosed(sock)) {
+                    throw new Error('whatsapp_logout_method_unavailable');
+                }
+            } catch (logoutError) {
+                if (!isSocketDefinitelyClosed(sock)) throw new Error(`list2_whatsapp_logout_failed:${sessionId}:${String(logoutError?.message || logoutError).slice(0, 280)}`);
+            }
+            session.status = 'deconnecte';
+            session.active = false;
+            session.reauthRequired = true;
+            const closed = await cleanupSocket(sessionId, {
+                credentialPersistenceTimeoutMs: 30000,
+                authStoreTimeoutMs: 45000,
+                authStoreQuietMs: 800,
+                socketCloseTimeoutMs: 7000
+            });
+            if (!closed || session.sock) throw new Error(`list2_socket_close_not_confirmed:${sessionId}:closeConfirmed=${closed}:runtimeSocketPresent=${!!session.sock}`);
+            logoutCount++;
+            console.info('[list2-session-logout-confirmed]', { sessionId, socketClosed: true, noticeWasAcknowledged: noticeTargets.some(item => item.sessionId === sessionId) });
+        }
+        list2Stage = 'release_runtime_locks';
+        for (const sessionId of [...sessionRuntimeLockTimers.keys()]) await releaseSessionRuntimeLock(sessionId);
+        for (const sessionId of [...sessionAccountRuntimeLocks.keys()]) await releaseAccountRuntimeLock(sessionId).catch(error => console.warn('[list2-account-lock-release-failed]', { sessionId, error: error?.message || String(error) }));
+        await db.collection('session_runtime_locks').deleteMany({ owner: processInstanceId });
+        list2Stage = 'delete_session_data';
+        await db.collection('baileys_auth').deleteMany({});
+        await db.collection('session_owners').deleteMany({});
+        await db.collection('group_settings').deleteMany({});
+        await db.collection('processed_messages').deleteMany({});
+        await db.collection('group_del2').deleteMany({});
+        await db.collection('group_del3').deleteMany({});
+        sessionOwnersCache.clear();
+        groupMetadataCache.clear();
+        groupSettingsCache.clear();
+        msgRetryCounterCache.clear();
+        msgRetryCounterExpiryCache.clear();
+        activeSessions.clear();
+        activeDel2UsersCache.clear();
+        activeDel3RulesCache.clear();
+        processedLocalCache.clear();
+        console.info('[list2-purge-completed]', { runtimeCount: entries.length, noticeCount: noticeTargets.length, deliveryAcknowledgedNoticeCount: noticeTargets.length, logoutCount, sessionDataDeleted: true });
+    })().catch(error => {
+        console.error('[list2-purge-failed]', { stage: list2Stage, error: String(error?.message || error).slice(0, 2400), action: 'preserve_session_documents_unless_the_final_data_deletion_stage_was_reached' });
+    }).finally(() => {
         isPurging = false;
-    })();
+    });
 });
 
 function getUptimeString(ms) {
