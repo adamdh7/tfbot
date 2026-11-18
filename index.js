@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'tfbot-v218';
+const TFBOT_CODE_VERSION = 'tfbot-v219';
 const TFBOT_NOTICE_PROMPT_PART_A = 'You write concise, professional WhatsApp service notifications for Bot (tfbot). Return only the final message, in the recipient language specified by the user. ';
 const TFBOT_CLOUDFLARE_AI_ENDPOINT_PREFIX = 'https://api.cloudflare.com/client/v4/accounts/';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
@@ -2001,7 +2001,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-17-r209-session-api-ai-failover-confirmed-disconnect';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-18-r210-session-api-ai-fallback-pairing-alphanumeric';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_SESSION_API_TOKEN = String(process.env.TFBOT_SESSION_API_TOKEN || '').trim() || '9f3a7c2e4b1d8a6f0c5e9b7d1a2c4f8';
@@ -9004,10 +9004,19 @@ async function proxyTfbotSessionApiRequest(req, res, activeUrl, activeHost, acti
         const responseBody = await response.text();
         const contentType = response.headers.get('content-type');
         const retryAfter = response.headers.get('retry-after');
-        const apiVersion = response.headers.get('x-tfbot-session-api');
+        const forwardedHeaders = {
+            'x-tfbot-session-api': 'X-TFBOT-Session-API',
+            'x-tfbot-code-version': 'X-TFBOT-Upstream-Code-Version',
+            'x-tfbot-build': 'X-TFBOT-Upstream-Build',
+            'x-tfbot-notice-ai-accounts': 'X-TFBOT-Upstream-Notice-AI-Accounts',
+            'x-tfbot-notice-model': 'X-TFBOT-Upstream-Notice-Model'
+        };
         if (contentType) res.setHeader('Content-Type', contentType);
         if (retryAfter) res.setHeader('Retry-After', retryAfter);
-        if (apiVersion) res.setHeader('X-TFBOT-Session-API', apiVersion);
+        for (const [sourceName, targetName] of Object.entries(forwardedHeaders)) {
+            const headerValue = response.headers.get(sourceName);
+            if (headerValue) res.setHeader(targetName, headerValue);
+        }
         return res.status(response.status).send(responseBody);
     } catch (error) {
         const timedOut = error?.name === 'AbortError';
@@ -10467,9 +10476,12 @@ async function createCodeSession(sId, format = 'pair', expectExisting = false, a
 }
 
 function normalizePairingCode(value) {
-    const raw = value === null || value === undefined ? '' : String(value).trim().toUpperCase().replace(/[\s-]/g, '');
+    const raw = value === null || value === undefined ? '' : String(value).trim().replace(/[\s-]/g, '');
     const code = typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 99999999 && /^\d+$/.test(raw) ? raw.padStart(8, '0') : raw;
-    if (!/^[0-9A-HJKMNP-TV-Z]{8}$/.test(code)) throw new Error('pairing_code_format_invalid');
+    if (!/^[A-Za-z0-9]{8}$/.test(code)) {
+        const characterSet = /^[A-Za-z0-9]+$/.test(code) ? 'alphanumeric' : 'contains_unsupported_characters';
+        throw new Error(`pairing_code_format_invalid:length=${code.length}:characterSet=${characterSet}:expected=8_case_preserved_alphanumeric_characters`);
+    }
     return code;
 }
 
@@ -10632,7 +10644,12 @@ function requestPairingCodeWhenReady(sessionId, sessionData, number, timeoutMs =
                 if (latest?.sock !== socket) throw new Error('pairing_socket_replaced_during_code_request');
                 const code = normalizePairingCode(rawCode);
                 const formattedCode = code.match(/.{1,4}/g)?.join('-') || code;
-                console.info('[pairing-code-request-completed]', { sessionId, requestCount: 1, codeLength: code.length, codeCharacterSet: /^[0-9]{8}$/.test(code) ? 'numeric' : 'crockford_base32', responseSentAsSoonAsCodeArrived: true });
+                const hasPairingDigits = /[0-9]/.test(code);
+                const hasPairingLowercase = /[a-z]/.test(code);
+                const hasPairingUppercase = /[A-Z]/.test(code);
+                const hasPairingLetters = hasPairingLowercase || hasPairingUppercase;
+                const codeCharacterSet = hasPairingDigits && hasPairingLetters ? 'mixed_alphanumeric' : hasPairingDigits ? 'numeric' : hasPairingLowercase && hasPairingUppercase ? 'mixed_case_alphabetic' : hasPairingLowercase ? 'lowercase_alphabetic' : 'uppercase_alphabetic';
+                console.info('[pairing-code-request-completed]', { sessionId, requestCount: 1, codeLength: code.length, codeCharacterSet, responseSentAsSoonAsCodeArrived: true });
                 persistCodeCredentialsInBackground(socket);
                 finish(null, formattedCode);
             } catch (error) {
@@ -12079,12 +12096,13 @@ async function disconnectTfbotSessionWithNotice(user) {
 }
 
 app.get('/api/sessions', async (req, res) => {
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').set('Pragma', 'no-cache').set('X-TFBOT-Session-API', 'v1');
+    const noticeAiAccounts = getTfbotNoticeAIAccounts();
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').set('Pragma', 'no-cache').set('X-TFBOT-Session-API', 'v1').set('X-TFBOT-Code-Version', TFBOT_CODE_VERSION).set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Notice-AI-Accounts', String(noticeAiAccounts.length)).set('X-TFBOT-Notice-Model', String(process.env.CF_AI_MODEL || `${TFBOT_NOTICE_MODEL_PREFIX}${TFBOT_NOTICE_MODEL_NAME}`).trim());
     if (!TFBOT_SESSION_API_TOKENS.length) return res.status(503).json({ ok: false, error: 'session_api_token_not_configured' });
     if (!isAuthorizedTfbotSessionApiRequest(req)) return res.status(401).json({ ok: false, error: 'session_api_unauthorized' });
     try {
         const users = await getTfbotConnectedSessionApiUsers();
-        return res.status(200).json({ ok: true, count: users.length, sessions: users });
+        return res.status(200).json({ ok: true, count: users.length, sessions: users, codeVersion: TFBOT_CODE_VERSION, noticeAiAccountsAvailable: noticeAiAccounts.length });
     } catch (error) {
         console.error('[session-api-list-failed]', { error: error?.message || String(error) });
         return res.status(503).json({ ok: false, error: 'session_api_list_failed' });
@@ -12092,7 +12110,8 @@ app.get('/api/sessions', async (req, res) => {
 });
 
 app.delete('/api/sessions', async (req, res) => {
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').set('Pragma', 'no-cache').set('X-TFBOT-Session-API', 'v1');
+    const noticeAiAccounts = getTfbotNoticeAIAccounts();
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').set('Pragma', 'no-cache').set('X-TFBOT-Session-API', 'v1').set('X-TFBOT-Code-Version', TFBOT_CODE_VERSION).set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Notice-AI-Accounts', String(noticeAiAccounts.length)).set('X-TFBOT-Notice-Model', String(process.env.CF_AI_MODEL || `${TFBOT_NOTICE_MODEL_PREFIX}${TFBOT_NOTICE_MODEL_NAME}`).trim());
     if (!TFBOT_SESSION_API_TOKENS.length) return res.status(503).json({ ok: false, error: 'session_api_token_not_configured' });
     if (!isAuthorizedTfbotSessionApiRequest(req)) return res.status(401).json({ ok: false, error: 'session_api_unauthorized' });
     if (isPurging) return res.status(409).json({ ok: false, error: 'mass_purge_in_progress' });
@@ -12121,14 +12140,14 @@ app.delete('/api/sessions', async (req, res) => {
             try {
                 results.push({ ok: true, ...await disconnectTfbotSessionWithNotice(user) });
             } catch (error) {
-                results.push({ ok: false, SessionId: user.SessionId, Numero: user.Numero, Name: user.Name, error: String(error?.message || error).slice(0, 1800) });
+                results.push({ ok: false, SessionId: user.SessionId, Numero: user.Numero, Name: user.Name, codeVersion: TFBOT_CODE_VERSION, noticeAiAccountsAvailable: getTfbotNoticeAIAccounts().length, error: String(error?.message || error).slice(0, 2400) });
             } finally {
                 tfbotSessionApiDisconnectLocks.delete(lockId);
             }
         }
         const succeeded = results.filter(item => item.ok).length;
         const failed = results.length - succeeded;
-        return res.status(failed ? succeeded ? 207 : 503 : 200).json({ ok: failed === 0, requested: targets.length, succeeded, failed, results });
+        return res.status(failed ? succeeded ? 207 : 503 : 200).json({ ok: failed === 0, codeVersion: TFBOT_CODE_VERSION, noticeAiAccountsAvailable: noticeAiAccounts.length, requested: targets.length, succeeded, failed, results });
     } catch (error) {
         console.error('[session-api-delete-failed]', { error: error?.message || String(error) });
         return res.status(503).json({ ok: false, error: 'session_api_disconnect_failed' });
