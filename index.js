@@ -5,10 +5,10 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'tfbot-v226';
+const TFBOT_CODE_VERSION = 'tfbot-v227';
 const TFBOT_DIAGNOSTIC_RETENTION_MS = 4 * 60 * 1000;
-const TFBOT_NOTICE_DELIVERY_ACK_TIMEOUT_MS = Math.max(8000, Math.min(60000, Number(process.env.TFBOT_NOTICE_DELIVERY_ACK_TIMEOUT_MS || 30000)));
-const TFBOT_NOTICE_POST_ACK_SETTLE_MS = Math.max(3000, Math.min(30000, Number(process.env.TFBOT_NOTICE_POST_ACK_SETTLE_MS || 8000)));
+const TFBOT_NOTICE_SEND_TIMEOUT_MS = Math.max(8000, Math.min(60000, Number(process.env.TFBOT_NOTICE_SEND_TIMEOUT_MS || 30000)));
+const TFBOT_NOTICE_POST_SEND_SETTLE_MS = Math.max(1500, Math.min(15000, Number(process.env.TFBOT_NOTICE_POST_SEND_SETTLE_MS || 5000)));
 const TFBOT_MONGO_STORAGE_LIMIT_BYTES = Math.max(64 * 1024 * 1024, Number(process.env.TFBOT_MONGO_STORAGE_LIMIT_BYTES || 512 * 1024 * 1024));
 const TFBOT_MONGO_STORAGE_TRIGGER_RATIO = Math.max(0.7, Math.min(0.95, Number(process.env.TFBOT_MONGO_STORAGE_TRIGGER_RATIO || 0.85)));
 const TFBOT_MONGO_STORAGE_REARM_RATIO = Math.max(0.4, Math.min(TFBOT_MONGO_STORAGE_TRIGGER_RATIO - 0.05, Number(process.env.TFBOT_MONGO_STORAGE_REARM_RATIO || 0.7)));
@@ -2047,7 +2047,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-18-r217-exact-asistan-prompt-first-use-all-ai-actions-permanent-user-flag-search-context-stream-end-and-storage-retry';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-18-r218-restore-notice-send-acceptance-and-five-second-settle-preserve-asistan-first-prompt-flow';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_SESSION_API_TOKEN = String(process.env.TFBOT_SESSION_API_TOKEN || '').trim() || '9f3a7c2e4b1d8a6f0c5e9b7d1a2c4f8';
@@ -12041,112 +12041,13 @@ async function createTfbotReplacementPairingChallenge(number, replacedSessionId)
     }
 }
 
-async function sendTfbotNoticeAndAwaitDelivery(sock, sendOperation, options = {}) {
-    if (!sock?.ev || typeof sock.ev.on !== 'function') throw new Error('whatsapp_notice_ack_listener_unavailable');
-    if (typeof sendOperation !== 'function') throw new Error('whatsapp_notice_send_operation_missing');
-    const timeoutMs = Math.max(8000, Math.min(60000, Number(options.timeoutMs || TFBOT_NOTICE_DELIVERY_ACK_TIMEOUT_MS)));
-    let messageId = '';
-    let serverAckObserved = false;
-    let settled = false;
-    let resolveAcknowledgement;
-    let rejectAcknowledgement;
-    const earlyUpdates = [];
-    const earlyReceipts = [];
-    const acknowledgementPromise = new Promise((resolve, reject) => {
-        resolveAcknowledgement = resolve;
-        rejectAcknowledgement = reject;
-    });
-    const finish = (error, acknowledgement) => {
-        if (settled) return;
-        settled = true;
-        if (error) rejectAcknowledgement(error);
-        else resolveAcknowledgement(acknowledgement);
-    };
-    const processUpdate = item => {
-        if (String(item?.key?.id || '') !== messageId) return;
-        const update = item?.update || {};
-        const status = Number(update.status);
-        if (status === 2) serverAckObserved = true;
-        if (update.error || status === 0) {
-            const reason = String(update.error?.message || update.error || update.messageStubParameters || 'server_rejected_message').replace(/[\r\n\t]+/g, ' ').slice(0, 240);
-            finish(new Error(`whatsapp_notice_server_rejected:${reason}`));
-            return;
-        }
-        if (Number.isFinite(status) && status >= 3 && status <= 5) {
-            finish(null, { source: 'messages.update', status });
-        }
-    };
-    const hasReceiptTimestamp = value => {
-        if (value && typeof value.toNumber === 'function') return Number(value.toNumber()) > 0;
-        return Number(value || 0) > 0;
-    };
-    const processReceipt = item => {
-        if (String(item?.key?.id || '') !== messageId) return;
-        const receipt = item?.receipt || {};
-        const receiptType = String(receipt.type || item?.type || '').toLowerCase();
-        const delivered = hasReceiptTimestamp(receipt.receiptTimestamp)
-            || hasReceiptTimestamp(receipt.readTimestamp)
-            || hasReceiptTimestamp(receipt.playedTimestamp)
-            || /^(?:delivery|delivered|read|played)$/.test(receiptType);
-        if (delivered) finish(null, { source: 'message-receipt.update', status: null, receiptType: receiptType || null });
-    };
-    const onMessageUpdate = updates => {
-        for (const item of Array.isArray(updates) ? updates : []) {
-            if (!messageId) {
-                earlyUpdates.push(item);
-                if (earlyUpdates.length > 120) earlyUpdates.shift();
-            } else {
-                processUpdate(item);
-            }
-        }
-    };
-    const onReceiptUpdate = updates => {
-        for (const item of Array.isArray(updates) ? updates : []) {
-            if (!messageId) {
-                earlyReceipts.push(item);
-                if (earlyReceipts.length > 120) earlyReceipts.shift();
-            } else {
-                processReceipt(item);
-            }
-        }
-    };
-    sock.ev.on('messages.update', onMessageUpdate);
-    sock.ev.on('message-receipt.update', onReceiptUpdate);
-    let timeoutHandle = null;
-    try {
-        const sent = await promiseWithTimeout(Promise.resolve().then(sendOperation), Math.max(timeoutMs, 30000), 'whatsapp_notice_send');
-        messageId = String(sent?.key?.id || '').trim();
-        if (!messageId) throw new Error('whatsapp_notice_send_result_message_id_missing');
-        for (const item of earlyUpdates) processUpdate(item);
-        for (const item of earlyReceipts) processReceipt(item);
-        if (!settled) {
-            const timeoutPromise = new Promise((_, reject) => {
-                timeoutHandle = setTimeout(() => reject(new Error(`whatsapp_notice_delivery_ack_timeout:messageId=${messageId}:serverAckObserved=${serverAckObserved}:waitMs=${timeoutMs}`)), timeoutMs);
-                if (typeof timeoutHandle.unref === 'function') timeoutHandle.unref();
-            });
-            const acknowledgement = await Promise.race([acknowledgementPromise, timeoutPromise]);
-            return { sent, messageId, ...acknowledgement, serverAckObserved };
-        }
-        const acknowledgement = await acknowledgementPromise;
-        return { sent, messageId, ...acknowledgement, serverAckObserved };
-    } catch (error) {
-        const message = String(error?.message || error || 'whatsapp_notice_delivery_failed');
-        if (/timed out after|delivery_ack_timeout/i.test(message)) {
-            throw new Error(`whatsapp_notice_delivery_not_confirmed:messageId=${messageId || 'missing'}:serverAckObserved=${serverAckObserved}:detail=${message.slice(0, 420)}`);
-        }
-        throw error;
-    } finally {
-        if (timeoutHandle) clearTimeout(timeoutHandle);
-        try {
-            if (typeof sock.ev.off === 'function') {
-                sock.ev.off('messages.update', onMessageUpdate);
-                sock.ev.off('message-receipt.update', onReceiptUpdate);
-            } else if (typeof sock.ev.removeListener === 'function') {
-                sock.ev.removeListener('messages.update', onMessageUpdate);
-                sock.ev.removeListener('message-receipt.update', onReceiptUpdate);
-            }
-        } catch (error) {}
-    }
+async function sendTfbotNoticeAndConfirmAccepted(sock, sendOperation, options = {}) {
+    if (!sock || typeof sendOperation !== 'function') throw new Error('whatsapp_notice_send_operation_unavailable');
+    const timeoutMs = Math.max(8000, Math.min(60000, Number(options.timeoutMs || TFBOT_NOTICE_SEND_TIMEOUT_MS)));
+    const sent = await promiseWithTimeout(Promise.resolve().then(sendOperation), timeoutMs, 'whatsapp_notice_send');
+    const messageId = String(sent?.key?.id || '').trim();
+    if (!messageId) throw new Error('whatsapp_notice_send_result_message_id_missing');
+    return { sent, messageId, source: String(options.source || 'sendMessage'), accepted: true };
 }
 
 async function disconnectTfbotSessionWithNotice(user) {
@@ -12183,26 +12084,26 @@ async function disconnectTfbotSessionWithNotice(user) {
         await discardFreshPairingSession(pairing.sessionId, 'original_session_changed_before_notice').catch(() => {});
         throw new Error('session_socket_changed_before_notice');
     }
-    let noticeAcknowledgement;
+    let noticeSend;
     try {
-        noticeAcknowledgement = await sendTfbotNoticeAndAwaitDelivery(
+        noticeSend = await sendTfbotNoticeAndConfirmAccepted(
             originalSocket,
-            () => queuedSendMessage(originalSocket, `${number}@s.whatsapp.net`, { text: caption }, {}, 0),
-            { sessionId, timeoutMs: TFBOT_NOTICE_DELIVERY_ACK_TIMEOUT_MS }
+            () => sendImageCaptioned(originalSocket, `${number}@s.whatsapp.net`, adamLogoBuffer, '', '', '', { exactCaption: caption, language, ownerName: 'Bot (tfbot)' }),
+            { sessionId, timeoutMs: TFBOT_NOTICE_SEND_TIMEOUT_MS, source: 'sendImageCaptioned' }
         );
-        noticeMessageId = noticeAcknowledgement.messageId;
-        console.info('[session-api-notice-delivery-acknowledged]', { sessionId, messageId: noticeMessageId, acknowledgementSource: noticeAcknowledgement.source, acknowledgementStatus: noticeAcknowledgement.status ?? null, serverAckObserved: noticeAcknowledgement.serverAckObserved });
+        noticeMessageId = noticeSend.messageId;
+        console.info('[session-api-notice-send-accepted]', { sessionId, messageId: noticeMessageId, sendSource: noticeSend.source, acceptedBySendOperation: true });
     } catch (sendError) {
-        await discardFreshPairingSession(pairing.sessionId, 'disconnect_notice_delivery_not_confirmed').catch(cleanupError => console.error('[session-api-pairing-cleanup-after-notice-failure]', { sessionId: pairing.sessionId, error: cleanupError?.message || String(cleanupError) }));
-        throw new Error(`whatsapp_notice_delivery_failed:${String(sendError?.message || sendError).slice(0, 900)}`);
+        await discardFreshPairingSession(pairing.sessionId, 'disconnect_notice_send_failed').catch(cleanupError => console.error('[session-api-pairing-cleanup-after-notice-failure]', { sessionId: pairing.sessionId, error: cleanupError?.message || String(cleanupError) }));
+        throw new Error(`whatsapp_notice_send_failed:${String(sendError?.message || sendError).slice(0, 900)}`);
     }
-    const noticeSettleMs = Math.max(8000, Math.min(30000, Number(process.env.TFBOT_SESSION_API_NOTICE_SETTLE_MS || TFBOT_NOTICE_POST_ACK_SETTLE_MS)));
+    const noticeSettleMs = Math.max(1500, Math.min(15000, Number(process.env.TFBOT_SESSION_API_NOTICE_SETTLE_MS || TFBOT_NOTICE_POST_SEND_SETTLE_MS)));
     await new Promise(resolve => setTimeout(resolve, noticeSettleMs));
     if (activeSessions.get(sessionId)?.sock !== originalSocket || !isAuthenticatedSocketOperational(runtime, originalSocket)) {
         await discardFreshPairingSession(pairing.sessionId, 'original_session_changed_after_notice').catch(cleanupError => console.error('[session-api-pairing-cleanup-after-socket-change]', { sessionId: pairing.sessionId, error: cleanupError?.message || String(cleanupError) }));
         throw new Error(`session_socket_changed_after_notice_before_logout:messageId=${noticeMessageId}`);
     }
-    console.info('[session-api-disconnect-notice-settled]', { sessionId, messageId: noticeMessageId, settleMs: noticeSettleMs, deliveryAcknowledged: true, acknowledgementSource: noticeAcknowledgement.source, acknowledgementStatus: noticeAcknowledgement.status ?? null, logoutStarted: false });
+    console.info('[session-api-disconnect-notice-settled]', { sessionId, messageId: noticeMessageId, settleMs: noticeSettleMs, sendAccepted: true, sendSource: noticeSend.source, logoutStarted: false });
     try {
         if (typeof originalSocket.logout === 'function') {
             await promiseWithTimeout(Promise.resolve(originalSocket.logout()), 15000, 'session_api_whatsapp_logout');
@@ -12253,7 +12154,7 @@ async function disconnectTfbotSessionWithNotice(user) {
     }
     scheduleSessionListBroadcast('session_api_user_disconnected');
     console.info('[session-api-disconnect-confirmed]', { sessionId, numberHash: shortLogHash(number), noticeMessageId, pairingSessionId: pairing.sessionId, whatsappLogoutConfirmed: true, socketClosed: true, sessionDataDeleted: true });
-    return { SessionId: sessionId, Numero: number, Name: user.Name, PairingSessionId: pairing.sessionId, PairingCodeSent: true, NoticeMessageId: noticeMessageId, NoticeDeliveryAcknowledged: true, NoticeAcknowledgementSource: noticeAcknowledgement.source, NoticeAcknowledgementStatus: noticeAcknowledgement.status ?? null, NoticeSettleMs: noticeSettleMs, WhatsAppLogoutConfirmed: true, SessionDataDeleted: true, DisconnectionConfirmed: true };
+    return { SessionId: sessionId, Numero: number, Name: user.Name, PairingSessionId: pairing.sessionId, PairingCodeSent: true, NoticeMessageId: noticeMessageId, NoticeSendAccepted: true, NoticeSendSource: noticeSend.source, NoticeSettleMs: noticeSettleMs, WhatsAppLogoutConfirmed: true, SessionDataDeleted: true, DisconnectionConfirmed: true };
 }
 
 app.get('/api/sessions', async (req, res) => {
@@ -12358,29 +12259,31 @@ async function runTfbotList2Purge(trigger = 'list2') {
             );
             noticeTargets.push({ sessionId, session, sock, number, language, languageSource: noticeLanguage.source, translationsForLanguage, hostName });
         }
-        console.info('[list2-notice-delivery-phase-started]', { trigger, authenticatedSessions: noticeTargets.length, activeRuntimeCount: entries.length, acknowledgementTimeoutMs: TFBOT_NOTICE_DELIVERY_ACK_TIMEOUT_MS });
-        list2Stage = 'send_and_confirm_all_notices';
+        console.info('[list2-notice-send-phase-started]', { trigger, authenticatedSessions: noticeTargets.length, activeRuntimeCount: entries.length, sendTimeoutMs: TFBOT_NOTICE_SEND_TIMEOUT_MS });
+        list2Stage = 'send_all_notices';
         const noticeResults = await Promise.allSettled(noticeTargets.map(async target => {
             const noticeBody = trigger === 'mongo_storage_auto_purge'
                 ? TFBOT_MONGO_STORAGE_WARNING_TEXTS[target.language] || TFBOT_MONGO_STORAGE_WARNING_TEXTS.en
                 : target.translationsForLanguage.disconnect_sys_msg;
             const noticeText = buildTfbotSystemDisconnectionNotice(target.hostName, noticeBody);
-            const acknowledgement = await sendTfbotNoticeAndAwaitDelivery(
+            const accepted = await sendTfbotNoticeAndConfirmAccepted(
                 target.sock,
-                () => queuedSendMessage(target.sock, `${target.number}@s.whatsapp.net`, { text: noticeText }, {}, 0),
-                { sessionId: target.sessionId, timeoutMs: TFBOT_NOTICE_DELIVERY_ACK_TIMEOUT_MS }
+                () => sendImageCaptioned(target.sock, `${target.number}@s.whatsapp.net`, adamLogoBuffer, '', '', '', { exactCaption: noticeText, language: target.language, ownerName: 'Bot (tfbot)' }),
+                { sessionId: target.sessionId, timeoutMs: TFBOT_NOTICE_SEND_TIMEOUT_MS, source: 'sendImageCaptioned' }
             );
-            console.info('[list2-notice-delivery-acknowledged]', { trigger, sessionId: target.sessionId, messageId: acknowledgement.messageId, language: target.language, languageSource: target.languageSource, acknowledgementSource: acknowledgement.source, acknowledgementStatus: acknowledgement.status ?? null, serverAckObserved: acknowledgement.serverAckObserved });
-            return { sessionId: target.sessionId, messageId: acknowledgement.messageId, source: acknowledgement.source, status: acknowledgement.status ?? null };
+            console.info('[list2-notice-send-accepted]', { trigger, sessionId: target.sessionId, messageId: accepted.messageId, language: target.language, languageSource: target.languageSource, sendSource: accepted.source });
+            return { sessionId: target.sessionId, messageId: accepted.messageId, source: accepted.source };
         }));
-        const noticeFailures = noticeResults.map((result, index) => result.status === 'rejected' ? { sessionId: noticeTargets[index]?.sessionId || null, error: String(result.reason?.message || result.reason || 'notice_delivery_failed').slice(0, 700) } : null).filter(Boolean);
+        const noticeFailures = noticeResults.map((result, index) => result.status === 'rejected' ? { sessionId: noticeTargets[index]?.sessionId || null, error: String(result.reason?.message || result.reason || 'notice_send_failed').slice(0, 700) } : null).filter(Boolean);
         if (noticeFailures.length) {
-            console.error('[list2-notice-delivery-failed]', { trigger, attempted: noticeTargets.length, succeeded: noticeTargets.length - noticeFailures.length, failed: noticeFailures.length, failures: noticeFailures, action: 'abort_before_logout_and_preserve_all_session_credentials' });
-            throw new Error(`list2_notice_delivery_failed:${noticeFailures.map(item => `${item.sessionId}:${item.error}`).join('|').slice(0, 1800)}`);
+            console.error('[list2-notice-send-failed]', { trigger, attempted: noticeTargets.length, succeeded: noticeTargets.length - noticeFailures.length, failed: noticeFailures.length, failures: noticeFailures, action: 'abort_before_logout_and_preserve_all_session_credentials' });
+            throw new Error(`list2_notice_send_failed:${noticeFailures.map(item => `${item.sessionId}:${item.error}`).join('|').slice(0, 1800)}`);
         }
-        const settleMs = Math.max(8000, Math.min(30000, Number(process.env.TFBOT_LIST2_NOTICE_SETTLE_MS || TFBOT_NOTICE_POST_ACK_SETTLE_MS)));
+        const settleMs = Math.max(1500, Math.min(15000, Number(process.env.TFBOT_LIST2_NOTICE_SETTLE_MS || TFBOT_NOTICE_POST_SEND_SETTLE_MS)));
         if (noticeTargets.length && settleMs) await new Promise(resolve => setTimeout(resolve, settleMs));
-        console.info('[list2-notice-settle-completed]', { trigger, noticeCount: noticeTargets.length, settleMs, allNoticesDeliveryAcknowledged: true });
+        const changedTargets = noticeTargets.filter(target => activeSessions.get(target.sessionId)?.sock !== target.sock || !isAuthenticatedSocketOperational(target.session, target.sock));
+        if (changedTargets.length) throw new Error(`list2_notice_socket_changed_after_send:${changedTargets.map(target => target.sessionId).join(',')}`);
+        console.info('[list2-notice-settle-completed]', { trigger, noticeCount: noticeTargets.length, settleMs, allNoticesAcceptedBySendOperation: true });
         list2Stage = 'logout_and_close_all_sockets';
         let logoutCount = 0;
         for (const [sessionId, originalSession] of entries) {
@@ -12407,7 +12310,7 @@ async function runTfbotList2Purge(trigger = 'list2') {
             });
             if (!closed || session.sock) throw new Error(`list2_socket_close_not_confirmed:${sessionId}:closeConfirmed=${closed}:runtimeSocketPresent=${!!session.sock}`);
             logoutCount++;
-            console.info('[list2-session-logout-confirmed]', { trigger, sessionId, socketClosed: true, noticeWasAcknowledged: noticeTargets.some(item => item.sessionId === sessionId) });
+            console.info('[list2-session-logout-confirmed]', { trigger, sessionId, socketClosed: true, noticeSendAccepted: noticeTargets.some(item => item.sessionId === sessionId) });
         }
         list2Stage = 'release_runtime_locks';
         for (const sessionId of [...sessionRuntimeLockTimers.keys()]) await releaseSessionRuntimeLock(sessionId);
@@ -12429,7 +12332,7 @@ async function runTfbotList2Purge(trigger = 'list2') {
         activeDel2UsersCache.clear();
         activeDel3RulesCache.clear();
         processedLocalCache.clear();
-        console.info('[list2-purge-completed]', { trigger, runtimeCount: entries.length, noticeCount: noticeTargets.length, deliveryAcknowledgedNoticeCount: noticeTargets.length, logoutCount, sessionDataDeleted: true });
+        console.info('[list2-purge-completed]', { trigger, runtimeCount: entries.length, noticeCount: noticeTargets.length, sendAcceptedNoticeCount: noticeTargets.length, logoutCount, sessionDataDeleted: true });
         return { runtimeCount: entries.length, noticeCount: noticeTargets.length, logoutCount, sessionDataDeleted: true };
     } catch (error) {
         console.error('[list2-purge-failed]', { trigger, stage: list2Stage, error: String(error?.message || error).slice(0, 2400), action: 'preserve_session_documents_unless_the_final_data_deletion_stage_was_reached' });
