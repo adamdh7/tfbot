@@ -5,11 +5,11 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'tfbot-v222';
+const TFBOT_CODE_VERSION = 'Bot (tfbot)';
 const TFBOT_DIAGNOSTIC_RETENTION_MS = 4 * 60 * 1000;
 const TFBOT_NOTICE_DELIVERY_ACK_TIMEOUT_MS = Math.max(8000, Math.min(60000, Number(process.env.TFBOT_NOTICE_DELIVERY_ACK_TIMEOUT_MS || 30000)));
 const TFBOT_NOTICE_POST_ACK_SETTLE_MS = Math.max(3000, Math.min(30000, Number(process.env.TFBOT_NOTICE_POST_ACK_SETTLE_MS || 8000)));
-const TFBOT_NOTICE_PROMPT_PART_A = 'You write the body text only for a concise, professional WhatsApp service notification for Bot (tfbot). Return only the notification body in the recipient language. ';
+const TFBOT_NOTICE_PROMPT_PART_A = 'You are Asistan, you write the body text only for a concise, professional WhatsApp service notification for Bot (tfbot). Return only the notification body in the recipient language.';
 const TFBOT_CLOUDFLARE_AI_ENDPOINT_PREFIX = 'https://api.cloudflare.com/client/v4/accounts/';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
 const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
@@ -2044,11 +2044,11 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-18-r213-notice-format-four-minute-logs';
+const RUNTIME_FIX_BUILD = 'Bot (tfbot)';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_SESSION_API_TOKEN = String(process.env.TFBOT_SESSION_API_TOKEN || '').trim() || '9f3a7c2e4b1d8a6f0c5e9b7d1a2c4f8';
-const TFBOT_SESSION_API_TOKENS = Object.freeze([...new Set([String(process.env.TFBOT_SESSION_API_TOKEN || '').trim(), TFBOT_SESSION_API_TOKEN, '9f3a7c2e4b1d8a6f0c5e9b7d1a2c4f8', 'tfbot'].filter(Boolean))]);
+const TFBOT_SESSION_API_TOKENS = Object.freeze([...new Set([String(process.env.TFBOT_SESSION_API_TOKEN || '').trim(), TFBOT_SESSION_API_TOKEN, '9f3a7c2e4b1d8a6f0c5e9b7d1a2c4f8', 'Bot (tfbot)'].filter(Boolean))]);
 const TFBOT_SESSION_API_PROXY_TIMEOUT_MS = Math.max(30000, Math.min(600000, Number(process.env.TFBOT_SESSION_API_PROXY_TIMEOUT_MS || 600000)));
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
 const TFBOT_ROUTER_RESOLVE_PATH = '/__tfbot/router/resolve';
@@ -2066,7 +2066,7 @@ const tfbotCoordinatorCandidateFailures = new Map();
 const TFBOT_ROUTER_STATE_ID = 'active-domain';
 const TFBOT_PRIMARY_DOMAIN = Object.freeze({ host: 'tf.bot.adamdh7.org', url: 'https://tf.bot.adamdh7.org', priority: 0 });
 const TFBOT_COORDINATOR_HOST = 'tfbot7.onrender.com';
-const TFBOT_NOTICE_PROMPT_PART_B = "Write no more than two short sentences and keep the body under 260 characters. Explain that the user's Bot (tfbot) WhatsApp session is being disconnected and that they can reconnect at ";
+const TFBOT_NOTICE_PROMPT_PART_B = "Write no more than two short sentences and keep the body under 270 characters. Explain that the user's Bot (tfbot) WhatsApp session is being disconnected and that they can reconnect at ";
 const TFBOT_ROUTER_SERVING_DOMAINS = Object.freeze([
     TFBOT_PRIMARY_DOMAIN,
     { host: 'tfbot3.onrender.com', url: 'https://tfbot3.onrender.com', priority: 1 },
