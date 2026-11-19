@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'tfbot-v214';
+const TFBOT_CODE_VERSION = 'tfbot-v216';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
 const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
 const TFBOT_ADMIN_BEARER_TOKEN = 'Bot (tfbot)';
@@ -7188,6 +7188,63 @@ async function getTfServerAiUserPhoneNumber(sessionId, sock, senderCandidates = 
     throw new Error('tfserver_ai_user_phone_unavailable');
 }
 
+async function persistPublicVisitorCommandProfile(sessionId, userPhone, senderCandidates = [], displayName = '', language = 'ht') {
+    const id = String(sessionId || '').trim();
+    if (!id || !db?.collection) throw new Error('public_user_profile_database_unavailable');
+    const number = normalizePhoneNumber(userPhone);
+    if (number && (!/^\d{6,20}$/.test(number) || /^0+$/.test(number))) throw new Error('public_user_profile_number_invalid');
+    const candidates = [...new Set((Array.isArray(senderCandidates) ? senderCandidates : [senderCandidates]).map(value => String(value || '').trim()).filter(Boolean))];
+    const normalizedAliases = [...new Set([
+        ...(number ? [number, `${number}@s.whatsapp.net`, `${number}@c.us`] : []),
+        ...candidates
+    ].filter(Boolean))];
+    const fallbackLid = candidates.map(normalizeLidCacheKey).find(value => /@lid$/i.test(value)) || '';
+    const canonicalSender = number ? `${number}@s.whatsapp.net` : fallbackLid || candidates[0] || '';
+    if (!canonicalSender) throw new Error('public_user_profile_sender_unavailable');
+    const normalizedLanguage = String(language || '').toLowerCase();
+    const selectedLanguage = ['fr', 'en', 'es', 'ht'].includes(normalizedLanguage) ? normalizedLanguage : 'ht';
+    const safeName = sanitizeSessionDisplayName(displayName);
+    const now = Date.now();
+    const fields = {
+        sessionId: id,
+        sender: canonicalSender,
+        number: number || '',
+        lang: selectedLanguage,
+        updatedAt: now,
+        expireAt: new Date(now + SESSION_PROFILE_RETENTION_MS)
+    };
+    if (safeName) {
+        fields.Name = safeName;
+        fields.pushName = safeName;
+        fields.displayName = safeName;
+    }
+    const collection = db.collection('user_preferences');
+    const existingRows = normalizedAliases.length ? await collection.find(
+        { sessionId: id, sender: { $in: normalizedAliases } },
+        { projection: { _id: 1, sender: 1, lang: 1, Name: 1, updatedAt: 1 }, maxTimeMS: 4000 }
+    ).sort({ updatedAt: -1 }).limit(10).toArray() : [];
+    const existing = existingRows[0] || null;
+    if (existing?._id) {
+        await collection.updateOne(
+            { _id: existing._id },
+            { $set: fields, $setOnInsert: { createdAt: new Date(now) } },
+            { upsert: false, writeConcern: { w: 'majority', wtimeout: 5000 } }
+        );
+    } else {
+        await collection.updateOne(
+            { sessionId: id, sender: canonicalSender },
+            { $set: fields, $setOnInsert: { createdAt: new Date(now) } },
+            { upsert: true, writeConcern: { w: 'majority', wtimeout: 5000 } }
+        );
+    }
+    for (const alias of normalizedAliases) {
+        userLanguageCache.set(alias, selectedLanguage);
+        if (userLanguageCache.size > SESSION_USER_CACHE_MAX_ENTRIES) userLanguageCache.delete(userLanguageCache.keys().next().value);
+    }
+    console.info('[public-visitor-command-profile-persisted]', { sessionId: id, visitorHash: shortLogHash(number || canonicalSender), phoneAvailable: !!number, nameAvailable: !!safeName, language: selectedLanguage, aliasCount: normalizedAliases.length, storage: 'user_preferences', awaited: true });
+    return { number: number || '', sender: canonicalSender, name: safeName, language: selectedLanguage };
+}
+
 async function getTfServerAiConversationId(sessionId, userPhone) {
     const normalizedSession = String(sessionId || '').trim();
     const tfid = normalizePhoneNumber(userPhone);
@@ -7434,9 +7491,20 @@ async function clearTfServerAiSessionsForSession(sessionId) {
 }
 
 async function deleteMongoSession(sessionId) {
+    const reconnectTimer = reconnectTimers.get(sessionId);
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimers.delete(sessionId);
+    reconnectRetryDueAt.delete(sessionId);
+    const lockRetryTimer = sessionLockRetryTimers.get(sessionId);
+    if (lockRetryTimer) clearTimeout(lockRetryTimer);
+    sessionLockRetryTimers.delete(sessionId);
+    sessionLockRetryDueAt.delete(sessionId);
+    sessionReconnectDeferredStarts.delete(sessionId);
+    clearSessionOpenReadinessRetry(sessionId);
     clearFreshPairingCleanupRetry(sessionId);
     clearPairingChallengeTimer(sessionId);
     clearPairingRestartWatchdog(sessionId);
+    clearPairing515SocketOpenWatchdog(sessionId);
     clearExplicitLogoutDeletionTimer(sessionId);
     try {
         if (!db || !sessionId) throw new Error('session_delete_database_or_id_unavailable');
@@ -9154,7 +9222,7 @@ app.use(async (req, res, next) => {
         res.setHeader('X-TFBOT-Active-Domain', activeHost);
         res.setHeader('X-TFBOT-Router-Generation', String(active.generation || ''));
         console.info('[tfbot-domain-request-proxied]', { fromHost: requestHost, toHost: activeHost, path: requestPath, method: req.method, source: active.source || 'tfbot7-memory-router' });
-        const proxyTimeout = requestPath === '/api/sessions' && String(req.method || '').toUpperCase() === 'DELETE' ? 420000 : TFBOT_CLUSTER_PROXY_TIMEOUT_MS;
+        const proxyTimeout = requestPath === '/api/sessions' && String(req.method || '').toUpperCase() === 'DELETE' ? 180000 : TFBOT_CLUSTER_PROXY_TIMEOUT_MS;
         if (await proxyClusterRequest(req, res, { _id: String(active.instanceId || active._id || activeHost), url: activeUrl, local: false }, proxyTimeout)) return;
         return res.status(502).json({ ok: false, error: 'tfbot_active_server_proxy_failed', activeHost, path: requestPath, method: req.method });
     }
@@ -11780,9 +11848,8 @@ function isAuthorizedAdmin(req) {
 const adminSessionDeletionPreparations = new Map();
 const adminSessionDeletionLocks = new Set();
 let adminSessionBulkDeletionInProgress = false;
-const ADMIN_SESSION_DELETE_WAIT_MS = 1000;
-const ADMIN_SESSION_REPLACEMENT_WAIT_MS = 45000;
-const ADMIN_SESSION_DELETE_MAP_TTL_MS = 20 * 60 * 1000;
+const ADMIN_SESSION_LOGOUT_TIMEOUT_MS = 12000;
+const ADMIN_SESSION_DELETE_MAP_TTL_MS = 3 * 60 * 1000;
 
 async function adminMongoRead(label, operation, timeoutMs = 12000) {
     let lastError = null;
@@ -11812,6 +11879,93 @@ function buildAdminSessionDisplayMessage(language, userName, code) {
     return messages[lang];
 }
 
+async function sendAdminSessionLogoutNotice(sock, sessionId, destination, text, timeoutMs = 8500) {
+    if (!sock?.ev || typeof sock.ev.on !== 'function') throw new Error('admin_logout_notice_ack_listener_unavailable');
+    let messageId = '';
+    let matchedAck = null;
+    let delivered = false;
+    const earlyUpdates = [];
+    let resolveAck;
+    const ackPromise = new Promise(resolve => { resolveAck = resolve; });
+    const isServerAck = update => {
+        if (update?.error) return true;
+        const status = Number(update?.status);
+        return Number.isFinite(status) && status >= 2 && status <= 5;
+    };
+    const listener = updates => {
+        for (const item of Array.isArray(updates) ? updates : []) {
+            const updateId = String(item?.key?.id || '');
+            if (!updateId) continue;
+            const update = item?.update || {};
+            if (messageId && updateId === messageId) {
+                if (isServerAck(update)) {
+                    matchedAck = update;
+                    if (Number(update?.status) >= 3) delivered = true;
+                    resolveAck(update);
+                }
+            } else if (!messageId) {
+                earlyUpdates.push(item);
+                if (earlyUpdates.length > 120) earlyUpdates.shift();
+            }
+        }
+    };
+    const receiptListener = updates => {
+        for (const item of Array.isArray(updates) ? updates : []) {
+            if (!messageId || String(item?.key?.id || '') !== messageId) continue;
+            const receipt = item?.receipt || item?.update || {};
+            if (receipt?.receiptTimestamp || receipt?.readTimestamp || receipt?.playedTimestamp || /(?:deliver|read|played)/i.test(String(receipt?.type || ''))) delivered = true;
+        }
+    };
+    sock.ev.on('messages.update', listener);
+    sock.ev.on('message-receipt.update', receiptListener);
+    try {
+        const sent = await queuedSendMessage(sock, destination, { text: String(text || '') }, {}, 0);
+        messageId = String(sent?.key?.id || '').trim();
+        if (!messageId) throw new Error('admin_logout_notice_message_id_missing');
+        const early = earlyUpdates.find(item => String(item?.key?.id || '') === messageId && isServerAck(item?.update || {}));
+        if (early) {
+            matchedAck = early.update || {};
+            if (Number(matchedAck.status) >= 3) delivered = true;
+            resolveAck(matchedAck);
+        }
+        const runtime = activeSessions.get(sessionId);
+        const credentials = runtime?.authState?.creds || null;
+        const accountPhone = getAuthenticatedPhoneNumber(sock.user || null, credentials);
+        const accountJid = String(sock.user?.id || sock.user?.phoneNumber || credentials?.me?.id || '');
+        const accountLid = getAuthenticatedLid(sock.user || null, credentials) || runtime?.ownLidJid || '';
+        const retryMessage = sent?.message ? sent : { ...sent, message: { conversation: String(text || '') } };
+        const durableCopySaved = await persistOutgoingRetryMessage(
+            sessionId,
+            sent?.key?.remoteJid || destination,
+            retryMessage,
+            [destination, sent?.key?.remoteJidAlt, accountJid, accountLid].filter(Boolean),
+            accountPhone,
+            accountJid,
+            accountLid,
+            'admin_logout_notice_before_logout'
+        );
+        if (!durableCopySaved) throw new Error('admin_logout_notice_retry_copy_not_persisted');
+        if (!matchedAck) matchedAck = await promiseWithTimeout(ackPromise, timeoutMs, 'admin_logout_notice_server_ack_timeout');
+        if (matchedAck?.error) throw new Error(`admin_logout_notice_server_rejected:${String(matchedAck.error?.message || matchedAck.error).slice(0, 180)}`);
+        const ackStatus = Number(matchedAck?.status);
+        if (!Number.isFinite(ackStatus) || ackStatus < 2 || ackStatus > 5) throw new Error(`admin_logout_notice_not_acknowledged:${String(matchedAck?.status ?? 'missing')}`);
+        const deliveryDeadline = Date.now() + 3500;
+        while (!delivered && Date.now() < deliveryDeadline) await sleep(100);
+        if (!delivered) await sleep(1500);
+        return { messageId, ackStatus, delivered, durableCopySaved: true };
+    } finally {
+        try {
+            if (typeof sock.ev.off === 'function') {
+                sock.ev.off('messages.update', listener);
+                sock.ev.off('message-receipt.update', receiptListener);
+            } else if (typeof sock.ev.removeListener === 'function') {
+                sock.ev.removeListener('messages.update', listener);
+                sock.ev.removeListener('message-receipt.update', receiptListener);
+            }
+        } catch (error) {}
+    }
+}
+
 async function getAdminSessionLanguage(sessionId, phone, owner, fallbackLanguage = 'en') {
     const normalizedPhone = normalizePhoneNumber(phone);
     const aliases = [...new Set([normalizedPhone, `${normalizedPhone}@s.whatsapp.net`, `${normalizedPhone}@c.us`].filter(Boolean))];
@@ -11830,62 +11984,142 @@ async function getAdminSessionLanguage(sessionId, phone, owner, fallbackLanguage
     return saved || ownerLanguage || (['fr', 'en', 'es', 'ht'].includes(fallback) ? fallback : 'en');
 }
 
+async function ensureAdminSessionOwnerRecord(sessionId, runtime, credentials, existingOwner = null) {
+    const id = String(sessionId || '').trim();
+    if (!id || !db || !runtime?.sock || !isAuthenticatedSocketOperational(runtime, runtime.sock)) throw new Error('admin_session_owner_bootstrap_requires_authenticated_socket');
+    const liveCredentials = runtime.authState?.creds || credentials || null;
+    if (!hasRegisteredWhatsAppIdentity(liveCredentials, runtime.sock.user || null)) throw new Error('admin_session_owner_bootstrap_requires_registered_identity');
+    const phone = getAuthenticatedPhoneNumber(runtime.sock.user || null, liveCredentials) || normalizePhoneNumber(existingOwner?.Number || existingOwner?.number || existingOwner?.Numero || '');
+    const lid = getAuthenticatedLid(runtime.sock.user || null, liveCredentials) || String(existingOwner?.OwnerLid || '');
+    const accountJid = phone ? `${phone}@s.whatsapp.net` : lid || String(runtime.sock.user?.id || '');
+    const displayName = sanitizeSessionDisplayName(existingOwner?.Name || existingOwner?.OwnerName || existingOwner?.ownerName || runtime.sock.user?.name || runtime.sock.user?.notify || liveCredentials?.me?.name || 'Bot (tfbot)') || 'Bot (tfbot)';
+    const now = new Date();
+    const connectedAt = runtime.accountFirstConnectedAt || runtime.connectedSince || runtime.connectedAt || runtime.socketAuthenticatedAt || now;
+    const connectedDate = connectedAt instanceof Date ? connectedAt : new Date(connectedAt);
+    const validConnectedDate = Number.isFinite(connectedDate.getTime()) && connectedDate.getTime() > 0 ? connectedDate : now;
+    const baseDocument = {
+        sessionId: id,
+        AccountJid: accountJid || null,
+        format: normalizeConnectionFormat(existingOwner?.format || existingOwner?.Format || runtime.format || 'pair'),
+        Format: normalizeConnectionFormat(existingOwner?.format || existingOwner?.Format || runtime.format || 'pair'),
+        mode: existingOwner?.mode || 'prive',
+        lang: ['fr', 'en', 'es', 'ht'].includes(String(existingOwner?.lang || existingOwner?.language || '').toLowerCase()) ? String(existingOwner.lang || existingOwner.language).toLowerCase() : 'en',
+        connectionStatus: 'connected',
+        connectionEverOpened: true,
+        everConnected: true,
+        everAuthenticated: true,
+        socketAuthenticated: true,
+        socketReady: true,
+        socketAuthenticatedAt: existingOwner?.socketAuthenticatedAt || validConnectedDate,
+        accountFirstConnectedAt: existingOwner?.accountFirstConnectedAt || validConnectedDate,
+        connectedSince: existingOwner?.connectedSince || validConnectedDate,
+        lastWhatsAppEvent: 'open',
+        lastWhatsAppEventAt: now,
+        statusUpdatedAt: now,
+        createdAt: existingOwner?.createdAt || now,
+        updatedAt: now,
+        ...getClusterSessionOwnerFields()
+    };
+    if (phone) baseDocument.Number = phone;
+    if (lid) baseDocument.OwnerLid = lid;
+    if (displayName) baseDocument.Name = displayName;
+    const setFields = {
+        connectionStatus: 'connected',
+        connectionEverOpened: true,
+        everConnected: true,
+        everAuthenticated: true,
+        socketAuthenticated: true,
+        socketReady: true,
+        lastWhatsAppEvent: 'open',
+        lastWhatsAppEventAt: now,
+        statusUpdatedAt: now,
+        updatedAt: now,
+        ...getClusterSessionOwnerFields()
+    };
+    if (!existingOwner?.AccountJid && accountJid) setFields.AccountJid = accountJid;
+    if (!existingOwner?.Number && phone) setFields.Number = phone;
+    if (!existingOwner?.OwnerLid && lid) setFields.OwnerLid = lid;
+    if (!(existingOwner?.Name || existingOwner?.OwnerName || existingOwner?.ownerName) && displayName) setFields.Name = displayName;
+    if (!existingOwner?.format && !existingOwner?.Format) {
+        setFields.format = baseDocument.format;
+        setFields.Format = baseDocument.Format;
+    }
+    if (!existingOwner?.lang && !existingOwner?.language) setFields.lang = baseDocument.lang;
+    await adminMongoRead('admin_session_owner_bootstrap_write', () => db.collection('session_owners').updateOne(
+        { sessionId: id },
+        { $set: setFields, $setOnInsert: baseDocument },
+        { upsert: true }
+    ));
+    if (accountJid) {
+        await adminMongoRead('admin_session_profile_bootstrap_write', () => db.collection('user_preferences').updateOne(
+            { sessionId: id, sender: accountJid },
+            {
+                $set: { Name: displayName, pushName: displayName, displayName, number: phone || '', updatedAt: now, expireAt: new Date(now.getTime() + SESSION_PROFILE_RETENTION_MS) },
+                $setOnInsert: { createdAt: now, lang: baseDocument.lang }
+            },
+            { upsert: true }
+        ));
+    }
+    const saved = await adminMongoRead('admin_session_owner_bootstrap_verify', () => db.collection('session_owners').findOne({ sessionId: id, socketAuthenticated: true }, { maxTimeMS: 8000 }));
+    if (!saved) throw new Error('admin_session_owner_bootstrap_not_persisted');
+    sessionOwnersCache.set(id, saved);
+    console.info('[admin-session-owner-record-rebuilt]', { sessionId: id, ownerRecordCreated: !existingOwner, phoneAvailable: !!phone, lidAvailable: !!lid, profileCreatedOrUpdated: !!accountJid, source: 'authenticated_live_socket_and_auth_credentials' });
+    return saved;
+}
+
 async function getAdminSessionOwner(sessionId) {
     return adminMongoRead('admin_session_owner_read', () => db.collection('session_owners').findOne({ sessionId }, { maxTimeMS: 8000 }));
 }
 
 async function prepareAdminSessionDeletion(sessionId, operationId = '') {
     const id = String(sessionId || '').trim();
-    await recordAdminSessionOperation(operationId, 'prepare_started', { sessionId: id, detail: 'Préparation de la liaison du compte.' });
+    await recordAdminSessionOperation(operationId, 'prepare_started', { sessionId: id, detail: 'Vérification du compte, génération du code avec le parcours officiel puis envoi de l’avis avant logout.' });
     if (!id || id.length > 180) throw new Error('invalid_session_id');
     const existing = adminSessionDeletionPreparations.get(id);
-    if (existing && existing.expiresAt > Date.now()) return { ok: true, prepared: true, idempotent: true, mode: existing.mode, messageSent: existing.messageSent === true };
+    if (existing && existing.expiresAt > Date.now()) return { ok: true, prepared: true, idempotent: true, mode: existing.mode, messageSent: existing.messageSent === true, replacementSessionId: existing.pairingSessionId || null };
     if (adminSessionDeletionLocks.has(id)) throw new Error('session_deletion_already_in_progress');
     adminSessionDeletionLocks.add(id);
     let freshPairingSessionId = '';
     let savedPreparation = false;
     try {
-        const [owner, runtime] = await Promise.all([
-            getAdminSessionOwner(id),
-            Promise.resolve(activeSessions.get(id) || null)
-        ]);
-        console.info('[admin-session-delete-prepare-started]', { sessionId: id, operationId: String(operationId || '').slice(0, 120) || null, workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, workerState: tfbotWorkerState, localRuntimePresent: !!runtime, localSocketPresent: !!runtime?.sock, localRuntimeLockPresent: sessionRuntimeLockTokens.has(id), recordedOwnerPresent: !!owner, recordedOwnerInstanceId: owner?.ownerInstanceId || null, recordedOwnerLeaseActive: new Date(owner?.ownerLeaseUntil || 0).getTime() > Date.now() });
         if (TFBOT_CLUSTER_COORDINATOR_ONLY || (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping))) throw new Error('admin_session_prepare_requires_active_worker');
-        if (!owner && !runtime) return { ok: true, prepared: true, alreadyRemoved: true, mode: 'already_removed', messageSent: false };
+        let owner = await getAdminSessionOwner(id);
+        const runtime = activeSessions.get(id) || null;
+        console.info('[admin-session-delete-prepare-started]', { sessionId: id, operationId: String(operationId || '').slice(0, 120) || null, workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, workerState: tfbotWorkerState, localRuntimePresent: !!runtime, localSocketPresent: !!runtime?.sock, localRuntimeLockPresent: sessionRuntimeLockTokens.has(id), recordedOwnerPresent: !!owner, recordedOwnerInstanceId: owner?.ownerInstanceId || null, recordedOwnerLeaseActive: new Date(owner?.ownerLeaseUntil || 0).getTime() > Date.now() });
         if (!runtime?.sock || !sessionRuntimeLockTokens.has(id) || !isAuthenticatedSocketOperational(runtime, runtime.sock)) throw new Error('session_socket_not_operational_preserve_existing_data');
-        await recordAdminSessionOperation(operationId, 'owner_loaded', { sessionId: id, stepStatus: 'success', detail: 'Session propriétaire trouvée sur un worker actif.' });
+        const originalSocket = runtime.sock;
         const authDoc = await adminMongoRead('admin_session_credentials_read', () => db.collection('baileys_auth').findOne(
             { _id: `auth-${id}-creds` },
             { projection: { creds: 1 }, maxTimeMS: 8000 }
         ));
-        const credentials = runtime?.authState?.creds || (authDoc?.creds ? fixBuffers(authDoc.creds) : null);
-        await recordAdminSessionOperation(operationId, 'credentials_checked', { sessionId: id, stepStatus: hasEstablishedWhatsAppAccount(owner, runtime, credentials) ? 'success' : 'error', detail: 'Vérification des identifiants WhatsApp authentifiés.' });
-        if (!hasEstablishedWhatsAppAccount(owner, runtime, credentials)) {
-            if (owner?.connectionEverOpened === false || runtime?.connectionEverOpened === false) {
-                const cleanupResult = await discardFreshPairingSession(id, 'admin_session_deletion_unregistered_session');
-                if (cleanupResult?.removed === true) return { ok: true, prepared: true, alreadyRemoved: true, mode: 'unregistered_removed', messageSent: false };
-                throw new Error(`unregistered_session_cleanup_not_confirmed:${cleanupResult?.reason || 'unknown'}`);
-            }
-            throw new Error('session_account_not_verified_preserve_existing_data');
-        }
-        const originalSocket = runtime?.sock || null;
-        if (!originalSocket || !isAuthenticatedSocketOperational(runtime, originalSocket)) throw new Error('session_socket_not_operational_preserve_existing_data');
-        await recordAdminSessionOperation(operationId, 'original_socket_verified', { sessionId: id, stepStatus: 'success', detail: 'Socket WhatsApp confirmé comme opérationnel.' });
+        const credentials = runtime.authState?.creds || (authDoc?.creds ? fixBuffers(authDoc.creds) : null);
+        const registered = hasRegisteredWhatsAppIdentity(credentials, originalSocket.user || null);
+        await recordAdminSessionOperation(operationId, 'credentials_checked', { sessionId: id, stepStatus: registered ? 'success' : 'error', detail: 'Vérification des identifiants authentifiés du compte WhatsApp existant.' });
+        if (!registered || !hasEstablishedWhatsAppAccount(owner, runtime, credentials)) throw new Error('session_account_not_verified_preserve_existing_data');
+        owner = await ensureAdminSessionOwnerRecord(id, runtime, credentials, owner);
+        const latestRuntime = activeSessions.get(id);
+        if (!latestRuntime || latestRuntime.sock !== originalSocket || !sessionRuntimeLockTokens.has(id) || !isAuthenticatedSocketOperational(latestRuntime, originalSocket)) throw new Error('session_changed_during_admin_delete_prepare');
+        await recordAdminSessionOperation(operationId, 'owner_record_ready', { sessionId: id, stepStatus: 'success', detail: 'Fiche propriétaire vérifiée ou reconstruite depuis le compte WhatsApp authentifié.' });
+        await recordAdminSessionOperation(operationId, 'original_socket_verified', { sessionId: id, stepStatus: 'success', detail: 'Le compte WhatsApp existant est authentifié et son socket est opérationnel.' });
         const phoneCandidate = getAuthenticatedPhoneNumber(originalSocket.user || null, credentials) || getStoredSessionOwnerPhone(owner || {}) || owner?.PairingNumber || owner?.pairingNumber || '';
         const phone = normalizePairingPhoneNumber(phoneCandidate);
         if (!/^\d{8,15}$/.test(phone)) throw new Error('session_phone_unavailable_for_pairing');
-        const displayName = sanitizeSessionDisplayName(
-            owner?.OwnerName || owner?.ownerName || owner?.Name || owner?.name || originalSocket.user?.name || originalSocket.user?.notify || credentials?.me?.name || 'Not provided'
-        ) || 'Not provided';
+        const displayName = sanitizeSessionDisplayName(owner?.OwnerName || owner?.ownerName || owner?.Name || owner?.name || originalSocket.user?.name || originalSocket.user?.notify || credentials?.me?.name || 'Not provided') || 'Not provided';
         const pairingApiBase = TFBOT_INTERNAL_API_BASE_URL || TFBOT_CLUSTER_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || TF_BOT_BASE_URL;
         if (!pairingApiBase) throw new Error('admin_pairing_api_not_configured');
-        const internalApiToken = TFBOT_ADMIN_BEARER_TOKEN;
-        const pairingApiUrl = new URL('/get-code', `${pairingApiBase}/`).toString();
-        await recordAdminSessionOperation(operationId, 'pairing_code_request_started', { sessionId: id, detail: 'Demande du code de liaison. Cette étape peut prendre plus de temps que les autres.' });
-        console.info('[admin-session-existing-get-code-route-started]', { sessionId: id, workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null, pairingRoute: '/get-code', phoneLength: phone.length, operationId: String(operationId || '').slice(0, 120) || null });
-        const pairingResponse = await fetch(pairingApiUrl, {
+        const pairingApiUrl = new URL('/get-code', `${pairingApiBase}/`);
+        const pairingOrigin = pairingApiUrl.origin;
+        await recordAdminSessionOperation(operationId, 'pairing_code_request_started', { sessionId: id, detail: 'Demande du code via la route officielle /get-code, comme une demande depuis le site.' });
+        console.info('[admin-session-existing-get-code-route-started]', { sessionId: id, workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null, pairingRoute: '/get-code', phoneLength: phone.length, originHost: pairingApiUrl.host, operationId: String(operationId || '').slice(0, 120) || null });
+        const pairingResponse = await fetch(pairingApiUrl.toString(), {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'Authorization': `Bearer ${internalApiToken}` },
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'Authorization': `Bearer ${TFBOT_ADMIN_BEARER_TOKEN}`,
+                'Origin': pairingOrigin,
+                'Referer': `${pairingOrigin}/`
+            },
             body: JSON.stringify({ number: phone, method: 'code', timeoutMs: 90000 }),
             redirect: 'error',
             cache: 'no-store'
@@ -11901,31 +12135,30 @@ async function prepareAdminSessionDeletion(sessionId, operationId = '') {
         if (!pairingResponse.ok) throw new Error(String(pairingData?.error || `admin_pairing_api_http_${pairingResponse.status}`));
         if (pairingData?.ok !== true || !pairingData?.code || !pairingData?.sessionId) throw new Error(String(pairingData?.error || 'admin_pairing_route_missing_code_or_session'));
         freshPairingSessionId = String(pairingData.sessionId).trim();
-        if (!freshPairingSessionId || freshPairingSessionId.length > 180) throw new Error('admin_pairing_route_session_id_invalid');
+        if (!freshPairingSessionId || freshPairingSessionId.length > 180 || freshPairingSessionId === id) throw new Error('admin_pairing_route_session_id_invalid');
         const pairingCode = normalizePairingCode(pairingData.code);
-        await recordAdminSessionOperation(operationId, 'pairing_code_ready', { sessionId: id, stepStatus: 'success', detail: 'Code généré et persisté. Le code lui-même n’est jamais enregistré dans les journaux.' });
+        if (!/^[A-Z0-9]{8}$/.test(pairingCode)) throw new Error('admin_pairing_route_code_invalid');
+        await recordAdminSessionOperation(operationId, 'pairing_code_ready', { sessionId: id, stepStatus: 'success', detail: 'Code créé et persisté par la route officielle. Le code lui-même n’est pas inscrit dans les journaux.' });
         pendingPairingReplacementSessions.add(freshPairingSessionId);
-        await adminMongoRead('admin_pairing_session_link', () => db.collection('session_owners').updateOne(
+        const linkedPairing = await adminMongoRead('admin_pairing_session_link', () => db.collection('session_owners').updateOne(
             { sessionId: freshPairingSessionId },
-            { $set: { replacementOfSessionId: id, pairingReplacementPending: true, adminDeletionOperationId: String(operationId || '').slice(0, 120), adminDeletionSourceSessionId: id, updatedAt: new Date() } }
+            { $set: { replacementOfSessionId: id, pairingReplacementPending: true, adminDeletionOperationId: String(operationId || '').slice(0, 120), adminDeletionSourceSessionId: id, updatedAt: new Date() } },
+            { upsert: false }
         ));
-        await recordAdminSessionOperation(operationId, 'replacement_session_linked', { sessionId: id, stepStatus: 'success', detail: 'Nouvelle session créée et rattachée à la session à remplacer.' });
-        console.info('[admin-session-existing-get-code-route-completed]', { sessionId: id, replacementSessionId: freshPairingSessionId, codeLength: pairingCode.length, codeCharacterSet: /^[A-Z0-9]{8}$/.test(pairingCode) ? 'alphanumeric' : 'unexpected', route: '/get-code', freshSessionCreatedByWebsiteFlow: true, responseStatus: pairingResponse.status });
+        if (!linkedPairing?.matchedCount && !linkedPairing?.modifiedCount) throw new Error('admin_pairing_session_link_not_confirmed');
+        await recordAdminSessionOperation(operationId, 'replacement_session_linked', { sessionId: id, stepStatus: 'success', detail: 'Le défi de liaison est associé au compte qui va être déconnecté.' });
+        console.info('[admin-session-existing-get-code-route-completed]', { sessionId: id, replacementSessionId: freshPairingSessionId, codeLength: pairingCode.length, route: '/get-code', freshSessionCreatedByWebsiteFlow: true, responseStatus: pairingResponse.status });
         const language = await getAdminSessionLanguage(id, phone, owner || {});
-        const latestOldRuntime = activeSessions.get(id);
-        if (!latestOldRuntime || latestOldRuntime.sock !== originalSocket || !isAuthenticatedSocketOperational(latestOldRuntime, originalSocket)) {
-            throw new Error('session_changed_during_pairing_preparation_preserve_existing_account');
-        }
-        const text = buildAdminSessionDisplayMessage(language, displayName, pairingCode);
-        const sent = await sendImageCaptioned(originalSocket, `${phone}@s.whatsapp.net`, adamLogoBuffer, 'Admin session', text, displayName, {
-            exactCaption: text,
-            preserveFormatting: true,
-            language,
-            ownerName: displayName
-        });
-        if (!sent?.key?.id) throw new Error('admin_session_disconnect_message_not_confirmed');
-        await recordAdminSessionOperation(operationId, 'owner_notification_sent', { sessionId: id, stepStatus: 'success', detail: 'Code de liaison envoyé au compte d’origine.' });
-        console.info('[admin-session-disconnect-message-sent]', { sessionId: id, replacementSessionId: freshPairingSessionId, messageIdHash: shortLogHash(sent.key.id), language });
+        const currentRuntime = activeSessions.get(id);
+        if (!currentRuntime || currentRuntime.sock !== originalSocket || !isAuthenticatedSocketOperational(currentRuntime, originalSocket)) throw new Error('session_changed_during_pairing_preparation_preserve_existing_account');
+        const noticeText = buildAdminSessionDisplayMessage(language, displayName, pairingCode);
+        const ownerSelfLid = getAuthenticatedLid(originalSocket.user || null, credentials) || normalizeLidCacheKey(owner?.OwnerLid || owner?.ownerLid || '');
+        const noticeDestination = ownerSelfLid || `${phone}@s.whatsapp.net`;
+        await recordAdminSessionOperation(operationId, 'owner_notification_send_started', { sessionId: id, detail: 'Envoi du code et de l’avis de déconnexion avec le même transport texte que les réponses normales du bot, en privilégiant le LID personnel authentifié.' });
+        const notice = await sendAdminSessionLogoutNotice(originalSocket, id, noticeDestination, noticeText, 8500);
+        await recordAdminSessionOperation(operationId, 'owner_notification_sent', { sessionId: id, stepStatus: 'success', detail: 'Message texte envoyé, copie de récupération persistée et accusé serveur WhatsApp reçu.' });
+        await recordAdminSessionOperation(operationId, 'owner_notification_delivery_waited', { sessionId: id, stepStatus: 'success', detail: notice.delivered ? 'Accusé de distribution reçu avant le logout.' : 'Accusé serveur reçu; délai de synchronisation appliqué avant le logout.' });
+        console.info('[admin-session-disconnect-message-sent]', { sessionId: id, replacementSessionId: freshPairingSessionId, messageIdHash: shortLogHash(notice.messageId), language, destinationType: ownerSelfLid ? 'authenticated_self_lid' : 'phone_fallback', ackStatus: notice.ackStatus, delivered: notice.delivered, durableRetryCopy: notice.durableCopySaved, transport: 'queuedSendMessage_plain_text' });
         const preparation = {
             sessionId: id,
             pairingSessionId: freshPairingSessionId,
@@ -11933,10 +12166,11 @@ async function prepareAdminSessionDeletion(sessionId, operationId = '') {
             language,
             displayName,
             originalSocket,
-            originalRuntime: latestOldRuntime,
-            messageId: sent.key.id,
+            originalRuntime: currentRuntime,
+            messageId: notice.messageId,
             messageSent: true,
-            mode: 'paired_account',
+            messageAcknowledged: true,
+            mode: 'admin_pairing_logout',
             createdAt: Date.now(),
             operationId: String(operationId || '').slice(0, 120),
             expiresAt: Date.now() + ADMIN_SESSION_DELETE_MAP_TTL_MS
@@ -11950,14 +12184,14 @@ async function prepareAdminSessionDeletion(sessionId, operationId = '') {
         if (typeof preparation.expiryTimer.unref === 'function') preparation.expiryTimer.unref();
         adminSessionDeletionPreparations.set(id, preparation);
         savedPreparation = true;
-        await recordAdminSessionOperation(operationId, 'prepare_complete', { sessionId: id, stepStatus: 'success', detail: 'Préparation terminée. En attente de validation du nouveau compte.' });
-        console.info('[admin-session-deletion-prepared]', { sessionId: id, replacementSessionId: freshPairingSessionId, phoneLength: phone.length, language, messageIdHash: shortLogHash(sent.key.id), operationId: preparation.operationId || null });
-        return { ok: true, prepared: true, mode: preparation.mode, messageSent: true, replacementSessionId: freshPairingSessionId };
+        await recordAdminSessionOperation(operationId, 'prepare_complete', { sessionId: id, stepStatus: 'success', detail: 'Code généré, message confirmé et synchronisation terminée. Le logout peut maintenant être exécuté sans attendre la reconnexion.' });
+        console.info('[admin-session-deletion-prepared]', { sessionId: id, replacementSessionId: freshPairingSessionId, phoneLength: phone.length, language, messageIdHash: shortLogHash(notice.messageId), operationId: preparation.operationId || null });
+        return { ok: true, prepared: true, mode: preparation.mode, messageSent: true, replacementSessionId: freshPairingSessionId, sessionId: id };
     } catch (error) {
-        await recordAdminSessionOperation(operationId, 'prepare_failed', { sessionId: id, stepStatus: 'error', error: String(error?.message || error), detail: 'La préparation a échoué.' });
+        await recordAdminSessionOperation(operationId, 'prepare_failed', { sessionId: id, stepStatus: 'error', error: String(error?.message || error), detail: 'La génération du code ou l’envoi confirmé de l’avis a échoué; le compte d’origine est conservé.' });
         console.error('[admin-session-delete-prepare-failed]', { sessionId: id, replacementSessionId: freshPairingSessionId || null, workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null, workerActive: tfbotWorkerActive, workerState: tfbotWorkerState, error: String(error?.message || error).slice(0, 240) });
         if (freshPairingSessionId) {
-            await discardFreshPairingSession(freshPairingSessionId, `admin_session_deletion_prepare_failed:${String(error?.message || error).slice(0, 120)}`).catch(cleanupError => {
+            await discardFreshPairingSession(freshPairingSessionId, `pair_code_unconnected_after_one_minute_admin_notice_failed:${String(error?.message || error).slice(0, 100)}`).catch(cleanupError => {
                 console.warn('[admin-session-pairing-cleanup-failed]', { sessionId: freshPairingSessionId, error: cleanupError?.message || String(cleanupError) });
             });
         }
@@ -11966,66 +12200,103 @@ async function prepareAdminSessionDeletion(sessionId, operationId = '') {
         if (!savedPreparation) adminSessionDeletionLocks.delete(id);
     }
 }
-
 async function finalizeAdminSessionDeletion(sessionId, operationId = '') {
     const id = String(sessionId || '').trim();
-    await recordAdminSessionOperation(operationId, 'finalize_started', { sessionId: id, detail: 'Finalisation du transfert de session.' });
+    await recordAdminSessionOperation(operationId, 'finalize_started', { sessionId: id, detail: 'Logout du compte WhatsApp existant et suppression immédiate des données associées.' });
     if (!id) throw new Error('invalid_session_id');
     const preparation = adminSessionDeletionPreparations.get(id);
     if (!preparation) {
-        const owner = await getAdminSessionOwner(id);
-        if (!owner && !activeSessions.has(id)) return { ok: true, deleted: true, alreadyRemoved: true };
+        const [owner, runtime] = await Promise.all([getAdminSessionOwner(id), Promise.resolve(activeSessions.get(id) || null)]);
+        if (!owner && !runtime) return { ok: true, deleted: true, alreadyRemoved: true, loggedOut: true };
         throw new Error('admin_session_deletion_preparation_missing');
     }
+    let logoutConfirmed = false;
+    let alreadyDisconnected = false;
+    let dataDeleted = false;
     try {
-        if (preparation.mode === 'already_removed' || preparation.mode === 'unregistered_removed') return { ok: true, deleted: true, alreadyRemoved: true };
-        const targetId = String(preparation.pairingSessionId || '');
-        const deadline = Date.now() + ADMIN_SESSION_REPLACEMENT_WAIT_MS;
-        let targetOwner = null;
-        let targetRuntime = null;
-        let targetCredentials = null;
-        let targetRegistered = false;
-        let targetConnected = false;
-        await recordAdminSessionOperation(operationId, 'replacement_check_started', { sessionId: id, detail: 'Vérification de la nouvelle session et de son authentification.' });
-        while (Date.now() < deadline) {
-            const oldOwner = await getAdminSessionOwner(id);
-            if (!oldOwner && !activeSessions.has(id)) return { ok: true, deleted: true, replaced: true };
-            targetOwner = await getAdminSessionOwner(targetId);
-            targetRuntime = activeSessions.get(targetId) || null;
-            const targetAuthDoc = await adminMongoRead('admin_replacement_credentials_read', () => db.collection('baileys_auth').findOne(
-                { _id: `auth-${targetId}-creds` },
-                { projection: { creds: 1 }, maxTimeMS: 8000 }
-            ));
-            targetCredentials = targetRuntime?.authState?.creds || (targetAuthDoc?.creds ? fixBuffers(targetAuthDoc.creds) : null);
-            targetRegistered = hasRegisteredWhatsAppIdentity(targetCredentials, targetRuntime?.sock?.user || null);
-            targetConnected = !!(targetRuntime?.sock && targetRuntime.openEventSeen && isAuthenticatedSocketOperational(targetRuntime, targetRuntime.sock));
-            if (targetConnected) break;
-            await sleep(500);
+        if (preparation.mode === 'already_removed' || preparation.mode === 'unregistered_removed') return { ok: true, deleted: true, alreadyRemoved: true, loggedOut: true };
+        if (preparation.mode !== 'admin_pairing_logout' || preparation.messageSent !== true || preparation.messageAcknowledged !== true || !preparation.pairingSessionId) throw new Error('admin_pairing_notice_not_confirmed_logout_blocked');
+        await recordAdminSessionOperation(operationId, 'pairing_notice_confirmed_before_logout', { sessionId: id, stepStatus: 'success', detail: 'Le code et le message de déconnexion ont été envoyés avant le logout.' });
+        const runtime = activeSessions.get(id);
+        let socket = preparation.originalSocket;
+        if (runtime?.sock && runtime.sock !== socket && isAuthenticatedSocketOperational(runtime, runtime.sock)) {
+            socket = runtime.sock;
+            preparation.originalSocket = socket;
+            await recordAdminSessionOperation(operationId, 'socket_reference_refreshed', { sessionId: id, stepStatus: 'success', detail: 'Le runtime a été remplacé depuis la préparation; le logout vise le socket authentifié actuellement actif.' });
+        } else if (!runtime || runtime.sock !== socket) {
+            const currentOwner = await getAdminSessionOwner(id);
+            if (!currentOwner && !runtime) return { ok: true, deleted: true, alreadyRemoved: true, loggedOut: false, alreadyDisconnected: true };
+            if (!socket || !isSocketDefinitelyClosed(socket)) throw new Error('session_changed_before_admin_logout');
+            alreadyDisconnected = true;
         }
-        const oldOwner = await getAdminSessionOwner(id);
-        if (!oldOwner && !activeSessions.has(id)) return { ok: true, deleted: true, replaced: true };
-        if (targetConnected) {
-            await recordAdminSessionOperation(operationId, 'replacement_connected', { sessionId: id, stepStatus: 'success', detail: 'La session de remplacement est authentifiée et connectée.' });
-            if (isPreviousDeploymentOwnerOnCurrentHost(oldOwner)) {
-                await adminMongoRead('admin_replacement_previous_owner_release', () => db.collection('session_owners').updateOne(
-                    { sessionId: id, ownerInstanceId: oldOwner.ownerInstanceId },
-                    { $unset: { ownerInstanceId: 1, ownerInstanceUrl: 1, ownerDeploymentId: 1, ownerLeaseUntil: 1 } }
-                ));
-            }
-            const retired = await retireDuplicateAccountSession(id, targetId, 'admin_session_pairing_replacement');
-            if (retired?.retired) return { ok: true, deleted: true, replaced: true };
-            const stillExists = await getAdminSessionOwner(id);
-            if (!stillExists && !activeSessions.has(id)) return { ok: true, deleted: true, replaced: true };
-            throw new Error(`replacement_retirement_not_confirmed:${retired?.reason || 'unknown'}`);
+        if (runtime) {
+            runtime.adminLogoutRequested = true;
+            runtime.status = 'admin_logout_pending';
+            runtime.active = false;
+            runtime.adminLogoutRequestedAt = Date.now();
         }
-        if (targetRegistered) {
-            await recordAdminSessionOperation(operationId, 'replacement_not_connected', { sessionId: id, stepStatus: 'error', detail: 'Les identifiants du nouveau compte existent, mais le socket WhatsApp n’a pas confirmé la connexion. Le compte d’origine reste conservé.' });
-            throw new Error('replacement_connection_in_progress_old_session_preserved');
+        const reconnectTimer = reconnectTimers.get(id);
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimers.delete(id);
+        reconnectRetryDueAt.delete(id);
+        const lockRetryTimer = sessionLockRetryTimers.get(id);
+        if (lockRetryTimer) clearTimeout(lockRetryTimer);
+        sessionLockRetryTimers.delete(id);
+        sessionLockRetryDueAt.delete(id);
+        sessionReconnectDeferredStarts.delete(id);
+        clearPairingChallengeTimer(id);
+        clearPairingRestartWatchdog(id);
+        clearPairing515SocketOpenWatchdog(id);
+        clearInvalidStatusCleanupTimer(id);
+        await recordAdminSessionOperation(operationId, 'reconnect_cancelled', { sessionId: id, stepStatus: 'success', detail: 'Timers de reconnexion et d’expiration suspendus pour empêcher la recréation du socket pendant le logout.' });
+        await adminMongoRead('admin_session_logout_marker_write', () => db.collection('session_owners').updateOne(
+            { sessionId: id },
+            { $set: { connectionStatus: 'admin_logout_pending', socketAuthenticated: false, socketReady: false, reauthRequired: true, pairingPending: false, pairingAttemptPending: false, adminLogoutRequested: true, adminLogoutRequestedAt: new Date(), statusUpdatedAt: new Date(), updatedAt: new Date() }, $unset: { nextRestoreRetryAt: 1, pairingExpiredAt: 1, pairingCleanupPending: 1 } },
+            { upsert: true }
+        ));
+        if (socket && !isSocketDefinitelyClosed(socket) && !alreadyDisconnected) {
+            if (typeof socket.logout !== 'function') throw new Error('whatsapp_logout_method_unavailable');
+            await recordAdminSessionOperation(operationId, 'whatsapp_logout_requested', { sessionId: id, stepStatus: 'info', detail: 'Demande de logout envoyée à WhatsApp via la méthode Baileys existante.' });
+            await promiseWithTimeout(Promise.resolve().then(() => socket.logout()), ADMIN_SESSION_LOGOUT_TIMEOUT_MS, 'admin_whatsapp_logout_timeout');
+            logoutConfirmed = true;
+            await recordAdminSessionOperation(operationId, 'whatsapp_logout_confirmed', { sessionId: id, stepStatus: 'success', detail: 'La méthode de logout WhatsApp a terminé sans erreur. Aucun nouveau code n’est requis pour confirmer la suppression.' });
+            console.info('[admin-session-whatsapp-logout-confirmed]', { sessionId: id, socketClosedByWhatsApp: isSocketDefinitelyClosed(socket), logoutMethod: 'existing_baileys_socket_logout' });
+        } else {
+            alreadyDisconnected = true;
+            await recordAdminSessionOperation(operationId, 'whatsapp_logout_unavailable_already_offline', { sessionId: id, stepStatus: 'info', detail: 'Le socket était déjà fermé avant la demande de logout. Les données locales seront supprimées, sans déclarer un logout WhatsApp distant confirmé.' });
+            console.info('[admin-session-whatsapp-already-disconnected]', { sessionId: id, remoteLogoutConfirmed: false, localSessionDataWillBeDeleted: true });
         }
-        await recordAdminSessionOperation(operationId, 'replacement_not_registered', { sessionId: id, stepStatus: 'error', detail: 'Le code n’a pas été accepté dans le délai. Le compte d’origine reste connecté.' });
-        throw new Error('replacement_pairing_not_registered_old_session_preserved');
+        const cleanupConfirmed = await cleanupSocket(id, { credentialPersistenceTimeoutMs: 12000, authStoreTimeoutMs: 18000, authStoreQuietMs: 350, socketCloseTimeoutMs: 5000 });
+        if (!cleanupConfirmed) throw new Error('admin_logout_socket_cleanup_not_confirmed');
+        const latestRuntime = activeSessions.get(id);
+        if (latestRuntime?.sock && latestRuntime.sock === socket && !isSocketDefinitelyClosed(socket)) throw new Error('admin_logout_socket_still_open');
+        await recordAdminSessionOperation(operationId, 'socket_closed', { sessionId: id, stepStatus: 'success', detail: 'Socket local fermé et runtime détaché. Suppression des données autorisée.' });
+        await deleteMongoSession(id);
+        const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const [remainingOwner, remainingAuth] = await Promise.all([
+            db.collection('session_owners').findOne({ sessionId: id }, { projection: { sessionId: 1 }, maxTimeMS: 8000 }),
+            db.collection('baileys_auth').countDocuments({ _id: { $regex: `^auth-${escapedId}(?:-|$)` } }, { maxTimeMS: 8000 })
+        ]);
+        if (remainingOwner || remainingAuth > 0 || activeSessions.has(id)) throw new Error('admin_session_data_deletion_not_confirmed');
+        dataDeleted = true;
+        await recordAdminSessionOperation(operationId, 'data_deleted', { sessionId: id, stepStatus: 'success', detail: 'Identifiants, propriétaire, préférences, messages, mappings et données de groupes supprimés.' });
+        await recordAdminSessionOperation(operationId, 'session_deletion_complete', { sessionId: id, stepStatus: 'success', detail: logoutConfirmed ? 'Logout WhatsApp confirmé après envoi du code; les données de l’ancienne session ont été supprimées. Le défi de liaison reste disponible selon sa durée de validité.' : 'Données locales supprimées; le socket était déjà hors ligne et le logout WhatsApp distant n’a pas pu être confirmé. Le défi de liaison reste disponible selon sa durée de validité.' });
+        console.info('[admin-session-deletion-completed]', { sessionId: id, loggedOut: logoutConfirmed, alreadyDisconnected, dataDeleted: true, newPairingSessionCreated: !!preparation.pairingSessionId, pairingSessionId: preparation.pairingSessionId || null, operationId: String(operationId || '').slice(0, 120) || null });
+        return { ok: true, deleted: true, loggedOut: logoutConfirmed, alreadyDisconnected, alreadyRemoved: false, sessionId: id, pairingSessionId: preparation.pairingSessionId, completedAt: new Date().toISOString() };
     } catch (error) {
-        await recordAdminSessionOperation(operationId, 'finalize_failed', { sessionId: id, stepStatus: 'error', error: String(error?.message || error), detail: 'La finalisation a échoué. Les données de la session d’origine ont été conservées lorsque la reconnexion n’était pas confirmée.' });
+        if (!logoutConfirmed && !alreadyDisconnected) {
+            const currentRuntime = activeSessions.get(id);
+            if (currentRuntime) {
+                currentRuntime.adminLogoutRequested = false;
+                if (currentRuntime.sock && isAuthenticatedSocketOperational(currentRuntime, currentRuntime.sock)) {
+                    currentRuntime.status = 'connecte';
+                    currentRuntime.active = true;
+                }
+            }
+            await db.collection('session_owners').updateOne({ sessionId: id }, { $set: { connectionStatus: 'connected', socketAuthenticated: true, socketReady: true, reauthRequired: false, adminLogoutRequested: false, updatedAt: new Date() }, $unset: { adminLogoutRequestedAt: 1 } }, { upsert: false }).catch(() => {});
+        }
+        await recordAdminSessionOperation(operationId, 'finalize_failed', { sessionId: id, stepStatus: 'error', error: String(error?.message || error), detail: dataDeleted ? 'Le logout a été confirmé mais la vérification finale des données a échoué.' : logoutConfirmed ? 'Le logout WhatsApp a été confirmé, mais la suppression des données doit être reprise.' : 'WhatsApp n’a pas confirmé le logout; les données du compte sont conservées.' });
+        console.error('[admin-session-delete-finalize-failed]', { sessionId: id, logoutConfirmed, dataDeleted, error: String(error?.message || error).slice(0, 240) });
         throw error;
     } finally {
         if (preparation.expiryTimer) clearTimeout(preparation.expiryTimer);
@@ -12039,54 +12310,16 @@ function isAdminApiWorkerReady() {
     return !!db && !serverShuttingDown && !TFBOT_CLUSTER_COORDINATOR_ONLY && (!TFBOT_CLUSTER_ENABLED || (tfbotWorkerActive && !tfbotWorkerStopping));
 }
 
-async function ensureAdminSessionRuntimeOnCurrentWorker(sessionId, timeoutMs = 240000) {
-    const id = String(sessionId || '').trim();
-    if (!id || !db) throw new Error('admin_session_database_unavailable');
-    if (!isAdminApiWorkerReady()) throw new Error('tfbot_worker_not_active');
-    const deadline = Date.now() + Math.max(30000, Number(timeoutMs) || 240000);
-    let lastStartError = '';
-    let lastStartAt = 0;
-    while (Date.now() < deadline && !serverShuttingDown) {
-        if (!isAdminApiWorkerReady()) throw new Error('tfbot_worker_not_active');
-        const runtime = activeSessions.get(id);
-        if (runtime?.sock && sessionRuntimeLockTokens.has(id) && isAuthenticatedSocketOperational(runtime, runtime.sock)) {
-            console.info('[admin-session-runtime-ready]', { sessionId: id, workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null, runtimeLockOwned: true, authenticatedSocket: true });
-            return runtime;
-        }
-        const owner = await getAdminSessionOwner(id);
-        if (!owner && !runtime && !sessionStartPromises.has(id)) throw new Error('admin_session_not_found_during_restore');
-        const retryScheduled = reconnectTimers.has(id) || sessionLockRetryTimers.has(id);
-        const startInFlight = sessionStartPromises.has(id);
-        if (!startInFlight && !retryScheduled && Date.now() - lastStartAt >= 2500) {
-            lastStartAt = Date.now();
-            const format = normalizeConnectionFormat(owner?.format || owner?.Format || runtime?.format || 'pair');
-            console.info('[admin-session-existing-runtime-restore-requested]', { sessionId: id, workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null, format, existingRuntimePresent: !!runtime, existingSocketPresent: !!runtime?.sock, runtimeLockOwned: sessionRuntimeLockTokens.has(id), ownerLeaseUntil: owner?.ownerLeaseUntil || null, action: 'reuse_startAdamBot_and_existing_runtime_lock' });
-            void startAdamBot(id, false, format, true).catch(error => {
-                lastStartError = String(error?.message || error || 'session_restore_failed').slice(0, 220);
-                console.warn('[admin-session-existing-runtime-restore-rejected]', { sessionId: id, error: lastStartError, retryScheduled: reconnectTimers.has(id) || sessionLockRetryTimers.has(id), credentialsPreserved: true });
-            });
-        }
-        await sleep(900);
-    }
-    const runtime = activeSessions.get(id);
-    if (runtime?.sock && sessionRuntimeLockTokens.has(id) && isAuthenticatedSocketOperational(runtime, runtime.sock)) return runtime;
-    throw new Error(lastStartError ? `admin_session_runtime_restore_timeout:${lastStartError}` : 'admin_session_runtime_restore_timeout');
-}
-
 async function prepareAdminSessionWithRuntime(sessionId, operationId = '') {
     const id = String(sessionId || '').trim();
     if (!id) throw new Error('invalid_session_id');
     if (!isAdminApiWorkerReady()) throw new Error('admin_session_prepare_requires_active_worker');
     const current = activeSessions.get(id);
     if (!current?.sock || !sessionRuntimeLockTokens.has(id) || !isAuthenticatedSocketOperational(current, current.sock)) {
-        await recordAdminSessionOperation(operationId, 'runtime_restore_started', { sessionId: id, detail: 'Restauration de la session WhatsApp existante avant de générer le code.' });
-        await ensureAdminSessionRuntimeOnCurrentWorker(id, 90000);
-        const restored = activeSessions.get(id);
-        if (!restored?.sock || !sessionRuntimeLockTokens.has(id) || !isAuthenticatedSocketOperational(restored, restored.sock)) throw new Error('admin_session_runtime_restore_not_operational');
-        await recordAdminSessionOperation(operationId, 'runtime_restore_completed', { sessionId: id, stepStatus: 'success', detail: 'Socket WhatsApp existant restauré et authentifié.' });
-    } else {
-        await recordAdminSessionOperation(operationId, 'runtime_restore_skipped', { sessionId: id, stepStatus: 'success', detail: 'Le socket WhatsApp existant est déjà opérationnel.' });
+        await recordAdminSessionOperation(operationId, 'runtime_check_failed', { sessionId: id, stepStatus: 'error', detail: 'Le compte n’a plus de socket connecté sur son worker. Aucune reconnexion automatique ne sera lancée pour une demande de suppression.' });
+        throw new Error('admin_session_socket_not_connected_no_reconnect_attempted');
     }
+    await recordAdminSessionOperation(operationId, 'runtime_check_completed', { sessionId: id, stepStatus: 'success', detail: 'Socket authentifié présent sur le worker propriétaire. La suppression peut être exécutée sans générer de code.' });
     return prepareAdminSessionDeletion(id, operationId);
 }
 
@@ -12131,7 +12364,7 @@ async function runAdminSessionOwnerAction(owner, action, sessionId, operationId 
                 catch (error) { throw new Error('session_owner_worker_url_invalid'); }
                 if (target.protocol !== 'https:' && !(target.protocol === 'http:' && TFBOT_CLUSTER_PRIVATE_NETWORK) && !['localhost', '127.0.0.1'].includes(target.hostname)) throw new Error('session_owner_worker_protocol_rejected');
                 const controller = new AbortController();
-                const timer = setTimeout(() => controller.abort(), action === 'prepare' ? 240000 : 45000);
+                const timer = setTimeout(() => controller.abort(), action === 'prepare' ? 90000 : 60000);
                 try {
                     await recordAdminSessionOperation(operationId, 'forwarding_to_owner_worker', { sessionId: id, detail: `Transmission de l’étape ${action} au worker propriétaire.` });
                     console.info('[admin-session-owner-action-forwarded]', { sessionId: id, action, ownerInstanceId: ownerId, ownerHost: clusterRecord.host || null, ownerWorkerStatus: workerStatus, workerLeaseActive: true });
@@ -12167,16 +12400,16 @@ async function runAdminSessionOwnerAction(owner, action, sessionId, operationId 
     }
     if (action === 'prepare' && isAdminApiWorkerReady() && ['session_owner_worker_inactive_runtime_unavailable', 'session_owner_lease_expired_worker_unavailable', 'session_owner_worker_http_503', 'admin_session_prepare_requires_active_worker'].includes(remoteError)) {
         try {
-            await recordAdminSessionOperation(operationId, 'owner_worker_recovery_fallback_started', { sessionId: id, detail: 'Le worker propriétaire ne répond plus. Tentative de reprise de la session existante sur le worker actif.' });
+            await recordAdminSessionOperation(operationId, 'owner_worker_recovery_fallback_started', { sessionId: id, detail: 'Le worker propriétaire ne répond plus. Tentative de reprise du socket existant sur le worker actif.' });
             const result = await prepareAdminSessionWithRuntime(id, operationId);
-            await recordAdminSessionOperation(operationId, 'owner_worker_recovery_fallback_completed', { sessionId: id, stepStatus: 'success', detail: 'La session existante a été reprise et préparée sur le worker actif.' });
+            await recordAdminSessionOperation(operationId, 'owner_worker_recovery_fallback_completed', { sessionId: id, stepStatus: 'success', detail: 'Le socket existant a été repris et préparé pour le logout sur le worker actif.' });
             return result;
         } catch (fallbackError) {
             remoteError = `${remoteError}:${String(fallbackError?.message || fallbackError).slice(0, 180)}`.slice(0, 240);
             await recordAdminSessionOperation(operationId, 'owner_worker_recovery_fallback_failed', { sessionId: id, stepStatus: 'error', error: remoteError, detail: 'La reprise du runtime n’a pas pu être confirmée. Les données restent conservées.' });
         }
     }
-    console.warn('[admin-session-owner-action-not-forwarded]', { sessionId: id, action, ownerInstanceId: ownerId || null, remoteError, actionPath: 'preserve_existing_account_if_owner_runtime_cannot_be_restored' });
+    console.warn('[admin-session-owner-action-not-forwarded]', { sessionId: id, action, ownerInstanceId: ownerId || null, remoteError, actionPath: 'do_not_reconnect_when_owner_socket_is_unavailable' });
     throw new Error(remoteError || 'session_owner_worker_unavailable');
 }
 
@@ -12244,12 +12477,17 @@ async function getAdminSessionRows(options = {}) {
     if (candidates.length) {
         const ownerDocs = await adminMongoRead('admin_sessions_list_owner_read', () => db.collection('session_owners').find(
             { sessionId: { $in: candidates.map(item => item.id) } },
-            { projection: { sessionId: 1, OwnerName: 1, ownerName: 1, Name: 1, name: 1, Number: 1, number: 1, Numero: 1, OwnerNumber: 1, ownerNumber: 1, OwnerPhone: 1, ownerPhone: 1, PairingNumber: 1, pairingNumber: 1, accountFirstConnectedAt: 1, connectedSince: 1, socketAuthenticatedAt: 1, lang: 1, language: 1, Lang: 1 }, maxTimeMS: 8000 }
+            { projection: { sessionId: 1, OwnerName: 1, ownerName: 1, Name: 1, name: 1, Number: 1, number: 1, Numero: 1, OwnerNumber: 1, ownerNumber: 1, OwnerPhone: 1, ownerPhone: 1, PairingNumber: 1, pairingNumber: 1, accountFirstConnectedAt: 1, connectedSince: 1, socketAuthenticatedAt: 1, ownerInstanceId: 1, ownerInstanceUrl: 1, ownerDeploymentId: 1, ownerLeaseUntil: 1, lang: 1, language: 1, Lang: 1 }, maxTimeMS: 8000 }
         ).limit(10000).toArray(), 10000);
         const ownersById = new Map(ownerDocs.map(owner => [String(owner?.sessionId || ''), owner]).filter(([id]) => !!id));
         const unique = new Map();
         for (const candidate of candidates) {
-            const owner = ownersById.get(candidate.id) || {};
+            let owner = ownersById.get(candidate.id) || null;
+            const ownerLeaseUntil = new Date(owner?.ownerLeaseUntil || 0).getTime();
+            if (!owner || !owner.ownerInstanceId || !owner.ownerInstanceUrl || ownerLeaseUntil <= Date.now()) {
+                owner = await ensureAdminSessionOwnerRecord(candidate.id, candidate.runtime, candidate.credentials, owner);
+                ownersById.set(candidate.id, owner);
+            }
             const previous = unique.get(candidate.identityKey);
             if (previous && previous._connectedAt >= candidate.connectedAt) continue;
             const phone = candidate.accountPhone || getStoredSessionOwnerPhone(owner) || normalizePhoneNumber(owner?.PairingNumber || owner?.pairingNumber || '');
@@ -12267,6 +12505,8 @@ async function getAdminSessionRows(options = {}) {
                 AccountKey: shortLogHash(candidate.accountPhone || getAuthenticatedLid(candidate.runtime.sock.user || null, candidate.credentials) || candidate.id),
                 ConnectedAt: new Date(connectedAt).toISOString(),
                 Worker: TFBOT_CLUSTER_INSTANCE_HOST || TFBOT_CLUSTER_INSTANCE_ID || null,
+                WorkerInstanceId: TFBOT_CLUSTER_INSTANCE_ID || null,
+                WorkerUrl: TFBOT_CLUSTER_INSTANCE_URL || null,
                 _connectedAt: connectedAt
             });
         }
@@ -12280,7 +12520,7 @@ async function getAdminSessionRows(options = {}) {
         releaseId: TFBOT_CODE_RELEASE_ID
     };
     if (options.localOnly === true || !TFBOT_CLUSTER_ENABLED || !db) {
-        return { ok: true, count: localSessions.length, connectedCount: localSessions.length, sessions: localSessions, worker: localWorker };
+        return { ok: true, count: localSessions.length, connectedCount: localSessions.length, sessions: localSessions, worker: localWorker, generatedAt: new Date().toISOString(), dataState: localSessions.length ? 'connected_sessions' : 'empty' };
     }
     let peerRows = [];
     try {
@@ -12314,7 +12554,7 @@ async function getAdminSessionRows(options = {}) {
             if (!response.ok) return [];
             const payload = await response.json().catch(() => null);
             if (payload?.ok !== true || String(payload?.worker?.instanceId || '') !== peerId || !Array.isArray(payload.sessions)) return [];
-            return payload.sessions.filter(item => item?.Connected === true && item?.Status === 'connected' && item?.SessionId).map(item => ({ ...item, Worker: item.Worker || peer.host || peerId }));
+            return payload.sessions.filter(item => item?.Connected === true && item?.Status === 'connected' && item?.SessionId).map(item => ({ ...item, Worker: item.Worker || peer.host || peerId, WorkerInstanceId: item.WorkerInstanceId || peerId, WorkerUrl: item.WorkerUrl || baseUrl }));
         } catch (error) {
             console.warn('[admin-sessions-peer-read-failed]', { worker: peerId, host: peer.host || null, error: error?.name === 'AbortError' ? 'timeout' : String(error?.message || error).slice(0, 150) });
             return [];
@@ -12334,7 +12574,7 @@ async function getAdminSessionRows(options = {}) {
         uniqueSessions.set(key, item);
     }
     const sessions = [...uniqueSessions.values()].sort((a, b) => String(a.Name || '').localeCompare(String(b.Name || '')));
-    return { ok: true, count: sessions.length, connectedCount: sessions.length, sessions, worker: localWorker, workersChecked: peerRows.length + 1 };
+    return { ok: true, count: sessions.length, connectedCount: sessions.length, sessions, worker: localWorker, workersChecked: peerRows.length + 1, generatedAt: new Date().toISOString(), dataState: sessions.length ? 'connected_sessions' : 'empty' };
 }
 
 app.get('/__tfbot/admin/sessions-local', async (req, res) => {
@@ -12426,16 +12666,17 @@ app.delete('/api/sessions', async (req, res) => {
             }
             const prepared = await mapAdminSessionsWithConcurrency(records, 4, ([id, owner]) => runAdminSessionOwnerAction(owner, 'prepare', id, operationId));
             const successfulPreparations = records.filter((record, index) => prepared[index]?.ok === true);
-            const hasSentNotification = prepared.some(item => item?.ok && item.value?.messageSent === true);
-            if (hasSentNotification) await sleep(ADMIN_SESSION_DELETE_WAIT_MS);
             await recordAdminSessionOperation(operationId, 'prepare_batch_complete', { count: records.length, prepared: successfulPreparations.length, failed: records.length - successfulPreparations.length, detail: 'Préparation terminée pour les comptes connectés.' });
             const finalized = await mapAdminSessionsWithConcurrency(successfulPreparations, 4, ([id, owner]) => runAdminSessionOwnerAction(owner, 'finalize', id, operationId));
             const failed = [];
             for (let index = 0; index < records.length; index++) if (!prepared[index]?.ok) failed.push({ sessionId: records[index][0], stage: 'prepare', error: prepared[index]?.error || 'prepare_failed' });
             for (let index = 0; index < successfulPreparations.length; index++) if (!finalized[index]?.ok) failed.push({ sessionId: successfulPreparations[index][0], stage: 'finalize', error: finalized[index]?.error || 'finalize_failed' });
-            const deleted = finalized.filter(item => item?.ok === true && item.value?.deleted === true).length;
-            const response = { ok: failed.length === 0, operationId, count: records.length, prepared: successfulPreparations.length, deleted, failed: failed.length, failures: failed.slice(0, 100) };
-            await recordAdminSessionOperation(operationId, failed.length ? 'operation_failed' : 'operation_completed', { operationStatus: failed.length ? 'failed' : 'completed', count: records.length, prepared: successfulPreparations.length, deleted, failed: failed.length, stepStatus: failed.length ? 'error' : 'success', detail: failed.length ? 'Certaines sessions ont été conservées car le transfert ou la reconnexion n’a pas été confirmé.' : 'Toutes les sessions préparées ont été supprimées.' });
+            const deletedResults = finalized.filter(item => item?.ok === true && item.value?.deleted === true);
+            const deleted = deletedResults.length;
+            const loggedOut = deletedResults.filter(item => item.value?.loggedOut === true).length;
+            const alreadyDisconnected = deletedResults.filter(item => item.value?.alreadyDisconnected === true).length;
+            const response = { ok: failed.length === 0, operationId, count: records.length, prepared: successfulPreparations.length, deleted, loggedOut, alreadyDisconnected, failed: failed.length, completedAt: new Date().toISOString(), failures: failed.slice(0, 100) };
+            await recordAdminSessionOperation(operationId, failed.length ? 'operation_failed' : 'operation_completed', { operationStatus: failed.length ? 'failed' : 'completed', count: records.length, prepared: successfulPreparations.length, deleted, failed: failed.length, stepStatus: failed.length ? 'error' : 'success', detail: failed.length ? 'Certaines sessions n’ont pas confirmé leur logout ou la suppression des données.' : 'Tous les comptes sélectionnés ont été déconnectés et leurs données supprimées.' });
             console.info('[admin-bulk-session-deletion-finished]', { operationId, count: records.length, prepared: successfulPreparations.length, deleted, failed: failed.length });
             return res.status(failed.length ? 409 : 200).json(response);
         } catch (error) {
@@ -12453,13 +12694,12 @@ app.delete('/api/sessions', async (req, res) => {
         if (!isConnected) throw new Error('session_not_connected');
         const owner = await getAdminSessionOwner(sessionId);
         const prepared = await runAdminSessionOwnerAction(owner, 'prepare', sessionId, operationId);
-        if (prepared?.messageSent === true) await sleep(ADMIN_SESSION_DELETE_WAIT_MS);
         const result = await runAdminSessionOwnerAction(owner, 'finalize', sessionId, operationId);
         if (result?.ok !== true || result?.deleted !== true) throw new Error('session_deletion_not_confirmed');
         await recordAdminSessionOperation(operationId, 'operation_completed', { operationStatus: 'completed', count: 1, prepared: 1, deleted: 1, failed: 0, stepStatus: 'success', sessionId, detail: 'Suppression confirmée.' });
-        return res.status(200).json({ ok: true, operationId, deleted: true, sessionId, replaced: result.replaced === true });
+        return res.status(200).json({ ok: true, operationId, deleted: true, loggedOut: result.loggedOut === true, alreadyDisconnected: result.alreadyDisconnected === true, sessionId, completedAt: result.completedAt || new Date().toISOString() });
     } catch (error) {
-        await recordAdminSessionOperation(operationId, 'operation_failed', { operationStatus: 'failed', count: 1, failed: 1, stepStatus: 'error', sessionId, error: String(error?.message || error), detail: 'Suppression interrompue. La session est conservée si la nouvelle connexion n’a pas été confirmée.' });
+        await recordAdminSessionOperation(operationId, 'operation_failed', { operationStatus: 'failed', count: 1, failed: 1, stepStatus: 'error', sessionId, error: String(error?.message || error), detail: 'Le logout ou la suppression n’a pas pu être confirmé. Les données restantes sont conservées pour éviter une perte silencieuse.' });
         console.error('[admin-single-session-deletion-failed]', { sessionId, operationId, error: error?.message || String(error) });
         return res.status(409).json({ ok: false, operationId, error: String(error?.message || 'session_deletion_failed').slice(0, 240), sessionId });
     }
@@ -13463,6 +13703,10 @@ async function generateCloudflareImage(prompt) {
 function scheduleSessionReconnect(sessionId, autoExpire, format, options = {}) {
     if (serverShuttingDown || tfbotWorkerStopping || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive)) return;
     const session = activeSessions.get(sessionId);
+    if (session?.adminLogoutRequested === true) {
+        console.info('[session-reconnect-suppressed-admin-logout]', { sessionId, action: 'admin_logout_in_progress' });
+        return;
+    }
     const currentStatus = String(session?.status || '').toLowerCase();
     if (session && (session.whatsappForbidden === true || currentStatus === 'forbidden_wait' || Number(session.lastDisconnectCode || 0) === 403)) {
         console.warn('[session-reconnect-suppressed-whatsapp-forbidden]', { sessionId, disconnectCode: Number(session.lastDisconnectCode || 403), status: currentStatus || null, credentialsPreserved: true, automaticReconnect: false });
@@ -13485,7 +13729,7 @@ function scheduleSessionReconnect(sessionId, autoExpire, format, options = {}) {
         reconnectTimers.delete(sessionId);
         reconnectRetryDueAt.delete(sessionId);
         const latest = activeSessions.get(sessionId);
-        if (!latest || String(latest.status || '').toLowerCase() === 'pairing_expired') return;
+        if (!latest || latest.adminLogoutRequested === true || String(latest.status || '').toLowerCase() === 'pairing_expired') return;
         if (isAuthenticatedSocketOperational(latest, latest.sock)) {
             console.info('[session-reconnect-skipped-already-authenticated]', { sessionId, status: latest.status || null });
             return;
@@ -15803,6 +16047,34 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 sessionData.qrString = null;
                 const statusCode = lastDisconnect?.error?.output?.statusCode ?? lastDisconnect?.error?.statusCode ?? null;
                 const disconnectReason = String(lastDisconnect?.error?.message || lastDisconnect?.error?.output?.payload?.message || 'unknown').slice(0, 180);
+                if (currentSession?.adminLogoutRequested === true) {
+                    const reconnectTimer = reconnectTimers.get(sessionId);
+                    if (reconnectTimer) clearTimeout(reconnectTimer);
+                    reconnectTimers.delete(sessionId);
+                    reconnectRetryDueAt.delete(sessionId);
+                    const lockRetryTimer = sessionLockRetryTimers.get(sessionId);
+                    if (lockRetryTimer) clearTimeout(lockRetryTimer);
+                    sessionLockRetryTimers.delete(sessionId);
+                    sessionLockRetryDueAt.delete(sessionId);
+                    sessionReconnectDeferredStarts.delete(sessionId);
+                    clearPairingChallengeTimer(sessionId);
+                    clearPairingRestartWatchdog(sessionId);
+                    clearPairing515SocketOpenWatchdog(sessionId);
+                    clearInvalidStatusCleanupTimer(sessionId);
+                    currentSession.status = 'admin_logout_pending';
+                    currentSession.active = false;
+                    currentSession.lastWhatsAppEvent = 'close';
+                    currentSession.lastWhatsAppEventAt = closeAt;
+                    currentSession.adminLogoutSocketClosedAt = closeAt;
+                    await db.collection('session_owners').updateOne(
+                        { sessionId },
+                        { $set: { connectionStatus: 'admin_logout_pending', socketAuthenticated: false, socketReady: false, reauthRequired: true, pairingPending: false, pairingAttemptPending: false, adminLogoutRequested: true, adminLogoutSocketClosedAt: new Date(closeAt), lastWhatsAppEvent: 'close', lastWhatsAppEventAt: new Date(closeAt), lastDisconnectCode: statusCode ?? null, lastDisconnectReason: disconnectReason, statusUpdatedAt: new Date(closeAt), updatedAt: new Date(closeAt) }, $unset: { nextRestoreRetryAt: 1, pairingExpiredAt: 1, pairingCleanupPending: 1 } },
+                        { upsert: true }
+                    ).catch(error => console.warn('[admin-logout-close-state-save-failed]', { sessionId, error: error?.message || String(error) }));
+                    console.info('[whatsapp-connection-closed-by-admin-logout]', { sessionId, statusCode: statusCode ?? null, reconnectScheduled: false, credentialsWillBeDeletedByAdminOperation: true });
+                    scheduleSessionListBroadcast('admin_logout_socket_closed');
+                    return;
+                }
                 let pairing515CredentialsReady = true;
                 const pairing515Restart = Number(statusCode || 0) === 515 || /restart required/i.test(disconnectReason);
                 if (pairing515Restart) {
@@ -17808,7 +18080,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         const canonicalProfileNumber = isOwnerReal ? authenticatedAccountNumber : (senderNumbers.find(number => number !== authenticatedAccountNumber) || sNum);
                         const canonicalProfileJid = canonicalProfileNumber ? `${canonicalProfileNumber}@s.whatsapp.net` : normalizeLidCacheKey(sender || from || 'unknown');
                         const languageCacheKey = canonicalProfileJid || sender || from || 'unknown';
-                        const preferenceAliases = [...new Set([languageCacheKey, sender, ...(isFromMe ? [botId] : senderJids), ...(!isFromMe ? [from] : [])].filter(Boolean).map(value => String(value).trim()))];
+                        const preferenceAliases = [...new Set([languageCacheKey, sender, ...(isFromMe ? [botId] : senderJids)].filter(Boolean).map(value => String(value).trim()))];
                         let savedUserPreference = null;
                         let messageLang = preferenceAliases.map(alias => userLanguageCache.get(alias)).find(value => ['fr', 'en', 'es', 'ht'].includes(value));
                         if (db?.collection) {
@@ -17853,21 +18125,21 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             userInfo.set(alias, profileRecord);
                             if (userInfo.size > SESSION_USER_CACHE_MAX_ENTRIES) userInfo.delete(userInfo.keys().next().value);
                         }
-                        if (validIncomingDisplayName || isOwnerReal && socketOwnerName) {
-                            const storedProfileName = isOwnerReal ? socketOwnerName || profileDisplayName : validIncomingDisplayName;
+                        if (isOwnerReal && socketOwnerName) {
+                            const storedProfileName = socketOwnerName || profileDisplayName;
                             const profileStateKey = `${sessionId}:${canonicalProfileJid}`;
                             const priorProfileState = userProfilePersistenceCache.get(profileStateKey);
                             const nowForProfile = Date.now();
                             const profileChanged = !priorProfileState || priorProfileState.name !== storedProfileName || priorProfileState.number !== profilePhone || priorProfileState.lang !== messageLang;
                             const profileRefreshDue = priorProfileState && nowForProfile - priorProfileState.at >= 12 * 60 * 60 * 1000;
                             if (profileChanged || profileRefreshDue) {
-                                userProfilePersistenceCache.set(profileStateKey, { name: storedProfileName, number: profilePhone, lang: messageLang, at: nowForProfile });
-                                while (userProfilePersistenceCache.size > 5000) userProfilePersistenceCache.delete(userProfilePersistenceCache.keys().next().value);
-                                void db.collection('user_preferences').updateOne(
+                                await db.collection('user_preferences').updateOne(
                                     { sessionId, sender: canonicalProfileJid },
                                     { $set: { Name: storedProfileName, pushName: storedProfileName, displayName: storedProfileName, number: profilePhone, lang: messageLang, updatedAt: nowForProfile, expireAt: new Date(nowForProfile + SESSION_PROFILE_RETENTION_MS) }, $setOnInsert: { createdAt: new Date(nowForProfile) } },
                                     { upsert: true }
-                                ).catch(profilePersistError => console.warn('[user-profile-refresh-failed]', { sessionId, senderKey: canonicalProfileJid, error: profilePersistError?.message || String(profilePersistError), action: 'continue_with_session_local_profile' }));
+                                );
+                                userProfilePersistenceCache.set(profileStateKey, { name: storedProfileName, number: profilePhone, lang: messageLang, at: nowForProfile });
+                                while (userProfilePersistenceCache.size > 5000) userProfilePersistenceCache.delete(userProfilePersistenceCache.keys().next().value);
                             }
                         }
 
@@ -17875,6 +18147,20 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         if (!parsedCommand) {
                             console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, senderAliases: senderJids, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', messageType, messageLang, messageClassification: String(body || '').trim() ? 'text_not_recognized_as_command' : 'no_text_or_caption', detectedCommand: null, isPublicMode, botMode, bodyLength: body.length, bodyPreview: body.slice(0, 240), aiDispatch: false, cloudflareAiEligible: false, action: 'display_and_ignore_without_response_or_ai_dispatch', reason: String(body || '').trim() ? 'not_a_command' : 'empty_message_body' });
                             return;
+                        }
+                        let publicCommandUserPhone = '';
+                        if (!isOwnerReal && isPublicMode) {
+                            publicCommandUserPhone = await getTfServerAiUserPhoneNumber(sessionId, sock, [sender, ...senderJids], sNum, '').catch(error => {
+                                console.warn('[public-visitor-phone-resolution-pending]', { sessionId, messageId: msgId, error: String(error?.message || error).slice(0, 180), action: 'retain_sender_alias_until_phone_mapping_is_available' });
+                                return '';
+                            });
+                            await persistPublicVisitorCommandProfile(
+                                sessionId,
+                                publicCommandUserPhone || profilePhone,
+                                [canonicalProfileJid, sender, ...senderJids],
+                                profileDisplayName || validIncomingDisplayName || pushName,
+                                messageLang
+                            );
                         }
                         const command = parsedCommand.command;
                         const args = parsedCommand.args;
@@ -19034,8 +19320,8 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                             if (aiControlCommand === 'clear') {
                                                 let aiClearLanguage = messageLang;
                                                 try {
-                                                    const aiClearUserPhone = await getTfServerAiUserPhoneNumber(sessionId, sock, [sender, ...senderJids], sNum, isOwnerReal ? authenticatedAccountNumber : '');
-                                                    aiClearLanguage = await getAdminSessionLanguage(sessionId, aiClearUserPhone, sOwnerTop || {}, messageLang);
+                                                    const aiClearUserPhone = publicCommandUserPhone || await getTfServerAiUserPhoneNumber(sessionId, sock, [sender, ...senderJids], sNum, isOwnerReal ? authenticatedAccountNumber : '');
+                                                    aiClearLanguage = await getAdminSessionLanguage(sessionId, aiClearUserPhone, isOwnerReal ? sOwnerTop || {} : {}, messageLang);
                                                     const aiClearTranslations = translations[aiClearLanguage] || translations.ht;
                                                     const aiClearResult = await clearTfServerAiConversationForUser(sessionId, aiClearUserPhone);
                                                     const clearConfirmation = ({
@@ -19062,7 +19348,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                             }
                                             let aiActionLanguage = messageLang;
                                             try {
-                                                const aiUserPhone = await getTfServerAiUserPhoneNumber(sessionId, sock, [sender, ...senderJids], sNum, isOwnerReal ? authenticatedAccountNumber : '');
+                                                const aiUserPhone = publicCommandUserPhone || await getTfServerAiUserPhoneNumber(sessionId, sock, [sender, ...senderJids], sNum, isOwnerReal ? authenticatedAccountNumber : '');
                                                 aiActionLanguage = await getAdminSessionLanguage(sessionId, aiUserPhone, isOwnerReal ? sOwnerTop || {} : {}, messageLang);
                                                 const aiResponseText = await callTfServerAiMessage(sessionId, aiUserPhone, promptText, 'chat', aiActionLanguage, profileDisplayName || validIncomingDisplayName || pushName, !isOwnerReal && isPublicMode);
                                                 if (isCancelled) return;
@@ -19113,7 +19399,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                             const imagePrompt = clipLongText(args, Math.min(2048, Number(process.env.IMAGE_PROMPT_MAX_CHARS || 2048)));
                                             let imageActionLanguage = messageLang;
                                             try {
-                                                const imageUserPhone = await getTfServerAiUserPhoneNumber(sessionId, sock, [sender, ...senderJids], sNum, isOwnerReal ? authenticatedAccountNumber : '');
+                                                const imageUserPhone = publicCommandUserPhone || await getTfServerAiUserPhoneNumber(sessionId, sock, [sender, ...senderJids], sNum, isOwnerReal ? authenticatedAccountNumber : '');
                                                 imageActionLanguage = await getAdminSessionLanguage(sessionId, imageUserPhone, isOwnerReal ? sOwnerTop || {} : {}, messageLang);
                                                 const imageAIResponse = await callTfServerAiMessage(sessionId, imageUserPhone, imagePrompt, 'image', imageActionLanguage, profileDisplayName || validIncomingDisplayName || pushName, !isOwnerReal && isPublicMode);
                                                 if (isCancelled) return;
@@ -19368,7 +19654,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                             let searchActionLanguage = messageLang;
                                             try {
                                                 const searchQuery = clipLongText(args, SEARCH_QUERY_MAX_CHARS);
-                                                const searchUserPhone = await getTfServerAiUserPhoneNumber(sessionId, sock, [sender, ...senderJids], sNum, isOwnerReal ? authenticatedAccountNumber : '');
+                                                const searchUserPhone = publicCommandUserPhone || await getTfServerAiUserPhoneNumber(sessionId, sock, [sender, ...senderJids], sNum, isOwnerReal ? authenticatedAccountNumber : '');
                                                 searchActionLanguage = await getAdminSessionLanguage(sessionId, searchUserPhone, isOwnerReal ? sOwnerTop || {} : {}, messageLang);
                                                 const searchAIResponse = await callTfServerAiMessage(sessionId, searchUserPhone, searchQuery, 'search', searchActionLanguage, profileDisplayName || validIncomingDisplayName || pushName, !isOwnerReal && isPublicMode);
                                                 if (isCancelled) return;
