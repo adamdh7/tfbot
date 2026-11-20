@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'tfbot-v207';
+const TFBOT_CODE_VERSION = 'tfbot-v209';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
 const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
 let tfbotBaileysSocketVersionCache = null;
@@ -83,9 +83,12 @@ const path = require('path');
 const EventEmitter = require('events');
 const { AsyncLocalStorage } = require('async_hooks');
 const TFBOT_DIAGNOSTIC_SESSION_ID = String(process.env.TFBOT_DIAGNOSTIC_SESSION_ID || '').trim();
-const TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES = Math.max(524288, Math.min(3145728, Number(process.env.TFBOT_DIAGNOSTIC_LOG_MAX_BYTES || 2097152)));
-const TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES = Math.max(500, Math.min(8000, Number(process.env.TFBOT_DIAGNOSTIC_LOG_MAX_LINES || 5000)));
-const TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES = Math.max(262144, Math.min(2097152, Number(process.env.TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES || 1048576)));
+const TFBOT_DIAGNOSTIC_RETENTION_MS = 7 * 60 * 60 * 1000;
+const TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES = 17 * 1024 * 1024;
+const TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES = 17000;
+const TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES = 17 * 1024 * 1024;
+const TFBOT_DIAGNOSTIC_LOG_FILE = path.join(__dirname, 'logs.txt');
+const TFBOT_DIAGNOSTIC_PRUNE_INTERVAL_MS = 60000;
 const tfbotOriginalConsole = { log: console.log.bind(console), info: console.info.bind(console), warn: console.warn.bind(console), error: console.error.bind(console), debug: console.debug.bind(console) };
 const tfbotDiagnosticSerialize = value => {
     try { return JSON.stringify(value, (key, item) => {
@@ -108,11 +111,50 @@ let tfbotDiagnosticWriterRunning = false;
 let tfbotDiagnosticDroppedEntries = 0;
 let tfbotDiagnosticTargetCacheAt = 0;
 let tfbotDiagnosticTargetCache = null;
+function getTfbotDiagnosticLineTimestamp(line) {
+    try {
+        const record = JSON.parse(String(line || '').trim());
+        const timestamp = Date.parse(String(record?.date || record?.timestamp || ''));
+        return Number.isFinite(timestamp) ? timestamp : 0;
+    } catch (error) {
+        return 0;
+    }
+}
+function retainTfbotDiagnosticLines(lines, now = Date.now()) {
+    const cutoff = now - TFBOT_DIAGNOSTIC_RETENTION_MS;
+    const retained = [];
+    let retainedBytes = 0;
+    for (const sourceLine of Array.isArray(lines) ? lines : []) {
+        const line = String(sourceLine || '');
+        if (!line) continue;
+        const timestamp = getTfbotDiagnosticLineTimestamp(line);
+        if (!timestamp || timestamp < cutoff) continue;
+        const normalizedLine = line.endsWith('\n') ? line : `${line}\n`;
+        retained.push(normalizedLine);
+        retainedBytes += Buffer.byteLength(normalizedLine, 'utf8');
+    }
+    while (retained.length > TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES || retainedBytes > TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES) {
+        const removed = retained.shift();
+        if (!removed) break;
+        retainedBytes = Math.max(0, retainedBytes - Buffer.byteLength(removed, 'utf8'));
+    }
+    return retained;
+}
 function appendTfbotDiagnosticMemoryLine(line) {
     const value = String(line || '');
     if (!value) return;
-    const bytes = Buffer.byteLength(value, 'utf8');
-    tfbotDiagnosticRecentLines.push(value);
+    const cutoff = Date.now() - TFBOT_DIAGNOSTIC_RETENTION_MS;
+    while (tfbotDiagnosticRecentLines.length) {
+        const first = tfbotDiagnosticRecentLines[0];
+        const firstTimestamp = getTfbotDiagnosticLineTimestamp(first);
+        if (firstTimestamp && firstTimestamp >= cutoff) break;
+        const removed = tfbotDiagnosticRecentLines.shift();
+        tfbotDiagnosticRecentBytes = Math.max(0, tfbotDiagnosticRecentBytes - Buffer.byteLength(removed || '', 'utf8'));
+        tfbotDiagnosticEvictedLines++;
+    }
+    const normalizedLine = value.endsWith('\n') ? value : `${value}\n`;
+    const bytes = Buffer.byteLength(normalizedLine, 'utf8');
+    tfbotDiagnosticRecentLines.push(normalizedLine);
     tfbotDiagnosticRecentBytes += bytes;
     tfbotDiagnosticTotalLines++;
     while (tfbotDiagnosticRecentLines.length > TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES || tfbotDiagnosticRecentBytes > TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES) {
@@ -121,6 +163,60 @@ function appendTfbotDiagnosticMemoryLine(line) {
         tfbotDiagnosticRecentBytes = Math.max(0, tfbotDiagnosticRecentBytes - Buffer.byteLength(removed, 'utf8'));
         tfbotDiagnosticEvictedLines++;
     }
+}
+let tfbotDiagnosticDiskPrunePromise = null;
+let tfbotDiagnosticDiskOperationChain = Promise.resolve();
+let tfbotDiagnosticDiskPrunedAt = 0;
+let tfbotDiagnosticDiskAvailable = true;
+function queueTfbotDiagnosticDiskOperation(operation) {
+    const pending = tfbotDiagnosticDiskOperationChain.then(operation, operation);
+    tfbotDiagnosticDiskOperationChain = pending.catch(() => {});
+    return pending;
+}
+function initializeTfbotDiagnosticDiskLog() {
+    try {
+        const source = fs.existsSync(TFBOT_DIAGNOSTIC_LOG_FILE) ? fs.readFileSync(TFBOT_DIAGNOSTIC_LOG_FILE, 'utf8') : '';
+        const retained = retainTfbotDiagnosticLines(source.split(/\r?\n/).filter(Boolean));
+        tfbotDiagnosticRecentLines.push(...retained);
+        tfbotDiagnosticRecentBytes = retained.reduce((total, line) => total + Buffer.byteLength(line, 'utf8'), 0);
+        const output = retained.join('');
+        if (source !== output) fs.writeFileSync(TFBOT_DIAGNOSTIC_LOG_FILE, output, { encoding: 'utf8', mode: 0o600 });
+    } catch (error) {
+        tfbotDiagnosticDiskAvailable = false;
+        tfbotOriginalConsole.warn('[tfbot-diagnostic-log-restore-failed]', { error: String(error?.message || error).slice(0, 300) });
+    }
+}
+async function pruneTfbotDiagnosticDiskLog(force = false) {
+    if (tfbotDiagnosticDiskPrunePromise) return tfbotDiagnosticDiskPrunePromise;
+    const now = Date.now();
+    let size = 0;
+    try { size = Number((await fs.promises.stat(TFBOT_DIAGNOSTIC_LOG_FILE)).size || 0); }
+    catch (error) { if (error?.code === 'ENOENT') return false; throw error; }
+    if (!force && now - tfbotDiagnosticDiskPrunedAt < TFBOT_DIAGNOSTIC_PRUNE_INTERVAL_MS && size <= TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES) return false;
+    tfbotDiagnosticDiskPrunePromise = (async () => {
+        const source = await fs.promises.readFile(TFBOT_DIAGNOSTIC_LOG_FILE, 'utf8');
+        const retained = retainTfbotDiagnosticLines(source.split(/\r?\n/).filter(Boolean), Date.now());
+        const output = retained.join('');
+        if (source !== output) {
+            const temporaryPath = `${TFBOT_DIAGNOSTIC_LOG_FILE}.${process.pid}.tmp`;
+            await fs.promises.writeFile(temporaryPath, output, { encoding: 'utf8', mode: 0o600 });
+            await fs.promises.rename(temporaryPath, TFBOT_DIAGNOSTIC_LOG_FILE);
+        }
+        tfbotDiagnosticDiskPrunedAt = Date.now();
+        return true;
+    })().finally(() => { tfbotDiagnosticDiskPrunePromise = null; });
+    return tfbotDiagnosticDiskPrunePromise;
+}
+initializeTfbotDiagnosticDiskLog();
+async function flushTfbotDiagnosticPersistence(timeoutMs = 7000) {
+    const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 7000);
+    while (tfbotDiagnosticWriterRunning || tfbotDiagnosticQueue.length) {
+        if (Date.now() >= deadline) throw new Error('diagnostic_log_queue_flush_timeout');
+        await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    await tfbotDiagnosticDiskOperationChain;
+    await pruneTfbotDiagnosticDiskLog(true);
+    return true;
 }
 function enqueueTfbotDiagnosticRecord(record) {
     try {
@@ -132,7 +228,7 @@ function enqueueTfbotDiagnosticRecord(record) {
             tfbotDiagnosticDroppedEntries++;
             return;
         }
-        while (tfbotDiagnosticQueue.length && (tfbotDiagnosticQueue.length >= 1200 || tfbotDiagnosticQueuedBytes + lineBytes > TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES)) {
+        while (tfbotDiagnosticQueue.length && (tfbotDiagnosticQueue.length >= TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES || tfbotDiagnosticQueuedBytes + lineBytes > TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES)) {
             const removed = tfbotDiagnosticQueue.shift();
             tfbotDiagnosticQueuedBytes = Math.max(0, tfbotDiagnosticQueuedBytes - Buffer.byteLength(removed || '', 'utf8'));
             tfbotDiagnosticDroppedEntries++;
@@ -154,9 +250,19 @@ async function flushTfbotDiagnosticQueue() {
                 const dropped = tfbotDiagnosticDroppedEntries;
                 tfbotDiagnosticDroppedEntries = 0;
                 const overflowDate = new Date();
-                appendTfbotDiagnosticMemoryLine(`${JSON.stringify({ name: 'Bot (tfbot)', date: overflowDate.toISOString(), dateHaiti: formatTfbotHaitiTimestamp(overflowDate), timeZone: TFBOT_LOG_TIME_ZONE, codeVersion: TFBOT_CODE_VERSION, level: 'WARN', event: 'diagnostic-log-queue-overflow', content: `${dropped} entrée(s) de diagnostic ont été abandonnées pour protéger la mémoire et la latence du bot.` })}\n`);
+                batch.unshift(`${JSON.stringify({ name: 'Bot (tfbot)', date: overflowDate.toISOString(), dateHaiti: formatTfbotHaitiTimestamp(overflowDate), timeZone: TFBOT_LOG_TIME_ZONE, codeVersion: TFBOT_CODE_VERSION, level: 'WARN', event: 'diagnostic-log-queue-overflow', content: `${dropped} entrée(s) de diagnostic ont été abandonnées pour protéger la mémoire et la latence du bot.` })}\n`);
             }
             for (const line of batch) appendTfbotDiagnosticMemoryLine(line);
+            try {
+                await queueTfbotDiagnosticDiskOperation(async () => {
+                    await fs.promises.appendFile(TFBOT_DIAGNOSTIC_LOG_FILE, batch.join(''), { encoding: 'utf8', mode: 0o600 });
+                    tfbotDiagnosticDiskAvailable = true;
+                    await pruneTfbotDiagnosticDiskLog(false);
+                });
+            } catch (diskError) {
+                tfbotDiagnosticDiskAvailable = false;
+                tfbotOriginalConsole.warn('[tfbot-diagnostic-log-persist-failed]', { error: String(diskError?.message || diskError).slice(0, 300), memoryFallback: true });
+            }
         }
     } finally {
         tfbotDiagnosticWriterRunning = false;
@@ -242,6 +348,8 @@ for (const level of Object.keys(tfbotOriginalConsole)) {
     };
 }
 enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'diagnostic-log-start', content: 'Journal opérationnel du cluster démarré; les identifiants, codes, numéros et contenus privés sont masqués.' });
+const tfbotDiagnosticPruneTimer = setInterval(() => { void queueTfbotDiagnosticDiskOperation(() => pruneTfbotDiagnosticDiskLog(true)).catch(error => { tfbotDiagnosticDiskAvailable = false; tfbotOriginalConsole.warn('[tfbot-diagnostic-log-periodic-prune-failed]', { error: String(error?.message || error).slice(0, 300) }); }); }, TFBOT_DIAGNOSTIC_PRUNE_INTERVAL_MS);
+if (typeof tfbotDiagnosticPruneTimer.unref === 'function') tfbotDiagnosticPruneTimer.unref();
 
 function applyBaileysLidPnDecryptRetryPatch() {
     const marker = '__tfbotPrivateLidPnDecryptFallbackV119';
@@ -1553,7 +1661,7 @@ const baileysOwnLidRetryAddressingPatchStatus = applyBaileysOwnLidRetryAddressin
 const baileysMessageRetryManagerDeviceJidPatchStatus = { applied: false, notApplicable: true, reason: 'Baileys_6_7_23_uses_getMessage_and_socket_retry_cache_not_MessageRetryManager' };
 const baileysCompanionRegRefreshPatchStatus = applyBaileysCompanionRegRefreshPatch();
 const baileysPairingCodeProtocolPatchStatus = applyBaileysPairingCodeProtocolPatch();
-console.info('[tfbot-local-diagnostics-ready]', { sessionId: TFBOT_DIAGNOSTIC_SESSION_ID || null, selector: TFBOT_DIAGNOSTIC_SESSION_ID ? 'configured_session' : 'most_recent_active_session', endpoint: '/logs.txt', storage: 'bounded_volatile_memory_only', persistentLocalWrites: false, publicRead: true, access: 'public-redacted-log', writer: 'asynchronous_memory_queue', timeZone: TFBOT_LOG_TIME_ZONE });
+console.info('[tfbot-local-diagnostics-ready]', { sessionId: TFBOT_DIAGNOSTIC_SESSION_ID || null, selector: TFBOT_DIAGNOSTIC_SESSION_ID ? 'configured_session' : 'most_recent_active_session', endpoint: '/logs.txt', storage: 'persistent_file_bounded_17mb_7h', persistentLocalWrites: tfbotDiagnosticDiskAvailable, publicRead: true, access: 'public-redacted-log', writer: 'asynchronous_file_and_memory_queue', timeZone: TFBOT_LOG_TIME_ZONE });
 console.info('[baileys-lid-pn-decrypt-retry-patch]', baileysLidPnDecryptPatchStatus);
 console.info('[baileys-group-lid-pn-decrypt-retry-patch]', baileysGroupLidPnDecryptPatchStatus);
 console.info('[baileys-self-chat-placeholder-resend-patch]', baileysSelfChatPlaceholderResendPatchStatus);
@@ -1594,7 +1702,7 @@ function getTfbotInstalledPackageVersion(packageName) {
     return null;
 }
 const TFBOT_BAILEYS_VERSION = getTfbotInstalledPackageVersion('@whiskeysockets/baileys');
-enqueueTfbotDiagnosticRecord({ name: 'Bot (tfbot)', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ codeVersion: TFBOT_CODE_VERSION, releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION, timeZone: TFBOT_LOG_TIME_ZONE, baileysVersion: TFBOT_BAILEYS_VERSION, signalPeerAutoHeal: { enabled: true, threshold: SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD, windowMs: SIGNAL_RECOVERY_WINDOW_MS, cooldownMs: SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS, failureKinds: [...SIGNAL_PEER_AUTO_HEAL_FAILURE_KINDS], scope: 'one_peer_signal_session_records_and_pn_lid_aliases_only', deleteMethod: 'signalRepository.deleteSession_or_authState.keys.set_session_category_fallback', baileysAuthCredentialsDeleted: false, accountLogout: false, groupSenderKeysDeleted: false, allPeersDeleted: false }, diagnosticLogStorage: 'bounded_volatile_memory_only', persistedLocalDisk: false, logTimeZone: TFBOT_LOG_TIME_ZONE, activeWorkerRouting: 'retain_current_healthy_worker_until_repeated_health_failure', appendCommandPolicy: 'authenticated_from_me_explicit_command_within_70_seconds_in_private_or_group_chat_and_not_known_outgoing_echo' }) });
+enqueueTfbotDiagnosticRecord({ name: 'Bot (tfbot)', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ codeVersion: TFBOT_CODE_VERSION, releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION, timeZone: TFBOT_LOG_TIME_ZONE, baileysVersion: TFBOT_BAILEYS_VERSION, signalPeerAutoHeal: { enabled: true, threshold: SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD, windowMs: SIGNAL_RECOVERY_WINDOW_MS, cooldownMs: SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS, failureKinds: [...SIGNAL_PEER_AUTO_HEAL_FAILURE_KINDS], scope: 'one_peer_signal_session_records_and_pn_lid_aliases_only', deleteMethod: 'signalRepository.deleteSession_or_authState.keys.set_session_category_fallback', baileysAuthCredentialsDeleted: false, accountLogout: false, groupSenderKeysDeleted: false, allPeersDeleted: false }, diagnosticLogStorage: 'bounded_file_and_memory_17mb_7h', persistedLocalDisk: tfbotDiagnosticDiskAvailable, logTimeZone: TFBOT_LOG_TIME_ZONE, activeWorkerRouting: 'retain_current_healthy_worker_until_repeated_health_failure', appendCommandPolicy: 'authenticated_from_me_explicit_command_within_70_seconds_in_private_or_group_chat_and_not_known_outgoing_echo' }) });
 enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, baileysVersion: TFBOT_BAILEYS_VERSION, perChatInboundProcessing: baileysPerChatInboundProcessingPatchStatus, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, retryBaseKeyCollision: baileysRetryBaseKeyCollisionPatchStatus, groupLidOutboundAddressing: baileysLidAwareGroupOutboundAddressingPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, groupLidPnDecrypt: baileysGroupLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus, pairingCodeProtocol: baileysPairingCodeProtocolPatchStatus }) });
 const { MongoClient } = require('mongodb');
 const { Writable } = require('stream');
@@ -1999,9 +2107,10 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-09-r207-all-chat-append-commands-spinner-retry-global-inbound';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-20-r209-user-info-cache-public-list2-private-ai-sessions';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
+const TFBOT_REQUEST_TOKEN = 'addc43cc37af78efa8d35cf9f0b7d0f212e489e3a64f26839f23604de6a04bc0';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
 const TFBOT_ROUTER_RESOLVE_PATH = '/__tfbot/router/resolve';
 const TFBOT_ROUTER_OK_PATH = '/__tfbot/router/ok';
@@ -2020,11 +2129,10 @@ const TFBOT_PRIMARY_DOMAIN = Object.freeze({ host: 'tf.bot.adamdh7.org', url: 'h
 const TFBOT_COORDINATOR_HOST = 'tfbot7.onrender.com';
 const TFBOT_ROUTER_SERVING_DOMAINS = Object.freeze([
     TFBOT_PRIMARY_DOMAIN,
-    { host: 'tfbot2.onrender.com', url: 'https://tfbot2.onrender.com', priority: 1 },
-    { host: 'tfbot3.onrender.com', url: 'https://tfbot3.onrender.com', priority: 2 },
-    { host: 'tfbot4.onrender.com', url: 'https://tfbot4.onrender.com', priority: 3 },
-    { host: 'tfbot5.onrender.com', url: 'https://tfbot5.onrender.com', priority: 4 },
-    { host: 'tfbot6.onrender.com', url: 'https://tfbot6.onrender.com', priority: 5 }
+    { host: 'tfbot3.onrender.com', url: 'https://tfbot3.onrender.com', priority: 1 },
+    { host: 'tfbot4.onrender.com', url: 'https://tfbot4.onrender.com', priority: 2 },
+    { host: 'tfbot5.onrender.com', url: 'https://tfbot5.onrender.com', priority: 3 },
+    { host: 'tfbot6.onrender.com', url: 'https://tfbot6.onrender.com', priority: 4 }
 ]);
 const TFBOT_ROUTER_DOMAIN_BY_HOST = new Map(TFBOT_ROUTER_SERVING_DOMAINS.map(item => [item.host, item]));
 function normalizeTfbotHost(value) {
@@ -2045,7 +2153,7 @@ function detectTfbotRuntimeHost() {
     const externalHost = normalizeTfbotHost(process.env.RENDER_EXTERNAL_HOSTNAME || '');
     if (TFBOT_ROUTER_DOMAIN_BY_HOST.has(externalHost) || externalHost === TFBOT_COORDINATOR_HOST) return externalHost;
     const serviceName = String(process.env.RENDER_SERVICE_NAME || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
-    const serviceNumber = serviceName.match(/tfbot[-_]?([2-7])(?:$|[-_])/i) || serviceName.match(/^tfbot([2-7])$/i);
+    const serviceNumber = serviceName.match(/tfbot[-_]?([3-7])(?:$|[-_])/i) || serviceName.match(/^tfbot([3-7])$/i);
     if (serviceNumber) return `tfbot${serviceNumber[1]}.onrender.com`;
     if (/tfbot/.test(serviceName)) return TFBOT_PRIMARY_DOMAIN.host;
     const legacyHost = normalizeTfbotHost(process.env.TFBOT_INSTANCE_URL || '');
@@ -2113,7 +2221,8 @@ const BOT_TIME_ZONE = process.env.BOT_TIME_ZONE || 'America/Port-au-Prince';
 const AI_MAX_INPUT_CHARS = Math.max(1000, Number(process.env.AI_MAX_INPUT_CHARS || 12000));
 const SEARCH_QUERY_MAX_CHARS = Math.max(200, Number(process.env.SEARCH_QUERY_MAX_CHARS || 1200));
 const TFSERVER_AI_URL = String(process.env.TFSERVER_AI_URL || 'https://tfserver-ai.onrender.com').trim().replace(/\/+$/, '');
-const TFSERVER_AI_TOKEN = String(process.env.TFSERVER_AI_TOKEN || process.env.TOKEN || '').trim();
+const TFSERVER_AI_TOKEN = TFBOT_REQUEST_TOKEN;
+const tfServerAiUserRequestQueues = new Map();
 const TFBOT_MAX_COMMAND_AGE_MS = Math.max(1000, Math.min(70000, Number(process.env.TFBOT_MAX_COMMAND_AGE_MS || 70000)));
 
 function getTfbotTimestampMilliseconds(value) {
@@ -2150,13 +2259,13 @@ function getTfbotMessageTimestampInfo(message, fallbackReceivedAtMs = Date.now()
         const timestampMs = getTfbotTimestampMilliseconds(candidate.value);
         if (timestampMs > 0) {
             const clockOffsetMs = Number(nowMs) - timestampMs;
-            return { timestampMs, source: candidate.source, clockOffsetMs, differenceMs: Math.abs(clockOffsetMs), usedFallback: false };
+            return { timestampMs, source: candidate.source, clockOffsetMs, differenceMs: Math.max(0, clockOffsetMs), usedFallback: false };
         }
     }
     const fallback = Number(fallbackReceivedAtMs);
     const timestampMs = Number.isFinite(fallback) && fallback > 0 ? fallback : Number(nowMs) || Date.now();
     const clockOffsetMs = Number(nowMs) - timestampMs;
-    return { timestampMs, source: 'upsert_received_at_fallback', clockOffsetMs, differenceMs: Math.abs(clockOffsetMs), usedFallback: true };
+    return { timestampMs, source: 'upsert_received_at_fallback', clockOffsetMs, differenceMs: Math.max(0, clockOffsetMs), usedFallback: true };
 }
 
 function getTfbotAccountMessageClaimScope(sessionId, accountIdentity = '') {
@@ -2169,6 +2278,9 @@ function getTfbotAccountMessageClaimScope(sessionId, accountIdentity = '') {
 }
 const TFSERVER_AI_TIMEOUT_MS = Math.max(15000, Math.min(300000, Number(process.env.TFSERVER_AI_TIMEOUT_MS || 180000)));
 const TFSERVER_AI_DELETE_TIMEOUT_MS = Math.max(3000, Math.min(30000, Number(process.env.TFSERVER_AI_DELETE_TIMEOUT_MS || 12000)));
+const TFSERVER_AI_USER_INFO_TIMEOUT_MS = Math.max(5000, Math.min(30000, Number(process.env.TFSERVER_AI_USER_INFO_TIMEOUT_MS || 15000)));
+const TFSERVER_AI_USER_INFO_CLAIM_MS = Math.max(45000, Math.min(60000, Number(process.env.TFSERVER_AI_USER_INFO_CLAIM_MS || 45000)));
+const TFSERVER_AI_USER_INFO_WAIT_MS = Math.max(15000, Math.min(90000, Number(process.env.TFSERVER_AI_USER_INFO_WAIT_MS || 60000)));
 const TFSERVER_AI_CLEANUP_RETRY_MS = Math.max(10000, Math.min(300000, Number(process.env.TFSERVER_AI_CLEANUP_RETRY_MS || 30000)));
 const GROUP_SETTING_CACHE_TTL_MS = Math.max(1000, Math.min(15000, Number(process.env.GROUP_SETTING_CACHE_TTL_MS || 4000)));
 const GROUP_RULE_CACHE_TTL_MS = Math.max(1000, Math.min(15000, Number(process.env.GROUP_RULE_CACHE_TTL_MS || 4000)));
@@ -5013,6 +5125,26 @@ async function queuedSendMessageLegacy(sock, jid, content, options = {}, delayMs
 async function queuedSendMessage(sock, jid, content, options = {}, delayMs = 180) {
     const sessionId = findActiveSessionIdForSocket(sock);
     if (!sessionId) throw new Error('whatsapp_socket_session_replaced');
+    const plainTextOnly = content && typeof content === 'object' && typeof content.text === 'string' && !['image', 'video', 'audio', 'document', 'sticker', 'album', 'albumMessage', 'buttonsMessage', 'listMessage', 'templateMessage', 'location', 'contacts'].some(key => Object.prototype.hasOwnProperty.call(content, key));
+    if (plainTextOnly && Array.from(content.text).length > MAX_WHATSAPP_TEXT_CHARS) {
+        const parts = splitWhatsAppText(content.text, MAX_WHATSAPP_TEXT_CHARS);
+        let lastPartResult = null;
+        for (let index = 0; index < parts.length; index++) {
+            const partContent = { ...content, text: parts[index] };
+            if (Array.isArray(content.mentions) && content.mentions.length) {
+                const hasVisibleMentionTokens = content.mentions.some(mention => parts.some(part => part.includes(`@${String(mention).split('@')[0]}`)));
+                const mentions = hasVisibleMentionTokens
+                    ? content.mentions.filter(mention => parts[index].includes(`@${String(mention).split('@')[0]}`))
+                    : index === 0 ? content.mentions : [];
+                if (mentions.length) partContent.mentions = mentions;
+                else delete partContent.mentions;
+            }
+            const partOptions = index === 0 ? options : { ...options };
+            if (index > 0) delete partOptions.quoted;
+            lastPartResult = await queuedSendMessage(sock, jid, partContent, partOptions, delayMs);
+        }
+        return lastPartResult;
+    }
     const isGroupDestination = /@g\.us$/i.test(String(jid || '').trim());
     const fallbackActive = isSessionMessagingFallbackActive(sessionId);
     if (isGroupDestination || fallbackActive) {
@@ -7137,7 +7269,7 @@ async function postTfServerAi(payload, timeoutMs = TFSERVER_AI_TIMEOUT_MS) {
 }
 
 async function getTfServerAiUserPhoneNumber(sessionId, sock, senderCandidates = [], senderNumber = '', ownerPhone = '') {
-    const candidates = [ownerPhone, senderNumber, ...senderCandidates].filter(value => value !== undefined && value !== null && String(value).trim());
+    const candidates = [senderNumber, ...senderCandidates, ownerPhone].filter(value => value !== undefined && value !== null && String(value).trim());
     for (const candidate of candidates) {
         const phoneJid = normalizePhoneCacheJid(candidate);
         if (phoneJid) {
@@ -7159,36 +7291,156 @@ async function getTfServerAiUserPhoneNumber(sessionId, sock, senderCandidates = 
     throw new Error('tfserver_ai_user_phone_unavailable');
 }
 
-async function getTfServerAiConversationId(sessionId, userPhone) {
+async function getTfServerAiConversationId(sessionId, userPhone, userName = 'Inconnu', userLang = 'ht') {
     const normalizedSession = String(sessionId || '').trim();
     const tfid = normalizePhoneNumber(userPhone);
     if (!normalizedSession || !/^\d{6,20}$/.test(tfid) || /^0+$/.test(tfid)) throw new Error('tfserver_ai_user_phone_unavailable');
     if (!db) throw new Error('tfserver_ai_database_unavailable');
+    const collection = db.collection('tfbot_ai_conversations');
     const now = new Date();
-    await db.collection('tfbot_ai_conversations').updateOne(
+    const normalizedName = sanitizeSessionDisplayName(userName) || 'Inconnu';
+    const normalizedLanguage = ['fr', 'en', 'es', 'ht'].includes(String(userLang || '').toLowerCase()) ? String(userLang).toLowerCase() : 'ht';
+    const existing = await collection.findOne({ _id: tfid, tfid }, { projection: { _id: 1, prompt: 1, userInfo: 1, createdAt: 1 } });
+    await collection.updateOne(
         { _id: tfid },
         {
-            $set: { tfid, lastSessionId: normalizedSession, updatedAt: now, deletionPending: false },
+            $set: {
+                tfid,
+                lastSessionId: normalizedSession,
+                updatedAt: now,
+                deletionPending: false,
+                'userInfo.fullName': normalizedName,
+                'userInfo.personalWhatsAppNumber': tfid,
+                'userInfo.botLanguage': normalizedLanguage,
+                'userInfo.updatedAt': now
+            },
             $addToSet: { sessionIds: normalizedSession },
-            $setOnInsert: { sessionId: normalizedSession, createdAt: now }
+            $setOnInsert: { sessionId: normalizedSession, createdAt: now, prompt: false, 'userInfo.prompt': false }
         },
         { upsert: true }
     );
+    if (existing && existing.prompt !== true && existing?.userInfo?.prompt !== true && (existing.prompt === undefined || existing?.userInfo?.prompt === undefined)) {
+        await collection.updateOne(
+            { _id: tfid, tfid, prompt: { $exists: false }, 'userInfo.prompt': { $exists: false } },
+            { $set: { prompt: false, 'userInfo.prompt': false, promptInitializationState: 'pending', updatedAt: now } }
+        );
+    }
     return tfid;
 }
 
-async function callTfServerAiMessage(sessionId, userPhone, text, useSearch = false) {
+async function ensureTfServerAiUserInformation(tfid, userName, userPhone, userLang) {
+    const collection = db.collection('tfbot_ai_conversations');
+    const normalizedName = sanitizeSessionDisplayName(userName) || 'Inconnu';
+    const normalizedPhone = normalizePhoneNumber(userPhone);
+    const normalizedLanguage = ['fr', 'en', 'es', 'ht'].includes(String(userLang || '').toLowerCase()) ? String(userLang).toLowerCase() : 'ht';
+    const backgroundInformation = `Please keep this background information about me in mind for our future interactions :\n\nYou are Asistan.\n\n<user_information>\n* User’s full name: ${normalizedName}\n* User’s personal WhatsApp number: ${normalizedPhone}\n* User’s Bot (tfbot) language: ${normalizedLanguage}\n</user_information>\n\n<basic_directives>\n- Answer fluently in ${normalizedLanguage}, but [TOOL: ...] English(en) only, if it is not in English, you will not respond to the user's expectation.\n- Respond to the current request using the provided context and recorded memories.\n- [TOOL: ...] Syntax:\n[TOOL: {"name": "tool_name", "params": {"parameter_key": "parameter_value"}}] \n</basic_directives>`;
+    const claimId = `${process.pid}-${crypto.randomUUID()}`;
+    const deadline = Date.now() + TFSERVER_AI_USER_INFO_WAIT_MS;
+    while (Date.now() <= deadline) {
+        const current = await collection.findOne({ _id: tfid, tfid }, { projection: { prompt: 1, userInfo: 1, promptInitLeaseUntil: 1 } });
+        if (current?.prompt === true || current?.userInfo?.prompt === true) {
+            if (current.prompt !== true || current?.userInfo?.prompt !== true) {
+                await collection.updateOne({ _id: tfid, tfid }, { $set: { prompt: true, 'userInfo.prompt': true, promptInitializationState: 'ready' } });
+            }
+            return { initializedNow: false, promptSaved: true };
+        }
+        const now = new Date();
+        const claim = await collection.updateOne(
+            {
+                _id: tfid,
+                tfid,
+                prompt: { $ne: true },
+                $or: [
+                    { promptInitLeaseUntil: { $exists: false } },
+                    { promptInitLeaseUntil: null },
+                    { promptInitLeaseUntil: { $lte: now } }
+                ]
+            },
+            {
+                $set: {
+                    prompt: false,
+                    'userInfo.prompt': false,
+                    promptInitClaimId: claimId,
+                    promptInitLeaseUntil: new Date(now.getTime() + TFSERVER_AI_USER_INFO_CLAIM_MS),
+                    promptInitializationState: 'sending',
+                    'userInfo.fullName': normalizedName,
+                    'userInfo.personalWhatsAppNumber': normalizedPhone,
+                    'userInfo.botLanguage': normalizedLanguage,
+                    'userInfo.updatedAt': now,
+                    updatedAt: now
+                }
+            }
+        );
+        if (Number(claim?.modifiedCount || 0) === 1) {
+            try {
+                const informationResult = await postTfServerAi({ tfid, text: backgroundInformation }, TFSERVER_AI_USER_INFO_TIMEOUT_MS);
+                let informationConfirmation = null;
+                try { informationConfirmation = JSON.parse(String(informationResult.bodyText || '')); } catch (error) {}
+                if (informationConfirmation?.ok !== true) throw new Error('tfserver_ai_user_information_not_confirmed');
+                await collection.updateOne(
+                    { _id: tfid, tfid, promptInitClaimId: claimId },
+                    {
+                        $set: {
+                            prompt: true,
+                            'userInfo.prompt': true,
+                            promptInitializationState: 'ready',
+                            promptInitializedAt: new Date(),
+                            'userInfo.promptInitializedAt': new Date(),
+                            updatedAt: new Date()
+                        },
+                        $unset: { promptInitClaimId: 1, promptInitLeaseUntil: 1 }
+                    }
+                );
+                const confirmed = await collection.findOne({ _id: tfid, tfid }, { projection: { prompt: 1, userInfo: 1 } });
+                if (confirmed?.prompt !== true && confirmed?.userInfo?.prompt !== true) throw new Error('tfserver_ai_user_information_local_save_not_confirmed');
+                return { initializedNow: true, promptSaved: true };
+            } catch (error) {
+                await collection.updateOne(
+                    { _id: tfid, tfid, promptInitClaimId: claimId },
+                    {
+                        $set: { prompt: false, 'userInfo.prompt': false, promptInitializationState: 'pending', updatedAt: new Date() },
+                        $unset: { promptInitClaimId: 1, promptInitLeaseUntil: 1 }
+                    }
+                ).catch(() => {});
+                throw error;
+            }
+        }
+        const latest = await collection.findOne({ _id: tfid, tfid }, { projection: { prompt: 1, userInfo: 1, promptInitLeaseUntil: 1 } });
+        if (latest?.prompt === true || latest?.userInfo?.prompt === true) continue;
+        if (!latest?.promptInitLeaseUntil || new Date(latest.promptInitLeaseUntil).getTime() <= Date.now()) continue;
+        await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    throw new Error('tfserver_ai_user_information_initialization_in_progress');
+}
+
+function enqueueTfServerAiUserRequest(tfid, operation) {
+    const key = String(tfid || '').trim();
+    if (!key || typeof operation !== 'function') return Promise.reject(new Error('tfserver_ai_user_queue_invalid'));
+    const previous = tfServerAiUserRequestQueues.get(key) || Promise.resolve();
+    const current = previous.catch(() => {}).then(operation);
+    tfServerAiUserRequestQueues.set(key, current);
+    return current.finally(() => {
+        if (tfServerAiUserRequestQueues.get(key) === current) tfServerAiUserRequestQueues.delete(key);
+    });
+}
+async function callTfServerAiMessage(sessionId, userPhone, text, useSearch = false, userName = 'Inconnu', userLang = 'ht') {
     const query = clipLongText(String(text || '').trim(), useSearch ? SEARCH_QUERY_MAX_CHARS : AI_MAX_INPUT_CHARS);
     if (!query) throw new Error(useSearch ? 'search_query_empty' : 'ai_prompt_empty');
-    const tfid = await getTfServerAiConversationId(sessionId, userPhone);
-    const payload = useSearch
-        ? { tfid, text: query, action: { name: 'search', params: { query } } }
-        : { tfid, text: query };
-    const aiResult = await postTfServerAi(payload, TFSERVER_AI_TIMEOUT_MS);
-    const answer = String(aiResult.finalMessage || buildTfServerAiEventText(aiResult.bodyText) || '').trim();
-    if (!answer) throw new Error('tfserver_ai_empty_response');
-    console.info('[tfserver-ai-request-completed]', { sessionId, conversationHash: shortLogHash(tfid), mode: useSearch ? 'search' : 'chat', inputLength: query.length, responseLength: answer.length });
-    return answer;
+    const normalizedName = sanitizeSessionDisplayName(userName) || 'Inconnu';
+    const normalizedPhone = normalizePhoneNumber(userPhone);
+    const normalizedLanguage = ['fr', 'en', 'es', 'ht'].includes(String(userLang || '').toLowerCase()) ? String(userLang).toLowerCase() : 'ht';
+    const tfid = await getTfServerAiConversationId(sessionId, normalizedPhone, normalizedName, normalizedLanguage);
+    return enqueueTfServerAiUserRequest(tfid, async () => {
+        const profileState = await ensureTfServerAiUserInformation(tfid, normalizedName, normalizedPhone, normalizedLanguage);
+        const payload = useSearch
+            ? { tfid, text: query, action: { name: 'search', params: { query } } }
+            : { tfid, text: query };
+        const aiResult = await postTfServerAi(payload, TFSERVER_AI_TIMEOUT_MS);
+        const answer = String(aiResult.finalMessage || buildTfServerAiEventText(aiResult.bodyText) || '').trim();
+        if (!answer) throw new Error('tfserver_ai_empty_response');
+        console.info('[tfserver-ai-request-completed]', { sessionId, conversationHash: shortLogHash(tfid), mode: useSearch ? 'search' : 'chat', inputLength: query.length, responseLength: answer.length, userInformationConfirmed: true, userInformationInitializedNow: profileState.initializedNow === true });
+        return answer;
+    });
 }
 
 function normalizeTfServerAiGeneratedImageLinks(value) {
@@ -8765,7 +9017,8 @@ app.get('/logs.txt', (req, res) => {
     res.setHeader('X-TFBOT-Revision', TFBOT_CLUSTER_CODE_REVISION);
     res.setHeader('X-TFBOT-Release', TFBOT_CODE_RELEASE_ID);
     res.setHeader('X-TFBOT-Time-Zone', TFBOT_LOG_TIME_ZONE);
-    res.setHeader('X-TFBOT-Log-Storage', 'bounded-volatile-memory');
+    res.setHeader('X-TFBOT-Log-Storage', 'persistent-file-bounded');
+    res.setHeader('X-TFBOT-Log-Access', 'public-redacted');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
     res.setHeader('Pragma', 'no-cache');
@@ -8775,7 +9028,7 @@ app.get('/logs.txt', (req, res) => {
     const pendingLines = tfbotDiagnosticQueue.slice();
     const allRawLines = [...tfbotDiagnosticRecentLines, ...pendingLines].filter(Boolean);
     const showAllLines = String(req.query?.all || '') === '1' || String(req.query?.all || '').toLowerCase() === 'true';
-    const maxPublicLines = Math.max(100, Math.min(TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES, Number(req.query?.limit || 1600)));
+    const maxPublicLines = Math.max(100, Math.min(TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES, Number(req.query?.limit || 17000)));
     const rawLines = showAllLines ? allRawLines : allRawLines.slice(-maxPublicLines);
     let latestStoredDate = null;
     const safeLines = rawLines.map(line => {
@@ -8832,10 +9085,16 @@ app.get('/logs.txt', (req, res) => {
             evictedLines: tfbotDiagnosticEvictedLines,
             queueDroppedEntries: tfbotDiagnosticDroppedEntries,
             memoryBytes: tfbotDiagnosticRecentBytes + tfbotDiagnosticQueuedBytes,
-            memoryMaxBytes: TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES + TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES,
+            memoryMaxBytes: TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES,
+            queueMaxBytes: TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES,
+            diskMaxBytes: TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES,
+            maximumLines: TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES,
+            retentionHours: 7,
+            logFile: 'logs.txt',
+            logFileAvailable: tfbotDiagnosticDiskAvailable,
             truncated: tfbotDiagnosticEvictedLines > 0 || safeLines.length < allRawLines.length,
-            storageMode: 'bounded_volatile_memory_only',
-            persistedLocalDisk: false,
+            storageMode: 'persistent_jsonl_bounded_7h',
+            persistedLocalDisk: tfbotDiagnosticDiskAvailable,
             fullLogQuery: showAllLines
         })
     };
@@ -9017,7 +9276,7 @@ app.use(async (req, res, next) => {
 app.use((req, res, next) => {
     if (!TFBOT_CLUSTER_ENABLED || !db || req.method === 'OPTIONS' || isValidClusterHop(req) || normalizeTfbotRequestPath(req.path || '') === '/ok' || normalizeTfbotRequestPath(req.path || '') === TFBOT_CLUSTER_HEALTH_PATH || String(req.path || '') === TFBOT_WORKER_CONTROL_PATH || normalizeTfbotRequestPath(req.path || '') === TFBOT_WORKER_POLL_PATH || normalizeTfbotRequestPath(req.path || '') === TFBOT_WORKER_FAILURE_PATH || normalizeTfbotRequestPath(req.path || '').startsWith('/__tfbot/router/')) return next();
     const requestPath = normalizeTfbotRequestPath(req.path || '/');
-    if (requestPath === '/list' || requestPath === '/list/events' || requestPath === '/logs.txt') return next();
+    if (requestPath === '/list' || requestPath === '/list/events' || requestPath === '/logs.txt' || requestPath === '/list2') return next();
     if (/\.(?:css|js|mjs|map|png|jpe?g|webp|gif|svg|ico|woff2?|ttf|otf|mp4|webm|pdf)$/i.test(requestPath)) return next();
     void registerCurrentClusterInstance(false).catch(error => console.warn('[cluster-instance-page-touch-failed]', { path: requestPath, error: error?.message || String(error) }));
     clusterInFlightRequests++;
@@ -9035,15 +9294,12 @@ app.use((req, res, next) => {
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     const requestPath = normalizeTfbotRequestPath(req.path || '/').replace(/\/+$/, '') || '/';
     if (requestPath === '/ok' || requestPath === TFBOT_CLUSTER_HEALTH_PATH || requestPath === TFBOT_ROUTER_OK_PATH || requestPath === TFBOT_ROUTER_RESOLVE_PATH || requestPath === TFBOT_WORKER_CONTROL_PATH || requestPath === TFBOT_WORKER_POLL_PATH || requestPath === TFBOT_WORKER_FAILURE_PATH || isValidClusterHop(req)) return next();
-    if (requestPath === '/list' || requestPath === '/list/events' || requestPath === '/logs.txt') return next();
+    if (requestPath === '/list' || requestPath === '/list/events') return next();
     if (requestPath === '/') {
         if (isAllowedEmbeddedHomeRequest(req)) return next();
         return sendAccessDeniedPage(req, res);
     }
-    if (requestPath === '/list2') {
-        if (!isAuthorizedAdmin(req)) return res.status(401).type('text/plain').send('NON AUTORISE.');
-        return next();
-    }
+    if (requestPath === '/list2') return next();
     if (['/get-code', '/upload-qr'].includes(requestPath) && isSameOriginFrontendApiRequest(req)) return next();
     if (requestPath === '/get-code') {
         let originHost = null;
@@ -11274,7 +11530,8 @@ info_text: [
   }
 };
 
-const MAX_WHATSAPP_CAPTION_CHARS = 950;
+const MAX_WHATSAPP_CAPTION_CHARS = 1024;
+const MAX_WHATSAPP_TEXT_CHARS = 4096;
 
 function normalizeCaptionText(value) {
     return String(value ?? '').replace(/\r\n?/g, '\n').trim();
@@ -11351,6 +11608,32 @@ function splitExactCaptionText(value, maxChars = MAX_WHATSAPP_CAPTION_CHARS) {
     if (remaining) chunks.push(remaining);
     return chunks.length ? chunks : [''];
 }
+function splitWhatsAppText(value, maxChars = MAX_WHATSAPP_TEXT_CHARS) {
+    const source = String(value ?? '');
+    const limit = Math.max(1, Number(maxChars) || MAX_WHATSAPP_TEXT_CHARS);
+    const characters = Array.from(source);
+    if (characters.length <= limit) return [source];
+    const chunks = [];
+    let offset = 0;
+    while (offset < characters.length) {
+        const remaining = characters.length - offset;
+        if (remaining <= limit) {
+            chunks.push(characters.slice(offset).join(''));
+            break;
+        }
+        let boundary = limit;
+        const minimumBoundary = Math.floor(limit * 0.72);
+        for (let index = limit - 1; index >= minimumBoundary; index--) {
+            if (/\s/u.test(characters[offset + index])) {
+                boundary = index + 1;
+                break;
+            }
+        }
+        chunks.push(characters.slice(offset, offset + boundary).join(''));
+        offset += boundary;
+    }
+    return chunks.filter((chunk, index) => chunk.length || index === 0);
+}
 
 const outgoingImageNormalizationCache = new WeakMap();
 
@@ -11403,7 +11686,7 @@ async function sendImageCaptioned(sock, jid, imageBuffer, type, text, userName, 
     const bodies = exactCaptionMode
         ? splitExactCaptionText(fullCaption, MAX_WHATSAPP_CAPTION_CHARS)
         : splitCaptionBodies(type, text, userName, MAX_WHATSAPP_CAPTION_CHARS, preserveFormatting, ownerName, language);
-    const selectedBodies = sendOptions.longTextMode === 'truncate' ? bodies.slice(0, 1) : bodies;
+    const selectedBodies = bodies;
     const messageOptions = { ...(sendOptions.messageOptions || {}) };
     const resolveCaption = body => exactCaptionMode ? body : buildCaption(type, body, userName, preserveFormatting, ownerName, language);
     const resolveMentions = body => Array.isArray(sendOptions.mentions) && sendOptions.mentions.length
@@ -11529,15 +11812,10 @@ app.get(/^\/(?:.*\/)?TF-[A-Za-z0-9_-]{1,80}(?:\/.*)?$/i, handleTFSlugRequest);
 
 function isAuthorizedAdmin(req) {
     if (isValidClusterHop(req)) return true;
-    const expected = String(process.env.ADMIN_API_TOKEN || process.env.TOKEN || '');
+    const expected = TFBOT_REQUEST_TOKEN;
     const authorization = String(req.get('Authorization') || '');
-    const cookieToken = String(req.headers?.cookie || '').split(';').map(value => value.trim()).find(value => value.startsWith('tfbot_admin='))?.slice('tfbot_admin='.length) || '';
-    let decodedCookie = cookieToken;
-    try { decodedCookie = decodeURIComponent(cookieToken); } catch (error) {}
     const supplied = authorization.match(/^Bearer\s+(.+)$/i)?.[1]?.trim()
-        || String(req.get('X-API-Key') || req.get('X-API-Token') || '').trim()
-        || String(req.query?.token || '').trim()
-        || decodedCookie;
+        || String(req.get('X-API-Key') || req.get('X-API-Token') || '').trim();
     if (!expected || !supplied) return false;
     const expectedBuffer = Buffer.from(expected);
     const suppliedBuffer = Buffer.from(supplied);
@@ -11570,8 +11848,7 @@ function isEmbeddedStaticAssetRequest(req) {
 }
 
 function signTFConfirmation(id) {
-    const secret = String(process.env.TOKEN || process.env.ADMIN_API_TOKEN || '').trim();
-    if (!secret) throw new Error('TOKEN is required to sign confirmation links');
+    const secret = TFBOT_REQUEST_TOKEN;
     return crypto.createHmac('sha256', secret).update(`tf-confirm:${String(id)}`).digest('hex');
 }
 
@@ -11600,8 +11877,7 @@ function isBotIframeDocumentRequest(req, html = '') {
 }
 
 app.get('/list2', (req, res) => {
-    if (!(process.env.ADMIN_API_TOKEN || process.env.TOKEN)) return res.status(503).type('text/plain').send('MAINTENANCE DESACTIVE : configurez TOKEN ou ADMIN_API_TOKEN.');
-    if (!isAuthorizedAdmin(req)) return res.status(401).type('text/plain').send('NON AUTORISE.');
+    console.warn('[public-list2-purge-requested]', { method: req.method, requestId: req.get('x-request-id') || null });
     if (isPurging) return res.type('text/plain').send('SUPPRESSION DEJA EN COURS.');
     isPurging = true;
     res.type('text/plain').send('SUPPRESSION EN COURS. LES SESSIONS ET DONNEES SERONT EFFACEES SOUS PEU.');
@@ -17004,12 +17280,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             try {
                                 const shouldSendTyping = isOwnerReal || isPublicMode || internalCommand === 'ai' || internalCommand === 'cheche';
                                 let isTyping = shouldSendTyping;
-                                if (shouldSendTyping) await sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', from, msgId);
+                                if (shouldSendTyping) await sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', from, msgId).catch(error => console.warn('[command-presence-start-failed-continuing]', { sessionId, messageId: msgId, command: internalCommand, error: String(error?.message || error).slice(0, 240) }));
                                 let typingUpdateInFlight = false;
                                 const typingInterval = shouldSendTyping ? setInterval(async () => {
                                     if (!isTyping || typingUpdateInFlight) return;
                                     typingUpdateInFlight = true;
                                     try { await sendPresenceUpdateWithDiagnostics(sock, sessionId, 'composing', from, msgId); }
+                                    catch (error) { console.warn('[command-presence-refresh-failed]', { sessionId, messageId: msgId, command: internalCommand, error: String(error?.message || error).slice(0, 240) }); }
                                     finally { typingUpdateInFlight = false; }
                                 }, 5000) : null;
                                 
@@ -17085,7 +17362,56 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                 };
                                 const trackedQueuedSendMessage = async (...sendArgs) => {
                                     const destination = String(sendArgs[1] || from || '');
-                                    const payloadType = Object.keys(sendArgs[2] || {}).filter(key => !['mentions', 'quoted', 'contextInfo', 'messageContextInfo'].includes(key)).join(',') || 'message';
+                                    const originalPayload = sendArgs[2] || {};
+                                    const originalMentions = Array.isArray(originalPayload.mentions) ? originalPayload.mentions : [];
+                                    const visibleMentionsExist = originalMentions.some(mention => String(originalPayload.text || originalPayload.caption || '').includes(`@${String(mention).split('@')[0]}`));
+                                    const getMentionsForPart = (partText, partIndex) => visibleMentionsExist
+                                        ? originalMentions.filter(mention => String(partText || '').includes(`@${String(mention).split('@')[0]}`))
+                                        : partIndex === 0 ? originalMentions : [];
+                                    const mediaCaptionKey = ['image', 'video', 'document'].find(key => Object.prototype.hasOwnProperty.call(originalPayload, key));
+                                    if (mediaCaptionKey && typeof originalPayload.caption === 'string' && Array.from(originalPayload.caption).length > MAX_WHATSAPP_CAPTION_CHARS) {
+                                        const captionParts = splitWhatsAppText(originalPayload.caption, MAX_WHATSAPP_CAPTION_CHARS);
+                                        const firstPayload = { ...originalPayload, caption: captionParts[0] };
+                                        const firstMentions = getMentionsForPart(captionParts[0], 0);
+                                        if (firstMentions.length) firstPayload.mentions = firstMentions;
+                                        else delete firstPayload.mentions;
+                                        const firstArgs = sendArgs.slice();
+                                        firstArgs[2] = firstPayload;
+                                        let lastResult = await trackedQueuedSendMessage(...firstArgs);
+                                        for (let index = 1; index < captionParts.length; index++) {
+                                            const nextPayload = { text: captionParts[index] };
+                                            const nextMentions = getMentionsForPart(captionParts[index], index);
+                                            if (nextMentions.length) nextPayload.mentions = nextMentions;
+                                            const nextArgs = sendArgs.slice();
+                                            nextArgs[2] = nextPayload;
+                                            nextArgs[3] = { ...(sendArgs[3] || {}) };
+                                            delete nextArgs[3].quoted;
+                                            lastResult = await trackedQueuedSendMessage(...nextArgs);
+                                        }
+                                        return lastResult;
+                                    }
+                                    const plainTextOnly = typeof originalPayload.text === 'string' && !['image', 'video', 'audio', 'document', 'sticker', 'album', 'albumMessage', 'buttonsMessage', 'listMessage', 'templateMessage', 'location', 'contacts'].some(key => Object.prototype.hasOwnProperty.call(originalPayload, key));
+                                    if (plainTextOnly && Array.from(originalPayload.text).length > MAX_WHATSAPP_TEXT_CHARS) {
+                                        const textParts = splitWhatsAppText(originalPayload.text, MAX_WHATSAPP_TEXT_CHARS);
+                                        let lastResult = null;
+                                        for (let index = 0; index < textParts.length; index++) {
+                                            const nextPayload = { ...originalPayload, text: textParts[index] };
+                                            if (originalMentions.length) {
+                                                const nextMentions = getMentionsForPart(textParts[index], index);
+                                                if (nextMentions.length) nextPayload.mentions = nextMentions;
+                                                else delete nextPayload.mentions;
+                                            }
+                                            const nextArgs = sendArgs.slice();
+                                            nextArgs[2] = nextPayload;
+                                            if (index > 0) {
+                                                nextArgs[3] = { ...(sendArgs[3] || {}) };
+                                                delete nextArgs[3].quoted;
+                                            }
+                                            lastResult = await trackedQueuedSendMessage(...nextArgs);
+                                        }
+                                        return lastResult;
+                                    }
+                                    const payloadType = Object.keys(originalPayload).filter(key => !['mentions', 'quoted', 'contextInfo', 'messageContextInfo'].includes(key)).join(',') || 'message';
                                     const useGroupLegacy = /@g\.us$/i.test(destination);
                                     const forceLegacy = sendArgs[5] === true;
                                     const useLegacy = forceLegacy || useGroupLegacy || isSessionMessagingFallbackActive(sessionId);
@@ -17139,7 +17465,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                         language: messageLang,
                                         preserveSourceImage: true,
                                         messageOptions,
-                                        longTextMode: internalCommand === 'lien' ? 'truncate' : (options.longTextMode || 'split')
+                                        longTextMode: options.longTextMode || 'split'
                                     };
                                 };
                                 const executeAdaptiveFormattedSend = async (send, responseType = 'text_or_media') => {
@@ -18169,7 +18495,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                             }
                                             try {
                                                 const aiUserPhone = await getTfServerAiUserPhoneNumber(sessionId, sock, [sender, ...senderJids], sNum, isOwnerReal ? authenticatedAccountNumber : '');
-                                                const aiResponseText = await callTfServerAiMessage(sessionId, aiUserPhone, promptText, false);
+                                                const aiResponseText = await callTfServerAiMessage(sessionId, aiUserPhone, promptText, false, pushName, messageLang);
                                                 if (isCancelled) return;
                                                 const aiDelivery = await sendTfServerAiReply(sock, from, aiResponseText, trackedQueuedSendMessage, m);
                                                 terminalResponseSent = true;
@@ -18246,8 +18572,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                             try {
                                                 const pairingApiBase = TFBOT_INTERNAL_API_BASE_URL || TFBOT_CLUSTER_INSTANCE_URL || process.env.RENDER_EXTERNAL_URL || TF_BOT_BASE_URL;
                                                 if (!pairingApiBase) throw new Error('pairing_api_not_configured');
-                                                const internalApiToken = String(process.env.ADMIN_API_TOKEN || process.env.TOKEN || '').trim();
-                                                if (!internalApiToken) throw new Error('internal_api_token_not_configured');
+                                                const internalApiToken = TFBOT_REQUEST_TOKEN;
                                                 const pairingApiUrl = new URL('/get-code', `${pairingApiBase}/`).toString();
                                                 let response;
                                                 let responseText;
@@ -18478,7 +18803,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                             try {
                                                 const searchQuery = clipLongText(args, SEARCH_QUERY_MAX_CHARS);
                                                 const searchUserPhone = await getTfServerAiUserPhoneNumber(sessionId, sock, [sender, ...senderJids], sNum, isOwnerReal ? authenticatedAccountNumber : '');
-                                                const searchAIResponse = await callTfServerAiMessage(sessionId, searchUserPhone, searchQuery, true);
+                                                const searchAIResponse = await callTfServerAiMessage(sessionId, searchUserPhone, searchQuery, true, pushName, messageLang);
                                                 if (isCancelled) return;
                                                 const searchDelivery = await sendTfServerAiReply(sock, from, searchAIResponse, trackedQueuedSendMessage, m);
                                                 terminalResponseSent = true;
@@ -19624,6 +19949,7 @@ async function shutdownServer(signal) {
     });
     console.info('[server-shutdown-completed]', { signal, processInstanceId });
     try { if (mongoClient) await mongoClient.close(); } catch (error) { console.warn('[server-shutdown-mongo-close-failed]', error?.message || String(error)); }
+    try { await flushTfbotDiagnosticPersistence(7000); } catch (error) { tfbotOriginalConsole.warn('[tfbot-diagnostic-shutdown-flush-failed]', { error: String(error?.message || error).slice(0, 300) }); }
 }
 
 for (const signal of ['SIGTERM', 'SIGINT']) {
@@ -19650,8 +19976,8 @@ async function main() {
         clusterServingDomains: TFBOT_ROUTER_SERVING_DOMAINS.map(item => item.host),
         clusterDomainRouter: true,
         clusterDomainDetectionUsesRenderDefaults: true,
-        clusterDomainSelectionPriority: 'tf-bot-then-tfbot2-through-tfbot6',
-        clusterDomainSelectionMode: 'strict-priority-tf-bot-then-tfbot2-then-tfbot3-only-when-previous-domain-does-not-respond',
+        clusterDomainSelectionPriority: 'tf-bot-then-tfbot3-through-tfbot6',
+        clusterDomainSelectionMode: 'strict-priority-tf-bot-then-tfbot3-only-when-previous-domain-does-not-respond',
         clusterWorkerCoordinatorPollMs: TFBOT_WORKER_COORDINATOR_POLL_MS,
         clusterWorkerStartupIndependent: true,
         clusterWorkerRequiresSimultaneousStartup: false,
@@ -19687,7 +20013,7 @@ async function main() {
         aiDispatchPolicy: 'ai-ia-asistan-iu-tfasistan-prefix-required-at-parser-and-handler',
         actionErrorExplanation: 'localized-static-fallback-no-ai-request',
         signalKeyCacheIsolation: 'deep-copy-on-cache-read-and-write-no-shared-mutable-session-object',
-        routerProbePolicy: 'keep_current_active_host_and_fail_over_only_after_a_final_send_failure; order_primary_then_tfbot2_through_tfbot6',
+        routerProbePolicy: 'keep_current_active_host_and_fail_over_only_after_a_final_send_failure; order_primary_then_tfbot3_through_tfbot6',
         companionDeviceMessages: 'dispatch-readable-own-device-commands-and-ignore-only-known-bot-echoes',
         pairingPendingSessionTtlMs: PAIRING_SESSION_TTL_MS,
         pairingConnectedSocketStates: [1, 'OPEN'],
