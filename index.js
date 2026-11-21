@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'tfbot-v209';
+const TFBOT_CODE_VERSION = 'tfbot-v211';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
 const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
 let tfbotBaileysSocketVersionCache = null;
@@ -1705,7 +1705,8 @@ const TFBOT_BAILEYS_VERSION = getTfbotInstalledPackageVersion('@whiskeysockets/b
 enqueueTfbotDiagnosticRecord({ name: 'Bot (tfbot)', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ codeVersion: TFBOT_CODE_VERSION, releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION, timeZone: TFBOT_LOG_TIME_ZONE, baileysVersion: TFBOT_BAILEYS_VERSION, signalPeerAutoHeal: { enabled: true, threshold: SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD, windowMs: SIGNAL_RECOVERY_WINDOW_MS, cooldownMs: SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS, failureKinds: [...SIGNAL_PEER_AUTO_HEAL_FAILURE_KINDS], scope: 'one_peer_signal_session_records_and_pn_lid_aliases_only', deleteMethod: 'signalRepository.deleteSession_or_authState.keys.set_session_category_fallback', baileysAuthCredentialsDeleted: false, accountLogout: false, groupSenderKeysDeleted: false, allPeersDeleted: false }, diagnosticLogStorage: 'bounded_file_and_memory_17mb_7h', persistedLocalDisk: tfbotDiagnosticDiskAvailable, logTimeZone: TFBOT_LOG_TIME_ZONE, activeWorkerRouting: 'retain_current_healthy_worker_until_repeated_health_failure', appendCommandPolicy: 'authenticated_from_me_explicit_command_within_70_seconds_in_private_or_group_chat_and_not_known_outgoing_echo' }) });
 enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, baileysVersion: TFBOT_BAILEYS_VERSION, perChatInboundProcessing: baileysPerChatInboundProcessingPatchStatus, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, retryBaseKeyCollision: baileysRetryBaseKeyCollisionPatchStatus, groupLidOutboundAddressing: baileysLidAwareGroupOutboundAddressingPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, groupLidPnDecrypt: baileysGroupLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus, pairingCodeProtocol: baileysPairingCodeProtocolPatchStatus }) });
 const { MongoClient } = require('mongodb');
-const { Writable } = require('stream');
+const { Readable, Writable } = require('stream');
+const { pipeline } = require('stream/promises');
 const zlib = require('zlib');
 
 function collectSignalJidHints(value, field = '', depth = 0, seen = new WeakSet(), output = []) {
@@ -2107,10 +2108,10 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-20-r209-user-info-cache-public-list2-private-ai-sessions';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-21-r211-admin-disconnect-caption-preserve-account-profile';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
-const TFBOT_REQUEST_TOKEN = 'addc43cc37af78efa8d35cf9f0b7d0f212e489e3a64f26839f23604de6a04bc0';
+const TFBOT_REQUEST_TOKEN = 'Bot (tfbot)';
 const TFBOT_CLUSTER_HEALTH_PATH = '/__tfbot/cluster/health';
 const TFBOT_ROUTER_RESOLVE_PATH = '/__tfbot/router/resolve';
 const TFBOT_ROUTER_OK_PATH = '/__tfbot/router/ok';
@@ -2221,7 +2222,7 @@ const BOT_TIME_ZONE = process.env.BOT_TIME_ZONE || 'America/Port-au-Prince';
 const AI_MAX_INPUT_CHARS = Math.max(1000, Number(process.env.AI_MAX_INPUT_CHARS || 12000));
 const SEARCH_QUERY_MAX_CHARS = Math.max(200, Number(process.env.SEARCH_QUERY_MAX_CHARS || 1200));
 const TFSERVER_AI_URL = String(process.env.TFSERVER_AI_URL || 'https://tfserver-ai.onrender.com').trim().replace(/\/+$/, '');
-const TFSERVER_AI_TOKEN = TFBOT_REQUEST_TOKEN;
+const TFSERVER_AI_TOKEN = 'addc43cc37af78efa8d35cf9f0b7d0f212e489e3a64f26839f23604de6a04bc0';
 const tfServerAiUserRequestQueues = new Map();
 const TFBOT_MAX_COMMAND_AGE_MS = Math.max(1000, Math.min(70000, Number(process.env.TFBOT_MAX_COMMAND_AGE_MS || 70000)));
 
@@ -2284,7 +2285,7 @@ const TFSERVER_AI_USER_INFO_WAIT_MS = Math.max(15000, Math.min(90000, Number(pro
 const TFSERVER_AI_CLEANUP_RETRY_MS = Math.max(10000, Math.min(300000, Number(process.env.TFSERVER_AI_CLEANUP_RETRY_MS || 30000)));
 const GROUP_SETTING_CACHE_TTL_MS = Math.max(1000, Math.min(15000, Number(process.env.GROUP_SETTING_CACHE_TTL_MS || 4000)));
 const GROUP_RULE_CACHE_TTL_MS = Math.max(1000, Math.min(15000, Number(process.env.GROUP_RULE_CACHE_TTL_MS || 4000)));
-const CLOUDFLARE_API_BASE_URL = String(process.env.CLOUDFLARE_API_BASE_URL || '').trim().replace(/\/+$/, '');
+const CLOUDFLARE_API_BASE_URL = String(process.env.CLOUDFLARE_API_BASE_URL || 'https://api.cloudflare.com/client/v4').trim().replace(/\/+$/, '');
 const BREF_UPLOAD_URL = String(process.env.BREF_UPLOAD_URL || '').trim();
 const TF_BOT_BASE_URL = String(process.env.TF_BOT_BASE_URL || process.env.RENDER_EXTERNAL_URL || 'https://tf.bot.adamdh7.org').trim().replace(/\/+$/, '');
 const TFBOT_INTERNAL_API_BASE_URL = String(TFBOT_CLUSTER_INSTANCE_URL || process.env.TFBOT_INTERNAL_API_URL || process.env.TF_BOT_INTERNAL_API_URL || process.env.RENDER_EXTERNAL_URL || TF_BOT_BASE_URL).trim().replace(/\/+$/, '');
@@ -2304,29 +2305,45 @@ function parseCloudflareAccounts() {
         seen.add(`${id}:${token}`);
         accounts.push({ accountId: id, apiToken: token });
     };
-    const raw = String(process.env.CF_ACCOUNTS || '').trim();
-    if (!raw) return accounts;
-    try {
-        const parsed = JSON.parse(raw);
-        const entries = Array.isArray(parsed) ? parsed : Object.values(parsed || {});
-        for (const item of entries) {
-            if (typeof item === 'string') {
-                const split = item.match(/^\s*([^:,;\s]+)\s*:\s*(.+?)\s*$/);
-                if (split) add(split[1], split[2]);
-            } else if (item && typeof item === 'object') {
-                add(item.accountId || item.account_id || item.id, item.apiToken || item.api_token || item.token);
-            }
-        }
-    } catch (e) {
-        for (const item of raw.split(/[,;\n]+/)) {
-            const split = item.match(/^\s*([^:,;\s]+)\s*:\s*(.+?)\s*$/);
+    const addEntry = item => {
+        if (typeof item === 'string') {
+            const split = item.match(/^\s*([^:,;=\s]+)\s*[:=]\s*(.+?)\s*$/);
             if (split) add(split[1], split[2]);
+        } else if (item && typeof item === 'object') {
+            add(item.accountId || item.account_id || item.id, item.apiToken || item.api_token || item.token);
+        }
+    };
+    const raw = String(process.env.CF_ACCOUNTS || '').trim();
+    if (raw) {
+        try {
+            const parsed = JSON.parse(raw);
+            const entries = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.accounts) ? parsed.accounts : parsed?.accountId || parsed?.account_id || parsed?.id ? [parsed] : Object.entries(parsed || {}).map(([key, value]) => typeof value === 'string' ? { accountId: key, apiToken: value } : value);
+            for (const item of entries) addEntry(item);
+        } catch (error) {
+            for (const item of raw.split(/[,;\n]+/)) addEntry(item);
         }
     }
+    add(process.env.CF_ACCOUNT_ID || process.env.CLOUDFLARE_ACCOUNT_ID, process.env.CF_API_TOKEN || process.env.CLOUDFLARE_API_TOKEN);
+    const indexedAccounts = new Map();
+    for (const [key, value] of Object.entries(process.env)) {
+        const accountMatch = key.match(/^(?:CF|CLOUDFLARE)_ACCOUNT_ID_(\d+)$/i);
+        const tokenMatch = key.match(/^(?:CF|CLOUDFLARE)_API_TOKEN_(\d+)$/i);
+        if (accountMatch) {
+            const item = indexedAccounts.get(accountMatch[1]) || {};
+            item.accountId = value;
+            indexedAccounts.set(accountMatch[1], item);
+        }
+        if (tokenMatch) {
+            const item = indexedAccounts.get(tokenMatch[1]) || {};
+            item.apiToken = value;
+            indexedAccounts.set(tokenMatch[1], item);
+        }
+    }
+    for (const item of indexedAccounts.values()) add(item.accountId, item.apiToken);
     return accounts;
 }
 const cloudflareAccounts = parseCloudflareAccounts();
-const imageModels = [...new Set([process.env.AI_MODEL_IMAGE, ...String(process.env.AI_MODEL_IMAGE_FALLBACKS || '').split(/[,;\s]+/)].filter(Boolean))];
+const imageModels = [...new Set([process.env.AI_MODEL_IMAGE || '@cf/black-forest-labs/flux-1-schnell', ...String(process.env.AI_MODEL_IMAGE_FALLBACKS || '').split(/[,;\s]+/)].filter(Boolean))];
 let cloudflareAccountIndex = 0;
 let cloudflareAccountIndexInitialized = false;
 let cloudflareAccountIndexInitPromise = null;
@@ -5308,7 +5325,8 @@ const TFBOT_LOGICAL_COLLECTIONS = new Set([
     'session_owners',
     'session_runtime_locks',
     'tfbot_ai_conversations',
-    'user_preferences'
+    'user_preferences',
+    'session_preserved_data'
 ]);
 
 function cloneMongoValue(value) {
@@ -5648,11 +5666,13 @@ async function connectMongo(options = {}) {
         await db.collection('lid_phone_mappings').createIndex({ sessionId: 1, phone: 1 }, { name: 'lid_phone_mappings_session_phone_lookup' });
         await db.collection('user_preferences').createIndex({ sessionId: 1, sender: 1 }, { name: 'user_preferences_session_sender' });
         await db.collection('user_preferences').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'user_preferences_expire_at_ttl' });
+        await db.collection('session_preserved_data').createIndex({ accountPhone: 1, kind: 1, sourceId: 1 }, { unique: true, name: 'session_preserved_account_kind_source' });
         await db.collection('group_del2').createIndex({ sessionId: 1, gjid: 1, targetJid: 1 });
         await db.collection('group_del3').createIndex({ sessionId: 1, gjid: 1, messageFormat: 1 }, { name: 'group_del3_format_lookup' });
         await db.collection('session_runtime_locks').createIndex({ leaseUntil: 1 }, { expireAfterSeconds: 0, name: 'session_runtime_locks_lease_ttl' });
         await db.collection('session_account_runtime_locks').createIndex({ leaseUntil: 1 }, { expireAfterSeconds: 0, name: 'session_account_runtime_locks_lease_ttl' });
         await db.collection('cluster_instances').createIndex({ status: 1, leaseUntil: 1, activeSessionCount: 1 }, { name: 'cluster_instances_candidate_lookup' });
+        await db.collection('admin_session_operations').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0, name: 'admin_session_operations_expiry_ttl' });
         for (const [collectionName, indexName] of [
             ['baileys_outgoing_messages', 'baileys_retry_message_lookup'],
             ['baileys_outgoing_messages', 'baileys_retry_message_account_lookup'],
@@ -7561,6 +7581,123 @@ async function clearTfServerAiSessionsForSession(sessionId) {
     return { cleared, pending };
 }
 
+const SESSION_PRESERVED_OWNER_FIELDS = ['Name', 'name', 'lang', 'language', 'Lang', 'mode', 'Mode', 'format', 'Format', 'OwnerName', 'ownerName'];
+const SESSION_PRESERVED_COLLECTIONS = ['user_preferences', 'group_settings', 'group_del2', 'group_del3'];
+
+function getPreservedSessionSourceId(kind, document) {
+    if (kind === 'user_preferences') return String(document?.sender || document?._id || '');
+    if (kind === 'group_settings') return String(document?.gjid || '');
+    if (kind === 'group_del2') return `${String(document?.gjid || '')}|${String(document?.targetJid || '')}`;
+    if (kind === 'group_del3') return `${String(document?.gjid || '')}|${String(document?.messageFormat || '')}`;
+    return 'profile';
+}
+
+function getPreservedSessionRecordId(accountPhone, kind, sourceId) {
+    return crypto.createHash('sha256').update(`${accountPhone}|${kind}|${sourceId}`).digest('hex');
+}
+
+async function preserveSessionScopedDataForAccount(sessionId, ownerRecord = null, runtime = null) {
+    if (!db || !sessionId) return { preserved: false, reason: 'database_or_session_unavailable', count: 0 };
+    const rawPhone = getStoredSessionOwnerPhone(ownerRecord || {})
+        || normalizePhoneNumber(getAuthenticatedPhoneNumber(runtime?.sock?.user || null, runtime?.authState?.creds || null) || runtime?.number || '');
+    if (!/^\d{6,20}$/.test(rawPhone) || /^0+$/.test(rawPhone)) return { preserved: false, reason: 'account_phone_unavailable', count: 0 };
+    const accountPhone = rawPhone;
+    const preserved = db.collection('session_preserved_data');
+    const now = new Date();
+    const writes = [];
+    const ownerFields = Object.fromEntries(SESSION_PRESERVED_OWNER_FIELDS.filter(key => ownerRecord && ownerRecord[key] !== undefined && ownerRecord[key] !== null && ownerRecord[key] !== '').map(key => [key, ownerRecord[key]]));
+    ownerFields.Number = accountPhone;
+    writes.push({ kind: 'owner', sourceId: 'profile', data: ownerFields });
+    const collections = await Promise.all(SESSION_PRESERVED_COLLECTIONS.map(name => db.collection(name).find({ sessionId }).toArray()));
+    for (let index = 0; index < SESSION_PRESERVED_COLLECTIONS.length; index++) {
+        const kind = SESSION_PRESERVED_COLLECTIONS[index];
+        for (const source of collections[index]) {
+            const sourceId = getPreservedSessionSourceId(kind, source);
+            if (!sourceId || sourceId === '|' || sourceId === 'undefined') continue;
+            const data = { ...source };
+            delete data._id;
+            delete data.sessionId;
+            writes.push({ kind, sourceId, data });
+        }
+    }
+    for (let index = 0; index < writes.length; index += 100) {
+        const batch = writes.slice(index, index + 100);
+        await Promise.all(batch.map(record => preserved.updateOne(
+            { _id: getPreservedSessionRecordId(accountPhone, record.kind, record.sourceId) },
+            { $set: { accountPhone, kind: record.kind, sourceId: record.sourceId, data: record.data, preservedFromSessionId: sessionId, updatedAt: now } },
+            { upsert: true }
+        )));
+    }
+    console.info('[session-persistent-data-preserved]', { sessionId, accountPhoneHash: shortLogHash(accountPhone), records: writes.length, collections: SESSION_PRESERVED_COLLECTIONS });
+    return { preserved: true, accountPhone, count: writes.length };
+}
+
+async function restorePreservedSessionDataForAccount(sessionId, accountPhone) {
+    const phone = normalizePhoneNumber(accountPhone);
+    if (!db || !sessionId || !/^\d{6,20}$/.test(phone) || /^0+$/.test(phone)) return { restored: 0, reason: 'account_identity_unavailable' };
+    const preserved = db.collection('session_preserved_data');
+    const records = await preserved.find({ accountPhone: phone }).limit(20000).toArray();
+    if (!records.length) return { restored: 0, reason: 'no_saved_profile' };
+    let restored = 0;
+    const ownerRecord = records.find(record => record.kind === 'owner' && record.data && typeof record.data === 'object');
+    if (ownerRecord) {
+        const ownerFields = { ...ownerRecord.data, Number: phone };
+        delete ownerFields.sessionId;
+        delete ownerFields._id;
+        await db.collection('session_owners').updateOne(
+            { sessionId },
+            { $set: ownerFields, $setOnInsert: { sessionId, createdAt: new Date() } },
+            { upsert: true }
+        );
+        restored++;
+    }
+    for (const record of records) {
+        const data = record?.data && typeof record.data === 'object' ? { ...record.data } : null;
+        if (!data || record.kind === 'owner') continue;
+        delete data._id;
+        delete data.sessionId;
+        let selector = null;
+        if (record.kind === 'user_preferences' && data.sender) selector = { sessionId, sender: data.sender };
+        else if (record.kind === 'group_settings' && data.gjid) selector = { sessionId, gjid: data.gjid };
+        else if (record.kind === 'group_del2' && data.gjid && data.targetJid) selector = { sessionId, gjid: data.gjid, targetJid: data.targetJid };
+        else if (record.kind === 'group_del3' && data.gjid && data.messageFormat) selector = { sessionId, gjid: data.gjid, messageFormat: data.messageFormat };
+        if (!selector) continue;
+        await db.collection(record.kind).updateOne(
+            selector,
+            { $setOnInsert: { ...data, sessionId, restoredFromAccountPhone: phone, restoredAt: new Date() } },
+            { upsert: true }
+        );
+        restored++;
+    }
+    console.info('[session-persistent-data-restored]', { sessionId, accountPhoneHash: shortLogHash(phone), records: restored });
+    return { restored, accountPhone: phone };
+}
+
+async function detachTfServerAiSessionsFromSession(sessionId) {
+    const id = String(sessionId || '').trim();
+    if (!id || !db) return { detached: 0 };
+    const timer = tfServerAiCleanupTimers.get(id);
+    if (timer) clearTimeout(timer);
+    tfServerAiCleanupTimers.delete(id);
+    const collection = db.collection('tfbot_ai_conversations');
+    const records = await collection.find({ $or: [{ sessionId: id }, { lastSessionId: id }, { sessionIds: id }] }, { projection: { _id: 1, sessionId: 1, lastSessionId: 1, sessionIds: 1 } }).toArray();
+    let detached = 0;
+    for (const record of records) {
+        const associated = [...new Set([...(Array.isArray(record.sessionIds) ? record.sessionIds : []), record.sessionId].map(value => String(value || '').trim()).filter(Boolean))];
+        const remaining = associated.filter(value => value !== id);
+        const update = { $pull: { sessionIds: id }, $set: { updatedAt: new Date() } };
+        if (record.sessionId === id) {
+            if (remaining.length) update.$set.sessionId = remaining[0];
+            else update.$unset = { ...(update.$unset || {}), sessionId: 1 };
+        }
+        if (record.lastSessionId === id) update.$unset = { ...(update.$unset || {}), lastSessionId: 1 };
+        await collection.updateOne({ _id: record._id }, update);
+        detached++;
+    }
+    console.info('[tfserver-ai-profile-preserved-after-session-logout]', { sessionId, conversationsDetached: detached, userMemoryDeleted: false, promptMarkerPreserved: true });
+    return { detached };
+}
+
 async function deleteMongoSession(sessionId) {
     clearFreshPairingCleanupRetry(sessionId);
     clearPairingChallengeTimer(sessionId);
@@ -7569,7 +7706,7 @@ async function deleteMongoSession(sessionId) {
     try {
         if (!db || !sessionId) throw new Error('session_delete_database_or_id_unavailable');
         const now = new Date();
-        const ownerRecord = await db.collection('session_owners').findOne({ sessionId }, { projection: { ownerInstanceId: 1, ownerLeaseUntil: 1, connectionStatus: 1 } }).catch(() => null);
+        const ownerRecord = await db.collection('session_owners').findOne({ sessionId }).catch(() => null);
         const ownerLeaseUntil = new Date(ownerRecord?.ownerLeaseUntil || 0).getTime();
         if (TFBOT_CLUSTER_ENABLED && ownerRecord?.ownerInstanceId && ownerRecord.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && ownerLeaseUntil > now.getTime()) throw new Error('session_delete_blocked_by_foreign_owner_lease');
         const [foreignSessionLock, foreignAccountLock] = await Promise.all([
@@ -7579,33 +7716,45 @@ async function deleteMongoSession(sessionId) {
         if (foreignSessionLock || foreignAccountLock) throw new Error('session_delete_blocked_by_foreign_runtime_lock');
         const currentRuntime = activeSessions.get(sessionId);
         if (currentRuntime?.sock && isAuthenticatedSocketOperational(currentRuntime, currentRuntime.sock) && !['reauth_required', 'duplicate_account', 'deconnecte'].includes(String(currentRuntime.status || '').toLowerCase())) throw new Error('session_delete_blocked_while_socket_authenticated');
+        const reconnectTimer = reconnectTimers.get(sessionId);
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimers.delete(sessionId);
+        reconnectRetryDueAt.delete(sessionId);
+        const sessionRetryTimer = sessionLockRetryTimers.get(sessionId);
+        if (sessionRetryTimer) clearTimeout(sessionRetryTimer);
+        sessionLockRetryTimers.delete(sessionId);
+        sessionLockRetryDueAt.delete(sessionId);
         const invalidTimer = invalidStatusCleanupTimers.get(sessionId);
         if (invalidTimer) clearTimeout(invalidTimer);
         invalidStatusCleanupTimers.delete(sessionId);
-        await clearTfServerAiSessionsForSession(sessionId);
+        const preservedState = await preserveSessionScopedDataForAccount(sessionId, ownerRecord, currentRuntime);
+        await detachTfServerAiSessionsFromSession(sessionId);
         await releaseSessionRuntimeLock(sessionId);
         const collection = db.collection('baileys_auth');
         const escapedSessionId = String(sessionId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const sessionKey = `auth-${escapedSessionId}`;
         await collection.deleteMany({ _id: { $regex: `^${sessionKey}(?:-|$)` } });
-        await Promise.all([
+        const cleanupOperations = [
             db.collection('session_owners').deleteMany({ sessionId }),
             db.collection('session_runtime_locks').deleteMany({ _id: sessionId }),
             db.collection('session_account_runtime_locks').deleteMany({ sessionId }),
-            db.collection('user_preferences').deleteMany({ sessionId }),
             db.collection('processed_messages').deleteMany({ sessionId }),
             db.collection('baileys_outgoing_messages').deleteMany({ sessionId }),
             db.collection('baileys_quoted_messages').deleteMany({ sessionId }),
             db.collection('lid_phone_mappings').deleteMany({ sessionId }),
-            db.collection('lid_phone_mappings').deleteMany({ _id: { $regex: `^${String(sessionId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:` } }),
+            db.collection('lid_phone_mappings').deleteMany({ _id: { $regex: `^${String(sessionId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:` } })
+        ];
+        if (preservedState.preserved) cleanupOperations.push(
+            db.collection('user_preferences').deleteMany({ sessionId }),
             db.collection('group_settings').deleteMany({ sessionId }),
             db.collection('group_del2').deleteMany({ sessionId }),
             db.collection('group_del3').deleteMany({ sessionId })
-        ]);
+        );
+        await Promise.all(cleanupOperations);
         sessionOwnersCache.delete(sessionId);
         activeSessions.delete(sessionId);
         cleanupSessionVolatileCaches(sessionId);
-        console.info('[session-data-cleanup-completed]', { sessionId, removed: ['auth', 'owner', 'user_preferences', 'processed_messages', 'outgoing_retry_messages', 'lid_mappings', 'group_settings', 'group_del2', 'group_del3'], localVolatileCachesCleared: true });
+        console.info('[session-data-cleanup-completed]', { sessionId, removed: ['auth', 'owner', 'processed_messages', 'outgoing_retry_messages', 'lid_mappings'], preservedAccountState: preservedState.preserved, preservedRecords: preservedState.count || 0, retainedSessionScopedDataBecauseAccountIdentityMissing: !preservedState.preserved, groupSettingsAndUserPreferencesRestoredOnNextConnection: true, localVolatileCachesCleared: true });
     } catch (error) {
         console.error('[session-delete-failed]', { sessionId, error: error?.message || String(error) });
         throw error;
@@ -9012,7 +9161,30 @@ process.on('uncaughtException', (error) => {
 
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
-app.get('/logs.txt', (req, res) => {
+let tfbotLogsHttpCache = null;
+async function getCompressedTfbotLogs(cache, encoding) {
+    if (!cache.compressedBodies) cache.compressedBodies = new Map();
+    if (!cache.compressionPromises) cache.compressionPromises = new Map();
+    if (cache.compressedBodies.has(encoding)) return cache.compressedBodies.get(encoding);
+    let pending = cache.compressionPromises.get(encoding);
+    if (!pending) {
+        const input = Buffer.from(cache.body, 'utf8');
+        const compressor = encoding === 'br' ? zlib.brotliCompress : zlib.gzip;
+        const options = encoding === 'br' ? { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 } } : { level: 6 };
+        pending = new Promise((resolve, reject) => compressor(input, options, (error, output) => error ? reject(error) : resolve(output)));
+        cache.compressionPromises.set(encoding, pending);
+    }
+    try {
+        const output = await pending;
+        const rawLength = Buffer.byteLength(cache.body, 'utf8');
+        const result = output.length < rawLength ? output : null;
+        cache.compressedBodies.set(encoding, result);
+        return result;
+    } finally {
+        cache.compressionPromises.delete(encoding);
+    }
+}
+app.get('/logs.txt', async (req, res) => {
     res.setHeader('X-TFBOT-Code-Version', TFBOT_CODE_VERSION);
     res.setHeader('X-TFBOT-Revision', TFBOT_CLUSTER_CODE_REVISION);
     res.setHeader('X-TFBOT-Release', TFBOT_CODE_RELEASE_ID);
@@ -9020,85 +9192,114 @@ app.get('/logs.txt', (req, res) => {
     res.setHeader('X-TFBOT-Log-Storage', 'persistent-file-bounded');
     res.setHeader('X-TFBOT-Log-Access', 'public-redacted');
     res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
-    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Cache-Control', 'public, max-age=2, stale-while-revalidate=10');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Vary', 'Accept-Encoding');
     res.type('text/plain');
-    const pendingLines = tfbotDiagnosticQueue.slice();
-    const allRawLines = [...tfbotDiagnosticRecentLines, ...pendingLines].filter(Boolean);
     const showAllLines = String(req.query?.all || '') === '1' || String(req.query?.all || '').toLowerCase() === 'true';
     const maxPublicLines = Math.max(100, Math.min(TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES, Number(req.query?.limit || 17000)));
-    const rawLines = showAllLines ? allRawLines : allRawLines.slice(-maxPublicLines);
-    let latestStoredDate = null;
-    const safeLines = rawLines.map(line => {
-        try {
-            const record = JSON.parse(line);
-            if (record.date) {
-                const parsedDate = new Date(record.date);
-                if (Number.isFinite(parsedDate.getTime()) && (!latestStoredDate || parsedDate > latestStoredDate)) latestStoredDate = parsedDate;
-                record.dateHaiti = formatTfbotHaitiTimestamp(record.date);
-                record.timeZone = TFBOT_LOG_TIME_ZONE;
+    const cacheKey = `${showAllLines ? 'all' : 'tail'}:${maxPublicLines}`;
+    const nowMs = Date.now();
+    if (!tfbotLogsHttpCache || tfbotLogsHttpCache.key !== cacheKey || nowMs >= tfbotLogsHttpCache.expiresAt) {
+        const pendingLines = tfbotDiagnosticQueue.slice();
+        const allRawLines = [...tfbotDiagnosticRecentLines, ...pendingLines].filter(Boolean);
+        const rawLines = showAllLines ? allRawLines : allRawLines.slice(-maxPublicLines);
+        let latestStoredDate = null;
+        const safeLines = rawLines.map(line => {
+            try {
+                const record = JSON.parse(line);
+                if (record.date) {
+                    const parsedDate = new Date(record.date);
+                    if (Number.isFinite(parsedDate.getTime()) && (!latestStoredDate || parsedDate > latestStoredDate)) latestStoredDate = parsedDate;
+                    record.dateHaiti = formatTfbotHaitiTimestamp(record.date);
+                    record.timeZone = TFBOT_LOG_TIME_ZONE;
+                }
+                if (record.event !== undefined) record.event = sanitizeTfbotDiagnosticLog(record.event, '');
+                if (record.content !== undefined) record.content = sanitizeTfbotDiagnosticLog(record.content, '');
+                if (record.name !== undefined) record.name = String(record.name).slice(0, 80);
+                return JSON.stringify(record);
+            } catch (parseError) {
+                return sanitizeTfbotDiagnosticLog(line, '');
             }
-            if (record.event !== undefined) record.event = sanitizeTfbotDiagnosticLog(record.event, '');
-            if (record.content !== undefined) record.content = sanitizeTfbotDiagnosticLog(record.content, '');
-            if (record.name !== undefined) record.name = String(record.name).slice(0, 80);
-            return JSON.stringify(record);
-        } catch (parseError) {
-            return sanitizeTfbotDiagnosticLog(line, '');
-        }
-    });
-    const now = new Date();
-    const headerRecord = {
-        name: 'TFBot',
-        date: now.toISOString(),
-        dateHaiti: formatTfbotHaitiTimestamp(now),
-        timeZone: TFBOT_LOG_TIME_ZONE,
-        codeVersion: TFBOT_CODE_VERSION,
-        releaseId: TFBOT_CODE_RELEASE_ID,
-        revision: TFBOT_CLUSTER_CODE_REVISION,
-        level: 'INFO',
-        event: 'tfbot-log-header',
-        content: JSON.stringify({
+        });
+        const now = new Date();
+        const headerRecord = {
+            name: 'TFBot',
+            date: now.toISOString(),
+            dateHaiti: formatTfbotHaitiTimestamp(now),
+            timeZone: TFBOT_LOG_TIME_ZONE,
             codeVersion: TFBOT_CODE_VERSION,
             releaseId: TFBOT_CODE_RELEASE_ID,
             revision: TFBOT_CLUSTER_CODE_REVISION,
-            timeZone: TFBOT_LOG_TIME_ZONE,
-            serverTimeHaiti: formatTfbotHaitiTimestamp(now),
-            workerState: tfbotWorkerState,
-            workerActive: tfbotWorkerActive,
-            workerStopping: tfbotWorkerStopping,
-            workerHost: TFBOT_CLUSTER_INSTANCE_HOST || TFBOT_CLUSTER_INSTANCE_URL || null,
-            activeSessionCount: activeSessions.size,
-            authenticatedSessionCount: [...activeSessions.values()].filter(runtime => isAuthenticatedSocketOperational(runtime, runtime?.sock)).length,
-            inboundHandlersInFlight: [...sessionInboundUpsertActivity.values()].reduce((total, value) => total + Number(value?.active || 0), 0),
-            inboundCommandQueuesActive: [...inboundCommandQueues.values()].reduce((total, value) => total + Number(value?.active || 0), 0),
-            inboundCommandQueuesPending: [...inboundCommandQueues.values()].reduce((total, value) => total + Number(value?.pending || 0), 0),
-            reconnectTimers: reconnectTimers.size,
-            sessionLockRetryTimers: sessionLockRetryTimers.size,
-            sessionStartsInFlight: sessionStartPromises.size,
-            latestStoredLogDate: latestStoredDate ? latestStoredDate.toISOString() : null,
-            latestStoredLogDateHaiti: latestStoredDate ? formatTfbotHaitiTimestamp(latestStoredDate) : null,
-            latestStoredLogAgeMs: latestStoredDate ? Math.max(0, now.getTime() - latestStoredDate.getTime()) : null,
-            totalLinesSinceProcessStart: tfbotDiagnosticTotalLines + pendingLines.length,
-            returnedLines: safeLines.length,
-            evictedLines: tfbotDiagnosticEvictedLines,
-            queueDroppedEntries: tfbotDiagnosticDroppedEntries,
-            memoryBytes: tfbotDiagnosticRecentBytes + tfbotDiagnosticQueuedBytes,
-            memoryMaxBytes: TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES,
-            queueMaxBytes: TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES,
-            diskMaxBytes: TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES,
-            maximumLines: TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES,
-            retentionHours: 7,
-            logFile: 'logs.txt',
-            logFileAvailable: tfbotDiagnosticDiskAvailable,
-            truncated: tfbotDiagnosticEvictedLines > 0 || safeLines.length < allRawLines.length,
-            storageMode: 'persistent_jsonl_bounded_7h',
-            persistedLocalDisk: tfbotDiagnosticDiskAvailable,
-            fullLogQuery: showAllLines
-        })
-    };
-    return res.status(200).send([JSON.stringify(headerRecord), ...safeLines].join('\n'));
+            level: 'INFO',
+            event: 'tfbot-log-header',
+            content: JSON.stringify({
+                codeVersion: TFBOT_CODE_VERSION,
+                releaseId: TFBOT_CODE_RELEASE_ID,
+                revision: TFBOT_CLUSTER_CODE_REVISION,
+                timeZone: TFBOT_LOG_TIME_ZONE,
+                serverTimeHaiti: formatTfbotHaitiTimestamp(now),
+                workerState: tfbotWorkerState,
+                workerActive: tfbotWorkerActive,
+                workerStopping: tfbotWorkerStopping,
+                workerHost: TFBOT_CLUSTER_INSTANCE_HOST || TFBOT_CLUSTER_INSTANCE_URL || null,
+                activeSessionCount: activeSessions.size,
+                authenticatedSessionCount: [...activeSessions.values()].filter(runtime => isAuthenticatedSocketOperational(runtime, runtime?.sock)).length,
+                inboundHandlersInFlight: [...sessionInboundUpsertActivity.values()].reduce((total, value) => total + Number(value?.active || 0), 0),
+                inboundCommandQueuesActive: [...inboundCommandQueues.values()].reduce((total, value) => total + Number(value?.active || 0), 0),
+                inboundCommandQueuesPending: [...inboundCommandQueues.values()].reduce((total, value) => total + Number(value?.pending || 0), 0),
+                reconnectTimers: reconnectTimers.size,
+                sessionLockRetryTimers: sessionLockRetryTimers.size,
+                sessionStartsInFlight: sessionStartPromises.size,
+                latestStoredLogDate: latestStoredDate ? latestStoredDate.toISOString() : null,
+                latestStoredLogDateHaiti: latestStoredDate ? formatTfbotHaitiTimestamp(latestStoredDate) : null,
+                latestStoredLogAgeMs: latestStoredDate ? Math.max(0, now.getTime() - latestStoredDate.getTime()) : null,
+                totalLinesSinceProcessStart: tfbotDiagnosticTotalLines + pendingLines.length,
+                returnedLines: safeLines.length,
+                evictedLines: tfbotDiagnosticEvictedLines,
+                queueDroppedEntries: tfbotDiagnosticDroppedEntries,
+                memoryBytes: tfbotDiagnosticRecentBytes + tfbotDiagnosticQueuedBytes,
+                memoryMaxBytes: TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES,
+                queueMaxBytes: TFBOT_DIAGNOSTIC_QUEUE_MAX_BYTES,
+                diskMaxBytes: TFBOT_DIAGNOSTIC_MEMORY_MAX_BYTES,
+                maximumLines: TFBOT_DIAGNOSTIC_MEMORY_MAX_LINES,
+                retentionHours: 7,
+                logFile: 'logs.txt',
+                logFileAvailable: tfbotDiagnosticDiskAvailable,
+                truncated: tfbotDiagnosticEvictedLines > 0 || safeLines.length < allRawLines.length,
+                storageMode: 'persistent_jsonl_bounded_7h',
+                persistedLocalDisk: tfbotDiagnosticDiskAvailable,
+                fullLogQuery: showAllLines
+            })
+        };
+        const body = [JSON.stringify(headerRecord), ...safeLines].join('\n');
+        tfbotLogsHttpCache = { key: cacheKey, body, etag: `W/\"${shortLogHash(body)}-${Buffer.byteLength(body, 'utf8')}\"`, expiresAt: nowMs + 2500, generatedAt: now.toISOString(), compressedBodies: new Map(), compressionPromises: new Map() };
+    }
+    const logCache = tfbotLogsHttpCache;
+    res.setHeader('ETag', logCache.etag);
+    res.setHeader('X-TFBOT-Log-Generated-At', logCache.generatedAt);
+    if (String(req.get('If-None-Match') || '') === logCache.etag) return res.status(304).end();
+    if (req.method === 'HEAD') return res.status(200).end();
+    const rawBytes = Buffer.byteLength(logCache.body, 'utf8');
+    if (rawBytes > 4 * 1024 * 1024) {
+        const accepted = String(req.get('Accept-Encoding') || '').toLowerCase();
+        const encodings = [];
+        if (/\bbr\b/.test(accepted) && typeof zlib.brotliCompress === 'function') encodings.push('br');
+        if (/\bgzip\b/.test(accepted)) encodings.push('gzip');
+        for (const encoding of encodings) {
+            try {
+                const compressed = await getCompressedTfbotLogs(logCache, encoding);
+                if (!compressed) continue;
+                res.setHeader('Content-Encoding', encoding);
+                res.setHeader('Content-Length', String(compressed.length));
+                return res.status(200).end(compressed);
+            } catch (compressionError) {
+                console.warn('[tfbot-logs-compression-failed]', { encoding, error: compressionError?.message || String(compressionError) });
+            }
+        }
+    }
+    return res.status(200).send(logCache.body);
 });
 function getAccessDeniedMessage(req) {
     const header = String(req.get('Accept-Language') || '').toLowerCase();
@@ -9226,6 +9427,12 @@ app.use(async (req, res, next) => {
     const requestPath = normalizeTfbotRequestPath(req.path || '/');
     if (requestPath === '/ok' || requestPath === TFBOT_CLUSTER_HEALTH_PATH || requestPath === TFBOT_ROUTER_OK_PATH || requestPath === TFBOT_ROUTER_RESOLVE_PATH || requestPath === TFBOT_WORKER_CONTROL_PATH || requestPath === TFBOT_WORKER_POLL_PATH || requestPath === TFBOT_WORKER_FAILURE_PATH || requestPath.startsWith('/__tfbot/router/')) return next();
     const requestHost = normalizeTfbotHost(req.get('host') || req.hostname || '');
+    const proxyAuthPath = normalizeTfbotRequestPath(req.path || '/').replace(/\/+$/, '') || '/';
+    const proxyPathIsPublic = proxyAuthPath === '/list' || proxyAuthPath === '/list/events' || proxyAuthPath === '/list/snapshot.json' || proxyAuthPath === '/logs.txt' || proxyAuthPath === '/list2' || proxyAuthPath === '/' && isAllowedEmbeddedHomeRequest(req) || ['/get-code', '/upload-qr'].includes(proxyAuthPath) && isSameOriginFrontendApiRequest(req) || isSignedTFConfirmationRequest(req) || isTFConfirmationPendingRequest(req) || /(?:^|\/)TF-[A-Za-z0-9_-]{1,80}(?:\/.*)?$/i.test(proxyAuthPath) || isEmbeddedStaticAssetRequest(req);
+    if (!proxyPathIsPublic && !isAuthorizedAdmin(req)) {
+        if (proxyAuthPath === '/') return sendAccessDeniedPage(req, res);
+        return res.status(401).type('application/json').send(JSON.stringify({ ok: false, error: 'token_required' }));
+    }
     let active = TFBOT_CLUSTER_COORDINATOR_ONLY ? tfbotCoordinatorSelectionCache : tfbotActiveDomainCache;
     let activeHost = normalizeTfbotHost(active?.host || '');
     let activeUrl = String(active?.url || '').replace(/\/+$/, '');
@@ -9252,9 +9459,6 @@ app.use(async (req, res, next) => {
         return res.status(503).json({ ok: false, error: 'tfbot_active_server_unavailable', retryAfterMs, coordinator: TFBOT_COORDINATOR_HOST, localHost: TFBOT_CLUSTER_INSTANCE_HOST || null, workerState: tfbotWorkerState, selectionCheckedAt: tfbotCoordinatorSelectionAt ? new Date(tfbotCoordinatorSelectionAt).toISOString() : null });
     }
     if (requestHost !== activeHost) {
-        let destination;
-        try { destination = new URL(normalizeTfbotRequestUrl(req.originalUrl || req.url || '/'), `${activeUrl}/`); }
-        catch (error) { return res.status(503).json({ ok: false, error: 'tfbot_active_url_invalid' }); }
         res.setHeader('Cache-Control', 'no-store, max-age=0');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-API-Token, X-TFBOT-Cluster-Token, X-TFBOT-Expected-Host, X-TFBOT-Cluster-Hop');
@@ -9262,8 +9466,11 @@ app.use(async (req, res, next) => {
         res.setHeader('Vary', 'Origin');
         res.setHeader('X-TFBOT-Active-Domain', activeHost);
         res.setHeader('X-TFBOT-Router-Generation', String(active.generation || ''));
-        console.info('[tfbot-domain-redirect]', { fromHost: requestHost, toHost: activeHost, path: requestPath, method: req.method, source: active.source || 'tfbot7-memory-router' });
-        return res.redirect(307, destination.toString());
+        console.info('[tfbot-domain-internal-proxy]', { fromHost: requestHost, toHost: activeHost, path: requestPath, method: req.method, source: active.source || 'tfbot7-memory-router' });
+        const proxied = await proxyClusterRequest(req, res, { _id: activeHost, url: activeUrl, local: false }, TFBOT_CLUSTER_PROXY_TIMEOUT_MS);
+        if (proxied) return;
+        if (!res.headersSent) return res.status(502).json({ ok: false, error: 'tfbot_internal_proxy_failed', activeHost, retryable: true });
+        return;
     }
     if (TFBOT_CLUSTER_COORDINATOR_ONLY) return res.status(503).json({ ok: false, error: 'tfbot_coordinator_has_no_bot_runtime' });
     if (!tfbotWorkerActive || !db || tfbotWorkerStopping) {
@@ -9289,12 +9496,12 @@ app.use((req, res, next) => {
 
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-API-Token');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-API-Token, X-TFBOT-Cluster-Token, X-TFBOT-Cluster-Hop, X-Request-Id');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS');
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     const requestPath = normalizeTfbotRequestPath(req.path || '/').replace(/\/+$/, '') || '/';
     if (requestPath === '/ok' || requestPath === TFBOT_CLUSTER_HEALTH_PATH || requestPath === TFBOT_ROUTER_OK_PATH || requestPath === TFBOT_ROUTER_RESOLVE_PATH || requestPath === TFBOT_WORKER_CONTROL_PATH || requestPath === TFBOT_WORKER_POLL_PATH || requestPath === TFBOT_WORKER_FAILURE_PATH || isValidClusterHop(req)) return next();
-    if (requestPath === '/list' || requestPath === '/list/events') return next();
+    if (requestPath === '/list' || requestPath === '/list/events' || requestPath === '/list/snapshot.json' || requestPath === '/logs.txt') return next();
     if (requestPath === '/') {
         if (isAllowedEmbeddedHomeRequest(req)) return next();
         return sendAccessDeniedPage(req, res);
@@ -9312,6 +9519,8 @@ app.use((req, res, next) => {
     next();
 });
 const PUBLIC_HTML_ROOT = path.resolve(__dirname, 'public');
+const publicHtmlPageCache = new Map();
+const PUBLIC_HTML_PAGE_CACHE_LIMIT = 96;
 
 app.use((req, res, next) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
@@ -9323,10 +9532,35 @@ app.use((req, res, next) => {
     try { decodedPath = decodeURIComponent(relativePath); } catch (error) { return next(); }
     const filePath = path.resolve(PUBLIC_HTML_ROOT, decodedPath);
     if (filePath !== PUBLIC_HTML_ROOT && !filePath.startsWith(PUBLIC_HTML_ROOT + path.sep)) return res.sendStatus(404);
-    fs.readFile(filePath, 'utf8', (error, source) => {
-        if (error) return next();
-        const output = isBotIframeDocumentRequest(req, source) ? source : injectAdScriptsIntoHtml(source);
-        res.type('html').send(output);
+    fs.stat(filePath, (statError, stats) => {
+        if (statError || !stats.isFile()) return next();
+        const cached = publicHtmlPageCache.get(filePath);
+        const cacheValid = cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size;
+        const sendPage = page => {
+            res.setHeader('Cache-Control', 'private, max-age=30, stale-while-revalidate=120');
+            res.setHeader('ETag', page.etag);
+            res.setHeader('Last-Modified', stats.mtime.toUTCString());
+            res.setHeader('Vary', 'Authorization, Accept-Encoding');
+            res.type('html');
+            const suppliedEtag = String(req.get('If-None-Match') || '');
+            const suppliedDate = Date.parse(String(req.get('If-Modified-Since') || '')) || 0;
+            if (suppliedEtag.split(/\s*,\s*/).includes(page.etag) || !suppliedEtag && suppliedDate >= Math.floor(stats.mtimeMs / 1000) * 1000) return res.status(304).end();
+            if (req.method === 'HEAD') return res.status(200).end();
+            return res.status(200).send(page.body);
+        };
+        if (cacheValid) {
+            publicHtmlPageCache.delete(filePath);
+            publicHtmlPageCache.set(filePath, cached);
+            return sendPage(cached);
+        }
+        fs.readFile(filePath, 'utf8', (error, source) => {
+            if (error) return next();
+            const output = isBotIframeDocumentRequest(req, source) ? source : injectAdScriptsIntoHtml(source);
+            const page = { body: output, etag: `W/\"${shortLogHash(output)}-${Buffer.byteLength(output, 'utf8')}\"`, mtimeMs: stats.mtimeMs, size: stats.size };
+            publicHtmlPageCache.set(filePath, page);
+            while (publicHtmlPageCache.size > PUBLIC_HTML_PAGE_CACHE_LIMIT) publicHtmlPageCache.delete(publicHtmlPageCache.keys().next().value);
+            return sendPage(page);
+        });
     });
 });
 
@@ -10076,6 +10310,11 @@ async function proxyClusterRequest(req, res, instance, timeoutOverride = TFBOT_C
         'X-TFBOT-Origin-Instance': TFBOT_CLUSTER_INSTANCE_ID,
         'Accept': String(req.get('Accept') || 'application/json')
     };
+    const forwardedHeaders = ['Accept-Language', 'Accept-Encoding', 'Cache-Control', 'If-None-Match', 'If-Modified-Since', 'If-Match', 'If-Range', 'Range', 'Origin', 'Referer', 'User-Agent', 'Cookie', 'X-Request-Id', 'X-Stream-Id', 'X-API-Key', 'X-API-Token'];
+    for (const name of forwardedHeaders) {
+        const value = req.get(name);
+        if (value) headers[name] = value;
+    }
     const contentType = String(req.get('Content-Type') || '');
     if (contentType) headers['Content-Type'] = contentType;
     const authorization = String(req.get('Authorization') || '');
@@ -10085,32 +10324,37 @@ async function proxyClusterRequest(req, res, instance, timeoutOverride = TFBOT_C
     const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
     try {
         let body;
+        let useStreamingBody = false;
         if (!['GET', 'HEAD'].includes(req.method)) {
             if (Buffer.isBuffer(req.body)) body = req.body;
             else if (contentType.toLowerCase().includes('application/x-www-form-urlencoded')) body = new URLSearchParams(req.body || {}).toString();
-            else body = JSON.stringify(req.body || {});
+            else if (req.body && typeof req.body === 'object' && Object.keys(req.body).length) body = JSON.stringify(req.body);
+            else if (req.readable && !req.readableEnded) {
+                body = req;
+                useStreamingBody = true;
+            } else if (req.body && typeof req.body === 'object') body = JSON.stringify(req.body);
         }
-        const response = await fetch(target, { method: req.method, headers, body, redirect: 'manual', cache: 'no-store', signal: controller.signal });
-        if (response.status >= 500) {
-            await response.body?.cancel().catch(() => {});
-            console.warn('[cluster-proxy-upstream-error]', { targetInstanceId: instance._id, status: response.status, action: 'try_next_healthy_instance' });
-            return false;
-        }
-        const allowedHeaders = ['content-type', 'cache-control', 'etag', 'last-modified', 'location', 'content-disposition', 'x-robots-tag', 'referrer-policy', 'content-security-policy', 'set-cookie'];
+        const requestOptions = { method: req.method, headers, body, redirect: 'follow', cache: 'no-store', signal: controller.signal };
+        if (useStreamingBody) requestOptions.duplex = 'half';
+        const response = await fetch(target, requestOptions);
+        const allowedHeaders = ['content-type', 'content-language', 'cache-control', 'etag', 'last-modified', 'location', 'content-disposition', 'x-robots-tag', 'referrer-policy', 'content-security-policy', 'accept-ranges', 'content-range', 'expires', 'retry-after', 'vary', 'www-authenticate', 'access-control-allow-origin', 'access-control-allow-headers', 'access-control-allow-methods'];
         for (const name of allowedHeaders) {
             const value = response.headers.get(name);
             if (value) res.setHeader(name, value);
         }
+        const setCookies = typeof response.headers.getSetCookie === 'function' ? response.headers.getSetCookie() : [];
+        if (setCookies.length) res.setHeader('Set-Cookie', setCookies);
         res.status(response.status);
-        if (req.method === 'HEAD' || response.status === 204 || response.status === 304) {
+        if (req.method === 'HEAD' || response.status === 204 || response.status === 304 || !response.body) {
+            await response.body?.cancel().catch(() => {});
             res.end();
             return true;
         }
-        const bytes = Buffer.from(await response.arrayBuffer());
         res.removeHeader('Content-Length');
         res.removeHeader('Content-Encoding');
-        res.send(bytes);
-        console.info('[cluster-request-proxied]', { path: String(req.path || '/'), method: req.method, targetInstanceId: instance._id, responseStatus: response.status, responseBytes: bytes.length });
+        const upstreamBytes = Number(response.headers.get('content-length') || 0);
+        await pipeline(Readable.fromWeb(response.body), res);
+        console.info('[cluster-request-proxied]', { path: String(req.path || '/'), method: req.method, targetInstanceId: instance._id, responseStatus: response.status, responseBytes: upstreamBytes || null, streamed: true });
         return true;
     } catch (error) {
         console.warn('[cluster-proxy-failed]', { targetInstanceId: instance?._id || null, error: error?.name === 'AbortError' ? 'timeout' : String(error?.message || error).slice(0, 160), action: 'try_next_healthy_instance' });
@@ -11799,19 +12043,40 @@ app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s Us Bot (t
 app.get('/ok', (req, res) => res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Code-Version', TFBOT_CODE_VERSION).set('X-TFBOT-Time-Zone', TFBOT_LOG_TIME_ZONE).set('X-TFBOT-Revision', TFBOT_CLUSTER_CODE_REVISION).set('X-TFBOT-Release', TFBOT_CODE_RELEASE_ID).set('X-TFBOT-Worker-State', tfbotWorkerState).set('X-TFBOT-Worker-Active', String(tfbotWorkerActive)).set('X-TFBOT-Worker-Stopping', String(tfbotWorkerStopping)).set('X-TFBOT-Inbound-Upserts', String([...sessionInboundUpsertActivity.values()].reduce((total, value) => total + Number(value?.active || 0), 0))).set('X-TFBOT-Reconnect-Timers', String(reconnectTimers.size)).set('X-TFBOT-Session-Starts', String(sessionStartPromises.size)).set('X-TFBOT-Group-Sender-Key-Reset', GROUP_SENDER_KEY_RESET_EVERY_SEND ? 'every-send' : 'cooldown').set('X-TFBOT-Baileys-Companion-Reg-Refresh', baileysCompanionRegRefreshPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-PN-Decryption', baileysLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-PN-Decryption', baileysGroupLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-Addressing', baileysLidAwareGroupOutboundAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-Chat-Placeholder-Resend', baileysSelfChatPlaceholderResendPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Retry-Deduplication', baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Own-LID-Retry-Addressing', baileysOwnLidRetryAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Session-Readiness', 'open-event-and-authenticated-identity').send('ok'));
 
 
-const handleTFSlugRequest = (req, res) => {
+const handleTFSlugRequest = async (req, res) => {
     const match = String(req.path || '').match(/(?:^|\/)TF-([A-Za-z0-9_-]{1,80})(?:\/.*)?$/i);
     const id = String(req.params?.id || match?.[1] || '');
     if (!/^[A-Za-z0-9_-]{1,80}$/.test(id)) return res.status(404).type('text/plain').send('Lien indisponible.');
     if (tfEvents.listenerCount('ok-' + id) > 0) tfEvents.emit('ok-' + id);
     if (!TF_REDIRECT_URL) return res.status(200).type('text/plain').send('ok');
-    return res.redirect(303, TF_REDIRECT_URL);
+    let target;
+    try { target = new URL(TF_REDIRECT_URL); } catch (error) { return res.status(502).type('text/plain').send('Proxy indisponib.'); }
+    if (target.protocol !== 'https:') return res.status(502).type('text/plain').send('Proxy indisponib.');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 60000);
+    try {
+        const response = await fetch(target, { method: 'GET', headers: { Accept: String(req.get('Accept') || '*/*') }, cache: 'no-store', redirect: 'follow', signal: controller.signal });
+        for (const header of ['content-type', 'content-disposition', 'cache-control', 'etag', 'last-modified', 'accept-ranges', 'content-range']) {
+            const value = response.headers.get(header);
+            if (value) res.setHeader(header, value);
+        }
+        res.setHeader('X-TFBOT-Proxy', 'server');
+        res.status(response.status);
+        if (req.method === 'HEAD' || response.status === 204 || response.status === 304 || !response.body) {
+            await response.body?.cancel().catch(() => {});
+            return res.end();
+        }
+        return await pipeline(Readable.fromWeb(response.body), res);
+    } catch (error) {
+        if (!res.headersSent) return res.status(502).type('text/plain').send(error?.name === 'AbortError' ? 'Demann nan pran twòp tan.' : 'Proxy indisponib.');
+    } finally {
+        clearTimeout(timer);
+    }
 };
 app.get('/TF-:id', handleTFSlugRequest);
 app.get(/^\/(?:.*\/)?TF-[A-Za-z0-9_-]{1,80}(?:\/.*)?$/i, handleTFSlugRequest);
 
 function isAuthorizedAdmin(req) {
-    if (isValidClusterHop(req)) return true;
     const expected = TFBOT_REQUEST_TOKEN;
     const authorization = String(req.get('Authorization') || '');
     const supplied = authorization.match(/^Bearer\s+(.+)$/i)?.[1]?.trim()
@@ -11821,6 +12086,336 @@ function isAuthorizedAdmin(req) {
     const suppliedBuffer = Buffer.from(supplied);
     return expectedBuffer.length === suppliedBuffer.length && crypto.timingSafeEqual(expectedBuffer, suppliedBuffer);
 }
+
+const ADMIN_SESSION_OPERATIONS_COLLECTION = 'admin_session_operations';
+const ADMIN_SESSION_OPERATION_TTL_MS = 24 * 60 * 60 * 1000;
+const ADMIN_SESSION_DELETE_NOTICE_DELAY_MS = Math.max(1200, Math.min(5000, Number(process.env.ADMIN_SESSION_DELETE_NOTICE_DELAY_MS || 2000)));
+const ADMIN_SESSION_DELETE_CONCURRENCY = Math.max(2, Math.min(12, Number(process.env.ADMIN_SESSION_DELETE_CONCURRENCY || 6)));
+
+function normalizeAdminOperationId(value) {
+    const id = String(value || '').trim().toLowerCase();
+    return /^[a-f0-9]{24}$/.test(id) ? id : '';
+}
+
+function getAdminSessionNotice(language, type) {
+    const lang = ['fr', 'en', 'es', 'ht'].includes(String(language || '').toLowerCase()) ? String(language).toLowerCase() : 'ht';
+    const notices = {
+        single: {
+            fr: { title: 'Déconnexion', content: 'Vous avez été déconnecté du serveur en raison de la limite de temps d’activité de Bot (tfbot). Pour vous reconnecter, rendez-vous sur bot.adamdh7.org.' },
+            en: { title: 'Disconnection', content: 'You have been disconnected from the server because the activity time limit for Bot (tfbot) was reached. To reconnect, visit bot.adamdh7.org.' },
+            es: { title: 'Desconexión', content: 'Se te ha desconectado del servidor porque se alcanzó el límite de tiempo de actividad de Bot (tfbot). Para volver a conectarte, visita bot.adamdh7.org.' },
+            ht: { title: 'Dekoneksyon', content: 'Yo dekonekte w sou sèvè a paske limit tan aktivite kont Bot (tfbot) la rive. Si ou vle rekonekte, ale sou bot.adamdh7.org.' }
+        },
+        bulk: {
+            fr: { title: 'Avis administratif', content: 'L’administrateur a demandé la suppression de tous les comptes Bot (tfbot) sur le serveur. Pour utiliser le service à nouveau, reconnectez-vous depuis bot.adamdh7.org.' },
+            en: { title: 'Administrator notice', content: 'The administrator has requested the removal of all Bot (tfbot) accounts from the server. To use the service again, reconnect through bot.adamdh7.org.' },
+            es: { title: 'Aviso administrativo', content: 'El administrador ha solicitado eliminar todas las cuentas de Bot (tfbot) del servidor. Para volver a utilizar el servicio, conéctate desde bot.adamdh7.org.' },
+            ht: { title: 'Avi administratè', content: 'Administratè a mande pou retire tout kont Bot (tfbot) yo sou sèvè a. Si ou vle sèvi ak sèvis la ankò, rekonekte sou bot.adamdh7.org.' }
+        }
+    };
+    return notices[type === 'bulk' ? 'bulk' : 'single'][lang];
+}
+
+async function appendAdminSessionOperationStep(operationId, sessionId, stage, status, detail, error = null, increments = {}) {
+    const step = { stage: String(stage || ''), status: String(status || 'info'), sessionId: sessionId || null, detail: String(detail || ''), error: error ? String(error).slice(0, 700) : null, at: new Date().toISOString() };
+    const update = { $set: { stage: step.stage, updatedAt: new Date() }, $push: { steps: { $each: [step], $slice: -500 } } };
+    const inc = Object.fromEntries(Object.entries(increments || {}).filter(([, value]) => Number(value || 0) !== 0));
+    if (Object.keys(inc).length) update.$inc = inc;
+    await db.collection(ADMIN_SESSION_OPERATIONS_COLLECTION).updateOne({ _id: operationId }, update);
+    console.info('[admin-session-operation-step]', { operationId, sessionId: sessionId || null, stage: step.stage, status: step.status, detail: step.detail });
+    return step;
+}
+
+async function finishAdminSessionOperation(operationId, status, stage, summary = '') {
+    const now = new Date();
+    await db.collection(ADMIN_SESSION_OPERATIONS_COLLECTION).updateOne({ _id: operationId }, { $set: { status, stage, summary: String(summary || ''), updatedAt: now, finishedAt: now } });
+}
+
+async function createAdminSessionOperation(operationId, type, sessionIds) {
+    const now = new Date();
+    await db.collection(ADMIN_SESSION_OPERATIONS_COLLECTION).insertOne({
+        _id: operationId,
+        operationId,
+        type,
+        status: 'running',
+        stage: 'kòmanse',
+        count: sessionIds.length,
+        prepared: 0,
+        deleted: 0,
+        failed: 0,
+        noticeFailed: 0,
+        steps: [],
+        createdAt: now,
+        updatedAt: now,
+        expiresAt: new Date(now.getTime() + ADMIN_SESSION_OPERATION_TTL_MS)
+    });
+}
+
+async function performAdminSessionRemovalOnThisWorker(operationId, sessionId, noticeKind = 'single', allowNoticeFailure = false) {
+    const id = String(sessionId || '').trim();
+    let runtime = null;
+    try {
+        if (!id || !db) throw new Error('session_or_database_unavailable');
+        await appendAdminSessionOperationStep(operationId, id, 'kòmanse', 'running', 'Operasyon an kòmanse pou kont sa a.');
+        const ownerDoc = await db.collection('session_owners').findOne({ sessionId: id }).catch(() => null);
+        runtime = activeSessions.get(id) || null;
+        const isBulk = noticeKind === 'bulk';
+        const canSend = !!(runtime?.sock && isAuthenticatedSocketOperational(runtime, runtime.sock));
+        if (canSend) {
+            runtime.adminDeletionInProgress = true;
+            const language = ['fr', 'en', 'es', 'ht'].includes(String(ownerDoc?.lang || '').toLowerCase()) ? String(ownerDoc.lang).toLowerCase() : 'ht';
+            const phone = getAuthenticatedPhoneNumber(runtime.sock.user || null, runtime.authState?.creds || null)
+                || normalizePhoneNumber(runtime.number || ownerDoc?.Number || ownerDoc?.number || ownerDoc?.PairingNumber || ownerDoc?.AccountJid || '');
+            if (!/^\d{6,20}$/.test(phone) || /^0+$/.test(phone)) {
+                const message = 'Nimewo WhatsApp pou voye avi a pa disponib.';
+                await appendAdminSessionOperationStep(operationId, id, 'avi', 'warning', message, 'whatsapp_number_unavailable', { noticeFailed: 1 });
+                if (!allowNoticeFailure) throw new Error('session_disconnect_notice_phone_unavailable');
+            } else {
+                const notice = getAdminSessionNotice(language, isBulk ? 'bulk' : 'single');
+                const displayName = sanitizeSessionDisplayName(runtime.sock.user?.name || runtime.sock.user?.notify || runtime.sock.user?.verifiedName || ownerDoc?.Name || ownerDoc?.name || 'Inconnu') || 'Inconnu';
+                const formattedNotice = `*__${normalizeCaptionText(notice.content).replace(/\*/g, '').replace(/_{1,2}/g, '')}__*`;
+                try {
+                    const sent = await sendImageCaptioned(runtime.sock, `${phone}@s.whatsapp.net`, adamLogoBuffer, notice.title, formattedNotice, displayName, { ownerName: 'Bot (tfbot)', language, preserveFormatting: true });
+                    if (!sent?.key?.id) throw new Error('session_disconnect_notice_send_not_confirmed');
+                    await appendAdminSessionOperationStep(operationId, id, 'avi', 'success', 'Avi caption an voye nan WhatsApp epi sèvè a konfime mesaj la.', null, { prepared: 1 });
+                    await new Promise(resolve => setTimeout(resolve, ADMIN_SESSION_DELETE_NOTICE_DELAY_MS));
+                } catch (noticeError) {
+                    await appendAdminSessionOperationStep(operationId, id, 'avi', 'warning', 'Mesaj avètisman an pa t kapab konfime.', noticeError?.message || String(noticeError), { noticeFailed: 1 });
+                    if (!allowNoticeFailure) throw noticeError;
+                }
+            }
+        } else {
+            await appendAdminSessionOperationStep(operationId, id, 'avi', 'info', 'Kont lan deja dekonekte oswa pa gen yon sesyon WhatsApp aktif pou resevwa avi a.');
+        }
+        if (runtime?.sock) {
+            const socket = runtime.sock;
+            runtime.adminDeletionInProgress = true;
+            try {
+                await Promise.race([Promise.resolve().then(() => socket.logout()), new Promise(resolve => setTimeout(resolve, 7000))]);
+            } catch (logoutError) {
+                await appendAdminSessionOperationStep(operationId, id, 'dekoneksyon', 'warning', 'WhatsApp pa t konfime logout la; fèmen koneksyon an dirèkteman.', logoutError?.message || String(logoutError));
+            }
+            try { socket.ws?.close?.(); } catch (closeError) {}
+            runtime.status = 'deconnecte';
+            runtime.active = false;
+            runtime.lastWhatsAppEvent = 'close';
+            runtime.lastWhatsAppEventAt = new Date();
+            runtime.sock = null;
+            await appendAdminSessionOperationStep(operationId, id, 'dekoneksyon', 'success', 'Koneksyon WhatsApp la fèmen.');
+        }
+        await appendAdminSessionOperationStep(operationId, id, 'netwayaj', 'running', 'Ap retire kalifikasyon ak done sesyon an.');
+        await deleteMongoSession(id);
+        await appendAdminSessionOperationStep(operationId, id, 'netwayaj', 'success', 'Done sesyon an efase epi verifikasyon an fini.', null, { deleted: 1 });
+        return { ok: true, sessionId: id, deleted: true };
+    } catch (error) {
+        if (runtime && activeSessions.get(id) === runtime && runtime.adminDeletionInProgress === true && runtime.sock && isAuthenticatedSocketOperational(runtime, runtime.sock)) runtime.adminDeletionInProgress = false;
+        await appendAdminSessionOperationStep(operationId, id, 'erè', 'failed', 'Operasyon an pa t rive fini pou kont sa a.', error?.message || String(error), { failed: 1 });
+        error.adminOperationRecorded = true;
+        throw error;
+    }
+}
+
+async function performAdminSessionRemovalOnOwner(operationId, sessionId, noticeKind = 'single', allowNoticeFailure = false) {
+    const id = String(sessionId || '').trim();
+    const owner = await db.collection('session_owners').findOne({ sessionId: id }, { projection: { ownerInstanceId: 1, ownerInstanceUrl: 1, ownerLeaseUntil: 1 } }).catch(() => null);
+    const ownerId = String(owner?.ownerInstanceId || '').trim();
+    const ownerLease = new Date(owner?.ownerLeaseUntil || 0).getTime();
+    if (TFBOT_CLUSTER_ENABLED && ownerId && ownerId !== TFBOT_CLUSTER_INSTANCE_ID && ownerLease > Date.now()) {
+        const peer = await db.collection('cluster_instances').findOne({ _id: ownerId, leaseUntil: { $gt: new Date() } }).catch(() => null);
+        const baseUrl = String(peer?.url || owner?.ownerInstanceUrl || '').trim();
+        let target;
+        try { target = new URL(baseUrl.startsWith('http') ? baseUrl : `https://${baseUrl}`); } catch (error) { target = null; }
+        const host = normalizeTfbotHost(target?.hostname || '');
+        if (!target || target.protocol !== 'https:' || !TFBOT_ROUTER_DOMAIN_BY_HOST.has(host)) throw new Error('session_owner_worker_not_available_for_admin_removal');
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 45000);
+        try {
+            const response = await fetch(new URL('/__tfbot/admin/session-delete', target.origin), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TFBOT_REQUEST_TOKEN}`, 'X-TFBOT-Cluster-Token': TFBOT_CLUSTER_TOKEN, 'X-TFBOT-Cluster-Hop': '1', Accept: 'application/json' },
+                body: JSON.stringify({ operationId, sessionId: id, noticeKind, allowNoticeFailure }),
+                cache: 'no-store',
+                redirect: 'manual',
+                signal: controller.signal
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok || payload.ok !== true) {
+                const error = new Error(payload.error || `session_owner_http_${response.status}`);
+                error.adminOperationRecorded = payload.recorded === true;
+                throw error;
+            }
+            return payload;
+        } catch (error) {
+            if (error?.name === 'AbortError') throw new Error('session_owner_worker_timeout');
+            throw error;
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+    return performAdminSessionRemovalOnThisWorker(operationId, id, noticeKind, allowNoticeFailure);
+}
+
+async function runAdminSingleSessionOperation(operationId, sessionId) {
+    try {
+        await performAdminSessionRemovalOnOwner(operationId, sessionId, 'single', false);
+        await finishAdminSessionOperation(operationId, 'completed', 'fini', 'Sesyon an efase epi dekoneksyon an konfime.');
+    } catch (error) {
+        const current = await db.collection(ADMIN_SESSION_OPERATIONS_COLLECTION).findOne({ _id: operationId }).catch(() => null);
+        if (!error?.adminOperationRecorded && !Number(current?.failed || 0)) await appendAdminSessionOperationStep(operationId, sessionId, 'erè', 'failed', 'Operasyon an echwe avan netwayaj la fini.', error?.message || String(error), { failed: 1 });
+        await finishAdminSessionOperation(operationId, 'failed', 'echwe', 'Sesyon an pa t efase nèt. Gade etap ak erè yo.');
+    }
+}
+
+async function getAllAdminSessionIds() {
+    const [owners, authRecords] = await Promise.all([
+        db.collection('session_owners').find({}, { projection: { sessionId: 1 } }).limit(10000).toArray().catch(() => []),
+        db.collection('baileys_auth').find({ _id: { $regex: '^auth-session_' } }, { projection: { _id: 1 } }).limit(10000).toArray().catch(() => [])
+    ]);
+    return [...new Set([
+        ...owners.map(item => String(item?.sessionId || '').trim()),
+        ...authRecords.map(item => String(item?._id || '').match(/^auth-(.+?)(?:-creds|-)/)?.[1] || ''),
+        ...activeSessions.keys()
+    ].filter(value => value && /^[A-Za-z0-9_-]{7,120}$/.test(value)))].slice(0, 10000);
+}
+
+async function runAdminBulkSessionOperation(operationId, sessionIds) {
+    await appendAdminSessionOperationStep(operationId, null, 'kòmanse', 'running', `Ap trete ${sessionIds.length} kont.`);
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(ADMIN_SESSION_DELETE_CONCURRENCY, Math.max(1, sessionIds.length)) }, async () => {
+        while (true) {
+            const index = cursor++;
+            if (index >= sessionIds.length) return;
+            const sessionId = sessionIds[index];
+            try {
+                await performAdminSessionRemovalOnOwner(operationId, sessionId, 'bulk', true);
+            } catch (error) {
+                if (!error?.adminOperationRecorded) await appendAdminSessionOperationStep(operationId, sessionId, 'erè', 'failed', 'Kont sa a pa t kapab netwaye.', error?.message || String(error), { failed: 1 });
+            }
+        }
+    });
+    await Promise.all(workers);
+    await appendAdminSessionOperationStep(operationId, null, 'netwayaj', 'running', 'Ap retire rès done sesyon yo nan baz done a.');
+    for (const sessionId of [...sessionRuntimeLockTimers.keys()]) {
+        try { await releaseSessionRuntimeLock(sessionId); } catch (error) {}
+    }
+    const cleanupResults = await Promise.allSettled([
+        db.collection('session_runtime_locks').deleteMany({}),
+        db.collection('session_account_runtime_locks').deleteMany({}),
+        db.collection('baileys_auth').deleteMany({}),
+        db.collection('session_owners').deleteMany({}),
+        db.collection('processed_messages').deleteMany({}),
+        db.collection('lid_phone_mappings').deleteMany({}),
+        db.collection('baileys_outgoing_messages').deleteMany({}),
+        db.collection('baileys_quoted_messages').deleteMany({})
+    ]);
+    const cleanupFailures = cleanupResults.filter(item => item.status === 'rejected');
+    sessionOwnersCache.clear();
+    groupMetadataCache.clear();
+    groupSettingsCache.clear();
+    msgRetryCounterCache.clear();
+    msgRetryCounterExpiryCache.clear();
+    activeSessions.clear();
+    activeDel2UsersCache.clear();
+    activeDel3RulesCache.clear();
+    processedLocalCache.clear();
+    if (cleanupFailures.length) await appendAdminSessionOperationStep(operationId, null, 'netwayaj', 'failed', 'Gen kèk koleksyon ki pa t kapab netwaye.', cleanupFailures.map(item => item.reason?.message || String(item.reason)).join(' | '), { failed: 1 });
+    const finalOperation = await db.collection(ADMIN_SESSION_OPERATIONS_COLLECTION).findOne({ _id: operationId }).catch(() => null);
+    const failed = Number(finalOperation?.failed || 0);
+    const status = failed > 0 ? 'failed' : 'completed';
+    await appendAdminSessionOperationStep(operationId, null, 'fini', status, status === 'completed' ? 'Tout kont ak done yo retire.' : 'Netwayaj la fini men gen kèk kont oswa etap ki echwe.');
+    await finishAdminSessionOperation(operationId, status, status === 'completed' ? 'fini' : 'echwe', status === 'completed' ? 'Tout kont yo efase.' : 'Gen kèk kont oswa etap ki pa t kapab efase.');
+}
+
+app.post('/__tfbot/admin/session-delete', async (req, res) => {
+    if (!isValidClusterHop(req) || !isAuthorizedAdmin(req)) return res.status(404).json({ ok: false, error: 'not_found' });
+    const operationId = normalizeAdminOperationId(req.body?.operationId);
+    const sessionId = String(req.body?.sessionId || '').trim();
+    if (!operationId || !/^[A-Za-z0-9_-]{7,120}$/.test(sessionId)) return res.status(400).json({ ok: false, error: 'invalid_admin_session_delete_request' });
+    try {
+        await performAdminSessionRemovalOnThisWorker(operationId, sessionId, req.body?.noticeKind === 'bulk' ? 'bulk' : 'single', req.body?.allowNoticeFailure === true);
+        return res.status(200).json({ ok: true, sessionId, deleted: true });
+    } catch (error) {
+        return res.status(500).json({ ok: false, recorded: error?.adminOperationRecorded === true, error: String(error?.message || error).slice(0, 300) });
+    }
+});
+
+app.get('/api/sessions', async (req, res) => {
+    if (!isAuthorizedAdmin(req)) return res.status(401).json({ ok: false, error: 'token_required' });
+    try {
+        const snapshot = await buildSessionListSnapshot();
+        const sessions = (Array.isArray(snapshot) ? snapshot : []).map(item => ({
+            SessionId: String(item.ID || ''),
+            Name: String(item.Name || 'Inconnu'),
+            Numero: String(item.Numero || 'N/A'),
+            TempsConnexion: String(item.Alive || ''),
+            Status: String(item.Sessions || 'deconnecte'),
+            Format: String(item.Format || ''),
+            Mode: String(item.Mode || '')
+        }));
+        const body = JSON.stringify({ ok: true, count: sessions.length, sessions, dataState: 'ready', workersChecked: 1 });
+        const etag = `W/\"${shortLogHash(body)}-${Buffer.byteLength(body, 'utf8')}\"`;
+        res.setHeader('Cache-Control', 'private, max-age=1, stale-while-revalidate=3');
+        res.setHeader('ETag', etag);
+        res.setHeader('Vary', 'Authorization');
+        if (String(req.get('If-None-Match') || '') === etag) return res.status(304).end();
+        return res.status(200).type('application/json').send(body);
+    } catch (error) {
+        console.error('[admin-sessions-list-failed]', { error: error?.message || String(error) });
+        return res.status(500).json({ ok: false, error: 'sessions_list_failed' });
+    }
+});
+
+app.delete('/api/sessions', async (req, res) => {
+    if (!isAuthorizedAdmin(req)) return res.status(401).json({ ok: false, error: 'token_required' });
+    try {
+        if (req.body?.all === true || req.body?.all === 'true' || req.body?.all === 1 || req.body?.all === '1') {
+            const sessionIds = await getAllAdminSessionIds();
+            const operationId = normalizeAdminOperationId(req.body?.operationId) || crypto.randomBytes(12).toString('hex');
+            if (await db.collection(ADMIN_SESSION_OPERATIONS_COLLECTION).findOne({ _id: operationId })) return res.status(409).json({ ok: false, error: 'operation_id_already_used' });
+            await createAdminSessionOperation(operationId, 'bulk', sessionIds);
+            setImmediate(() => { void runAdminBulkSessionOperation(operationId, sessionIds).catch(async error => {
+                await appendAdminSessionOperationStep(operationId, null, 'erè', 'failed', 'Operasyon global la echwe.', error?.message || String(error), { failed: 1 }).catch(() => {});
+                await finishAdminSessionOperation(operationId, 'failed', 'echwe', 'Operasyon global la pa t kapab fini.').catch(() => {});
+            }); });
+            return res.status(202).json({ ok: true, operationId, status: 'running', count: sessionIds.length });
+        }
+        const sessionId = String(req.body?.sessionId || '').trim();
+        const operationId = normalizeAdminOperationId(req.body?.operationId) || crypto.randomBytes(12).toString('hex');
+        if (!/^[A-Za-z0-9_-]{7,120}$/.test(sessionId)) return res.status(400).json({ ok: false, error: 'invalid_session_id' });
+        if (await db.collection(ADMIN_SESSION_OPERATIONS_COLLECTION).findOne({ _id: operationId })) return res.status(409).json({ ok: false, error: 'operation_id_already_used' });
+        await createAdminSessionOperation(operationId, 'single', [sessionId]);
+        setImmediate(() => { void runAdminSingleSessionOperation(operationId, sessionId).catch(error => console.error('[admin-single-session-operation-failed]', { operationId, error: error?.message || String(error) })); });
+        return res.status(202).json({ ok: true, operationId, status: 'running', count: 1 });
+    } catch (error) {
+        console.error('[admin-session-delete-start-failed]', { error: error?.message || String(error) });
+        return res.status(500).json({ ok: false, error: 'session_delete_start_failed' });
+    }
+});
+
+app.get('/api/sessions/operations/:operationId', async (req, res) => {
+    if (!isAuthorizedAdmin(req)) return res.status(401).json({ ok: false, error: 'token_required' });
+    const operationId = normalizeAdminOperationId(req.params?.operationId);
+    if (!operationId) return res.status(400).json({ ok: false, error: 'invalid_operation_id' });
+    const operation = await db.collection(ADMIN_SESSION_OPERATIONS_COLLECTION).findOne({ _id: operationId });
+    if (!operation) return res.status(404).json({ ok: false, error: 'operation_not_found' });
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(200).json({ ok: true, operation: {
+        operationId: operation.operationId,
+        type: operation.type,
+        status: operation.status,
+        stage: operation.stage,
+        count: Number(operation.count || 0),
+        prepared: Number(operation.prepared || 0),
+        deleted: Number(operation.deleted || 0),
+        failed: Number(operation.failed || 0),
+        noticeFailed: Number(operation.noticeFailed || 0),
+        summary: operation.summary || '',
+        steps: Array.isArray(operation.steps) ? operation.steps : [],
+        createdAt: operation.createdAt || null,
+        updatedAt: operation.updatedAt || null,
+        finishedAt: operation.finishedAt || null
+    } });
+});
 
 function isAllowedEmbeddedHomeRequest(req) {
     if (req.method !== 'GET' && req.method !== 'HEAD') return false;
@@ -12469,7 +13064,7 @@ async function buildSessionListSnapshot() {
 }
 
 app.get('/list', (req, res) => {
-    res.set('Referrer-Policy', 'no-referrer').set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0').type('html').send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;min-height:100%;background:#000;color:#fff;overscroll-behavior:none;overscroll-behavior-y:none;touch-action:pan-y}body{width:100%;height:100dvh;min-height:100svh;overflow:hidden;overscroll-behavior:none}#loader{position:fixed;inset:0;display:grid;place-items:center;background:#000}#loader svg{width:52px;height:52px;animation:tfbot-spin .85s linear infinite}#loader circle{fill:none;stroke:#fff;stroke-width:4;stroke-linecap:round;stroke-dasharray:92 160}#output{display:block;width:100%;height:100dvh;min-height:100svh;margin:0;padding:calc(env(safe-area-inset-top) + 12px) calc(env(safe-area-inset-right) + 12px) calc(env(safe-area-inset-bottom) + 12px) calc(env(safe-area-inset-left) + 12px);overflow:auto;overscroll-behavior:none;overscroll-behavior-y:none;overscroll-behavior-x:none;-webkit-overflow-scrolling:touch;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:clamp(12px,2.9vw,15px)/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}#output[hidden],#loader[hidden]{display:none}@media (hover:none) and (pointer:coarse){#output{scrollbar-width:none;-ms-overflow-style:none}#output::-webkit-scrollbar{display:none;width:0;height:0}}@keyframes tfbot-spin{to{transform:rotate(360deg)}}</style></head><body><div id="loader" aria-hidden="true"><svg viewBox="0 0 48 48" role="presentation"><circle cx="24" cy="24" r="19"></circle></svg></div><pre id="output" hidden></pre><script>if(location.search)history.replaceState(null,'',location.pathname);const loader=document.getElementById('loader');const output=document.getElementById('output');let hasSnapshot=false;let fallbackRunning=false;let lastFallbackAt=0;const render=data=>{output.textContent=JSON.stringify(data,null,2);hasSnapshot=true;loader.hidden=true;output.hidden=false;};const fallback=async(force=false)=>{const now=Date.now();if(fallbackRunning||!force&&now-lastFallbackAt<2500)return;fallbackRunning=true;lastFallbackAt=now;const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),7000);try{const response=await fetch('/list/snapshot.json?ts='+now,{cache:'no-store',headers:{'Accept':'application/json'},signal:controller.signal});if(!response.ok)throw new Error('snapshot_http_'+response.status);const data=await response.json();if(!Array.isArray(data))throw new Error('snapshot_invalid');render(data);}catch(error){if(!hasSnapshot){loader.hidden=false;output.hidden=true;}}finally{clearTimeout(timeout);fallbackRunning=false;}};const stream=new EventSource('/list/events');stream.addEventListener('snapshot',event=>{try{const data=JSON.parse(event.data);if(!Array.isArray(data))throw new Error('snapshot_invalid');render(data);}catch(error){void fallback(true);}});stream.onerror=()=>{void fallback();};setTimeout(()=>{if(!hasSnapshot)void fallback(true);},500);setInterval(()=>{if(!hasSnapshot||stream.readyState!==1)void fallback();},5000);</script></body></html>`);
+    res.set('Referrer-Policy', 'no-referrer').set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('Cache-Control', 'private, max-age=30, stale-while-revalidate=120').type('html').send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;min-height:100%;background:#000;color:#fff;overscroll-behavior:none;overscroll-behavior-y:none;touch-action:pan-y}body{width:100%;height:100dvh;min-height:100svh;overflow:hidden;overscroll-behavior:none}#loader{position:fixed;inset:0;display:grid;place-items:center;background:#000}#loader svg{width:52px;height:52px;animation:tfbot-spin .85s linear infinite}#loader circle{fill:none;stroke:#fff;stroke-width:4;stroke-linecap:round;stroke-dasharray:92 160}#output{display:block;width:100%;height:100dvh;min-height:100svh;margin:0;padding:calc(env(safe-area-inset-top) + 12px) calc(env(safe-area-inset-right) + 12px) calc(env(safe-area-inset-bottom) + 12px) calc(env(safe-area-inset-left) + 12px);overflow:auto;overscroll-behavior:none;overscroll-behavior-y:none;overscroll-behavior-x:none;-webkit-overflow-scrolling:touch;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:clamp(12px,2.9vw,15px)/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}#output[hidden],#loader[hidden]{display:none}@media (hover:none) and (pointer:coarse){#output{scrollbar-width:none;-ms-overflow-style:none}#output::-webkit-scrollbar{display:none;width:0;height:0}}@keyframes tfbot-spin{to{transform:rotate(360deg)}}</style></head><body><div id="loader" aria-hidden="true"><svg viewBox="0 0 48 48" role="presentation"><circle cx="24" cy="24" r="19"></circle></svg></div><pre id="output" hidden></pre><script>if(location.search)history.replaceState(null,'',location.pathname);const loader=document.getElementById('loader');const output=document.getElementById('output');let hasSnapshot=false;let fallbackRunning=false;let lastFallbackAt=0;const render=data=>{output.textContent=JSON.stringify(data,null,2);hasSnapshot=true;loader.hidden=true;output.hidden=false;};const fallback=async(force=false)=>{const now=Date.now();if(fallbackRunning||!force&&now-lastFallbackAt<2500)return;fallbackRunning=true;lastFallbackAt=now;const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),7000);try{const response=await fetch('/list/snapshot.json?ts='+now,{cache:'no-store',headers:{'Accept':'application/json'},signal:controller.signal});if(!response.ok)throw new Error('snapshot_http_'+response.status);const data=await response.json();if(!Array.isArray(data))throw new Error('snapshot_invalid');render(data);}catch(error){if(!hasSnapshot){loader.hidden=false;output.hidden=true;}}finally{clearTimeout(timeout);fallbackRunning=false;}};const stream=new EventSource('/list/events');stream.addEventListener('snapshot',event=>{try{const data=JSON.parse(event.data);if(!Array.isArray(data))throw new Error('snapshot_invalid');render(data);}catch(error){void fallback(true);}});stream.onerror=()=>{void fallback();};setTimeout(()=>{if(!hasSnapshot)void fallback(true);},500);setInterval(()=>{if(!hasSnapshot||stream.readyState!==1)void fallback();},5000);</script></body></html>`);
 });
 
 const sessionListStreamClients = new Set();
@@ -12658,10 +13253,7 @@ function normalizeCloudflareAccountIndex(index, count) {
 }
 
 function getCloudflareAttemptLimit(accounts) {
-    if (!Array.isArray(accounts) || accounts.length === 0) return 0;
-    const configured = Number(process.env.AI_MAX_ACCOUNT_ATTEMPTS || 7);
-    const requested = Number.isFinite(configured) ? Math.floor(configured) : 7;
-    return Math.min(accounts.length, Math.max(1, Math.min(7, requested)));
+    return Array.isArray(accounts) ? accounts.length : 0;
 }
 
 async function ensureCloudflareAccountIndex(accounts) {
@@ -12758,10 +13350,15 @@ async function recordCloudflareAccountSuccess(accounts, accountIndex, model, dur
         updatedAt: new Date()
     };
     if (isCurrent) {
-        fields.currentIndex = accountIndex;
-        fields.accountNumber = accountIndex + 1;
-        fields.accountId = account?.accountId || null;
-        fields.status = 'success';
+        const nextIndex = normalizeCloudflareAccountIndex(accountIndex + 1, accounts.length);
+        const nextAccount = accounts[nextIndex];
+        cloudflareAccountIndex = nextIndex;
+        fields.currentIndex = nextIndex;
+        fields.accountNumber = nextIndex + 1;
+        fields.accountId = nextAccount?.accountId || null;
+        fields.lastSuccessfulAccountNumber = accountIndex + 1;
+        fields.lastSuccessfulAccountId = account?.accountId || null;
+        fields.status = 'success_next_account';
     }
     await writeCloudflareRotationState(fields);
 }
@@ -12771,8 +13368,8 @@ async function generateCloudflareImage(prompt) {
     if (!accounts.length || !CLOUDFLARE_API_BASE_URL || !imageModels.length) throw new Error('ai_not_configured');
     const firstAccountIndex = await ensureCloudflareAccountIndex(accounts);
     let lastError = null;
-    const deadline = Date.now() + Math.max(20000, Number(process.env.IMAGE_TOTAL_TIMEOUT_MS || 280000));
-    const requestTimeoutMs = Math.max(1000, Number(process.env.IMAGE_REQUEST_TIMEOUT_MS || 40000));
+    const deadline = Date.now() + Math.max(60000, Math.min(900000, Number(process.env.IMAGE_TOTAL_TIMEOUT_MS || 600000)));
+    const requestTimeoutMs = Math.max(1000, Math.min(60000, Number(process.env.IMAGE_REQUEST_TIMEOUT_MS || 30000)));
     const maxAccountAttempts = getCloudflareAttemptLimit(accounts);
     for (let accountOffset = 0; accountOffset < maxAccountAttempts && Date.now() < deadline; accountOffset++) {
         const accountIndex = (firstAccountIndex + accountOffset) % accounts.length;
@@ -12857,7 +13454,7 @@ function scheduleSessionReconnect(sessionId, autoExpire, format, options = {}) {
         console.warn('[session-reconnect-suppressed-whatsapp-forbidden]', { sessionId, disconnectCode: Number(session.lastDisconnectCode || 403), status: currentStatus || null, credentialsPreserved: true, automaticReconnect: false });
         return;
     }
-    if (!session || session.retiringDuplicateAccount === true || currentStatus === 'duplicate_account' || reconnectTimers.has(sessionId) || currentStatus === 'pairing_expired' || session.reauthRequired === true || session.deviceRemoved === true) return;
+    if (!session || session.adminDeletionInProgress === true || session.retiringDuplicateAccount === true || currentStatus === 'duplicate_account' || reconnectTimers.has(sessionId) || currentStatus === 'pairing_expired' || session.reauthRequired === true || session.deviceRemoved === true) return;
     const disconnectCode = Number(session.lastDisconnectCode || 0);
     const isRestartRequired = disconnectCode === 515 || /stream errored.*restart required|restart required/i.test(String(session.lastDisconnectReason || ''));
     if (session.pairingRestartFailed === true && !isRestartRequired) return;
@@ -13669,6 +14266,32 @@ const commandsWithoutArguments = new Set([
     'kickall', 'kickall2', 'ferme', 'ouvert', 'bienvenue', 'nolien', 'nolien2',
     'del', 'del3', 'vv', 'vv2', 'url', 'sites'
 ]);
+const independentInboundCommands = new Set(['ai', 'cheche', 'imaj']);
+const targetArgumentCommands = new Set(['kick', 'add', 'promote', 'demote', 'del2']);
+
+function isValidTargetCommandArguments(args, context = {}) {
+    const source = String(args || '').trim();
+    if (!source) return context.hasQuotedMessage === true;
+    const mentionTokens = source.match(/@[\p{L}\p{N}_.-]+/gu) || [];
+    if (mentionTokens.length) {
+        const remainder = source.replace(/@[\p{L}\p{N}_.-]+/gu, '').trim();
+        return !remainder && Array.isArray(context.mentionedJid) && context.mentionedJid.length === mentionTokens.length;
+    }
+    if (!/^\+?[0-9][0-9().-]*[0-9]$/u.test(source)) return false;
+    const groups = source.match(/[0-9]+/gu) || [];
+    if (groups.filter(group => group.length >= 5).length > 1) return false;
+    const digits = normalizePhoneNumber(source);
+    return digits.length >= 6 && digits.length <= 20 && !/^0+$/.test(digits);
+}
+
+function isValidSinglePhoneArgument(value, minDigits = 6, maxDigits = 20) {
+    const source = String(value || '').trim();
+    if (!/^\+?[0-9][0-9().-]*[0-9]$/u.test(source)) return false;
+    const groups = source.match(/[0-9]+/gu) || [];
+    if (groups.filter(group => group.length >= 5).length > 1) return false;
+    const digits = normalizePhoneNumber(source);
+    return digits.length >= minDigits && digits.length <= maxDigits && !/^0+$/.test(digits);
+}
 
 function hasExplicitAiCommandPrefix(body) {
     let source = String(body || '').trim();
@@ -13687,16 +14310,15 @@ function parseIncomingCommand(body, language, context = {}) {
     const args = String(match[2] || '').trim();
     const internalCommand = resolveCommand(command, language);
     if (!internalCommand) return null;
-    if (internalCommand === 'ai' && !hasExplicitAiCommandPrefix(body)) return null;
+    if (internalCommand === 'ai' && (!hasExplicitAiCommandPrefix(body) || !args)) return null;
     if (commandsWithoutArguments.has(internalCommand) && args) return null;
     if ((internalCommand === 'del' || internalCommand === 'del3') && !context.hasQuotedMessage) return null;
     if ((internalCommand === 'vv' || internalCommand === 'vv2') && context.hasQuotedViewOnceMedia !== true) return null;
-    if (internalCommand === 'del2' && !args && !context.hasQuotedMessage) return null;
-    if (internalCommand === 'code') {
-        if (!/^\+?[0-9][0-9()]*$/u.test(args)) return null;
-        const normalizedPairingDigits = normalizePairingPhoneNumber(args);
-        if (normalizedPairingDigits.length < 8 || normalizedPairingDigits.length > 15 || /^0+$/.test(normalizedPairingDigits)) return null;
-    }
+    if (internalCommand === 'url' && context.hasQuotedMedia !== true) return null;
+    if (['cheche', 'imaj', 'qr'].includes(internalCommand) && !args) return null;
+    if (internalCommand === 'lang' && args && !/^(?:fr|en|es|ht)$/i.test(args)) return null;
+    if (targetArgumentCommands.has(internalCommand) && !isValidTargetCommandArguments(args, context)) return null;
+    if (internalCommand === 'code' && !isValidSinglePhoneArgument(args, 8, 15)) return null;
     let parsedArgs = args;
     if (internalCommand === 'ai') {
         const aiPrefixes = new Set(['ai', 'ia', 'assistant', 'asistente', 'asistan', 'iu', 'tfasistan']);
@@ -13705,6 +14327,7 @@ function parseIncomingCommand(body, language, context = {}) {
             if (!prefixMatch || !aiPrefixes.has(normalizeText(prefixMatch[1]))) break;
             parsedArgs = String(prefixMatch[2] || '').trim();
         }
+        if (!parsedArgs) return null;
         parsedArgs = clipLongText(parsedArgs, AI_MAX_INPUT_CHARS);
     }
     return { command, internalCommand, args: parsedArgs };
@@ -13714,11 +14337,6 @@ function resolveIncomingMessageCommand(body, language, context = {}) {
     return parseIncomingCommand(body, language, context);
 }
 
-async function sendPlainExplanationMessage(sock, jid, text) {
-    const body = String(text || '').trim();
-    if (!body) return null;
-    return queuedSendMessage(sock, jid, { text: body }, {}, 220);
-}
 
 async function sendFormatted(sock, from, type, text, pushName, isAI = false, hostName = "Bot (tfbot)", sendOptions = {}) {
     return sendImageCaptioned(sock, from, adamLogoBuffer, type, text, pushName || 'Inconnu', sendOptions);
@@ -15070,6 +15688,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const currentBotAccountJid = currentBotNum ? `${currentBotNum}@s.whatsapp.net` : currentBotLid || String(sock.user?.id || '');
                 const currentBotName = sanitizeSessionDisplayName(sock.user?.name);
                 if (currentBotNum || /@lid$/i.test(currentBotLid)) {
+                    if (currentBotNum) {
+                        try {
+                            await restorePreservedSessionDataForAccount(sessionId, currentBotNum);
+                        } catch (restoreError) {
+                            console.warn('[session-persistent-data-restore-failed]', { sessionId, accountNumberHash: shortLogHash(currentBotNum), error: restoreError?.message || String(restoreError) });
+                        }
+                    }
                     const ownerCol = db.collection('session_owners');
                     const now = Date.now();
                     const existingRecord = await ownerCol.findOne({ sessionId });
@@ -18871,7 +19496,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                         if (messageClaimHeartbeat) clearInterval(messageClaimHeartbeat);
                         if (messageClaimed) await finalizeMessageClaim(true);
                     }
-                    }, msgId, receivedSenderJid, false, receivedClassification === 'recognized_command').catch(async dispatchQueueError => {
+                    }, msgId, receivedSenderJid, independentInboundCommands.has(receivedParsedCommand?.internalCommand), receivedClassification === 'recognized_command').catch(async dispatchQueueError => {
                         messageProcessingCompleted = true;
                         messageProcessingSucceeded = false;
                         messageProcessingError = dispatchQueueError?.message || String(dispatchQueueError);
@@ -19733,7 +20358,7 @@ setInterval(() => {
     if (serverShuttingDown || tfbotWorkerStopping || TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive) return;
     const now = Date.now();
     for (const [sessionId, runtime] of activeSessions.entries()) {
-        if (!runtime || runtime.retiringDuplicateAccount === true || runtime.deviceRemoved === true || runtime.reauthRequired === true || runtime.whatsappForbidden === true) continue;
+        if (!runtime || runtime.adminDeletionInProgress === true || runtime.retiringDuplicateAccount === true || runtime.deviceRemoved === true || runtime.reauthRequired === true || runtime.whatsappForbidden === true) continue;
         const status = String(runtime.status || '').toLowerCase();
         if (status === 'forbidden_wait' || status === 'duplicate_account' || status === 'pairing_expired' || Number(runtime.lastDisconnectCode || 0) === 403) continue;
         if (isAuthenticatedSocketOperational(runtime, runtime.sock)) continue;
