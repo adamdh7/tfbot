@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'tfbot-v218';
+const TFBOT_CODE_VERSION = 'tfbot-v219';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
 const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
 let tfbotBaileysSocketVersionCache = null;
@@ -2108,7 +2108,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-21-r218-image-command-chat-text-dispatch';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-21-r219-explicit-image-action-sse-result-and-exact-admin-caption';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_REQUEST_TOKEN = 'Bot (tfbot)';
@@ -7154,13 +7154,19 @@ async function readTfServerAiFinalStream(response) {
     if (!reader) {
         const bodyText = await response.text();
         const finalMessage = buildTfServerAiEventText(bodyText);
-        if (!finalMessage) throw new Error('tfserver_ai_stream_missing_final_message');
-        return finalMessage;
+        let parsed = null;
+        try { parsed = JSON.parse(bodyText); } catch (error) {}
+        const imageUrl = String(parsed?.image_url || parsed?.imageUrl || parsed?.url || parsed?.result?.url || '').trim();
+        if (!finalMessage && !imageUrl) throw new Error('tfserver_ai_stream_missing_final_message');
+        return { finalMessage: finalMessage || `![Generated Image](${imageUrl})`, imageUrl, eventCount: 0, generationDone: true };
     }
     const decoder = new TextDecoder('utf-8');
     let pending = '';
     let generationEnd = null;
     let streamError = '';
+    let finalContent = '';
+    let imageUrl = '';
+    let imageUrlConfirmed = false;
     let eventCount = 0;
     const consumeLine = line => {
         const trimmedLine = String(line || '').trim();
@@ -7171,8 +7177,30 @@ async function readTfServerAiFinalStream(response) {
         try { event = JSON.parse(raw); } catch (error) { return; }
         eventCount++;
         const type = String(event?.type || '').toLowerCase();
-        if (type === 'generation_end') generationEnd = event;
-        else if (type === 'error' || (type === 'final' && event?.error === true)) streamError = String(event?.message || event?.content || 'generation_failed');
+        if (type === 'image_result') {
+            const candidate = String(event?.url || event?.image_url || event?.result_url || '').trim();
+            if (candidate && event?.confirmed !== false) {
+                imageUrl = candidate;
+                imageUrlConfirmed = event?.confirmed === true;
+            }
+            if (typeof event?.final_message === 'string' && event.final_message.trim()) finalContent = event.final_message.trim();
+        } else if (type === 'final') {
+            if (event?.error === true) {
+                streamError = String(event?.message || event?.content || 'generation_failed');
+                return;
+            }
+            const candidate = String(event?.image_url || event?.url || '').trim();
+            if (candidate) imageUrl = candidate;
+            if (typeof event?.content === 'string' && event.content.trim()) finalContent = event.content.trim();
+            if (typeof event?.final_message === 'string' && event.final_message.trim()) finalContent = event.final_message.trim();
+        } else if (type === 'generation_end') {
+            generationEnd = event;
+            const candidate = String(event?.image_url || event?.url || '').trim();
+            if (candidate) imageUrl = candidate;
+            if (typeof event?.final_message === 'string' && event.final_message.trim()) finalContent = event.final_message.trim();
+        } else if (type === 'error' || (type === 'final' && event?.error === true)) {
+            streamError = String(event?.message || event?.content || 'generation_failed');
+        }
     };
     try {
         while (true) {
@@ -7188,16 +7216,15 @@ async function readTfServerAiFinalStream(response) {
         try { reader.releaseLock(); } catch (error) {}
     }
     if (streamError) throw new Error(`tfserver_ai_generation_failed:${streamError.slice(0, 500)}`);
-    if (!generationEnd) throw new Error('tfserver_ai_stream_closed_before_generation_end');
-    if (generationEnd.error === true || generationEnd.stopped === true || generationEnd.done !== true) {
+    if (!generationEnd && !imageUrlConfirmed) throw new Error('tfserver_ai_stream_closed_before_generation_end');
+    if (generationEnd && (generationEnd.error === true || generationEnd.stopped === true || generationEnd.done !== true) && !imageUrlConfirmed) {
         throw new Error(`tfserver_ai_generation_incomplete:${String(generationEnd.message || (generationEnd.stopped ? 'generation_stopped' : 'generation_not_completed')).slice(0, 240)}`);
     }
-    const finalMessage = String(generationEnd.final_message || '').trim();
-    if (!finalMessage) throw new Error('tfserver_ai_generation_completed_without_final_message');
-    console.info('[tfserver-ai-stream-final-received]', { eventCount, finalLength: finalMessage.length, generationDone: true });
-    return finalMessage;
+    const finalMessage = String(generationEnd?.final_message || finalContent || (imageUrl ? `![Generated Image](${imageUrl})` : '')).trim();
+    if (!finalMessage && !imageUrl) throw new Error('tfserver_ai_generation_completed_without_final_message');
+    console.info('[tfserver-ai-stream-final-received]', { eventCount, finalLength: finalMessage.length, generationDone: generationEnd?.done === true, imageResultConfirmed: imageUrlConfirmed, imageUrlReceived: Boolean(imageUrl) });
+    return { finalMessage, imageUrl, eventCount, generationDone: generationEnd?.done === true, imageUrlConfirmed };
 }
-
 async function postTfServerAi(payload, timeoutMs = TFSERVER_AI_TIMEOUT_MS) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs) || TFSERVER_AI_TIMEOUT_MS));
@@ -7218,17 +7245,31 @@ async function postTfServerAi(payload, timeoutMs = TFSERVER_AI_TIMEOUT_MS) {
             cache: 'no-store'
         });
         if (!response.ok) {
-            try { await response.body?.cancel?.(); } catch (error) {}
-            throw new Error(`tfserver_ai_http_${response.status}`);
+            const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase();
+            const errorBody = await response.text().catch(() => '');
+            let detail = '';
+            try {
+                const parsedError = JSON.parse(errorBody);
+                detail = String(parsedError?.message || parsedError?.error?.message || parsedError?.error || parsedError?.detail || parsedError?.cause || '');
+                if (!detail && parsedError && typeof parsedError === 'object') detail = JSON.stringify(parsedError);
+            } catch (error) {
+                detail = errorBody;
+            }
+            const safeDetail = redactActionError(String(detail || '').slice(0, 900)).replace(/[\r\n\t]+/g, ' ').slice(0, 600);
+            console.error('[tfserver-ai-http-failed]', { status: response.status, contentType, responseCharacters: errorBody.length, detail: safeDetail || null });
+            throw new Error(`tfserver_ai_http_${response.status}${safeDetail ? `:${safeDetail}` : ''}`);
         }
         const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase();
         if (contentType.includes('text/event-stream')) {
-            const finalMessage = await readTfServerAiFinalStream(response);
-            return { response, bodyText: '', finalMessage, streamed: true };
+            const streamResult = await readTfServerAiFinalStream(response);
+            return { response, bodyText: '', finalMessage: streamResult.finalMessage, imageUrl: streamResult.imageUrl || '', streamEventCount: streamResult.eventCount || 0, imageUrlConfirmed: streamResult.imageUrlConfirmed === true, streamed: true };
         }
         const bodyText = await response.text();
         const finalMessage = buildTfServerAiEventText(bodyText);
-        return { response, bodyText, finalMessage, streamed: false };
+        let parsedBody = null;
+        try { parsedBody = JSON.parse(bodyText); } catch (error) {}
+        const imageUrl = String(parsedBody?.image_url || parsedBody?.imageUrl || parsedBody?.url || parsedBody?.result?.url || '').trim();
+        return { response, bodyText, finalMessage, imageUrl, streamed: false };
     } catch (error) {
         if (error?.name === 'AbortError') throw new Error('tfserver_ai_timeout');
         throw error;
@@ -7415,14 +7456,23 @@ async function callTfServerAiImage(sessionId, userPhone, prompt, userName = 'Inc
     const tfid = await getTfServerAiConversationId(sessionId, normalizedPhone, normalizedName, normalizedLanguage);
     return enqueueTfServerAiUserRequest(tfid, async () => {
         const profileState = await ensureTfServerAiUserInformation(tfid, normalizedName, normalizedPhone, normalizedLanguage);
-        const chatText = `Generate IMAGES: ${query}`;
-        const payload = { tfid, text: chatText };
-        console.info('[tfserver-ai-image-chat-request]', { sessionId, conversationHash: shortLogHash(tfid), promptLength: query.length, messageFormat: 'Generate IMAGES: <prompt>', actionFieldSent: false, userInformationConfirmed: true });
+        const payload = { tfid, text: query, action: { name: 'image', params: { prompt: query } } };
+        console.info('[tfserver-ai-image-chat-request]', { sessionId, conversationHash: shortLogHash(tfid), promptLength: query.length, messageFormat: 'normal chat text with explicit image action', actionFieldSent: true, actionName: 'image', userInformationConfirmed: true });
         const aiResult = await postTfServerAi(payload, TFSERVER_AI_TIMEOUT_MS);
         const answer = String(aiResult.finalMessage || buildTfServerAiEventText(aiResult.bodyText) || '').trim();
-        if (!answer) throw new Error('tfserver_ai_image_empty_final_message');
-        const imageUrl = extractTfServerAiBrefImageUrl(answer);
-        console.info('[tfserver-ai-image-request-completed]', { sessionId, conversationHash: shortLogHash(tfid), promptLength: query.length, imageUrlHost: new URL(imageUrl).hostname, userInformationConfirmed: true, userInformationInitializedNow: profileState.initializedNow === true, streamed: aiResult.streamed === true, messageFormat: 'Generate IMAGES: <prompt>', responseCharacters: answer.length });
+        let imageUrl = '';
+        for (const candidate of [aiResult.imageUrl, answer, aiResult.bodyText]) {
+            if (!candidate) continue;
+            try {
+                imageUrl = extractTfServerAiBrefImageUrl(candidate);
+                if (imageUrl) break;
+            } catch (error) {}
+        }
+        if (!imageUrl) {
+            console.error('[tfserver-ai-image-result-missing-url]', { sessionId, conversationHash: shortLogHash(tfid), promptLength: query.length, streamed: aiResult.streamed === true, streamEventCount: Number(aiResult.streamEventCount || 0), imageUrlConfirmed: aiResult.imageUrlConfirmed === true, finalMessageCharacters: answer.length, finalMessageHasImageMarker: /image_generation|generated image/i.test(answer), responseBodyCharacters: String(aiResult.bodyText || '').length });
+            throw new Error('tfserver_ai_image_bref_url_missing_from_confirmed_result');
+        }
+        console.info('[tfserver-ai-image-request-completed]', { sessionId, conversationHash: shortLogHash(tfid), promptLength: query.length, imageUrlHost: new URL(imageUrl).hostname, userInformationConfirmed: true, userInformationInitializedNow: profileState.initializedNow === true, streamed: aiResult.streamed === true, streamEventCount: Number(aiResult.streamEventCount || 0), imageUrlConfirmed: aiResult.imageUrlConfirmed === true, messageFormat: 'normal chat text with explicit image action', responseCharacters: answer.length });
         return imageUrl;
     });
 }
@@ -12363,7 +12413,8 @@ async function performAdminSessionRemovalOnThisWorker(operationId, sessionId, no
                 const displayName = sanitizeSessionDisplayName(runtime.sock.user?.name || runtime.sock.user?.notify || runtime.sock.user?.verifiedName || ownerDoc?.Name || ownerDoc?.name || 'Inconnu') || 'Inconnu';
                 const formattedNotice = normalizeCaptionText(notice.content);
                 try {
-                    const sent = await sendImageCaptioned(runtime.sock, `${phone}@s.whatsapp.net`, adamLogoBuffer, notice.title, formattedNotice, displayName, { ownerName: 'Bot (tfbot)', language, preserveFormatting: true });
+                    const exactDisconnectCaption = buildCaption(notice.title, formattedNotice, displayName, true, 'Bot (tfbot)', language);
+                    const sent = await sendImageCaptioned(runtime.sock, `${phone}@s.whatsapp.net`, adamLogoBuffer, notice.title, formattedNotice, displayName, { ownerName: 'Bot (tfbot)', language, exactCaption: exactDisconnectCaption });
                     if (!sent?.key?.id) throw new Error('session_disconnect_notice_send_not_confirmed');
                     await appendAdminSessionOperationStep(operationId, id, 'avi', 'success', 'Avi caption an voye nan WhatsApp epi sèvè a konfime mesaj la.', null, { prepared: 1 });
                     await new Promise(resolve => setTimeout(resolve, ADMIN_SESSION_DELETE_NOTICE_DELAY_MS));
