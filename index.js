@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'tfbot-v216';
+const TFBOT_CODE_VERSION = 'tfbot-v217';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
 const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
 let tfbotBaileysSocketVersionCache = null;
@@ -2108,7 +2108,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-21-r216-admin-api-hide-running-deletions-asistan-image-bref';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-21-r217-bref-url-delivery-translated-disconnect-restore-failed-sessions';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_REQUEST_TOKEN = 'Bot (tfbot)';
@@ -7428,32 +7428,6 @@ async function callTfServerAiImage(sessionId, userPhone, prompt, userName = 'Inc
     });
 }
 
-async function downloadTfServerAiGeneratedImage(imageUrl) {
-    const parsed = new URL(String(imageUrl || ''));
-    if (parsed.protocol !== 'https:' || parsed.hostname.toLowerCase() !== 'bref.adamdh7.org' || parsed.pathname === '/' || /^\/upload(?:\/confirm)?\/?$/i.test(parsed.pathname)) throw new Error('tfserver_ai_image_url_not_trusted');
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 45000);
-    if (typeof timer.unref === 'function') timer.unref();
-    try {
-        const response = await fetch(parsed.toString(), { method: 'GET', headers: { Accept: 'image/*' }, cache: 'no-store', redirect: 'follow', signal: controller.signal });
-        if (!response.ok) throw new Error(`tfserver_ai_bref_http_${response.status}`);
-        const finalUrl = new URL(String(response.url || parsed.toString()));
-        if (finalUrl.protocol !== 'https:') throw new Error('tfserver_ai_bref_redirect_not_https');
-        const contentLength = Number(response.headers.get('content-length') || 0);
-        if (contentLength > 20 * 1024 * 1024) throw new Error('tfserver_ai_bref_image_too_large');
-        const buffer = Buffer.from(await response.arrayBuffer());
-        if (!buffer.length || buffer.length > 20 * 1024 * 1024) throw new Error('tfserver_ai_bref_image_invalid_size');
-        const mimeType = detectImageMimeType(buffer);
-        if (!String(mimeType || '').startsWith('image/')) throw new Error('tfserver_ai_bref_response_not_image');
-        return { buffer, mimeType, bytes: buffer.length };
-    } catch (error) {
-        if (error?.name === 'AbortError') throw new Error('tfserver_ai_bref_download_timeout');
-        throw error;
-    } finally {
-        clearTimeout(timer);
-    }
-}
-
 async function callTfServerAiMessage(sessionId, userPhone, text, useSearch = false, userName = 'Inconnu', userLang = 'ht') {
     const query = clipLongText(String(text || '').trim(), useSearch ? SEARCH_QUERY_MAX_CHARS : AI_MAX_INPUT_CHARS);
     if (!query) throw new Error(useSearch ? 'search_query_empty' : 'ai_prompt_empty');
@@ -12188,10 +12162,10 @@ function getAdminSessionNotice(language, type) {
     if (!['fr', 'en', 'es', 'ht'].includes(lang)) throw new Error('session_disconnect_user_language_unavailable');
     const notices = {
         single: {
-            fr: { title: 'Déconnexion', content: 'Vous avez été déconnecté du serveur en raison de la limite de temps d’activité de Bot (tfbot). Pour vous reconnecter, rendez-vous sur bot.adamdh7.org.' },
-            en: { title: 'Disconnection', content: 'You have been disconnected from the server because the activity time limit for Bot (tfbot) was reached. To reconnect, visit bot.adamdh7.org.' },
-            es: { title: 'Desconexión', content: 'Se te ha desconectado del servidor porque se alcanzó el límite de tiempo de actividad de Bot (tfbot). Para volver a conectarte, visita bot.adamdh7.org.' },
-            ht: { title: 'Dekoneksyon', content: 'Yo dekonekte w sou sèvè a paske limit tan aktivite kont Bot (tfbot) la rive. Si ou vle rekonekte, ale sou bot.adamdh7.org.' }
+            fr: { title: 'Déconnexion', content: '*Vous avez été déconnecté de *_Bot (tfbot)_* parce que la limite de temps d’activité de votre compte *_Bot (tfbot)_* a été atteinte. Si vous souhaitez vous reconnecter, rendez-vous sur bot.adamdh7.org.*' },
+            en: { title: 'Disconnection', content: '*You have been disconnected from *_Bot (tfbot)_* because your *_Bot (tfbot)_* account has reached its activity time limit. To reconnect, visit bot.adamdh7.org.*' },
+            es: { title: 'Desconexión', content: '*Se te ha desconectado de *_Bot (tfbot)_* porque tu cuenta de *_Bot (tfbot)_* ha alcanzado su límite de tiempo de actividad. Si quieres volver a conectarte, visita bot.adamdh7.org.*' },
+            ht: { title: 'Dekoneksyon', content: '*Ou dekonekte sou *_Bot (tfbot)_* paske limit tan aktivite kont *_Bot (tfbot)_*  ou an rive. Si ou vle rekonekte, ale sou bot.adamdh7.org.*' }
         },
         bulk: {
             fr: { title: 'Avis administratif', content: 'L’administrateur a demandé la suppression de tous les comptes Bot (tfbot) sur le serveur. Pour utiliser le service à nouveau, reconnectez-vous depuis bot.adamdh7.org.' },
@@ -12263,12 +12237,14 @@ async function resolveAdminSessionUserLanguage(sessionId, ownerDoc, runtime, pho
 let adminDeletedSessionIdCache = new Set();
 let adminDeletedSessionIdCacheAt = 0;
 let adminDeletedSessionIdRefreshPromise = null;
+let adminDeletedSessionIdCacheGeneration = 0;
 const ADMIN_DELETED_SESSION_CACHE_TTL_MS = 500;
 async function getAdminDeletedSessionIds(force = false) {
     if (!db) return adminDeletedSessionIdCache;
     const now = Date.now();
     if (!force && now - adminDeletedSessionIdCacheAt < ADMIN_DELETED_SESSION_CACHE_TTL_MS) return adminDeletedSessionIdCache;
     if (adminDeletedSessionIdRefreshPromise) return adminDeletedSessionIdRefreshPromise;
+    const refreshGeneration = adminDeletedSessionIdCacheGeneration;
     adminDeletedSessionIdRefreshPromise = (async () => {
         try {
             const cutoff = new Date(now - ADMIN_SESSION_OPERATION_TTL_MS);
@@ -12291,11 +12267,14 @@ async function getAdminDeletedSessionIds(force = false) {
                     if (value) next.add(value);
                 }
             }
-            adminDeletedSessionIdCache = next;
+            if (refreshGeneration === adminDeletedSessionIdCacheGeneration) {
+                adminDeletedSessionIdCache = next;
+                adminDeletedSessionIdCacheAt = Date.now();
+            }
         } catch (error) {
             console.warn('[admin-session-deleted-id-refresh-failed]', { error: error?.message || String(error), fallbackIds: adminDeletedSessionIdCache.size });
+            if (refreshGeneration === adminDeletedSessionIdCacheGeneration) adminDeletedSessionIdCacheAt = Date.now();
         }
-        adminDeletedSessionIdCacheAt = Date.now();
         return adminDeletedSessionIdCache;
     })().finally(() => { adminDeletedSessionIdRefreshPromise = null; });
     return adminDeletedSessionIdRefreshPromise;
@@ -12308,13 +12287,31 @@ async function appendAdminSessionOperationStep(operationId, sessionId, stage, st
     if (Object.keys(inc).length) update.$inc = inc;
     if (sessionId && Number(increments?.deleted || 0) > 0) update.$addToSet = { deletedSessionIds: String(sessionId) };
     await db.collection(ADMIN_SESSION_OPERATIONS_COLLECTION).updateOne({ _id: operationId }, update);
+    if (sessionId && Number(increments?.deleted || 0) > 0) {
+        adminDeletedSessionIdCache.add(String(sessionId));
+        adminDeletedSessionIdCacheAt = 0;
+    }
     console.info('[admin-session-operation-step]', { operationId, sessionId: sessionId || null, stage: step.stage, status: step.status, detail: step.detail });
     return step;
 }
 
 async function finishAdminSessionOperation(operationId, status, stage, summary = '') {
     const now = new Date();
-    await db.collection(ADMIN_SESSION_OPERATIONS_COLLECTION).updateOne({ _id: operationId }, { $set: { status, stage, summary: String(summary || ''), updatedAt: now, finishedAt: now } });
+    const collection = db.collection(ADMIN_SESSION_OPERATIONS_COLLECTION);
+    const beforeFinish = await collection.findOne({ _id: operationId }, { projection: { sessionIds: 1, deletedSessionIds: 1 } }).catch(() => null);
+    await collection.updateOne({ _id: operationId }, { $set: { status, stage, summary: String(summary || ''), updatedAt: now, finishedAt: now } });
+    if (status !== 'running') {
+        const confirmedDeleted = new Set((Array.isArray(beforeFinish?.deletedSessionIds) ? beforeFinish.deletedSessionIds : []).map(value => String(value || '').trim()).filter(Boolean));
+        for (const sessionId of Array.isArray(beforeFinish?.sessionIds) ? beforeFinish.sessionIds : []) {
+            const id = String(sessionId || '').trim();
+            if (!id) continue;
+            if (confirmedDeleted.has(id)) adminDeletedSessionIdCache.add(id);
+            else adminDeletedSessionIdCache.delete(id);
+        }
+        adminDeletedSessionIdCacheGeneration++;
+        adminDeletedSessionIdCacheAt = Date.now();
+        console.info('[admin-session-operation-list-visibility-finalized]', { operationId, status, hiddenDeletedCount: confirmedDeleted.size, restoredFailedCount: (Array.isArray(beforeFinish?.sessionIds) ? beforeFinish.sessionIds : []).filter(value => !confirmedDeleted.has(String(value || '').trim())).length });
+    }
 }
 
 async function createAdminSessionOperation(operationId, type, sessionIds) {
@@ -12339,7 +12336,8 @@ async function createAdminSessionOperation(operationId, type, sessionIds) {
         expiresAt: new Date(now.getTime() + ADMIN_SESSION_OPERATION_TTL_MS)
     });
     for (const id of normalizedSessionIds) adminDeletedSessionIdCache.add(id);
-    adminDeletedSessionIdCacheAt = 0;
+    adminDeletedSessionIdCacheGeneration++;
+    adminDeletedSessionIdCacheAt = Date.now();
 }
 
 async function performAdminSessionRemovalOnThisWorker(operationId, sessionId, noticeKind = 'single', allowNoticeFailure = false) {
@@ -12364,7 +12362,7 @@ async function performAdminSessionRemovalOnThisWorker(operationId, sessionId, no
             } else {
                 const notice = getAdminSessionNotice(language, isBulk ? 'bulk' : 'single');
                 const displayName = sanitizeSessionDisplayName(runtime.sock.user?.name || runtime.sock.user?.notify || runtime.sock.user?.verifiedName || ownerDoc?.Name || ownerDoc?.name || 'Inconnu') || 'Inconnu';
-                const formattedNotice = `*__${normalizeCaptionText(notice.content).replace(/\*/g, '').replace(/_{1,2}/g, '')}__*`;
+                const formattedNotice = normalizeCaptionText(notice.content);
                 try {
                     const sent = await sendImageCaptioned(runtime.sock, `${phone}@s.whatsapp.net`, adamLogoBuffer, notice.title, formattedNotice, displayName, { ownerName: 'Bot (tfbot)', language, preserveFormatting: true });
                     if (!sent?.key?.id) throw new Error('session_disconnect_notice_send_not_confirmed');
@@ -19161,13 +19159,12 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 const publicImageUrl = await callTfServerAiImage(sessionId, imageUserPhone, imagePrompt, pushName, messageLang);
                                                 if (isCancelled) return;
                                                 console.info('[tfserver-ai-image-finalized]', { sessionId, messageId: msgId, imageUrlHost: new URL(publicImageUrl).hostname, durationMs: Date.now() - imageGenerationStartedAt });
-                                                const imageFile = await downloadTfServerAiGeneratedImage(publicImageUrl);
-                                                if (isCancelled) return;
-                                                const captionText = `${t.imaj_generated.replace('{prompt}', imagePrompt)}\n${publicImageUrl}`;
-                                                const sentImage = await trackedSendImageCaptioned(sock, from, imageFile.buffer, t.image_generated_title, captionText, pushName);
-                                                if (!sentImage?.key?.id) throw new Error('tfserver_ai_image_whatsapp_send_unconfirmed');
+                                                const imageAnswer = `![Generated Image](${publicImageUrl})`;
+                                                const imageDelivery = await sendTfServerAiReply(sock, from, imageAnswer, trackedQueuedSendMessage, m);
+                                                if (!imageDelivery?.sent || !imageDelivery?.generatedImageCount) throw new Error('tfserver_ai_image_url_whatsapp_send_unconfirmed');
                                                 terminalResponseSent = true;
-                                                console.info('[tfserver-ai-image-command-delivered]', { sessionId, messageId: msgId, imageBytes: imageFile.buffer.length, mimeType: imageFile.mimeType, imageUrlHost: new URL(publicImageUrl).hostname, durationMs: Date.now() - imageGenerationStartedAt });
+                                                responseSentForLog = true;
+                                                console.info('[tfserver-ai-image-command-delivered]', { sessionId, messageId: msgId, deliveryType: imageDelivery.type, generatedImageCount: imageDelivery.generatedImageCount, imageUrlHost: new URL(publicImageUrl).hostname, downloadedFromBref: false, durationMs: Date.now() - imageGenerationStartedAt });
                                             } catch (e) {
                                                 console.error('[tfserver-ai-image-command-failed]', { sessionId, messageId: msgId, error: redactActionError(e).slice(0, 900), durationMs: Date.now() - imageGenerationStartedAt });
                                                 await safeSendActionError(sock, from, t.imaj_title, e, messageLang, pushName, m.messageTimestamp);
