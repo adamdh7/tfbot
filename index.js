@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'tfbot-v217';
+const TFBOT_CODE_VERSION = 'tfbot-v218';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
 const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
 let tfbotBaileysSocketVersionCache = null;
@@ -2108,7 +2108,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-21-r217-bref-url-delivery-translated-disconnect-restore-failed-sessions';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-21-r218-image-command-chat-text-dispatch';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_REQUEST_TOKEN = 'Bot (tfbot)';
@@ -7415,15 +7415,14 @@ async function callTfServerAiImage(sessionId, userPhone, prompt, userName = 'Inc
     const tfid = await getTfServerAiConversationId(sessionId, normalizedPhone, normalizedName, normalizedLanguage);
     return enqueueTfServerAiUserRequest(tfid, async () => {
         const profileState = await ensureTfServerAiUserInformation(tfid, normalizedName, normalizedPhone, normalizedLanguage);
-        const payload = {
-            tfid,
-            text: query,
-            action: { name: 'image', params: { prompt: query } }
-        };
+        const chatText = `Generate IMAGES: ${query}`;
+        const payload = { tfid, text: chatText };
+        console.info('[tfserver-ai-image-chat-request]', { sessionId, conversationHash: shortLogHash(tfid), promptLength: query.length, messageFormat: 'Generate IMAGES: <prompt>', actionFieldSent: false, userInformationConfirmed: true });
         const aiResult = await postTfServerAi(payload, TFSERVER_AI_TIMEOUT_MS);
         const answer = String(aiResult.finalMessage || buildTfServerAiEventText(aiResult.bodyText) || '').trim();
+        if (!answer) throw new Error('tfserver_ai_image_empty_final_message');
         const imageUrl = extractTfServerAiBrefImageUrl(answer);
-        console.info('[tfserver-ai-image-request-completed]', { sessionId, conversationHash: shortLogHash(tfid), promptLength: query.length, imageUrlHost: new URL(imageUrl).hostname, userInformationConfirmed: true, userInformationInitializedNow: profileState.initializedNow === true, streamed: aiResult.streamed === true });
+        console.info('[tfserver-ai-image-request-completed]', { sessionId, conversationHash: shortLogHash(tfid), promptLength: query.length, imageUrlHost: new URL(imageUrl).hostname, userInformationConfirmed: true, userInformationInitializedNow: profileState.initializedNow === true, streamed: aiResult.streamed === true, messageFormat: 'Generate IMAGES: <prompt>', responseCharacters: answer.length });
         return imageUrl;
     });
 }
@@ -20680,8 +20679,8 @@ async function main() {
         commandTyping: 'composing_presence_for_full_ai_and_search_wait_for_all_chat_types_and_owner_or_public_commands',
         commandReplyFallbackRecovery: 'legacy_queue_sender_key_reset_and_identity_resolution_until_three_successes_after_15_seconds_or_window_expiry',
         sendHealthChecks: 'throttled_background_session_socket_and_ownership_audit_not_blocking_message_send',
-        commandImageProvider: 'tfserver-ai-explicit-image-action-bref-url',
-        commandImageDelivery: 'download-confirmed-bref-image-and-send-whatsapp-media',
+        commandImageProvider: 'tfserver-ai-chat-text-generate-images-marker-bref-url',
+        commandImageDelivery: 'send-confirmed-bref-url-as-normal-whatsapp-text',
         privateLidMappedPhonePrimary: true,
         privateLidSessionMigrationAfterVerifiedMapping: true,
         privateLidPnDecryptPatchApplied: baileysLidPnDecryptPatchStatus.applied === true,
