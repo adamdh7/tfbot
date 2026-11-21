@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'tfbot-v219';
+const TFBOT_CODE_VERSION = 'Bot (tfbot) 217';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
 const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
 let tfbotBaileysSocketVersionCache = null;
@@ -13,7 +13,7 @@ const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID ||
 function formatTfbotHaitiTimestamp(value = Date.now()) {
     const date = value instanceof Date ? value : new Date(value);
     if (!Number.isFinite(date.getTime())) return null;
-    const parts = new Intl.DateTimeFormat('fr-HT', { timeZone: TFBOT_LOG_TIME_ZONE, day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(date);
+    const parts = new Intl.DateTimeFormat('ht-HT', { timeZone: TFBOT_LOG_TIME_ZONE, day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(date);
     const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
     return `${values.day}/${values.month}/${values.year} ${values.hour}:${values.minute}:${values.second} HT`;
 }
@@ -12211,10 +12211,10 @@ function getAdminSessionNotice(language, type) {
     if (!['fr', 'en', 'es', 'ht'].includes(lang)) throw new Error('session_disconnect_user_language_unavailable');
     const notices = {
         single: {
-            fr: { title: 'Déconnexion', content: '*Vous avez été déconnecté de *_Bot (tfbot)_* parce que la limite de temps d’activité de votre compte *_Bot (tfbot)_* a été atteinte. Si vous souhaitez vous reconnecter, rendez-vous sur bot.adamdh7.org.*' },
-            en: { title: 'Disconnection', content: '*You have been disconnected from *_Bot (tfbot)_* because your *_Bot (tfbot)_* account has reached its activity time limit. To reconnect, visit bot.adamdh7.org.*' },
-            es: { title: 'Desconexión', content: '*Se te ha desconectado de *_Bot (tfbot)_* porque tu cuenta de *_Bot (tfbot)_* ha alcanzado su límite de tiempo de actividad. Si quieres volver a conectarte, visita bot.adamdh7.org.*' },
-            ht: { title: 'Dekoneksyon', content: '*Ou dekonekte sou *_Bot (tfbot)_* paske limit tan aktivite kont *_Bot (tfbot)_*  ou an rive. Si ou vle rekonekte, ale sou bot.adamdh7.org.*' }
+            fr: { title: 'Déconnexion', content: '*Vous avez été déconnecté de _Bot (tfbot)_ parce que la limite de temps d’activité de votre compte _Bot (tfbot)_ a été atteinte. Si vous souhaitez vous reconnecter, rendez-vous sur bot.adamdh7.org.*' },
+            en: { title: 'Disconnection', content: '*You have been disconnected from _Bot (tfbot)_ because your _Bot (tfbot)_ account has reached its activity time limit. To reconnect, visit bot.adamdh7.org.*' },
+            es: { title: 'Desconexión', content: '*Se te ha desconectado de _Bot (tfbot)_ porque tu cuenta de _Bot (tfbot)_ ha alcanzado su límite de tiempo de actividad. Si quieres volver a conectarte, visita bot.adamdh7.org.*' },
+            ht: { title: 'Dekoneksyon', content: '*Ou dekonekte sou _Bot (tfbot)_ paske limit tan aktivite kont _Bot (tfbot)_ ou an rive. Si ou vle rekonekte, ale sou bot.adamdh7.org.*' }
         },
         bulk: {
             fr: { title: 'Avis administratif', content: 'L’administrateur a demandé la suppression de tous les comptes Bot (tfbot) sur le serveur. Pour utiliser le service à nouveau, reconnectez-vous depuis bot.adamdh7.org.' },
