@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'tfbot-v211';
+const TFBOT_CODE_VERSION = 'tfbot-v214';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
 const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
 let tfbotBaileysSocketVersionCache = null;
@@ -331,7 +331,7 @@ for (const level of Object.keys(tfbotOriginalConsole)) {
     console[level] = (...args) => {
         try {
             const serialized = args.map(value => typeof value === 'string' ? value : tfbotDiagnosticSerialize(value)).join(' ');
-            const operationalLog = /tfbot-health|tfbot-router|tfbot-worker|cluster-|session-(?:restore|orphan|expired|duplicate|runtime-lock|account-runtime-lock|reconnect|open|health|runtime-status)|signal-|whatsapp-signal|pairing-challenge|worker-handoff|send-failure|whatsapp-send|mongo-(?:connect|close)|storage-layout|messages-upsert|message-|command-|stale-command|tfserver-ai|del3-|quoted-media|view-once|group-status|whatsapp-presence-update|group-metadata|group-sender-key|sender-key-memory|group-participant|baileys-|message-receipt|message-status/i.test(serialized);
+            const operationalLog = /tfbot-health|tfbot-router|tfbot-worker|cluster-|admin-session|admin_session|cloudflare-image|image-command|image-upload|whatsapp-image|image-normalization|image-send|command-response-send|session-(?:restore|orphan|expired|duplicate|runtime-lock|account-runtime-lock|reconnect|open|health|runtime-status)|signal-|whatsapp-signal|pairing-challenge|worker-handoff|send-failure|whatsapp-send|mongo-(?:connect|close)|storage-layout|messages-upsert|message-|command-|stale-command|tfserver-ai|del3-|quoted-media|view-once|group-status|whatsapp-presence-update|group-metadata|group-sender-key|sender-key-memory|group-participant|baileys-|message-receipt|message-status/i.test(serialized);
             if (isSignalDecryptionFailure(args)) {
                 const fallbackSessionMatch = serialized.match(/(?:sessionId|session_id)["'=:\s]+([A-Za-z0-9_-]{8,120})/i);
                 const diagnosticSession = fallbackSessionMatch?.[1] || getTfbotDiagnosticSession()?.sessionId || '';
@@ -2108,7 +2108,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-21-r211-admin-disconnect-caption-preserve-account-profile';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-21-r214-admin-operation-logical-collection-image-generation-fix';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_REQUEST_TOKEN = 'Bot (tfbot)';
@@ -2300,7 +2300,7 @@ function parseCloudflareAccounts() {
     const seen = new Set();
     const add = (accountId, apiToken) => {
         const id = String(accountId || '').trim();
-        const token = String(apiToken || '').trim();
+        const token = String(apiToken || '').trim().replace(/^Bearer\s+/i, '');
         if (!id || !token || seen.has(`${id}:${token}`)) return;
         seen.add(`${id}:${token}`);
         accounts.push({ accountId: id, apiToken: token });
@@ -2317,7 +2317,15 @@ function parseCloudflareAccounts() {
     if (raw) {
         try {
             const parsed = JSON.parse(raw);
-            const entries = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.accounts) ? parsed.accounts : parsed?.accountId || parsed?.account_id || parsed?.id ? [parsed] : Object.entries(parsed || {}).map(([key, value]) => typeof value === 'string' ? { accountId: key, apiToken: value } : value);
+            const entries = Array.isArray(parsed)
+                ? parsed
+                : Array.isArray(parsed?.accounts)
+                    ? parsed.accounts
+                    : parsed?.accounts && typeof parsed.accounts === 'object'
+                        ? Object.entries(parsed.accounts).map(([key, value]) => typeof value === 'string' ? { accountId: key, apiToken: value } : { ...(value || {}), accountId: value?.accountId || value?.account_id || value?.id || key })
+                        : parsed?.accountId || parsed?.account_id || parsed?.id
+                            ? [parsed]
+                            : Object.entries(parsed || {}).map(([key, value]) => typeof value === 'string' ? { accountId: key, apiToken: value } : value);
             for (const item of entries) addEntry(item);
         } catch (error) {
             for (const item of raw.split(/[,;\n]+/)) addEntry(item);
@@ -2344,6 +2352,7 @@ function parseCloudflareAccounts() {
 }
 const cloudflareAccounts = parseCloudflareAccounts();
 const imageModels = [...new Set([process.env.AI_MODEL_IMAGE || '@cf/black-forest-labs/flux-1-schnell', ...String(process.env.AI_MODEL_IMAGE_FALLBACKS || '').split(/[,;\s]+/)].filter(Boolean))];
+console.info('[cloudflare-image-configuration]', { accountCount: cloudflareAccounts.length, modelCount: imageModels.length, models: imageModels, endpointConfigured: !!CLOUDFLARE_API_BASE_URL, accountConfigurationSource: [process.env.CF_ACCOUNTS ? 'CF_ACCOUNTS' : '', process.env.CF_ACCOUNT_ID || process.env.CLOUDFLARE_ACCOUNT_ID ? 'single_account' : '', Object.keys(process.env).some(key => /^(?:CF|CLOUDFLARE)_ACCOUNT_ID_\d+$/i.test(key)) ? 'indexed_accounts' : ''].filter(Boolean) });
 let cloudflareAccountIndex = 0;
 let cloudflareAccountIndexInitialized = false;
 let cloudflareAccountIndexInitPromise = null;
@@ -5316,6 +5325,7 @@ const TFBOT_LOGICAL_COLLECTIONS = new Set([
     'cluster_instances',
     'cluster_router',
     'bot_runtime_state',
+    'admin_session_operations',
     'group_del2',
     'group_del3',
     'group_settings',
@@ -5406,6 +5416,10 @@ function tfbotPrepareDocument(document, bucket) {
         const createdAt = new Date(output.createdAt).getTime();
         if (Number.isFinite(createdAt)) output.__tfbotExpiresAt = new Date(createdAt + BAILEYS_RETRY_MESSAGE_TTL_SECONDS * 1000);
     }
+    if (bucket === 'admin_session_operations' && output.expiresAt) {
+        const expiresAt = new Date(output.expiresAt).getTime();
+        if (Number.isFinite(expiresAt)) output.__tfbotExpiresAt = new Date(expiresAt);
+    }
     return output;
 }
 
@@ -5428,6 +5442,10 @@ function tfbotPrepareUpdate(update, bucket) {
         if (bucket === 'baileys_outgoing_messages' && fields.createdAt) {
             const createdAt = new Date(fields.createdAt).getTime();
             if (Number.isFinite(createdAt)) fields.__tfbotExpiresAt = new Date(createdAt + BAILEYS_RETRY_MESSAGE_TTL_SECONDS * 1000);
+        }
+        if (bucket === 'admin_session_operations' && fields.expiresAt) {
+            const expiresAt = new Date(fields.expiresAt).getTime();
+            if (Number.isFinite(expiresAt)) fields.__tfbotExpiresAt = new Date(expiresAt);
         }
         cleanBucketPath(fields);
     }
@@ -5520,7 +5538,7 @@ class TfbotLogicalCollection {
         if (options.expireAfterSeconds !== undefined && fields.length === 1 && fields[0][0] === 'leaseUntil') {
             return this.rawCollection.createIndex({ leaseUntil: 1 }, { ...options, name: 'tfbot_data_lease_until_ttl' });
         }
-        if (options.expireAfterSeconds !== undefined && fields.length === 1 && fields[0][0] === 'createdAt') {
+        if (options.expireAfterSeconds !== undefined && fields.length === 1 && (fields[0][0] === 'createdAt' && this.bucket === 'baileys_outgoing_messages' || fields[0][0] === 'expiresAt' && this.bucket === 'admin_session_operations')) {
             return this.rawCollection.createIndex({ __tfbotExpiresAt: 1 }, { ...options, expireAfterSeconds: 0, name: 'tfbot_data_temporary_expiry_ttl' });
         }
         const compound = { __tfbotBucket: 1 };
@@ -9423,8 +9441,9 @@ app.use((req, res, next) => {
 });
 
 app.use(async (req, res, next) => {
-    if (!TFBOT_CLUSTER_ENABLED || req.method === 'OPTIONS' || isValidClusterHop(req)) return next();
     const requestPath = normalizeTfbotRequestPath(req.path || '/');
+    const isAdminSessionApi = /^\/api\/sessions(?:\/|$)/i.test(requestPath);
+    if (!TFBOT_CLUSTER_ENABLED || req.method === 'OPTIONS' || isValidClusterHop(req) && !isAdminSessionApi) return next();
     if (requestPath === '/ok' || requestPath === TFBOT_CLUSTER_HEALTH_PATH || requestPath === TFBOT_ROUTER_OK_PATH || requestPath === TFBOT_ROUTER_RESOLVE_PATH || requestPath === TFBOT_WORKER_CONTROL_PATH || requestPath === TFBOT_WORKER_POLL_PATH || requestPath === TFBOT_WORKER_FAILURE_PATH || requestPath.startsWith('/__tfbot/router/')) return next();
     const requestHost = normalizeTfbotHost(req.get('host') || req.hostname || '');
     const proxyAuthPath = normalizeTfbotRequestPath(req.path || '/').replace(/\/+$/, '') || '/';
@@ -9474,8 +9493,25 @@ app.use(async (req, res, next) => {
     }
     if (TFBOT_CLUSTER_COORDINATOR_ONLY) return res.status(503).json({ ok: false, error: 'tfbot_coordinator_has_no_bot_runtime' });
     if (!tfbotWorkerActive || !db || tfbotWorkerStopping) {
+        if (isAdminSessionApi && !serverShuttingDown) {
+            try {
+                await pollTfbotCoordinatorSelection();
+            } catch (selectionError) {
+                console.warn('[admin-session-router-refresh-failed]', { host: TFBOT_CLUSTER_INSTANCE_HOST || null, error: selectionError?.message || String(selectionError) });
+            }
+            const refreshedSelection = tfbotActiveDomainCache;
+            const refreshedHost = normalizeTfbotHost(refreshedSelection?.host || '');
+            const refreshedUrl = String(refreshedSelection?.url || (refreshedHost ? TFBOT_ROUTER_DOMAIN_BY_HOST.get(refreshedHost)?.url : '') || '').replace(/\/+$/, '');
+            if (refreshedHost && refreshedUrl && refreshedHost !== requestHost) {
+                const rerouted = await proxyClusterRequest(req, res, { _id: refreshedHost, url: refreshedUrl, local: false }, TFBOT_CLUSTER_PROXY_TIMEOUT_MS);
+                if (rerouted) return;
+                if (res.headersSent) return;
+            }
+            console.error('[admin-session-router-worker-not-ready]', { requestHost, activeHost: refreshedHost || activeHost || null, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, databaseReady: !!db, workerStopping: tfbotWorkerStopping, clusterHop: isValidClusterHop(req) });
+        }
         res.setHeader('Retry-After', '5');
-        return res.status(503).json({ ok: false, error: 'tfbot_worker_starting', state: tfbotWorkerState, retryAfterMs: 5000 });
+        res.setHeader('Cache-Control', 'no-store');
+        return res.status(503).json({ ok: false, error: isAdminSessionApi ? 'tfbot_admin_active_worker_not_ready' : 'tfbot_worker_starting', state: tfbotWorkerState, workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null, activeHost: tfbotActiveDomainCache?.host || null, databaseReady: !!db, retryable: true, retryAfterMs: 5000 });
     }
     next();
 });
@@ -10317,6 +10353,7 @@ async function proxyClusterRequest(req, res, instance, timeoutOverride = TFBOT_C
     }
     const contentType = String(req.get('Content-Type') || '');
     if (contentType) headers['Content-Type'] = contentType;
+    if (/^\/api\/sessions(?:\/|$)/i.test(normalizeTfbotRequestPath(req.path || '/'))) headers['X-TFBOT-Admin-Forwarded'] = '1';
     const authorization = String(req.get('Authorization') || '');
     if (authorization) headers.Authorization = authorization;
     const controller = new AbortController();
@@ -10362,6 +10399,45 @@ async function proxyClusterRequest(req, res, instance, timeoutOverride = TFBOT_C
     } finally {
         clearTimeout(timer);
     }
+}
+
+async function ensureAdminApiRunsOnActiveWorker(req, res) {
+    const localReady = !!db && !TFBOT_CLUSTER_COORDINATOR_ONLY && (!TFBOT_CLUSTER_ENABLED || tfbotWorkerActive && !tfbotWorkerStopping);
+    if (localReady) return false;
+    const alreadyForwarded = String(req.get('X-TFBOT-Admin-Forwarded') || '') === '1';
+    if (TFBOT_CLUSTER_ENABLED && !alreadyForwarded && !serverShuttingDown) {
+        const selectionAt = TFBOT_CLUSTER_COORDINATOR_ONLY ? tfbotCoordinatorSelectionAt : tfbotActiveDomainCacheAt;
+        if (!selectionAt || Date.now() - selectionAt > 8000) {
+            try {
+                if (TFBOT_CLUSTER_COORDINATOR_ONLY) await refreshTfbotActiveDomain(true);
+                else await pollTfbotCoordinatorSelection();
+            } catch (error) {
+                console.warn('[admin-api-active-worker-refresh-failed]', { error: error?.message || String(error) });
+            }
+        }
+        const active = TFBOT_CLUSTER_COORDINATOR_ONLY ? tfbotCoordinatorSelectionCache : tfbotActiveDomainCache;
+        const activeHost = normalizeTfbotHost(active?.host || '');
+        const activeUrl = String(active?.url || (activeHost ? TFBOT_ROUTER_DOMAIN_BY_HOST.get(activeHost)?.url : '') || '').replace(/\/+$/, '');
+        if (activeHost && activeUrl && activeHost !== TFBOT_CLUSTER_INSTANCE_HOST) {
+            const target = { _id: activeHost, url: activeUrl, local: false };
+            if (await proxyClusterRequest(req, res, target, Math.max(TFBOT_CLUSTER_PROXY_TIMEOUT_MS, 45000))) return true;
+            if (res.headersSent) return true;
+            console.warn('[admin-api-active-worker-proxy-failed]', { path: req.path, method: req.method, activeHost, localHost: TFBOT_CLUSTER_INSTANCE_HOST || null });
+        }
+    }
+    if (res.headersSent) return true;
+    res.setHeader('Retry-After', '3');
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(503).json({
+        ok: false,
+        error: alreadyForwarded ? 'tfbot_active_worker_unavailable' : 'tfbot_admin_api_requires_active_worker',
+        workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null,
+        workerState: tfbotWorkerState,
+        databaseReady: !!db,
+        activeHost: normalizeTfbotHost((TFBOT_CLUSTER_COORDINATOR_ONLY ? tfbotCoordinatorSelectionCache : tfbotActiveDomainCache)?.host || '') || null,
+        retryable: true
+    });
+    return true;
 }
 
 app.use((req, res, next) => {
@@ -11890,8 +11966,16 @@ async function normalizeOutgoingImageBuffer(imageBuffer) {
     if (!source?.length) return null;
     const cached = outgoingImageNormalizationCache.get(source);
     if (cached) return cached;
-    const sharp = require('sharp');
     const sourceMime = detectImageMimeType(source);
+    if (!sourceMime.startsWith('image/')) throw new Error('outgoing_image_invalid_source');
+    let sharp;
+    try {
+        sharp = require('sharp');
+    } catch (dependencyError) {
+        outgoingImageNormalizationCache.set(source, source);
+        console.warn('[whatsapp-image-sharp-unavailable-original-preserved]', { imageBytes: source.length, mimeType: sourceMime, error: dependencyError?.code || dependencyError?.message || 'sharp_unavailable' });
+        return source;
+    }
     const expectedMimeByFormat = { jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
     let sourceMetadata = null;
     try {
@@ -11909,6 +11993,11 @@ async function normalizeOutgoingImageBuffer(imageBuffer) {
             .jpeg({ quality: 88, mozjpeg: true })
             .toBuffer();
     } catch (normalizationError) {
+        if (['image/jpeg', 'image/png', 'image/webp'].includes(sourceMime)) {
+            outgoingImageNormalizationCache.set(source, source);
+            console.warn('[whatsapp-image-normalization-failed-original-preserved]', { imageBytes: source.length, mimeType: sourceMime, error: normalizationError?.message || String(normalizationError) });
+            return source;
+        }
         throw new Error('outgoing_image_normalization_failed');
     }
     let normalizedMetadata = null;
@@ -12328,6 +12417,7 @@ async function runAdminBulkSessionOperation(operationId, sessionIds) {
 
 app.post('/__tfbot/admin/session-delete', async (req, res) => {
     if (!isValidClusterHop(req) || !isAuthorizedAdmin(req)) return res.status(404).json({ ok: false, error: 'not_found' });
+    if (!db || TFBOT_CLUSTER_COORDINATOR_ONLY || TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) return res.status(503).json({ ok: false, error: 'session_owner_worker_not_active', workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null, workerState: tfbotWorkerState, retryable: true });
     const operationId = normalizeAdminOperationId(req.body?.operationId);
     const sessionId = String(req.body?.sessionId || '').trim();
     if (!operationId || !/^[A-Za-z0-9_-]{7,120}$/.test(sessionId)) return res.status(400).json({ ok: false, error: 'invalid_admin_session_delete_request' });
@@ -12341,6 +12431,7 @@ app.post('/__tfbot/admin/session-delete', async (req, res) => {
 
 app.get('/api/sessions', async (req, res) => {
     if (!isAuthorizedAdmin(req)) return res.status(401).json({ ok: false, error: 'token_required' });
+    if (await ensureAdminApiRunsOnActiveWorker(req, res)) return;
     try {
         const snapshot = await buildSessionListSnapshot();
         const sessions = (Array.isArray(snapshot) ? snapshot : []).map(item => ({
@@ -12367,6 +12458,8 @@ app.get('/api/sessions', async (req, res) => {
 
 app.delete('/api/sessions', async (req, res) => {
     if (!isAuthorizedAdmin(req)) return res.status(401).json({ ok: false, error: 'token_required' });
+    if (await ensureAdminApiRunsOnActiveWorker(req, res)) return;
+    if (!db) return res.status(503).json({ ok: false, error: 'admin_session_database_unavailable', retryable: true });
     try {
         if (req.body?.all === true || req.body?.all === 'true' || req.body?.all === 1 || req.body?.all === '1') {
             const sessionIds = await getAllAdminSessionIds();
@@ -12387,13 +12480,27 @@ app.delete('/api/sessions', async (req, res) => {
         setImmediate(() => { void runAdminSingleSessionOperation(operationId, sessionId).catch(error => console.error('[admin-single-session-operation-failed]', { operationId, error: error?.message || String(error) })); });
         return res.status(202).json({ ok: true, operationId, status: 'running', count: 1 });
     } catch (error) {
-        console.error('[admin-session-delete-start-failed]', { error: error?.message || String(error) });
-        return res.status(500).json({ ok: false, error: 'session_delete_start_failed' });
+        const details = {
+            operationId: normalizeAdminOperationId(req.body?.operationId) || null,
+            sessionId: String(req.body?.sessionId || '').trim() || null,
+            errorName: error?.name || 'Error',
+            error: String(error?.message || error).slice(0, 500),
+            errorCode: error?.code || error?.codeName || null,
+            workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null,
+            workerState: tfbotWorkerState,
+            workerActive: tfbotWorkerActive,
+            databaseReady: !!db,
+            stack: String(error?.stack || '').slice(0, 1200)
+        };
+        console.error('[admin-session-delete-start-failed]', details);
+        return res.status(500).json({ ok: false, error: 'session_delete_start_failed', cause: details.error, retryable: true });
     }
 });
 
 app.get('/api/sessions/operations/:operationId', async (req, res) => {
     if (!isAuthorizedAdmin(req)) return res.status(401).json({ ok: false, error: 'token_required' });
+    if (await ensureAdminApiRunsOnActiveWorker(req, res)) return;
+    if (!db) return res.status(503).json({ ok: false, error: 'admin_session_database_unavailable', retryable: true });
     const operationId = normalizeAdminOperationId(req.params?.operationId);
     if (!operationId) return res.status(400).json({ ok: false, error: 'invalid_operation_id' });
     const operation = await db.collection(ADMIN_SESSION_OPERATIONS_COLLECTION).findOne({ _id: operationId });
@@ -13252,6 +13359,77 @@ function normalizeCloudflareAccountIndex(index, count) {
     return ((numeric % count) + count) % count;
 }
 
+function decodeCloudflareImagePayload(payload) {
+    const result = payload?.result;
+    const candidates = [
+        result,
+        result?.image,
+        result?.image_base64,
+        result?.base64,
+        result?.data,
+        result?.output,
+        Array.isArray(result?.images) ? result.images[0] : null,
+        payload?.image,
+        payload?.image_base64,
+        payload?.base64,
+        payload?.data,
+        payload?.dataURI,
+        payload?.dataUri,
+        payload?.output
+    ];
+    for (const candidate of candidates) {
+        if (Buffer.isBuffer(candidate)) {
+            if (candidate.length > 100 && detectImageMimeType(candidate) !== 'application/octet-stream') return candidate;
+            continue;
+        }
+        if (ArrayBuffer.isView(candidate)) {
+            const buffer = Buffer.from(candidate.buffer, candidate.byteOffset, candidate.byteLength);
+            if (buffer.length > 100 && detectImageMimeType(buffer) !== 'application/octet-stream') return buffer;
+            continue;
+        }
+        if (candidate instanceof ArrayBuffer) {
+            const buffer = Buffer.from(candidate);
+            if (buffer.length > 100 && detectImageMimeType(buffer) !== 'application/octet-stream') return buffer;
+            continue;
+        }
+        if (Array.isArray(candidate) && candidate.length > 100 && candidate.every(value => Number.isInteger(Number(value)) && Number(value) >= 0 && Number(value) <= 255)) {
+            const buffer = Buffer.from(candidate);
+            if (detectImageMimeType(buffer) !== 'application/octet-stream') return buffer;
+            continue;
+        }
+        if (typeof candidate !== 'string') continue;
+        let encoded = candidate.trim();
+        const dataUri = encoded.match(/^data:(image\/[a-z0-9.+-]+)(?:;[^,]*)?;base64,([\s\S]+)$/i);
+        if (dataUri) encoded = dataUri[2];
+        encoded = encoded.replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/');
+        if (encoded.length < 136 || encoded.length % 4 === 1 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) continue;
+        const buffer = Buffer.from(encoded, 'base64');
+        if (buffer.length > 100 && detectImageMimeType(buffer) !== 'application/octet-stream') return buffer;
+    }
+    return null;
+}
+
+function buildCloudflareImageRequest(model, prompt) {
+    const safePrompt = clipLongText(prompt, Math.min(2048, Number(process.env.IMAGE_PROMPT_MAX_CHARS || 2048)));
+    const normalizedModel = String(model || '').toLowerCase();
+    const isFlux2Multipart = /@cf\/black-forest-labs\/flux-2-(?:klein-4b|klein-9b|dev)/i.test(normalizedModel);
+    if (isFlux2Multipart) {
+        const form = new FormData();
+        const width = Math.max(256, Math.min(1920, Number(process.env.IMAGE_WIDTH || 1024)));
+        const height = Math.max(256, Math.min(1920, Number(process.env.IMAGE_HEIGHT || 768)));
+        form.set('prompt', safePrompt);
+        form.set('width', String(width));
+        form.set('height', String(height));
+        if (/@cf\/black-forest-labs\/flux-2-dev$/i.test(normalizedModel)) form.set('steps', String(Math.max(4, Math.min(50, Number(process.env.IMAGE_NUM_STEPS || 20)))));
+        return { headers: { Accept: 'image/png, application/json;q=0.9, application/octet-stream;q=0.8' }, body: form, format: 'multipart' };
+    }
+    return {
+        headers: { 'Content-Type': 'application/json', Accept: 'image/png, application/json;q=0.9, application/octet-stream;q=0.8' },
+        body: JSON.stringify({ prompt: safePrompt, steps: Math.max(4, Math.min(8, Number(process.env.IMAGE_NUM_STEPS || 4))) }),
+        format: 'json'
+    };
+}
+
 function getCloudflareAttemptLimit(accounts) {
     return Array.isArray(accounts) ? accounts.length : 0;
 }
@@ -13380,10 +13558,11 @@ async function generateCloudflareImage(prompt) {
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), Math.max(1000, Math.min(requestTimeoutMs, Math.max(1000, deadline - Date.now()))));
             try {
+                const imageRequest = buildCloudflareImageRequest(model, prompt);
                 const response = await fetch(`${CLOUDFLARE_API_BASE_URL}/accounts/${account.accountId}/ai/run/${model}`, {
                     method: 'POST',
-                    headers: { Authorization: `Bearer ${account.apiToken}`, 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ prompt: clipLongText(prompt, Math.min(2048, Number(process.env.IMAGE_PROMPT_MAX_CHARS || 2048))), steps: Math.max(4, Math.min(8, Number(process.env.IMAGE_NUM_STEPS || 4))) }),
+                    headers: { Authorization: `Bearer ${account.apiToken}`, ...imageRequest.headers },
+                    body: imageRequest.body,
                     signal: controller.signal
                 });
                 if (response.status === 429) {
@@ -13418,22 +13597,13 @@ async function generateCloudflareImage(prompt) {
                     lastError = new Error(errorCode === 429 ? `quota_error:${errorDetail}` : `image_http_${errorCode || response.status || 502}:${errorDetail}`);
                     continue;
                 }
-                const encoded = data?.result?.image || data?.result?.image_base64 || data?.result?.data;
-                if (typeof encoded === 'string' && encoded.length > 100) {
-                    const imageBuffer = Buffer.from(encoded.replace(/^data:image\/[^,]+;base64,/i, ''), 'base64');
-                    if (imageBuffer.length > 100 && detectImageMimeType(imageBuffer) !== 'application/octet-stream') {
-                        await recordCloudflareAccountSuccess(accounts, accountIndex, model, 0);
-                        return imageBuffer;
-                    }
+                const imageBuffer = decodeCloudflareImagePayload(data);
+                if (imageBuffer) {
+                    await recordCloudflareAccountSuccess(accounts, accountIndex, model, 0);
+                    console.info('[cloudflare-image-generated]', { accountNumber: accountIndex + 1, model, imageBytes: imageBuffer.length, mimeType: detectImageMimeType(imageBuffer), responseFormat: typeof data?.result === 'string' ? 'result_base64_string' : 'json_image_field' });
+                    return imageBuffer;
                 }
-                if (Array.isArray(encoded) && encoded.length > 100) {
-                    const imageBuffer = Buffer.from(encoded);
-                    if (imageBuffer.length > 100 && detectImageMimeType(imageBuffer) !== 'application/octet-stream') {
-                        await recordCloudflareAccountSuccess(accounts, accountIndex, model, 0);
-                        return imageBuffer;
-                    }
-                }
-                lastError = new Error('image_error');
+                lastError = new Error('image_result_does_not_contain_valid_image_bytes');
             } catch (error) {
                 lastError = error?.name === 'AbortError' ? new Error('image_timeout') : error;
             } finally {
@@ -13442,6 +13612,7 @@ async function generateCloudflareImage(prompt) {
         }
         const nextIndex = (accountIndex + 1) % accounts.length;
         await recordCloudflareAccountFailure(accounts, accountIndex, nextIndex, imageModels[0], lastError || new Error('image_error'));
+        console.warn('[cloudflare-image-account-failed]', { accountNumber: accountIndex + 1, accountCount: accounts.length, accountHash: shortLogHash(account.accountId), model: imageModels[imageModels.length - 1] || imageModels[0], error: String(lastError?.message || 'image_error').slice(0, 400), nextAccountNumber: nextIndex + 1 });
     }
     console.error('[cloudflare-image] account rotation failed:', { accountCount: accounts.length, currentAccountNumber: cloudflareAccountIndex + 1, error: lastError?.message || 'deadline_exceeded' });
     throw new Error(lastError?.message ? String(lastError.message).slice(0, 900) : 'image_error');
@@ -19162,8 +19333,11 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 break;
                                             }
                                             const imagePrompt = clipLongText(args, Math.min(2048, Number(process.env.IMAGE_PROMPT_MAX_CHARS || 2048)));
+                                            const imageGenerationStartedAt = Date.now();
+                                            console.info('[cloudflare-image-command-start]', { sessionId, messageId: msgId, promptLength: imagePrompt.length, accountCount: cloudflareAccounts.length, models: imageModels });
                                             try {
                                                 const imageBuffer = await generateCloudflareImage(imagePrompt);
+                                                console.info('[cloudflare-image-command-generated]', { sessionId, messageId: msgId, imageBytes: imageBuffer?.length || 0, mimeType: detectImageMimeType(imageBuffer), durationMs: Date.now() - imageGenerationStartedAt });
                                                 if (isCancelled) return;
                                                 const imageMimeType = detectImageMimeType(imageBuffer);
                                                 const imageExtension = imageMimeType === 'image/png' ? 'png' : imageMimeType === 'image/webp' ? 'webp' : 'jpg';
@@ -19182,7 +19356,9 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                     : `${t.imaj_generated.replace('{prompt}', imagePrompt)}${publicImageUrl ? `\n${publicImageUrl}` : ''}`;
                                                 await trackedSendImageCaptioned(sock, from, imageBuffer, t.image_generated_title, capText, pushName);
                                                 terminalResponseSent = true;
+                                                console.info('[cloudflare-image-command-delivered]', { sessionId, messageId: msgId, imageBytes: imageBuffer.length, durationMs: Date.now() - imageGenerationStartedAt });
                                             } catch (e) {
+                                                console.error('[cloudflare-image-command-failed]', { sessionId, messageId: msgId, accountCount: cloudflareAccounts.length, error: redactActionError(e).slice(0, 900), durationMs: Date.now() - imageGenerationStartedAt });
                                                 await safeSendActionError(sock, from, t.imaj_title, e, messageLang, pushName, m.messageTimestamp);
                                             }
                                             break;
