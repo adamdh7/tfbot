@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'Bot (tfbot) 218';
+const TFBOT_CODE_VERSION = 'Bot (tfbot) 219';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
 const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
 let tfbotBaileysSocketVersionCache = null;
@@ -535,26 +535,17 @@ function findTfbotMatchingBraceEnd(source, openIndex) {
 }
 
 function applyBaileysSelfChatPlaceholderResendPnPatch() {
-    const marker = '__tfbotSelfChatRetryStanzaIdAndOriginalLidV102';
-    const previousMarker = '__tfbotSelfChatRetryStanzaIdAndPnPlaceholderV101';
+    const marker = '__tfbotPlaceholderResendMessageKeyV103';
+    const previousMarkers = ['__tfbotSelfChatRetryStanzaIdAndOriginalLidV102', '__tfbotSelfChatRetryStanzaIdAndPnPlaceholderV101'];
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
         const searchDirectories = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
-        const candidates = [...new Set(searchDirectories.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs', 'ts'].map(extension => path.join(directory, folder, `messages-recv.${extension}`)))) )];
+        const candidates = [...new Set(searchDirectories.flatMap(directory => ['Socket', 'socket'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `messages-recv.${extension}`)))) )];
         const filePath = candidates.find(candidate => fs.existsSync(candidate));
         if (!filePath) return { applied: false, reason: 'messages_recv_module_not_found' };
         let source = fs.readFileSync(filePath, 'utf8');
-        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), stanzaIdFallback: true, selfChatRetryPreservesOriginalLid: true };
-        if (source.includes(previousMarker)) {
-            const oldRequestKey = 'const __tfbotRetryRequestKey = __tfbotIsSelfChatRetry ? { ...msgKey, id: String(msgKey.id), remoteJid: __tfbotOwnPnJid, remoteJidAlt: __tfbotOwnLidJid || msgKey.remoteJidAlt } : msgKey;';
-            if (source.split(oldRequestKey).length - 1 !== 1) return { applied: false, reason: 'previous_self_chat_retry_key_rewrite_not_found', file: path.basename(filePath) };
-            source = source.replace(oldRequestKey, 'const __tfbotRetryRequestKey = { ...msgKey, id: String(msgKey.id) };');
-            source = source.replace(`const ${previousMarker} = true;`, `const ${marker} = true;`);
-            if (!source.includes(marker) || source.includes(previousMarker) || source.includes('remoteJid: __tfbotOwnPnJid')) return { applied: false, reason: 'self_chat_retry_original_lid_upgrade_verification_failed', file: path.basename(filePath) };
-            fs.writeFileSync(filePath, source, 'utf8');
-            return { applied: true, alreadyApplied: false, upgradedPreviousPatch: true, file: path.basename(filePath), stanzaIdFallback: true, selfChatRetryPreservesOriginalLid: true };
-        }
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), stanzaIdFallback: true, missingRemoteJidRecoveredFromRetryNode: true, fullOriginalMessageMetadataCachedForAllChats: true, existingCacheMetadataPromoted: true };
         const functionMatch = /(?:const|let|var)\s+sendRetryRequest\s*=\s*async\s*\(/.exec(source) || /async\s+function\s+sendRetryRequest\s*\(/.exec(source);
         if (!functionMatch) return { applied: false, reason: 'send_retry_request_not_found', file: path.basename(filePath) };
         const arrowIndex = source.indexOf('=>', functionMatch.index);
@@ -563,6 +554,19 @@ function applyBaileysSelfChatPlaceholderResendPnPatch() {
         const closeBrace = findTfbotMatchingBraceEnd(source, openBrace);
         if (closeBrace < 0) return { applied: false, reason: 'send_retry_request_block_unbalanced', file: path.basename(filePath) };
         let block = source.slice(functionMatch.index, closeBrace + 1);
+        for (const previousMarker of previousMarkers) {
+            const oldMarkerIndex = block.indexOf(`const ${previousMarker} = true;`);
+            if (oldMarkerIndex < 0) continue;
+            const oldInjectionStart = block.lastIndexOf('const __tfbotRetryChild', oldMarkerIndex);
+            if (oldInjectionStart >= 0) {
+                const oldMarkerLineEnd = block.indexOf('\n', oldMarkerIndex);
+                block = block.slice(0, oldInjectionStart) + block.slice(oldMarkerLineEnd >= 0 ? oldMarkerLineEnd + 1 : block.length);
+            } else {
+                block = block.replace(/const __tfbotRetryRequestKey\s*=\s*__tfbotIsSelfChatRetry\s*\?[\s\S]*?;\s*/, '');
+                block = block.replace(`const ${previousMarker} = true;`, '');
+            }
+            block = block.replace(/if\s*\(!__tfbotDecodedRetryId\s*&&\s*__tfbotRetryNodeId\s*\)[^\n]*\n?/, '');
+        }
         const keyAnchor = /const\s*\{\s*key\s*:\s*msgKey\s*\}\s*=\s*fullMessage\s*;?/;
         const keyMatch = keyAnchor.exec(block);
         if (!keyMatch) return { applied: false, reason: 'retry_message_key_anchor_not_found', file: path.basename(filePath) };
@@ -573,30 +577,119 @@ const __tfbotDecodedRetryId = String(msgKey?.id || '').trim();
 if (!__tfbotDecodedRetryId && __tfbotRetryNodeId) msgKey.id = __tfbotRetryNodeId;
 const __tfbotOwnPnJid = String(authState?.creds?.me?.id || '').trim().replace(/:\\d+(?=@s\\.whatsapp\\.net$)/i, '');
 const __tfbotOwnLidJid = String(authState?.creds?.me?.lid || '').trim();
-const __tfbotRetryChatJid = String(node?.attrs?.recipient || msgKey?.remoteJid || msgKey?.remoteJidAlt || '').trim();
-const __tfbotIsSelfChatRetry = msgKey?.fromMe === true && Boolean(__tfbotOwnPnJid) && Boolean(__tfbotRetryChatJid) && ((__tfbotOwnLidJid && areJidsSameUser(__tfbotRetryChatJid, __tfbotOwnLidJid)) || areJidsSameUser(__tfbotRetryChatJid, __tfbotOwnPnJid));
+const __tfbotRetryChatJid = String(msgKey?.remoteJid || node?.attrs?.from || node?.attrs?.recipient || msgKey?.remoteJidAlt || '').trim();
+const __tfbotRetryIdentityCandidates = [__tfbotRetryChatJid, node?.attrs?.recipient, msgKey?.remoteJidAlt].map(value => String(value || '').trim()).filter(Boolean);
+const __tfbotIsSelfChatRetry = msgKey?.fromMe === true && __tfbotRetryIdentityCandidates.some(value => ((__tfbotOwnLidJid && areJidsSameUser(value, __tfbotOwnLidJid)) || (__tfbotOwnPnJid && areJidsSameUser(value, __tfbotOwnPnJid))));
 if (!String(msgKey?.id || '').trim()) {
-    logger.warn({ stanzaIdPresent: Boolean(__tfbotRetryNodeId), decodedIdPresent: Boolean(__tfbotDecodedRetryId), fromMe: msgKey?.fromMe === true, remoteJidType: /@(?:hosted\\.)?lid$/i.test(__tfbotRetryChatJid) ? 'lid' : /@s\\.whatsapp\\.net$/i.test(__tfbotRetryChatJid) ? 'pn' : 'unknown' }, 'retry request ignored because no message id was available in decoded key or retry stanza');
+    logger.warn({ stanzaIdPresent: Boolean(__tfbotRetryNodeId), decodedIdPresent: Boolean(__tfbotDecodedRetryId), fromMe: msgKey?.fromMe === true, chatJidRecovered: Boolean(__tfbotRetryChatJid), remoteJidSource: msgKey?.remoteJid ? 'message_key' : node?.attrs?.from ? 'retry_node_from' : node?.attrs?.recipient ? 'retry_node_recipient' : 'unavailable' }, 'retry request ignored because no message id was available in decoded key or retry stanza');
     return;
 }
-const __tfbotRetryRequestKey = { ...msgKey, id: String(msgKey.id) };
+const __tfbotRetryRequestKey = { ...msgKey, id: String(msgKey.id), ...(__tfbotRetryChatJid ? { remoteJid: __tfbotRetryChatJid } : {}) };
 const ${marker} = true;
-if (!__tfbotDecodedRetryId && __tfbotRetryNodeId) logger.info({ messageId: __tfbotRetryNodeId, selfChat: __tfbotIsSelfChatRetry, source: 'retry_stanza_id' }, 'retry message id restored from receipt stanza before retry manager lookup');`;
+logger.debug({ messageId: String(msgKey.id), chatJidRecovered: Boolean(__tfbotRetryChatJid), remoteJidSource: msgKey?.remoteJid ? 'message_key' : node?.attrs?.from ? 'retry_node_from' : node?.attrs?.recipient ? 'retry_node_recipient' : 'unavailable', selfChat: __tfbotIsSelfChatRetry, originalMetadataCached: true }, 'placeholder resend request prepared with original message metadata');`;
         block = block.slice(0, keyMatch.index) + injection + block.slice(keyMatch.index + keyMatch[0].length);
-        const autoRecreatePattern = /if\s*\(\s*enableAutoSessionRecreation\s*&&\s*messageRetryManager\s*&&\s*retryCount\s*>\s*1\s*\)\s*\{/;
-        if (autoRecreatePattern.test(block)) block = block.replace(autoRecreatePattern, match => match.replace(/\)\s*\{$/, ' && !__tfbotIsSelfChatRetry) {'));
-        const resendPattern = /requestPlaceholderResend\s*\(\s*msgKey\s*\)/g;
-        const resendMatches = [...block.matchAll(resendPattern)];
-        if (!resendMatches.length) return { applied: false, reason: 'placeholder_resend_call_not_found', file: path.basename(filePath) };
-        block = block.replace(resendPattern, 'requestPlaceholderResend(__tfbotRetryRequestKey, __tfbotIsSelfChatRetry ? fullMessage : undefined)');
-        if (!block.includes(marker) || !block.includes('node?.attrs?.id') || !block.includes('msgKey.id = __tfbotRetryNodeId') || !block.includes('const __tfbotRetryRequestKey = { ...msgKey, id: String(msgKey.id) };') || block.includes('remoteJid: __tfbotOwnPnJid')) return { applied: false, reason: 'self_chat_retry_original_lid_patch_verification_failed', file: path.basename(filePath) };
+        block = block.replace(/requestPlaceholderResend\s*\(\s*msgKey\s*\)/g, 'requestPlaceholderResend(__tfbotRetryRequestKey, fullMessage)');
+        block = block.replace(/requestPlaceholderResend\s*\(\s*__tfbotRetryRequestKey(?:\s*,[\s\S]*?)?\s*\)/g, 'requestPlaceholderResend(__tfbotRetryRequestKey, fullMessage)');
+        const autoRecreatePattern = /if\s*\(([^{}\n]*enableAutoSessionRecreation[^{}\n]*retryCount\s*>\s*1[^{}\n]*)\)\s*\{/;
+        let selfChatAutoRecreationGuardApplied = false;
+        const autoRecreateMatch = autoRecreatePattern.exec(block);
+        if (autoRecreateMatch && !autoRecreateMatch[1].includes('__tfbotIsSelfChatRetry')) {
+            block = block.replace(autoRecreatePattern, `if (${autoRecreateMatch[1]} && !__tfbotIsSelfChatRetry) {`);
+            selfChatAutoRecreationGuardApplied = true;
+        } else if (autoRecreateMatch) {
+            selfChatAutoRecreationGuardApplied = true;
+        }
+        if (!block.includes(marker) || !block.includes('node?.attrs?.from') || !block.includes('remoteJid: __tfbotRetryChatJid') || !block.includes('requestPlaceholderResend(__tfbotRetryRequestKey, fullMessage)')) return { applied: false, reason: 'placeholder_resend_message_key_patch_verification_failed', file: path.basename(filePath) };
         const patchedSource = source.slice(0, functionMatch.index) + block + source.slice(closeBrace + 1);
-        fs.writeFileSync(filePath, patchedSource, 'utf8');
-        return { applied: true, alreadyApplied: false, file: path.basename(filePath), retryRequests: resendMatches.length, stanzaIdFallback: true, selfChatRetryPreservesOriginalLid: true, disablesAutoSessionRecreationForSelfChat: autoRecreatePattern.test(source) };
+        const requestFunctionPattern = /const\s+requestPlaceholderResend\s*=\s*async\s*(?:\(\s*messageKey\s*\)|messageKey)\s*=>/;
+        const requestFunctionMatch = requestFunctionPattern.exec(patchedSource);
+        if (!requestFunctionMatch) return { applied: false, reason: 'placeholder_resend_function_not_found', file: path.basename(filePath) };
+        let updatedSource = patchedSource.replace(requestFunctionPattern, 'const requestPlaceholderResend = async (messageKey, msgData) =>');
+        const cacheGuardPattern = /if\s*\(\s*placeholderResendCache(?:\?\.)?\.get\(\s*messageKey\?\.id!?\s*\)\s*\)\s*\{/;
+        const cacheGuardMatch = cacheGuardPattern.exec(updatedSource);
+        const promotionMarker = '__tfbotPlaceholderResendCachePromotionV103';
+        if (!cacheGuardMatch && !updatedSource.includes(promotionMarker)) return { applied: false, reason: 'placeholder_resend_cache_guard_anchor_not_found', file: path.basename(filePath) };
+        if (!updatedSource.includes(promotionMarker)) {
+            const promotion = `const ${promotionMarker} = true;\nconst __tfbotExistingResendMetadataV103 = placeholderResendCache.get(messageKey?.id);\nif (__tfbotExistingResendMetadataV103 && msgData && typeof msgData === 'object' && typeof __tfbotExistingResendMetadataV103 !== 'object') placeholderResendCache.set(messageKey?.id, msgData);\n`;
+            updatedSource = updatedSource.slice(0, cacheGuardMatch.index) + promotion + updatedSource.slice(cacheGuardMatch.index);
+        }
+        const cacheWritePattern = /(placeholderResendCache(?:\?\.)?\.set\(\s*messageKey\?\.id!?\s*,\s*)true(\s*\))/;
+        if (cacheWritePattern.test(updatedSource)) updatedSource = updatedSource.replace(cacheWritePattern, '$1msgData || true$2');
+        else if (!/placeholderResendCache(?:\?\.)?\.set\(\s*messageKey\?\.id!?\s*,\s*msgData\s*\|\|\s*true\s*\)/.test(updatedSource)) return { applied: false, reason: 'placeholder_resend_cache_write_anchor_not_found', file: path.basename(filePath) };
+        const unavailableDecodePattern = /const\s*\{\s*key\s*\}\s*=\s*decodeMessageNode\(([^;\n]+)\)\.fullMessage\s*;?/;
+        const unavailableDecodeMatch = unavailableDecodePattern.exec(updatedSource);
+        let unavailableRequestMetadataCached = false;
+        if (unavailableDecodeMatch) {
+            const unavailableFullMessageName = '__tfbotUnavailableFullMessageV103';
+            const replacement = `const ${unavailableFullMessageName} = decodeMessageNode(${unavailableDecodeMatch[1]}).fullMessage;\nconst { key } = ${unavailableFullMessageName};`;
+            updatedSource = updatedSource.slice(0, unavailableDecodeMatch.index) + replacement + updatedSource.slice(unavailableDecodeMatch.index + unavailableDecodeMatch[0].length);
+            const unavailableCallIndex = updatedSource.indexOf('requestPlaceholderResend(key)', unavailableDecodeMatch.index + replacement.length);
+            if (unavailableCallIndex >= 0) {
+                updatedSource = updatedSource.slice(0, unavailableCallIndex) + `requestPlaceholderResend(key, ${unavailableFullMessageName})` + updatedSource.slice(unavailableCallIndex + 'requestPlaceholderResend(key)'.length);
+                unavailableRequestMetadataCached = true;
+            }
+        }
+        if (!updatedSource.includes(marker) || !updatedSource.includes(promotionMarker) || !updatedSource.includes('msgData || true') || !updatedSource.includes('requestPlaceholderResend(__tfbotRetryRequestKey, fullMessage)')) return { applied: false, reason: 'placeholder_resend_patch_final_verification_failed', file: path.basename(filePath) };
+        fs.writeFileSync(filePath, updatedSource, 'utf8');
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), retryRequests: (block.match(/requestPlaceholderResend\(__tfbotRetryRequestKey, fullMessage\)/g) || []).length, stanzaIdFallback: true, missingRemoteJidRecoveredFromRetryNode: true, fullOriginalMessageMetadataCachedForAllChats: true, existingCacheMetadataPromoted: true, unavailableRequestMetadataCached, selfChatRetryPreservesOriginalLid: true, selfChatAutoRecreationGuardApplied: selfChatAutoRecreationGuardApplied, selfChatAutoRecreationNotPresentInInstalledSource: !autoRecreateMatch };
     } catch (error) {
         return { applied: false, reason: String(error?.message || error).slice(0, 180) };
     }
 }
+
+function applyBaileysPlaceholderResendResponseMetadataPatch() {
+    const marker = '__tfbotPlaceholderResendResponseMetadataV2';
+    try {
+        const entryPath = require.resolve('@whiskeysockets/baileys');
+        const entryDirectory = path.dirname(entryPath);
+        const searchDirectories = [...new Set([entryDirectory, path.dirname(entryDirectory), path.join(entryDirectory, 'lib'), path.join(entryDirectory, 'dist')])];
+        const candidates = [...new Set(searchDirectories.flatMap(directory => ['Utils', 'utils'].flatMap(folder => ['js', 'cjs', 'mjs'].map(extension => path.join(directory, folder, `process-message.${extension}`)))) )];
+        const filePath = candidates.find(candidate => fs.existsSync(candidate));
+        if (!filePath) return { applied: false, reason: 'process_message_module_not_found' };
+        let source = fs.readFileSync(filePath, 'utf8');
+        if (source.includes(marker)) return { applied: true, alreadyApplied: true, file: path.basename(filePath), retryCacheUsesMessageId: true, originalMessageMetadataRestored: true, preservesCompleteOriginalMessageMetadata: true };
+        const decodePattern = /const\s+webMessageInfo\s*=\s*proto\.WebMessageInfo\.decode\(\s*retryResponse\.webMessageInfoBytes\s*\)\s*;?/;
+        const decodeMatches = [...source.matchAll(new RegExp(decodePattern.source, 'g'))];
+        if (decodeMatches.length !== 1) return { applied: false, reason: `placeholder_resend_response_decode_anchor_count_${decodeMatches.length}`, file: path.basename(filePath) };
+        const decodeMatch = decodeMatches[0];
+        const injection = `${decodeMatch[0]}
+const ${marker} = true;
+const __tfbotResendMessageId = String(webMessageInfo?.key?.id || '').trim();
+const __tfbotCachedResendMessage = __tfbotResendMessageId ? placeholderResendCache?.get(__tfbotResendMessageId) : undefined;
+if (__tfbotResendMessageId) placeholderResendCache?.del(__tfbotResendMessageId);
+if (__tfbotCachedResendMessage && typeof __tfbotCachedResendMessage === 'object' && String(__tfbotCachedResendMessage?.key?.id || '') === __tfbotResendMessageId) {
+    const __tfbotDecodedResendMessage = { ...webMessageInfo, key: { ...(webMessageInfo.key || {}) } };
+    const __tfbotCachedResendKey = __tfbotCachedResendMessage.key && typeof __tfbotCachedResendMessage.key === 'object' ? __tfbotCachedResendMessage.key : {};
+    const __tfbotDecodedResendKey = __tfbotDecodedResendMessage.key && typeof __tfbotDecodedResendMessage.key === 'object' ? __tfbotDecodedResendMessage.key : {};
+    for (const [metadataKey, metadataValue] of Object.entries(__tfbotCachedResendMessage)) {
+        if (metadataKey !== 'key' && metadataKey !== 'message' && metadataKey !== 'messageTimestamp' && webMessageInfo[metadataKey] == null && metadataValue !== undefined) webMessageInfo[metadataKey] = metadataValue;
+    }
+    webMessageInfo.key = {
+        ...__tfbotCachedResendKey,
+        ...__tfbotDecodedResendKey,
+        id: String(__tfbotDecodedResendKey.id || __tfbotCachedResendKey.id || __tfbotResendMessageId),
+        remoteJid: __tfbotDecodedResendKey.remoteJid || __tfbotCachedResendKey.remoteJid,
+        remoteJidAlt: __tfbotDecodedResendKey.remoteJidAlt || __tfbotCachedResendKey.remoteJidAlt,
+        participant: __tfbotDecodedResendKey.participant || __tfbotCachedResendKey.participant,
+        participantAlt: __tfbotDecodedResendKey.participantAlt || __tfbotCachedResendKey.participantAlt,
+        participantPn: __tfbotDecodedResendKey.participantPn || __tfbotCachedResendKey.participantPn,
+        senderPn: __tfbotDecodedResendKey.senderPn || __tfbotCachedResendKey.senderPn,
+        fromMe: typeof __tfbotDecodedResendKey.fromMe === 'boolean' ? __tfbotDecodedResendKey.fromMe : __tfbotCachedResendKey.fromMe === true
+    };
+    webMessageInfo.message = __tfbotDecodedResendMessage.message;
+    webMessageInfo.messageTimestamp = Number(__tfbotDecodedResendMessage.messageTimestamp?.toNumber?.() ?? __tfbotDecodedResendMessage.messageTimestamp) || Number(__tfbotCachedResendMessage.messageTimestamp?.toNumber?.() ?? __tfbotCachedResendMessage.messageTimestamp) || Math.floor(Date.now() / 1000);
+    logger?.debug?.({ messageId: __tfbotResendMessageId, originalChatJidRestored: !!webMessageInfo.key.remoteJid, originalParticipantRestored: !!(webMessageInfo.key.participant || webMessageInfo.key.participantPn), originalTimestampRestored: !!webMessageInfo.messageTimestamp }, 'placeholder resend restored original message metadata');
+}`;
+        source = source.slice(0, decodeMatch.index) + injection + source.slice(decodeMatch.index + decodeMatch[0].length);
+        source = source.replace(/placeholderResendCache(?:\?\.|\.)del\(\s*response\.stanzaId!?\s*\)\s*;?/g, '');
+        if (!source.includes(marker) || !source.includes('placeholderResendCache?.get(__tfbotResendMessageId)') || !source.includes('webMessageInfo.message = __tfbotDecodedResendMessage.message') || /placeholderResendCache(?:\?\.|\.)del\(\s*response\.stanzaId/.test(source)) return { applied: false, reason: 'placeholder_resend_response_metadata_patch_verification_failed', file: path.basename(filePath) };
+        fs.writeFileSync(filePath, source, 'utf8');
+        return { applied: true, alreadyApplied: false, file: path.basename(filePath), retryCacheUsesMessageId: true, originalMessageMetadataRestored: true, preservesCompleteOriginalMessageMetadata: true, handlesPrivateGroupAndSelfChat: true };
+    } catch (error) {
+        return { applied: false, reason: String(error?.message || error).slice(0, 180) };
+    }
+}
+
 function applyBaileysPerChatInboundProcessingPatch() {
     const marker = '__tfbotPerChatInboundProcessingV123';
     const previousMarkers = ['__tfbotPerChatInboundProcessingV122', '__tfbotPerChatInboundProcessingV121', '__tfbotPerChatInboundProcessingV119'];
@@ -1129,7 +1222,7 @@ try {
 }
 
 function applyBaileysGroupRetrySkdmPatch() {
-    const result = { applied: false, version: '6.7.23', issue: 'Baileys#2506', libsignal: { applied: false }, messagesRecv: { applied: false }, messagesSend: { applied: false }, reason: 'not_attempted' };
+    const result = { applied: false, version: getTfbotInstalledPackageVersion('@whiskeysockets/baileys') || 'unknown', issue: 'Baileys#2506', libsignal: { applied: false }, messagesRecv: { applied: false }, messagesSend: { applied: false }, reason: 'not_attempted' };
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
@@ -1140,7 +1233,7 @@ function applyBaileysGroupRetrySkdmPatch() {
         const receivePath = candidates('Socket', 'messages-recv').find(candidate => fs.existsSync(candidate));
         const sendPath = candidates('Socket', 'messages-send').find(candidate => fs.existsSync(candidate));
         if (!libPath || !receivePath || !sendPath) {
-            result.reason = `baileys_6_7_23_source_missing_${!libPath ? 'libsignal' : !receivePath ? 'messages_recv' : 'messages_send'}`;
+            result.reason = `baileys_source_source_missing_${!libPath ? 'libsignal' : !receivePath ? 'messages_recv' : 'messages_send'}`;
             return result;
         }
         let libSource = fs.readFileSync(libPath, 'utf8');
@@ -1151,7 +1244,7 @@ function applyBaileysGroupRetrySkdmPatch() {
             const repositoryReturn = /const\s+storage\s*=\s*signalStorage\(auth\)\s*;\s*return\s*\{/;
             const repositoryMatch = repositoryReturn.exec(libSource);
             if (!repositoryMatch) {
-                result.reason = 'baileys_6_7_23_signal_repository_anchor_not_found';
+                result.reason = 'baileys_source_signal_repository_anchor_not_found';
                 return result;
             }
             const helper = `const __tfbotEnsureSenderKeyAndCreateSkdmV115 = async (group, meId) => auth.keys.transaction(async () => {
@@ -1167,7 +1260,7 @@ function applyBaileysGroupRetrySkdmPatch() {
             const injectAnchor = /async\s+injectE2ESession\s*\(\s*\{\s*jid\s*,\s*session\s*\}\s*\)\s*\{/;
             const injectMatch = injectAnchor.exec(libSource);
             if (!injectMatch) {
-                result.reason = 'baileys_6_7_23_signal_inject_anchor_not_found';
+                result.reason = 'baileys_source_signal_inject_anchor_not_found';
                 return result;
             }
             const methods = `async getSenderKeyDistributionMessage({ group, meId }) {
@@ -1192,7 +1285,7 @@ function applyBaileysGroupRetrySkdmPatch() {
         `;
             libSource = libSource.slice(0, injectMatch.index) + methods + libSource.slice(injectMatch.index);
             if (!libSource.includes(libMarker) || !libSource.includes('__tfbotEnsureSenderKeyAndCreateSkdmV115') || !libSource.includes('async getSessionInfo')) {
-                result.reason = 'baileys_6_7_23_signal_patch_verification_failed';
+                result.reason = 'baileys_source_signal_patch_verification_failed';
                 return result;
             }
             fs.writeFileSync(libPath, libSource, 'utf8');
@@ -1204,13 +1297,13 @@ function applyBaileysGroupRetrySkdmPatch() {
             result.messagesRecv = { applied: true, alreadyApplied: true, file: path.basename(receivePath) };
         } else {
             if (!receiveSource.includes('KEY_BUNDLE_TYPE') || !receiveSource.includes('getBinaryNodeChildBuffer') || !receiveSource.includes('getBinaryNodeChild')) {
-                result.reason = 'baileys_6_7_23_retry_receipt_parser_symbols_missing';
+                result.reason = 'baileys_source_retry_receipt_parser_symbols_missing';
                 return result;
             }
             const utilsImport = /import\s*\{([\s\S]*?)\}\s*from\s*['"]\.\.\/Utils(?:\/index)?(?:\.js)?['"]\s*;?/;
             const utilsMatch = utilsImport.exec(receiveSource);
             if (!utilsMatch) {
-                result.reason = 'baileys_6_7_23_receive_utils_import_not_found';
+                result.reason = 'baileys_source_receive_utils_import_not_found';
                 return result;
             }
             let utilsMembers = utilsMatch[1];
@@ -1219,7 +1312,7 @@ function applyBaileysGroupRetrySkdmPatch() {
             const receiveImportEnd = /from\s*['"]\.\.\/WABinary(?:\/index)?(?:\.js)?['"]\s*;?/;
             const wabinaryMatch = receiveImportEnd.exec(receiveSource);
             if (!wabinaryMatch) {
-                result.reason = 'baileys_6_7_23_receive_wabinary_import_not_found';
+                result.reason = 'baileys_source_receive_wabinary_import_not_found';
                 return result;
             }
             const helper = `
@@ -1260,14 +1353,14 @@ const __tfbotExtractRetryReceiptBundleV115 = receipt => {
             const signaturePattern = /const\s+sendMessagesAgain\s*=\s*async\s*\(\s*key\s*,\s*ids\s*,\s*retryNode\s*\)\s*=>\s*\{/;
             const signatureMatch = signaturePattern.exec(receiveSource);
             if (!signatureMatch) {
-                result.reason = 'baileys_6_7_23_send_messages_again_signature_not_found';
+                result.reason = 'baileys_source_send_messages_again_signature_not_found';
                 return result;
             }
             receiveSource = receiveSource.slice(0, signatureMatch.index) + signatureMatch[0].replace(/retryNode\s*\)/, 'retryNode, receiptNode)') + receiveSource.slice(signatureMatch.index + signatureMatch[0].length);
             const sendToAllPattern = /const\s+sendToAll\s*=\s*!jidDecode\(participant\)\?\.device\s*;?/;
             const sendToAllMatch = sendToAllPattern.exec(receiveSource);
             if (!sendToAllMatch) {
-                result.reason = 'baileys_6_7_23_send_to_all_anchor_not_found';
+                result.reason = 'baileys_source_send_to_all_anchor_not_found';
                 return result;
             }
             const retrySetup = `${sendToAllMatch[0]}
@@ -1299,7 +1392,7 @@ const __tfbotExtractRetryReceiptBundleV115 = receipt => {
             const retryCall = /await\s+sendMessagesAgain\(key\s*,\s*ids\s*,\s*retryNode(?:!)?\s*\)/;
             const retryCallMatch = retryCall.exec(receiveSource);
             if (!retryCallMatch) {
-                result.reason = 'baileys_6_7_23_retry_receipt_call_not_found';
+                result.reason = 'baileys_source_retry_receipt_call_not_found';
                 return result;
             }
             const retryRelayTelemetry = injectBaileysRetryRelayTelemetry(receiveSource);
@@ -1310,7 +1403,7 @@ const __tfbotExtractRetryReceiptBundleV115 = receipt => {
             receiveSource = retryRelayTelemetry.source;
             if (!receiveSource.includes(receiveMarker)) receiveSource = receiveSource.replace('const __tfbotReadRetryReceiptUIntV115 =', `const ${receiveMarker} = true;\nconst __tfbotReadRetryReceiptUIntV115 =`);
             if (!receiveSource.includes(receiveMarker) || !receiveSource.includes('__tfbotExtractRetryReceiptBundleV115') || !receiveSource.includes('retryNode, node)') || !receiveSource.includes('__tfbotRetryRelayStartedAtV126')) {
-                result.reason = 'baileys_6_7_23_receive_patch_verification_failed';
+                result.reason = 'baileys_source_receive_patch_verification_failed';
                 return result;
             }
             fs.writeFileSync(receivePath, receiveSource, 'utf8');
@@ -1324,7 +1417,7 @@ const __tfbotExtractRetryReceiptBundleV115 = receipt => {
             const groupPatchAnchor = /const\s+patched\s*=\s*await\s+patchMessageBeforeSending\(message\)\s*;?/;
             const groupPatchMatch = groupPatchAnchor.exec(sendSource);
             if (!groupPatchMatch || !sendSource.includes('if (isGroup || isStatus)') || !sendSource.includes('const destinationJid =')) {
-                result.reason = 'baileys_6_7_23_group_retry_skdm_anchor_not_found';
+                result.reason = 'baileys_source_group_retry_skdm_anchor_not_found';
                 return result;
             }
             const replacement = `let __tfbotRetryMessageV115 = message;
@@ -1346,7 +1439,7 @@ const __tfbotExtractRetryReceiptBundleV115 = receipt => {
                 const patched = await patchMessageBeforeSending(__tfbotRetryMessageV115);`;
             sendSource = sendSource.slice(0, groupPatchMatch.index) + replacement + sendSource.slice(groupPatchMatch.index + groupPatchMatch[0].length);
             if (!sendSource.includes(sendMarker) || !sendSource.includes('axolotlSenderKeyDistributionMessage: __tfbotRetrySkdmV115')) {
-                result.reason = 'baileys_6_7_23_send_patch_verification_failed';
+                result.reason = 'baileys_source_send_patch_verification_failed';
                 return result;
             }
             fs.writeFileSync(sendPath, sendSource, 'utf8');
@@ -1361,7 +1454,7 @@ const __tfbotExtractRetryReceiptBundleV115 = receipt => {
     }
 }
 function applyBaileysRetryBaseKeyCollisionPatch() {
-    const result = { applied: false, version: '6.7.23', issue: 'Baileys#2506', reason: 'not_attempted' };
+    const result = { applied: false, version: getTfbotInstalledPackageVersion('@whiskeysockets/baileys') || 'unknown', issue: 'Baileys#2506', reason: 'not_attempted' };
     try {
         const entryPath = require.resolve('@whiskeysockets/baileys');
         const entryDirectory = path.dirname(entryPath);
@@ -1509,7 +1602,7 @@ function applyBaileysCompanionRegRefreshPatch() {
         if (!advMatch) return { applied: false, reason: 'pairing_adv_secret_declaration_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
         const qrPattern = /const\s+qr\s*=\s*\[\s*ref\s*,\s*noiseKeyB64\s*,\s*identityKeyB64\s*,\s*advB64\s*\]\.join\(\s*['"]\s*,\s*['"]\s*\)\s*;?/;
         const qrMatch = qrPattern.exec(source.slice(pairHandlerMatch.index));
-        if (!qrMatch) return { applied: false, reason: 'baileys_6_7_23_pairing_qr_array_pattern_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
+        if (!qrMatch) return { applied: false, reason: 'baileys_source_pairing_qr_array_pattern_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
         if (!/\bgetBinaryNodeChild\s*\(/.test(source)) return { applied: false, reason: 'binary_node_child_accessor_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
         if (!/\brandomBytes\s*\(/.test(source)) return { applied: false, reason: 'crypto_random_bytes_import_not_found', file: path.basename(socketPath), issue: 'Baileys#2737' };
         const outerInjection = `let __tfbotCurrentPairingQRRefV116 = null;
@@ -1653,18 +1746,20 @@ const baileysGroupRetrySkdmPatchStatus = applyBaileysGroupRetrySkdmPatch();
 const baileysRetryBaseKeyCollisionPatchStatus = applyBaileysRetryBaseKeyCollisionPatch();
 const baileysLidAwareGroupOutboundAddressingPatchStatus = applyBaileysLidAwareGroupOutboundAddressingPatch();
 const baileysSelfChatPlaceholderResendPatchStatus = applyBaileysSelfChatPlaceholderResendPnPatch();
+const baileysPlaceholderResendResponseMetadataPatchStatus = applyBaileysPlaceholderResendResponseMetadataPatch();
 const baileysSignalTransactionPatchStatus = applyBaileysSignalTransactionPatch();
 const baileysPerChatInboundProcessingPatchStatus = applyBaileysPerChatInboundProcessingPatch();
 const baileysOutgoingRetryPreflightPatchStatus = applyBaileysOutgoingRetryPreflightPatch();
-const baileysRetryResendDoubleEncryptionPatchStatus = { applied: false, notApplicable: true, reason: 'Baileys_6_7_23_does_not_use_the_v7_retry_resend_guard' };
+const baileysRetryResendDoubleEncryptionPatchStatus = { applied: false, notApplicable: true, reason: 'Baileys_source_does_not_use_the_v7_retry_resend_guard' };
 const baileysOwnLidRetryAddressingPatchStatus = applyBaileysOwnLidRetryAddressingPatch();
-const baileysMessageRetryManagerDeviceJidPatchStatus = { applied: false, notApplicable: true, reason: 'Baileys_6_7_23_uses_getMessage_and_socket_retry_cache_not_MessageRetryManager' };
+const baileysMessageRetryManagerDeviceJidPatchStatus = { applied: false, notApplicable: true, reason: 'Baileys_source_uses_getMessage_and_socket_retry_cache_not_MessageRetryManager' };
 const baileysCompanionRegRefreshPatchStatus = applyBaileysCompanionRegRefreshPatch();
 const baileysPairingCodeProtocolPatchStatus = applyBaileysPairingCodeProtocolPatch();
 console.info('[tfbot-local-diagnostics-ready]', { sessionId: TFBOT_DIAGNOSTIC_SESSION_ID || null, selector: TFBOT_DIAGNOSTIC_SESSION_ID ? 'configured_session' : 'most_recent_active_session', endpoint: '/logs.txt', storage: 'persistent_file_bounded_17mb_7h', persistentLocalWrites: tfbotDiagnosticDiskAvailable, publicRead: true, access: 'public-redacted-log', writer: 'asynchronous_file_and_memory_queue', timeZone: TFBOT_LOG_TIME_ZONE });
 console.info('[baileys-lid-pn-decrypt-retry-patch]', baileysLidPnDecryptPatchStatus);
 console.info('[baileys-group-lid-pn-decrypt-retry-patch]', baileysGroupLidPnDecryptPatchStatus);
 console.info('[baileys-self-chat-placeholder-resend-patch]', baileysSelfChatPlaceholderResendPatchStatus);
+console.info('[baileys-placeholder-resend-response-metadata-patch]', baileysPlaceholderResendResponseMetadataPatchStatus);
 console.info('[baileys-group-retry-skdm-patch]', baileysGroupRetrySkdmPatchStatus);
 console.info('[baileys-retry-base-key-collision-patch]', baileysRetryBaseKeyCollisionPatchStatus);
 console.info('[baileys-lid-aware-group-outbound-addressing-patch]', baileysLidAwareGroupOutboundAddressingPatchStatus);
@@ -2108,7 +2203,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-25-r220-add-inbound-replay-worker-recovery-mode-menu';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-25-r221-placeholder-resend-add-disconnect-ack';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_REQUEST_TOKEN = 'Bot (tfbot)';
@@ -4228,6 +4323,7 @@ async function persistOutgoingRetryMessage(sessionId, jid, message, jidAliases =
         fromMe: true,
         message: message.message,
         messageTimestamp: Number(message.messageTimestamp) || Math.floor(Date.now() / 1000),
+        preserveAfterSessionDeletion: persistenceMode === 'admin_disconnect_notice',
         createdAt: new Date()
     };
     console.info('[message-retry-store-write-started]', { sessionId, messageId, destinationType: getWhatsAppDestinationType(remoteJid), messageType: Object.keys(message.message || {}).join(',') || 'unknown', aliasCount: remoteJidAliases.length, selfChatRetry: isSelfChatRetry, retryKeys: { messageId: true, pn: !!retryPhoneJid, lid: !!retryLidJid }, persistenceMode, durableWriteRequested: true });
@@ -7774,7 +7870,7 @@ async function deleteMongoSession(sessionId) {
             db.collection('session_runtime_locks').deleteMany({ _id: sessionId }),
             db.collection('session_account_runtime_locks').deleteMany({ sessionId }),
             db.collection('processed_messages').deleteMany({ sessionId }),
-            db.collection('baileys_outgoing_messages').deleteMany({ sessionId }),
+            db.collection('baileys_outgoing_messages').deleteMany({ sessionId, preserveAfterSessionDeletion: { $ne: true } }),
             db.collection('baileys_quoted_messages').deleteMany({ sessionId }),
             db.collection('lid_phone_mappings').deleteMany({ sessionId }),
             db.collection('lid_phone_mappings').deleteMany({ _id: { $regex: `^${String(sessionId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:` } })
@@ -7792,7 +7888,7 @@ async function deleteMongoSession(sessionId) {
         if (typeof invalidateSessionListSnapshotCache === 'function') invalidateSessionListSnapshotCache();
         adminDeletedSessionIdCache?.add?.(String(sessionId));
         adminDeletedSessionIdCacheAt = 0;
-        console.info('[session-data-cleanup-completed]', { sessionId, removed: ['auth', 'owner', 'processed_messages', 'outgoing_retry_messages', 'lid_mappings'], preservedAccountState: preservedState.preserved, preservedRecords: preservedState.count || 0, retainedSessionScopedDataBecauseAccountIdentityMissing: !preservedState.preserved, groupSettingsAndUserPreferencesRestoredOnNextConnection: true, localVolatileCachesCleared: true });
+        console.info('[session-data-cleanup-completed]', { sessionId, removed: ['auth', 'owner', 'processed_messages', 'non_preserved_outgoing_retry_messages', 'lid_mappings'], preservedAccountState: preservedState.preserved, preservedRecords: preservedState.count || 0, retainedSessionScopedDataBecauseAccountIdentityMissing: !preservedState.preserved, groupSettingsAndUserPreferencesRestoredOnNextConnection: true, localVolatileCachesCleared: true });
     } catch (error) {
         console.error('[session-delete-failed]', { sessionId, error: error?.message || String(error) });
         throw error;
@@ -11522,20 +11618,20 @@ const translations = {
     cmd_kickall: "expulsetout", cmd_kickall2: "expulsetout2", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
     cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_vv2: "vv2", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", cmd_prive: "prive", cmd_public: "public", alive_title: "Alive", connected_since: "Connecté depuis", days: "jour(s)", hours: "heure(s)", minutes: "minute(s)", seconds: "seconde(s)",
-    enabled: "activé", disabled: "désactivé", welcome_on: "Bienvenue activée", welcome_off: "Bienvenue désactivée", nolien_on: "Nolien activé", nolien_off: "Nolien désactivé", nolien2_on: "Nolien2 activé", nolien2_off: "Nolien2 désactivé",
+      welcome_on: "Bienvenue activée", welcome_off: "Bienvenue désactivée", nolien_on: "Nolien activé", nolien_off: "Nolien désactivé", nolien2_on: "Nolien2 activé", nolien2_off: "Nolien2 désactivé",
     mode_title: 'Mode',
     welcome_title: "Bienvenue", welcome_to: "Bienvenue dans",
     menu_title: "Menu", lang_changed: "La langue du bot est maintenant {lang}.", languages_available: "Langues disponibles : fr en es ht",
-    imaj_prompt: "Envoie image suivi de la description souhaitée.", imaj_generated: "*{prompt}*", imaj_error: "La génération de l’image n’a pas abouti. Réessaie dans quelques instants.", search_title: "Recherche", search_error: "La recherche n’a pas pu aboutir. Réessaie dans quelques instants.",
-    lang_title: "Langue", lang_current: "Langue actuelle du bot : {lang}.", ai_title: "Message", imaj_title: "Image", image_generated_title: "Image Générée",
-    ai_click_to_receive: "Cliquez ici pour recevoir la réponse de l'IA :\n{link}",
-    imaj_click_to_receive: "Cliquez ici pour recevoir votre image :\n{link}",
-    code_confirm: "+_Veuillez autoriser l'envoi du code en cliquant ici_* :\n{link}", code_error: "Le code n’a pas pu être généré.", code_active: "Le code n’a pas pu être généré.",
+    imaj_prompt: "Envoie image suivi de la description souhaitée.",   search_title: "Recherche", 
+    lang_title: "Langue", lang_current: "Langue actuelle du bot : {lang}.", ai_title: "Message", imaj_title: "Image", 
+    
+    
+     code_error: "Le code n’a pas pu être généré.", 
     qrbot_created: "Nouvelle Session Créée",
     qrbot_scan: "Scannez ce code pour connecter la nouvelle session.",
-    qrbot_connected: "Session Connectée",
-    qrbot_active: "La nouvelle session est active.\nID: {id}",
-    hidetag_title: "Hidetag", hidetag_default: "Il s'agit juste d'un hidetag",
+    
+    
+     hidetag_default: "Il s'agit juste d'un hidetag",
     links_text: links_common,
     mode_changed_private: "Le bot est maintenant en mode PRIVE.",
     mode_changed_public: "Le bot est maintenant en mode PUBLIC.",
@@ -11547,37 +11643,35 @@ const translations = {
     del2_deactivated: "La suppression automatique des messages de @{user} est désactivée.",
     del3_activated: "La suppression automatique des futurs messages de même format est activée dans ce groupe.",
     del3_deactivated: "La suppression automatique des futurs messages de même format est désactivée dans ce groupe.",
-    del3_delete_failed: "Le format du message sélectionné n’a pas pu être identifié. Aucune règle automatique n’a été modifiée.",
-    del3_deleted_unclassified: "Le format du message sélectionné n’a pas pu être identifié. Aucune règle automatique n’a été modifiée.",
+    
+    
     del3_usage: "Dans un groupe, un administrateur peut répondre à n’importe quel message, quel que soit son auteur, avec del3 pour activer ou désactiver la suppression automatique des futurs messages de même format. Le message sélectionné est conservé et les messages du propriétaire du compte restent protégés. Le bot doit également être administrateur du groupe.",
-    vv_usage: "Réponds à une image, une vidéo, un audio, un document ou un sticker avec vv pour le renvoyer dans cette conversation.", vv_media_required: "Le message sélectionné ne contient pas de média pris en charge.", vv_self_unavailable: "Le chat personnel de ce compte n’a pas pu être identifié.",
+      vv_self_unavailable: "Le chat personnel de ce compte n’a pas pu être identifié.",
     del3_bot_admin_required: "Le bot doit être administrateur du groupe pour appliquer cette règle.",
     del_usage: "Réponds au message à supprimer avec del.",
     del2_usage: "Indique une mention ou un numéro international, ou réponds au message du membre.",
     target_usage: "Indique une mention ou un numéro international, ou réponds au message du membre.",
-    no_eligible_target: "Aucun membre correspondant et éligible n’a été trouvé dans ce groupe.",
-    delete_failed: "La suppression n’a pas pu être effectuée. Vérifie les autorisations applicables et réessaie.",
-    del_completed: "La demande de suppression a été traitée.",
-    vv2_usage: "Réponds à une image, une vidéo, un audio, un document ou un sticker avec vv2 pour le recevoir dans Vous. Commande réservée au propriétaire.",
-    vv2_media_required: "Le message sélectionné ne contient pas de média pris en charge.",
+    
+    
+    
+    
+    
     pending_msg: "Message en cours de chargement.",
     msg_unloaded: "Contenu du message indisponible.",
     take_time: "Le chargement peut prendre quelques instants.",
-    quota_error: "La limite d’utilisation du service a été atteinte. Réessaie plus tard.",
-    ai_error: "L’assistant n’a pas pu traiter la demande. Réessaie dans quelques instants.",
+    
+    
     ai_usage: "Asistan suivi de ta question.",
     url_usage: "Réponds à une image, une vidéo, un audio, un document ou un sticker avec url pour obtenir son lien.",
     url_error: "Le média n’a pas pu être traité. Vérifie qu’il est toujours accessible, puis réessaie.",
     qr_usage: "Envoie qr suivi du texte ou du lien à encoder.", qr_too_long: "Le texte est trop long pour un QR code. Utilise un texte plus court ou un lien.", qr_generated: "QR code généré.",
     search_usage: "Chercher suivi de ta question.",
-    code_usage: "Envoie code suivi d’un numéro au format international (8 à 15 chiffres).",
+    
     owner_required: "Cette commande est réservée au propriétaire du compte connecté.",
     group_required: "Cette commande est disponible uniquement dans un groupe WhatsApp.",
     group_invite_admin_required: "Seuls les administrateurs du groupe peuvent récupérer son lien d’invitation.",
     admin_required: "Cette action est réservée aux administrateurs du groupe ou au propriétaire du compte connecté.",
     command_error: "L’action n’a pas pu être terminée. Vérifie les informations et autorisations requises, puis réessaie.",
-    add_completed: "La demande d’ajout a été traitée par WhatsApp.",
-    add_already_member: "La personne indiquée est déjà membre de ce groupe. Aucun doublon n’a été créé.",
     add_metadata_unavailable: "Impossible de vérifier les membres du groupe. Aucun ajout n’a été tenté.",
 info_text: [
         "*IA & recherche*",
@@ -11621,20 +11715,20 @@ info_text: [
     cmd_kickall: "kickall", cmd_kickall2: "kickall2", cmd_ferme: "close", cmd_ouvert: "open", cmd_bienvenue: "welcome",
     cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_vv2: "vv2", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", cmd_prive: "private", cmd_public: "public", alive_title: "Alive", connected_since: "Connected for", days: "day(s)", hours: "hour(s)", minutes: "minute(s)", seconds: "second(s)",
-    enabled: "enabled", disabled: "disabled", welcome_on: "Welcome enabled", welcome_off: "Welcome disabled", nolien_on: "No link enabled", nolien_off: "No link disabled", nolien2_on: "Strict no link enabled", nolien2_off: "Strict no link disabled",
+      welcome_on: "Welcome enabled", welcome_off: "Welcome disabled", nolien_on: "No link enabled", nolien_off: "No link disabled", nolien2_on: "Strict no link enabled", nolien2_off: "Strict no link disabled",
     mode_title: 'Mode',
     welcome_title: "Welcome", welcome_to: "Welcome to",
     menu_title: "Menu", lang_changed: "Bot language is now {lang}.", languages_available: "Available languages: fr en es ht",
-    imaj_prompt: "Send image followed by the description.", imaj_generated: "*{prompt}*", imaj_error: "Image generation could not be completed. Please try again shortly.", search_title: "Search", search_error: "The search could not be completed. Please try again shortly.",
-    lang_title: "Language", lang_current: "Current bot language: {lang}.", ai_title: "Message", imaj_title: "Image", image_generated_title: "Generated Image",
-    ai_click_to_receive: "Click here to receive the AI response:\n{link}",
-    imaj_click_to_receive: "Click here to receive your image:\n{link}",
-    code_confirm: "*_Please authorize the sending of the code by clicking here_* :\n{link}", code_error: "The code could not be generated.", code_active: "The code could not be generated.",
+    imaj_prompt: "Send image followed by the description.",   search_title: "Search", 
+    lang_title: "Language", lang_current: "Current bot language: {lang}.", ai_title: "Message", imaj_title: "Image", 
+    
+    
+     code_error: "The code could not be generated.", 
     qrbot_created: "New Session Created",
     qrbot_scan: "Scan this QR code to connect the new session.",
-    qrbot_connected: "Session Connected",
-    qrbot_active: "The new session is active.\nID: {id}",
-    hidetag_title: "Hidetag", hidetag_default: "It’s just a hidetag",
+    
+    
+     hidetag_default: "It’s just a hidetag",
     links_text: links_common,
     mode_changed_private: "The bot is now in PRIVATE mode.",
     mode_changed_public: "The bot is now in PUBLIC mode.",
@@ -11646,37 +11740,35 @@ info_text: [
     del2_deactivated: "Automatic deletion for messages from @{user} is disabled.",
     del3_activated: "Automatic deletion of future messages in the same format is enabled for this group.",
     del3_deactivated: "Automatic deletion of future messages in the same format is disabled for this group.",
-    del3_delete_failed: "The selected message format could not be identified. No automatic rule was changed.",
-    del3_deleted_unclassified: "The selected message format could not be identified. No automatic rule was changed.",
+    
+    
     del3_usage: "In a group, an administrator can reply to any message, regardless of its sender, with del3 to enable or disable automatic deletion of future messages in the same format. The selected message is kept, and messages from the account owner are protected. The bot must also be a group administrator.",
-    vv_usage: "Reply to an image, video, audio, document, or sticker with vv to resend it in this chat.", vv_media_required: "The selected message does not contain supported media.", vv_self_unavailable: "The connected account’s personal chat could not be identified.",
+      vv_self_unavailable: "The connected account’s personal chat could not be identified.",
     del3_bot_admin_required: "The bot must be a group administrator to apply this rule.",
     del_usage: "Reply to the message you want to delete with del.",
     del2_usage: "Provide a mention or an international number, or reply to the member’s message.",
     target_usage: "Provide a mention or an international number, or reply to the member’s message.",
-    no_eligible_target: "No eligible group member matched the supplied target.",
-    delete_failed: "The deletion could not be completed. Check the applicable permissions and try again.",
-    del_completed: "The deletion request has been processed.",
-    vv2_usage: "Reply to an image, video, audio, document, or sticker with vv2 to receive it in You. This command is restricted to the account owner.",
-    vv2_media_required: "The selected message does not contain supported media.",
+    
+    
+    
+    
+    
     pending_msg: "Message is loading.",
     msg_unloaded: "Message content is unavailable.",
     take_time: "Loading may take a few moments.",
-    quota_error: "The service usage limit has been reached. Please try again later.",
-    ai_error: "The assistant could not process the request. Please try again shortly.",
+    
+    
     ai_usage: "Send Asistan followed by your question.",
     url_usage: "Reply to an image, video, audio, document, or sticker with url to obtain its link.",
     url_error: "The media could not be processed. Check that it is still available and try again.",
     qr_usage: "Send qr followed by the text or link to encode.", qr_too_long: "This text is too long for a QR code. Use shorter text or a URL.", qr_generated: "QR code generated.",
     search_usage: "Send search followed by your question.",
-    code_usage: "Send code followed by a number in international format (8 to 15 digits).",
+    
     owner_required: "This command is available only to the owner of the connected account.",
     group_required: "This command is only available in a WhatsApp group.",
     group_invite_admin_required: "Only group administrators can retrieve this group’s invite link.",
     admin_required: "This action is restricted to group administrators or the connected account owner.",
     command_error: "The action could not be completed. Check the supplied information and required permissions, then try again.",
-    add_completed: "WhatsApp processed the add request.",
-    add_already_member: "The selected person is already a member of this group. No duplicate was added.",
     add_metadata_unavailable: "The group members could not be verified. No add request was sent.",
 info_text: [
         "*AI & search*",
@@ -11720,20 +11812,20 @@ info_text: [
     cmd_kickall: "borrartodo", cmd_kickall2: "borrartodo2", cmd_ferme: "cerrar", cmd_ouvert: "abrir", cmd_bienvenue: "bienvenida",
     cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_vv2: "vv2", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", cmd_prive: "privado", cmd_public: "publico", alive_title: "Alive", connected_since: "Conectado por", days: "día(s)", hours: "hora(s)", minutes: "minuto(s)", seconds: "segundo(s)",
-    enabled: "activado", disabled: "desactivado", welcome_on: "Bienvenida activada", welcome_off: "Bienvenida desactivada", nolien_on: "Sin enlaces activado", nolien_off: "Sin enlaces desactivado", nolien2_on: "Sin enlaces estricto activado", nolien2_off: "Sin enlaces estricto desactivado",
+      welcome_on: "Bienvenida activada", welcome_off: "Bienvenida desactivada", nolien_on: "Sin enlaces activado", nolien_off: "Sin enlaces desactivado", nolien2_on: "Sin enlaces estricto activado", nolien2_off: "Sin enlaces estricto desactivado",
     mode_title: 'Modo',
     welcome_title: "Bienvenida", welcome_to: "Bienvenida a",
     menu_title: "Menú", lang_changed: "El idioma del bot es ahora {lang}.", languages_available: "Idiomas disponibles: fr en es ht",
-    imaj_prompt: "Envía imagen seguido de la descripción.", imaj_generated: "*{prompt}*", imaj_error: "No se pudo completar la generación de la imagen. Inténtalo de nuevo en unos momentos.", search_title: "Búsqueda", search_error: "No se pudo completar la búsqueda. Inténtalo de nuevo en unos momentos.",
-    lang_title: "Idioma", lang_current: "Idioma actual del bot: {lang}.", ai_title: "Mensaje", imaj_title: "Imagen", image_generated_title: "Imagen Generada",
-    ai_click_to_receive: "Haz clic aquí para recibir la respuesta de la IA:\n{link}",
-    imaj_click_to_receive: "Haz clic aquí para recibir tu imagen:\n{link}",
-    code_confirm: "*_Por favor autoriza el envío del código haciendo clic aquí_* :\n{link}", code_error: "No se pudo generar el código.", code_active: "No se pudo generar el código.",
+    imaj_prompt: "Envía imagen seguido de la descripción.",   search_title: "Búsqueda", 
+    lang_title: "Idioma", lang_current: "Idioma actual del bot: {lang}.", ai_title: "Mensaje", imaj_title: "Imagen", 
+    
+    
+     code_error: "No se pudo generar el código.", 
     qrbot_created: "Nueva Sesión Creada",
     qrbot_scan: "Escanea este código para conectar la nueva sesión.",
-    qrbot_connected: "Sesión Conectada",
-    qrbot_active: "La nueva sesión está activa.\nID: {id}",
-    hidetag_title: "Hidetag", hidetag_default: "Es solo un hidetag",
+    
+    
+     hidetag_default: "Es solo un hidetag",
     links_text: links_common,
     mode_changed_private: "El bot ahora está en modo PRIVADO.",
     mode_changed_public: "El bot ahora está en modo PÚBLICO.",
@@ -11745,37 +11837,35 @@ info_text: [
     del2_deactivated: "La eliminación automática de los mensajes de @{user} está desactivada.",
     del3_activated: "La eliminación automática de futuros mensajes del mismo formato está activada en este grupo.",
     del3_deactivated: "La eliminación automática de futuros mensajes del mismo formato está desactivada en este grupo.",
-    del3_delete_failed: "No se pudo identificar el formato del mensaje seleccionado. No se modificó ninguna regla automática.",
-    del3_deleted_unclassified: "No se pudo identificar el formato del mensaje seleccionado. No se modificó ninguna regla automática.",
+    
+    
     del3_usage: "En un grupo, un administrador puede responder a cualquier mensaje, sin importar quién lo haya enviado, con del3 para activar o desactivar la eliminación automática de futuros mensajes del mismo formato. El mensaje seleccionado se conserva y los mensajes del propietario de la cuenta permanecen protegidos. El bot también debe ser administrador del grupo.",
-    vv_usage: "Responde a una imagen, vídeo, audio, documento o sticker con vv para reenviarlo en este chat.", vv_media_required: "El mensaje seleccionado no contiene contenido multimedia compatible.", vv_self_unavailable: "No se pudo identificar el chat personal de la cuenta conectada.",
+      vv_self_unavailable: "No se pudo identificar el chat personal de la cuenta conectada.",
     del3_bot_admin_required: "El bot debe ser administrador del grupo para aplicar esta regla.",
     del_usage: "Responde al mensaje que deseas eliminar con del.",
     del2_usage: "Indica una mención o un número internacional, o responde al mensaje del miembro.",
     target_usage: "Indica una mención o un número internacional, o responde al mensaje del miembro.",
-    no_eligible_target: "No se encontró ningún miembro que cumpla los requisitos para esta acción.",
-    delete_failed: "No se pudo completar la eliminación. Comprueba los permisos correspondientes e inténtalo de nuevo.",
-    del_completed: "La solicitud de eliminación se ha procesado.",
-    vv2_usage: "Responde a una imagen, vídeo, audio, documento o sticker con vv2 para recibirlo en Tú. Este comando está reservado al propietario.",
-    vv2_media_required: "El mensaje seleccionado no contiene contenido multimedia compatible.",
+    
+    
+    
+    
+    
     pending_msg: "El mensaje se está cargando.",
     msg_unloaded: "El contenido del mensaje no está disponible.",
     take_time: "La carga puede tardar unos momentos.",
-    quota_error: "Se ha alcanzado el límite de uso del servicio. Inténtalo de nuevo más tarde.",
-    ai_error: "El asistente no pudo procesar la solicitud. Inténtalo de nuevo en unos momentos.",
+    
+    
     ai_usage: "Envía Asistan seguido de tu pregunta.",
     url_usage: "Responde a una imagen, vídeo, audio, documento o sticker con url para obtener su enlace.",
     url_error: "No se pudo procesar el archivo multimedia. Comprueba que siga disponible e inténtalo de nuevo.",
     qr_usage: "Envía qr seguido del texto o enlace que deseas codificar.", qr_too_long: "El texto es demasiado largo para un código QR. Usa un texto más corto o un enlace.", qr_generated: "Código QR generado.",
     search_usage: "Envía buscar seguido de tu pregunta.",
-    code_usage: "Envía código seguido de un número en formato internacional (de 8 a 15 dígitos).",
+    
     owner_required: "Este comando está disponible únicamente para el propietario de la cuenta conectada.",
     group_required: "Este comando solo está disponible en un grupo de WhatsApp.",
     group_invite_admin_required: "Solo los administradores del grupo pueden obtener su enlace de invitación.",
     admin_required: "Esta acción está reservada a los administradores del grupo o al propietario de la cuenta conectada.",
     command_error: "No se pudo completar la acción. Comprueba la información y los permisos necesarios e inténtalo de nuevo.",
-    add_completed: "WhatsApp ha procesado la solicitud de añadir.",
-    add_already_member: "La persona indicada ya es miembro de este grupo. No se creó ningún duplicado.",
     add_metadata_unavailable: "No se pudieron verificar los miembros del grupo. No se envió ninguna solicitud de añadido.",
 info_text: [
         "*IA y búsqueda*",
@@ -11816,23 +11906,23 @@ info_text: [
     cmd_ai: "Asistan", cmd_lang: "lang", cmd_imaj: "imaj", cmd_cheche: "cheche",
     cmd_menu: "meni", cmd_qrbot: "qrbot", cmd_qr: "qr", cmd_code: "kòd", cmd_lien: "lyen", cmd_tagall: "tout",
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
-    cmd_kickall: "siptout", cmd_kickall2: "siptout2", cmd_ferme: "fèmen", cmd_ouvri: "ouvri", cmd_bienvenue: "byenveni",
+    cmd_kickall: "siptout", cmd_kickall2: "siptout2", cmd_ferme: "fèmen", cmd_ouvert: "ouvri", cmd_bienvenue: "byenveni",
     cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_vv2: "vv2", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
     cmd_alive: "alive", cmd_prive: "prive", cmd_public: "piblik", alive_title: "Alive", connected_since: "Konekte depi", days: "jou", hours: "èdtan", minutes: "minit", seconds: "segonn",
-    enabled: "aktive", disabled: "dezaktive", welcome_on: "Byenveni aktive", welcome_off: "Byenveni dezaktive", nolien_on: "Nolyen aktive", nolien_off: "Nolyen dezaktive", nolien2_on: "Nolyen2 aktive", nolien2_off: "Nolyen2 dezaktive",
+      welcome_on: "Byenveni aktive", welcome_off: "Byenveni dezaktive", nolien_on: "Nolyen aktive", nolien_off: "Nolyen dezaktive", nolien2_on: "Nolyen2 aktive", nolien2_off: "Nolyen2 dezaktive",
     mode_title: 'Mòd',
     welcome_title: "Byenveni", welcome_to: "Byenveni nan",
     menu_title: "Meni", lang_changed: "Lang bot la se kounye a {lang}.", languages_available: "Lang disponib : fr en es ht",
-    imaj_prompt: "Voye imaj ansanm ak deskripsyon sa ou vle a.", imaj_generated: "*{prompt}*", imaj_error: "Jenerasyon imaj la pa t kapab fini. Eseye ankò nan kèk moman.", search_title: "Rechèch", search_error: "Rechèch la pa t kapab fini. Eseye ankò nan kèk moman.",
-    lang_title: "Lang", lang_current: "Lang bot la kounye a: {lang}.", ai_title: "Mesaj", imaj_title: "Imaj", image_generated_title: "Imaj Jenere",
-    ai_click_to_receive: "Klike isit pou resevwa repons IA a :\n{link}",
-    imaj_click_to_receive: "Klike isit la pou w resevwa imaj ou a :\n{link}",
-    code_confirm: "*_Tanpri otorize voye kòd la lè w klike isit_* :\n{link}", code_error: "Kòd la pa t kapab kreye.", code_active: "Kòd la pa t kapab kreye.",
+    imaj_prompt: "Voye imaj ansanm ak deskripsyon sa ou vle a.",   search_title: "Rechèch", 
+    lang_title: "Lang", lang_current: "Lang bot la kounye a: {lang}.", ai_title: "Mesaj", imaj_title: "Imaj", 
+    
+    
+     code_error: "Kòd la pa t kapab kreye.", 
     qrbot_created: "Nouvo Sesyon Kreye",
     qrbot_scan: "Eskane kòd sa a pou konekte nouvo sesyon an.",
-    qrbot_connected: "Sesyon Konekte",
-    qrbot_active: "Nouvo sesyon an aktif.\nID: {id}",
-    hidetag_title: "Hidetag", hidetag_default: "Se jis yon hidetag",
+    
+    
+     hidetag_default: "Se jis yon hidetag",
     links_text: links_common,
     mode_changed_private: "Kounye Bot la an mòd PRIVE.",
     mode_changed_public: "Kounye Bot la an mòd PIBLIK.",
@@ -11844,37 +11934,35 @@ info_text: [
     del2_deactivated: "Efasman otomatik mesaj @{user} dezaktive.",
     del3_activated: "Efase otomatik mesaj k ap vini yo ki gen menm fòma a aktive nan gwoup sa a.",
     del3_deactivated: "Efasman otomatik pwochen mesaj ki gen menm fòma a dezaktive nan gwoup sa a.",
-    del3_delete_failed: "Yo pa t kapab idantifye fòma mesaj ou chwazi a. Okenn règ otomatik pa chanje.",
-    del3_deleted_unclassified: "Yo pa t kapab idantifye fòma mesaj ou chwazi a. Okenn règ otomatik pa chanje.",
+    
+    
     del3_usage: "Nan yon gwoup, yon administratè ka reponn sou nenpòt mesaj, kèlkeswa moun ki voye li, ak del3 pou aktive oswa dezaktive efasman otomatik pwochen mesaj ki gen menm fòma a. Mesaj ou chwazi a rete nan konvèsasyon an, epi mesaj pwopriyetè kont lan pwoteje. Bot la dwe administratè gwoup la tou.",
-    vv_usage: "Reponn sou yon imaj, videyo, odyo, dokiman oswa sticker ak vv pou voye li ankò nan chat sa a.", vv_media_required: "Mesaj ou chwazi a pa gen yon medya ki sipòte.", vv_self_unavailable: "Li pa posib idantifye chat pèsonèl kont ki konekte a.",
+      vv_self_unavailable: "Li pa posib idantifye chat pèsonèl kont ki konekte a.",
     del3_bot_admin_required: "Bot la dwe administratè gwoup la pou aplike règ sa a.",
     del_usage: "Reponn sou mesaj ou vle efase a ak del.",
     del2_usage: "Mete yon mansyon oswa yon nimewo entènasyonal, oswa reponn sou mesaj manm nan.",
     target_usage: "Mete yon mansyon oswa yon nimewo entènasyonal, oswa reponn sou mesaj manm nan.",
-    no_eligible_target: "Pa gen manm ki kalifye pou aksyon sa a nan gwoup la.",
-    delete_failed: "Efasman an pa t kapab fini. Verifye otorizasyon ki aplikab yo epi eseye ankò.",
-    del_completed: "Demann efasman an trete.",
-    vv2_usage: "Reponn sou yon imaj, videyo, odyo, dokiman oswa sticker ak vv2 pou resevwa li nan Ou. Se pwopriyetè kont lan sèlman ki ka itilize kòmand sa a.",
-    vv2_media_required: "Mesaj ou chwazi a pa gen yon medya ki sipòte.",
+    
+    
+    
+    
+    
     pending_msg: "Mesaj la ap chaje.",
     msg_unloaded: "Kontni mesaj la pa disponib.",
     take_time: "Chajman an ka pran kèk moman.",
-    quota_error: "Limit itilizasyon sèvis la rive. Eseye ankò pita.",
-    ai_error: "Asistan an pa t kapab trete demann lan. Eseye ankò nan kèk moman.",
+    
+    
     ai_usage: "Voye Asistan ansanm ak kesyon ou an.",
     url_usage: "Reponn sou yon imaj, videyo, odyo, dokiman oswa sticker ak url pou jwenn lyen li.",
     url_error: "Medya a pa t kapab trete. Verifye si li toujou disponib epi eseye ankò.",
     qr_usage: "Voye qr ansanm ak tèks oswa lyen ou vle mete nan kòd la.", qr_too_long: "Tèks la twò long pou yon kòd QR. Sèvi ak yon tèks ki pi kout oswa yon lyen.", qr_generated: "Kòd QR la kreye.",
     search_usage: "Voye cheche ansanm ak kesyon ou an.",
-    code_usage: "Voye code ansanm ak yon nimewo nan fòma entènasyonal (8 a 15 chif).",
+    
     owner_required: "Kòmand sa a disponib sèlman pou pwopriyetè kont ki konekte a.",
     group_required: "Kòmand sa a disponib sèlman nan yon gwoup WhatsApp.",
     group_invite_admin_required: "Se administratè gwoup la sèlman ki ka jwenn lyen envitasyon gwoup la.",
     admin_required: "Se administratè gwoup la oswa pwopriyetè kont ki konekte a sèlman ki ka fè aksyon sa a.",
     command_error: "Aksyon an pa t kapab fini. Verifye enfòmasyon yo ak otorizasyon ki nesesè yo, epi eseye ankò.",
-    add_completed: "WhatsApp trete demann pou ajoute a.",
-    add_already_member: "Moun ou chwazi a deja manm gwoup sa a. Pa gen okenn kopi ki ajoute.",
     add_metadata_unavailable: "Li pa posib verifye manm gwoup la. Pa gen okenn demann ajoute ki voye.",
 info_text: [
         "*IA ak rechèch*",
@@ -12192,7 +12280,7 @@ app.get('/sitemap.xml', (req, res) => res.sendFile(path.join(__dirname, 'sitemap
 app.get('/manifest.json', (req, res) => res.sendFile(path.join(__dirname, 'manifest.json')));
 app.get('/sw.js', (req, res) => res.sendFile(path.join(__dirname, 'sw.js')));
 app.get('/Adam_DH7', (req, res) => res.type('text/plain').send("It’s Us Bot (tfbot)"));
-app.get('/ok', (req, res) => res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Code-Version', TFBOT_CODE_VERSION).set('X-TFBOT-Time-Zone', TFBOT_LOG_TIME_ZONE).set('X-TFBOT-Revision', TFBOT_CLUSTER_CODE_REVISION).set('X-TFBOT-Release', TFBOT_CODE_RELEASE_ID).set('X-TFBOT-Worker-State', tfbotWorkerState).set('X-TFBOT-Worker-Active', String(tfbotWorkerActive)).set('X-TFBOT-Worker-Stopping', String(tfbotWorkerStopping)).set('X-TFBOT-Inbound-Upserts', String([...sessionInboundUpsertActivity.values()].reduce((total, value) => total + Number(value?.active || 0), 0))).set('X-TFBOT-Reconnect-Timers', String(reconnectTimers.size)).set('X-TFBOT-Session-Starts', String(sessionStartPromises.size)).set('X-TFBOT-Group-Sender-Key-Reset', GROUP_SENDER_KEY_RESET_EVERY_SEND ? 'every-send' : 'cooldown').set('X-TFBOT-Baileys-Companion-Reg-Refresh', baileysCompanionRegRefreshPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-PN-Decryption', baileysLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-PN-Decryption', baileysGroupLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-Addressing', baileysLidAwareGroupOutboundAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-Chat-Placeholder-Resend', baileysSelfChatPlaceholderResendPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Retry-Deduplication', baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Own-LID-Retry-Addressing', baileysOwnLidRetryAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Session-Readiness', 'open-event-and-authenticated-identity').send('ok'));
+app.get('/ok', (req, res) => res.set('X-TFBOT-Build', RUNTIME_FIX_BUILD).set('X-TFBOT-Code-Version', TFBOT_CODE_VERSION).set('X-TFBOT-Time-Zone', TFBOT_LOG_TIME_ZONE).set('X-TFBOT-Revision', TFBOT_CLUSTER_CODE_REVISION).set('X-TFBOT-Release', TFBOT_CODE_RELEASE_ID).set('X-TFBOT-Worker-State', tfbotWorkerState).set('X-TFBOT-Worker-Active', String(tfbotWorkerActive)).set('X-TFBOT-Worker-Stopping', String(tfbotWorkerStopping)).set('X-TFBOT-Inbound-Upserts', String([...sessionInboundUpsertActivity.values()].reduce((total, value) => total + Number(value?.active || 0), 0))).set('X-TFBOT-Reconnect-Timers', String(reconnectTimers.size)).set('X-TFBOT-Session-Starts', String(sessionStartPromises.size)).set('X-TFBOT-Group-Sender-Key-Reset', GROUP_SENDER_KEY_RESET_EVERY_SEND ? 'every-send' : 'cooldown').set('X-TFBOT-Baileys-Companion-Reg-Refresh', baileysCompanionRegRefreshPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-PN-Decryption', baileysLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-PN-Decryption', baileysGroupLidPnDecryptPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Group-LID-Addressing', baileysLidAwareGroupOutboundAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Self-Chat-Placeholder-Resend', baileysSelfChatPlaceholderResendPatchStatus.applied && baileysPlaceholderResendResponseMetadataPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Placeholder-Resend-Metadata', baileysPlaceholderResendResponseMetadataPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Retry-Deduplication', baileysRetryResendDoubleEncryptionPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Baileys-Own-LID-Retry-Addressing', baileysOwnLidRetryAddressingPatchStatus.applied ? 'applied' : 'not-applied').set('X-TFBOT-Session-Readiness', 'open-event-and-authenticated-identity').send('ok'));
 
 
 const handleTFSlugRequest = async (req, res) => {
@@ -12242,7 +12330,7 @@ function isAuthorizedAdmin(req) {
 const ADMIN_SESSION_OPERATIONS_COLLECTION = 'admin_session_operations';
 const ADMIN_SESSION_OPERATION_TTL_MS = 24 * 60 * 60 * 1000;
 const ADMIN_SESSION_OPERATION_STALE_MS = 30 * 60 * 1000;
-const ADMIN_SESSION_DELETE_NOTICE_DELAY_MS = Math.max(1200, Math.min(5000, Number(process.env.ADMIN_SESSION_DELETE_NOTICE_DELAY_MS || 2000)));
+const ADMIN_SESSION_DELETE_NOTICE_DELAY_MS = Math.max(3000, Math.min(15000, Number(process.env.ADMIN_SESSION_DELETE_NOTICE_DELAY_MS || 6000)));
 const ADMIN_SESSION_DELETE_CONCURRENCY = Math.max(2, Math.min(12, Number(process.env.ADMIN_SESSION_DELETE_CONCURRENCY || 6)));
 
 function normalizeAdminOperationId(value) {
@@ -12433,6 +12521,58 @@ async function createAdminSessionOperation(operationId, type, sessionIds) {
     adminDeletedSessionIdCacheAt = Date.now();
 }
 
+function createWhatsAppMessageServerAckTracker(sock) {
+    let targetMessageId = '';
+    let matchedUpdate = null;
+    let resolveAck;
+    const earlyUpdates = new Map();
+    const ackPromise = new Promise(resolve => { resolveAck = resolve; });
+    const isServerAcknowledgement = update => {
+        if (update?.error) return true;
+        const status = Number(update?.status);
+        return Number.isFinite(status) && status >= 2 && status <= 5;
+    };
+    const listener = updates => {
+        for (const item of Array.isArray(updates) ? updates : []) {
+            const updateId = String(item?.key?.id || '').trim();
+            const update = item?.update || {};
+            if (!updateId || !isServerAcknowledgement(update)) continue;
+            if (targetMessageId && updateId === targetMessageId) {
+                matchedUpdate = update;
+                resolveAck(update);
+            } else if (!targetMessageId) {
+                earlyUpdates.set(updateId, update);
+                while (earlyUpdates.size > 150) earlyUpdates.delete(earlyUpdates.keys().next().value);
+            }
+        }
+    };
+    sock.ev.on('messages.update', listener);
+    return {
+        waitFor: async (messageId, timeoutMs = 12000) => {
+            targetMessageId = String(messageId || '').trim();
+            if (!targetMessageId) throw new Error('whatsapp_message_ack_id_missing');
+            if (!matchedUpdate && earlyUpdates.has(targetMessageId)) {
+                matchedUpdate = earlyUpdates.get(targetMessageId);
+                resolveAck(matchedUpdate);
+            }
+            const acknowledgement = matchedUpdate || await promiseWithTimeout(ackPromise, timeoutMs, 'WhatsApp server message acknowledgement');
+            const status = Number(acknowledgement?.status);
+            if (acknowledgement?.error || !Number.isFinite(status) || status < 2 || status > 5) {
+                const reason = acknowledgement?.error?.message || `status_${String(acknowledgement?.status ?? 'missing')}`;
+                throw new Error(`whatsapp_message_not_server_acknowledged:${reason}`);
+            }
+            return { acknowledgement, status };
+        },
+        close: () => {
+            try {
+                if (typeof sock.ev.off === 'function') sock.ev.off('messages.update', listener);
+                else if (typeof sock.ev.removeListener === 'function') sock.ev.removeListener('messages.update', listener);
+            } catch (error) {}
+            earlyUpdates.clear();
+        }
+    };
+}
+
 async function performAdminSessionRemovalOnThisWorker(operationId, sessionId, noticeKind = 'single', allowNoticeFailure = false) {
     const id = String(sessionId || '').trim();
     let runtime = null;
@@ -12458,13 +12598,28 @@ async function performAdminSessionRemovalOnThisWorker(operationId, sessionId, no
                 const formattedNotice = normalizeCaptionText(notice.content);
                 try {
                     const exactDisconnectCaption = buildCaption(notice.title, formattedNotice, displayName, true, 'Bot (tfbot)', language);
-                    const sent = await sendImageCaptioned(runtime.sock, `${phone}@s.whatsapp.net`, adamLogoBuffer, notice.title, formattedNotice, displayName, { ownerName: 'Bot (tfbot)', language, exactCaption: exactDisconnectCaption });
-                    if (!sent?.key?.id) throw new Error('session_disconnect_notice_send_not_confirmed');
-                    await appendAdminSessionOperationStep(operationId, id, 'avi', 'success', 'Avi caption an voye nan WhatsApp epi sèvè a konfime mesaj la.', null, { prepared: 1 });
-                    await new Promise(resolve => setTimeout(resolve, ADMIN_SESSION_DELETE_NOTICE_DELAY_MS));
+                    const ownLid = getAuthenticatedLid(runtime.sock.user || null, runtime.authState?.creds || null);
+                    const phoneJid = `${phone}@s.whatsapp.net`;
+                    const noticeJid = ownLid || phoneJid;
+                    const noticeAckTracker = createWhatsAppMessageServerAckTracker(runtime.sock);
+                    try {
+                        const sent = await sendImageCaptioned(runtime.sock, noticeJid, adamLogoBuffer, notice.title, formattedNotice, displayName, { ownerName: 'Bot (tfbot)', language, exactCaption: exactDisconnectCaption });
+                        if (!sent?.key?.id || !sent?.message) throw new Error('session_disconnect_notice_send_not_confirmed');
+                        const noticePersisted = await persistOutgoingRetryMessage(id, noticeJid, sent, [phoneJid, ownLid, runtime.sock.user?.id, runtime.sock.user?.phoneNumber, sent.key?.remoteJidAlt].filter(Boolean), phone, runtime.sock.user?.id || runtime.sock.user?.phoneNumber || '', ownLid, 'admin_disconnect_notice');
+                        if (!noticePersisted) {
+                            const persistenceError = new Error('session_disconnect_notice_retry_persistence_failed');
+                            persistenceError.disconnectNoticeRetryPersistenceFailed = true;
+                            throw persistenceError;
+                        }
+                        const noticeAcknowledgement = await noticeAckTracker.waitFor(sent.key.id, 12000);
+                        await appendAdminSessionOperationStep(operationId, id, 'avi', 'success', 'Avi caption an voye, konfime pa sèvè WhatsApp, epi kopi retry a konsève anvan logout.', null, { prepared: 1, retryCopyPreserved: 1, serverAcknowledged: true, acknowledgementStatus: noticeAcknowledgement.status, destinationType: getWhatsAppDestinationType(noticeJid) });
+                        await new Promise(resolve => setTimeout(resolve, ADMIN_SESSION_DELETE_NOTICE_DELAY_MS));
+                    } finally {
+                        noticeAckTracker.close();
+                    }
                 } catch (noticeError) {
-                    await appendAdminSessionOperationStep(operationId, id, 'avi', 'warning', 'Mesaj avètisman an pa t kapab konfime.', noticeError?.message || String(noticeError), { noticeFailed: 1 });
-                    if (!allowNoticeFailure) throw noticeError;
+                    await appendAdminSessionOperationStep(operationId, id, 'avi', 'warning', 'Mesaj avètisman an pa t kapab konfime oswa konsève.', noticeError?.message || String(noticeError), { noticeFailed: 1 });
+                    if (noticeError?.disconnectNoticeRetryPersistenceFailed || !allowNoticeFailure) throw noticeError;
                 }
             }
         } else {
@@ -13730,6 +13885,10 @@ async function uploadToBref(buffer, filename, mimeType = 'application/octet-stre
 function normalizePhoneNumber(number) {
     return String(number || '').normalize('NFKC').replace(/[\p{Cf}\u061c\u200e\u200f]/gu, '').replace(/[^0-9]/g, '');
 }
+function normalizeAddPhoneNumber(value) {
+    const digits = normalizePhoneNumber(value);
+    return digits.length >= 6 && digits.length <= 20 && !/^0+$/.test(digits) ? `+${digits}` : '';
+}
 
 function normalizePairingPhoneNumber(value) {
     const normalizedInput = String(value || '').normalize('NFKC').replace(/[\p{Cf}\u061c\u200e\u200f]/gu, '');
@@ -14353,14 +14512,16 @@ const commandsWithoutArguments = new Set([
 const independentInboundCommands = new Set(['ai', 'cheche', 'imaj']);
 const targetArgumentCommands = new Set(['kick', 'add', 'promote', 'demote', 'del2']);
 
-function isValidTargetCommandArguments(args, context = {}) {
+function isValidTargetCommandArguments(args, context = {}, internalCommand = '') {
     const source = String(args || '').trim();
     if (!source) return context.hasQuotedMessage === true;
     const mentionTokens = source.match(/@[\p{L}\p{N}_.-]+/gu) || [];
-    if (mentionTokens.length) {
+    if (mentionTokens.length && Array.isArray(context.mentionedJid) && context.mentionedJid.length === mentionTokens.length) {
         const remainder = source.replace(/@[\p{L}\p{N}_.-]+/gu, '').trim();
-        return !remainder && Array.isArray(context.mentionedJid) && context.mentionedJid.length === mentionTokens.length;
+        if (!remainder) return true;
     }
+    if (internalCommand === 'add') return !!normalizeAddPhoneNumber(source) || context.hasQuotedMessage === true;
+    if (mentionTokens.length) return false;
     if (!/^\+?[0-9][0-9().-]*[0-9]$/u.test(source)) return false;
     const groups = source.match(/[0-9]+/gu) || [];
     if (groups.filter(group => group.length >= 5).length > 1) return false;
@@ -14401,7 +14562,7 @@ function parseIncomingCommand(body, language, context = {}) {
     if (internalCommand === 'url' && context.hasQuotedMedia !== true) return null;
     if (['cheche', 'imaj', 'qr'].includes(internalCommand) && !args) return null;
     if (internalCommand === 'lang' && args && !/^(?:fr|en|es|ht)$/i.test(args)) return null;
-    if (targetArgumentCommands.has(internalCommand) && !isValidTargetCommandArguments(args, context)) return null;
+    if (targetArgumentCommands.has(internalCommand) && !isValidTargetCommandArguments(args, context, internalCommand)) return null;
     if (internalCommand === 'code' && !isValidSinglePhoneArgument(args, 8, 15)) return null;
     let parsedArgs = args;
     if (internalCommand === 'ai') {
@@ -16502,7 +16663,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             return /@lid$/i.test(requestedLid) && configured.lids.has(requestedLid);
         };
 
-        const resolveTargets = async (arg, m, metadata = null, ownerDocument = null, currentBotJid = null) => {
+        const resolveTargets = async (arg, m, metadata = null, ownerDocument = null, currentBotJid = null, actionCommand = '') => {
             const context = getMessageContextInfo(m.message);
             const quoted = context.quotedMessage ? unwrapMessageContent(context.quotedMessage) : {};
             const normalizedArg = normalizePersonName(arg);
@@ -16537,6 +16698,13 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 return member ? preferredParticipantId(member) : value;
             }))];
             if (arg) {
+                if (actionCommand === 'add' && /^\d+(?::\d+)?@(?:hosted\.)?lid$/i.test(String(arg).trim())) return [normalizeActionJid(arg)];
+                const addPhone = actionCommand === 'add' ? normalizeAddPhoneNumber(arg) : '';
+                if (addPhone) {
+                    const number = addPhone.slice(1);
+                    const member = metadata?.participants?.find(item => normalizedJidNumber(item.id) === number || normalizedJidNumber(item.phoneNumber || item.phone || item.idAlt || '') === number);
+                    return [member ? preferredParticipantId(member) : `${number}@s.whatsapp.net`];
+                }
                 const number = normalizePhoneNumber(arg);
                 const looksLikePhone = number.length >= 6 && /^\+?[0-9][0-9\s().-]*$/.test(String(arg).trim());
                 if (looksLikePhone) {
@@ -18561,7 +18729,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 console.warn('[group-add-aborted-metadata-unavailable]', { sessionId, group: from, automaticRetry: false, reason: 'fresh_group_participants_list_required_before_add' });
                                                 break;
                                             }
-                                            const targetsAdd = await resolveTargets(args, m, metadataAdd, sOwnerTop, botId);
+                                            const targetsAdd = await resolveTargets(args, m, metadataAdd, sOwnerTop, botId, 'add');
                                             if (targetsAdd.length === 0) {
                                                 if (isProtectedTargetRequestWithoutJid(args, sOwnerTop)) {
                                                     console.info('[protected-group-target-ignored]', { sessionId, group: from, command: 'add', targetMatchedBy: 'owner_or_bot_identity_without_resolved_jid' });
@@ -18588,7 +18756,6 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                             }
                                             if (filteredTargetsAdd.length === 0) {
                                                 if (alreadyMemberTargetsAdd.length) {
-                                                    await safeSendFormatted(sock, from, t.cmd_add, t.add_already_member || t.command_error, pushName, false, activeHostName);
                                                     console.info('[group-add-skipped-existing-members]', { sessionId, group: from, alreadyMembers: alreadyMemberTargetsAdd.length, attemptedAdds: 0, automaticRetry: false });
                                                 } else {
                                                     console.info('[protected-group-target-ignored]', { sessionId, group: from, command: 'add', action: 'ignore_owner_or_bot_target' });
@@ -18615,7 +18782,6 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                             }
                                             if (addedTargetCount > 0 && !addTargetFailed) {
                                                 invalidateCachedGroupMetadata(sessionId, from);
-                                                await safeSendFormatted(sock, from, t.cmd_add, t.add_completed || t.command_error, pushName, false, activeHostName);
                                             }
                                             break;
                                         case 'kick':
@@ -20850,7 +21016,6 @@ async function main() {
         timedOutQueuePolicy: 'keep_same_chat_partition_serialized_until_original_operation_settles',
         authenticatedSessionAuthDeletionOnOfflineTimeout: false,
         targetedSignalPeerRecovery: true,
-        selfChatOriginalJidPreferred: true,
         lidPhoneMappingFreshMs: LID_PHONE_MAPPING_FRESH_MS,
         sessionScopedLidMappings: true,
         senderKeyIdentityInvalidation: true,
