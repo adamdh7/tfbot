@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'Bot (tfbot) 219';
+const TFBOT_CODE_VERSION = 'Bot (tfbot) 220';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
 const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
 let tfbotBaileysSocketVersionCache = null;
@@ -70,7 +70,7 @@ const SIGNAL_PEER_AUTO_HEAL_FAILURE_KINDS = new Set(['message_counter_error', 'b
 const SIGNAL_PEER_AUTO_HEAL_MAX_ALIASES = 2;
 
 function isSignalDecryptionFailure(args) {
-    return /Failed to decrypt message|failed to decrypt message|Session error:.*Bad MAC|Bad MAC|SignalErrorBadMac|SignalErrorInvalidMessage|MessageCounterError|Key used already or never filled|SessionError:\s*No sessions|No session found to decrypt message|No sessions|Chain closed|Decrypted message with closed session|calculateMAC|Cannot read properties of null \(reading ['\"]constructor['\"]\)/i.test(getSignalLogText(args));
+    return /Failed to decrypt message|failed to decrypt message|Session error:.*Bad MAC|Bad MAC|SignalErrorBadMac|SignalErrorInvalidMessage|MessageCounterError|Key used already or never filled|SessionError:\s*No sessions|No matching sessions found for message|No session found to decrypt message|No sessions|Chain closed|Decrypted message with closed session|calculateMAC|Cannot read properties of null \(reading ['\"]constructor['\"]\)/i.test(getSignalLogText(args));
 }
 
 const crypto = require('crypto');
@@ -2044,7 +2044,7 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
     const explicitFailureKind = String(parsed?.failureClass || parsed?.failureKind || '').trim().toLowerCase();
     const kind = ['message_counter_error', 'signal_session_missing', 'bad_mac'].includes(explicitFailureKind) ? explicitFailureKind
         : /MessageCounterError|Key used already or never filled/i.test(failureText) ? 'message_counter_error'
-        : /SessionError:\s*No sessions|No sessions|No session found to decrypt message/i.test(failureText) ? 'signal_session_missing'
+        : /SessionError:\s*No sessions|No matching sessions found for message|No sessions|No session found to decrypt message/i.test(failureText) ? 'signal_session_missing'
         : /Bad MAC|SignalErrorBadMac|SignalErrorInvalidMessage|retry.{0,20}(?:error|code).{0,8}(?:4|7)\b/i.test(failureText) ? 'bad_mac'
         : 'signal_decryption_error';
     markSessionMessagingFallback(sessionId, `signal_decryption_${kind}`, details.messageId || '');
@@ -2203,7 +2203,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-25-r221-placeholder-resend-add-disconnect-ack';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-25-r222-signal-session-missing-classification';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_REQUEST_TOKEN = 'Bot (tfbot)';
@@ -4774,7 +4774,7 @@ function classifyWhatsAppFailure(error) {
     if (/Bad MAC|SignalErrorBadMac|SignalErrorInvalidMessage|calculateMAC/i.test(value)) return 'bad_mac';
     if (/Chain closed|Decrypted message with closed session|closed session/i.test(value)) return 'chain_closed';
     if (/MessageCounterError|Key used already or never filled/i.test(value)) return 'message_counter_error';
-    if (/SessionError:\s*No sessions|No sessions|No session found to decrypt message/i.test(value)) return 'signal_session_missing';
+    if (/SessionError:\s*No sessions|No matching sessions found for message|No sessions|No session found to decrypt message/i.test(value)) return 'signal_session_missing';
     if (/pre.?key|identity.?key|signed.?pre.?key/i.test(value)) return 'signal_key_state';
     if (/timeout|timed out|ETIMEDOUT/i.test(value)) return 'timeout';
     if (/socket|connection|ECONN|EPIPE|closed/i.test(value)) return 'transport';
