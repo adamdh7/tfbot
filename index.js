@@ -5,7 +5,7 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'Bot (tfbot) 217';
+const TFBOT_CODE_VERSION = 'Bot (tfbot) 218';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
 const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
 let tfbotBaileysSocketVersionCache = null;
@@ -1702,7 +1702,7 @@ function getTfbotInstalledPackageVersion(packageName) {
     return null;
 }
 const TFBOT_BAILEYS_VERSION = getTfbotInstalledPackageVersion('@whiskeysockets/baileys');
-enqueueTfbotDiagnosticRecord({ name: 'Bot (tfbot)', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ codeVersion: TFBOT_CODE_VERSION, releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION, timeZone: TFBOT_LOG_TIME_ZONE, baileysVersion: TFBOT_BAILEYS_VERSION, signalPeerAutoHeal: { enabled: true, threshold: SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD, windowMs: SIGNAL_RECOVERY_WINDOW_MS, cooldownMs: SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS, failureKinds: [...SIGNAL_PEER_AUTO_HEAL_FAILURE_KINDS], scope: 'one_peer_signal_session_records_and_pn_lid_aliases_only', deleteMethod: 'signalRepository.deleteSession_or_authState.keys.set_session_category_fallback', baileysAuthCredentialsDeleted: false, accountLogout: false, groupSenderKeysDeleted: false, allPeersDeleted: false }, diagnosticLogStorage: 'bounded_file_and_memory_17mb_7h', persistedLocalDisk: tfbotDiagnosticDiskAvailable, logTimeZone: TFBOT_LOG_TIME_ZONE, activeWorkerRouting: 'retain_current_healthy_worker_until_repeated_health_failure', appendCommandPolicy: 'authenticated_from_me_explicit_command_within_70_seconds_in_private_or_group_chat_and_not_known_outgoing_echo' }) });
+enqueueTfbotDiagnosticRecord({ name: 'Bot (tfbot)', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ codeVersion: TFBOT_CODE_VERSION, releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION, timeZone: TFBOT_LOG_TIME_ZONE, baileysVersion: TFBOT_BAILEYS_VERSION, signalPeerAutoHeal: { enabled: true, threshold: SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD, windowMs: SIGNAL_RECOVERY_WINDOW_MS, cooldownMs: SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS, failureKinds: [...SIGNAL_PEER_AUTO_HEAL_FAILURE_KINDS], scope: 'one_peer_signal_session_records_and_pn_lid_aliases_only', deleteMethod: 'signalRepository.deleteSession_or_authState.keys.set_session_category_fallback', baileysAuthCredentialsDeleted: false, accountLogout: false, groupSenderKeysDeleted: false, allPeersDeleted: false }, diagnosticLogStorage: 'bounded_file_and_memory_17mb_7h', persistedLocalDisk: tfbotDiagnosticDiskAvailable, logTimeZone: TFBOT_LOG_TIME_ZONE, activeWorkerRouting: 'retain_current_healthy_worker_until_repeated_health_failure', appendCommandPolicy: 'authenticated_from_me_explicit_command_with_trusted_timestamp_within_70_seconds_not_before_current_socket_and_not_known_outgoing_echo' }) });
 enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, baileysVersion: TFBOT_BAILEYS_VERSION, perChatInboundProcessing: baileysPerChatInboundProcessingPatchStatus, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, retryBaseKeyCollision: baileysRetryBaseKeyCollisionPatchStatus, groupLidOutboundAddressing: baileysLidAwareGroupOutboundAddressingPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, groupLidPnDecrypt: baileysGroupLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus, pairingCodeProtocol: baileysPairingCodeProtocolPatchStatus }) });
 const { MongoClient } = require('mongodb');
 const { Readable, Writable } = require('stream');
@@ -2108,7 +2108,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-21-r219-explicit-image-action-sse-result-and-exact-admin-caption';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-25-r220-add-inbound-replay-worker-recovery-mode-menu';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_REQUEST_TOKEN = 'Bot (tfbot)';
@@ -2224,6 +2224,7 @@ const SEARCH_QUERY_MAX_CHARS = Math.max(200, Number(process.env.SEARCH_QUERY_MAX
 const TFSERVER_AI_URL = 'https://tfserver-ai.onrender.com';
 const tfServerAiUserRequestQueues = new Map();
 const TFBOT_MAX_COMMAND_AGE_MS = Math.max(1000, Math.min(70000, Number(process.env.TFBOT_MAX_COMMAND_AGE_MS || 70000)));
+const TFBOT_MAX_COMMAND_FUTURE_SKEW_MS = Math.max(5000, Math.min(120000, Number(process.env.TFBOT_MAX_COMMAND_FUTURE_SKEW_MS || 30000)));
 
 function getTfbotTimestampMilliseconds(value) {
     try {
@@ -2259,13 +2260,13 @@ function getTfbotMessageTimestampInfo(message, fallbackReceivedAtMs = Date.now()
         const timestampMs = getTfbotTimestampMilliseconds(candidate.value);
         if (timestampMs > 0) {
             const clockOffsetMs = Number(nowMs) - timestampMs;
-            return { timestampMs, source: candidate.source, clockOffsetMs, differenceMs: Math.max(0, clockOffsetMs), usedFallback: false };
+            return { timestampMs, source: candidate.source, clockOffsetMs, differenceMs: Math.max(0, clockOffsetMs), futureSkewMs: Math.max(0, -clockOffsetMs), usedFallback: false };
         }
     }
     const fallback = Number(fallbackReceivedAtMs);
     const timestampMs = Number.isFinite(fallback) && fallback > 0 ? fallback : Number(nowMs) || Date.now();
     const clockOffsetMs = Number(nowMs) - timestampMs;
-    return { timestampMs, source: 'upsert_received_at_fallback', clockOffsetMs, differenceMs: Math.max(0, clockOffsetMs), usedFallback: true };
+    return { timestampMs, source: 'upsert_received_at_fallback', clockOffsetMs, differenceMs: Math.max(0, clockOffsetMs), futureSkewMs: 0, usedFallback: true };
 }
 
 function getTfbotAccountMessageClaimScope(sessionId, accountIdentity = '') {
@@ -10923,8 +10924,35 @@ async function pollTfbotCoordinatorSelection() {
             tfbotWorkerSelectedHost = selectedHost;
             tfbotWorkerSelectionGeneration = generation;
             if (selectedHost === TFBOT_CLUSTER_INSTANCE_HOST) {
-                if (tfbotWorkerActive && !tfbotWorkerStopping) renewTfbotWorkerLease();
-                return true;
+                if (tfbotWorkerActive && !tfbotWorkerStopping && tfbotWorkerState === 'active' && db && mongoClient) {
+                    renewTfbotWorkerLease();
+                    return true;
+                }
+                if (tfbotWorkerStopping && !tfbotWorkerDeactivationPromise) {
+                    console.warn('[tfbot-worker-selected-during-untracked-stop]', { host: TFBOT_CLUSTER_INSTANCE_HOST, generation, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, action: 'wait_for_current_stop_transition_before_reactivation' });
+                    return false;
+                }
+                const activationStartedAt = Date.now();
+                try {
+                    renewTfbotWorkerLease();
+                    const activated = await activateTfbotWorker();
+                    const workerReady = activated === true
+                        && tfbotWorkerActive === true
+                        && tfbotWorkerStopping === false
+                        && tfbotWorkerState === 'active'
+                        && tfbotWorkerSelectedHost === TFBOT_CLUSTER_INSTANCE_HOST
+                        && tfbotWorkerSelectionGeneration === generation
+                        && !!db
+                        && !!mongoClient;
+                    if (!workerReady) throw new Error('coordinator_selected_worker_activation_not_confirmed');
+                    const ping = await mongoClient.db(TFBOT_DATABASE_NAME).command({ ping: 1 });
+                    if (Number(ping?.ok) !== 1) throw new Error('coordinator_selected_worker_database_ping_failed');
+                    console.warn('[tfbot-worker-recovered-from-coordinator-selection]', { host: TFBOT_CLUSTER_INSTANCE_HOST, generation, activationMs: Date.now() - activationStartedAt, activeSessionCount: activeSessions.size, databasePing: true, action: 'reactivate_only_after_coordinator_confirms_this_host_as_the_selected_worker' });
+                    return true;
+                } catch (activationError) {
+                    console.error('[tfbot-worker-selected-activation-failed]', { host: TFBOT_CLUSTER_INSTANCE_HOST, generation, activationMs: Date.now() - activationStartedAt, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, error: activationError?.message || String(activationError), action: 'keep_worker_unavailable_and_retry_on_next_coordinator_poll' });
+                    return false;
+                }
             }
             if (tfbotWorkerActive || db || mongoClient || tfbotWorkerActivationPromise) {
                 if (!tfbotWorkerDeactivationPromise) void deactivateTfbotWorker('coordinator_selected_another_worker').catch(error => console.error('[tfbot-worker-deactivation-failed]', { host: TFBOT_CLUSTER_INSTANCE_HOST, error: error?.message || String(error) }));
@@ -11493,7 +11521,7 @@ const translations = {
     cmd_hidetag: "hidetag", cmd_kick: "expulse", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "expulsetout", cmd_kickall2: "expulsetout2", cmd_ferme: "ferme", cmd_ouvert: "ouvert", cmd_bienvenue: "bienvenue",
     cmd_nolien: "nolien", cmd_nolien2: "nolien2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_vv2: "vv2", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
-    cmd_alive: "alive", alive_title: "Alive", connected_since: "Connecté depuis", days: "jour(s)", hours: "heure(s)", minutes: "minute(s)", seconds: "seconde(s)",
+    cmd_alive: "alive", cmd_prive: "prive", cmd_public: "public", alive_title: "Alive", connected_since: "Connecté depuis", days: "jour(s)", hours: "heure(s)", minutes: "minute(s)", seconds: "seconde(s)",
     enabled: "activé", disabled: "désactivé", welcome_on: "Bienvenue activée", welcome_off: "Bienvenue désactivée", nolien_on: "Nolien activé", nolien_off: "Nolien désactivé", nolien2_on: "Nolien2 activé", nolien2_off: "Nolien2 désactivé",
     mode_title: 'Mode',
     welcome_title: "Bienvenue", welcome_to: "Bienvenue dans",
@@ -11548,6 +11576,9 @@ const translations = {
     group_invite_admin_required: "Seuls les administrateurs du groupe peuvent récupérer son lien d’invitation.",
     admin_required: "Cette action est réservée aux administrateurs du groupe ou au propriétaire du compte connecté.",
     command_error: "L’action n’a pas pu être terminée. Vérifie les informations et autorisations requises, puis réessaie.",
+    add_completed: "La demande d’ajout a été traitée par WhatsApp.",
+    add_already_member: "La personne indiquée est déjà membre de ce groupe. Aucun doublon n’a été créé.",
+    add_metadata_unavailable: "Impossible de vérifier les membres du groupe. Aucun ajout n’a été tenté.",
 info_text: [
         "*IA & recherche*",
         "Asistan <question> — Assistant IA",
@@ -11558,6 +11589,7 @@ info_text: [
         "*Session*",
         "menu — Commandes",
         "info — Aide",
+        "prive / public — Mode privé / public",
         "qrbot — Nouvelle session",
         "code <numéro> — Code d’association",
         "qr <texte> — QR code",
@@ -11588,7 +11620,7 @@ info_text: [
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "kickall", cmd_kickall2: "kickall2", cmd_ferme: "close", cmd_ouvert: "open", cmd_bienvenue: "welcome",
     cmd_nolien: "nolink", cmd_nolien2: "nolink2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_vv2: "vv2", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
-    cmd_alive: "alive", alive_title: "Alive", connected_since: "Connected for", days: "day(s)", hours: "hour(s)", minutes: "minute(s)", seconds: "second(s)",
+    cmd_alive: "alive", cmd_prive: "private", cmd_public: "public", alive_title: "Alive", connected_since: "Connected for", days: "day(s)", hours: "hour(s)", minutes: "minute(s)", seconds: "second(s)",
     enabled: "enabled", disabled: "disabled", welcome_on: "Welcome enabled", welcome_off: "Welcome disabled", nolien_on: "No link enabled", nolien_off: "No link disabled", nolien2_on: "Strict no link enabled", nolien2_off: "Strict no link disabled",
     mode_title: 'Mode',
     welcome_title: "Welcome", welcome_to: "Welcome to",
@@ -11643,6 +11675,9 @@ info_text: [
     group_invite_admin_required: "Only group administrators can retrieve this group’s invite link.",
     admin_required: "This action is restricted to group administrators or the connected account owner.",
     command_error: "The action could not be completed. Check the supplied information and required permissions, then try again.",
+    add_completed: "WhatsApp processed the add request.",
+    add_already_member: "The selected person is already a member of this group. No duplicate was added.",
+    add_metadata_unavailable: "The group members could not be verified. No add request was sent.",
 info_text: [
         "*AI & search*",
         "Asistan <question> — AI assistant",
@@ -11653,6 +11688,7 @@ info_text: [
         "*Session*",
         "menu — Commands",
         "info — Help",
+        "private / public — Private / public mode",
         "qrbot — New session",
         "code <number> — Pairing code",
         "qr <text> — QR code",
@@ -11683,7 +11719,7 @@ info_text: [
     cmd_hidetag: "hidetag", cmd_kick: "expulsar", cmd_add: "añadir", cmd_promote: "promover", cmd_demote: "degradar",
     cmd_kickall: "borrartodo", cmd_kickall2: "borrartodo2", cmd_ferme: "cerrar", cmd_ouvert: "abrir", cmd_bienvenue: "bienvenida",
     cmd_nolien: "sinenlace", cmd_nolien2: "sinenlace2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_vv2: "vv2", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
-    cmd_alive: "alive", alive_title: "Alive", connected_since: "Conectado por", days: "día(s)", hours: "hora(s)", minutes: "minuto(s)", seconds: "segundo(s)",
+    cmd_alive: "alive", cmd_prive: "privado", cmd_public: "publico", alive_title: "Alive", connected_since: "Conectado por", days: "día(s)", hours: "hora(s)", minutes: "minuto(s)", seconds: "segundo(s)",
     enabled: "activado", disabled: "desactivado", welcome_on: "Bienvenida activada", welcome_off: "Bienvenida desactivada", nolien_on: "Sin enlaces activado", nolien_off: "Sin enlaces desactivado", nolien2_on: "Sin enlaces estricto activado", nolien2_off: "Sin enlaces estricto desactivado",
     mode_title: 'Modo',
     welcome_title: "Bienvenida", welcome_to: "Bienvenida a",
@@ -11738,6 +11774,9 @@ info_text: [
     group_invite_admin_required: "Solo los administradores del grupo pueden obtener su enlace de invitación.",
     admin_required: "Esta acción está reservada a los administradores del grupo o al propietario de la cuenta conectada.",
     command_error: "No se pudo completar la acción. Comprueba la información y los permisos necesarios e inténtalo de nuevo.",
+    add_completed: "WhatsApp ha procesado la solicitud de añadir.",
+    add_already_member: "La persona indicada ya es miembro de este grupo. No se creó ningún duplicado.",
+    add_metadata_unavailable: "No se pudieron verificar los miembros del grupo. No se envió ninguna solicitud de añadido.",
 info_text: [
         "*IA y búsqueda*",
         "Asistan <pregunta> — Asistente IA",
@@ -11748,6 +11787,7 @@ info_text: [
         "*Sesión*",
         "menú — Comandos",
         "info — Ayuda",
+        "privado / publico — Modo privado / público",
         "qrbot — Nueva sesión",
         "código <número> — Código de vinculación",
         "qr <texto> — Código QR",
@@ -11778,7 +11818,7 @@ info_text: [
     cmd_hidetag: "hidetag", cmd_kick: "kick", cmd_add: "add", cmd_promote: "promote", cmd_demote: "demote",
     cmd_kickall: "siptout", cmd_kickall2: "siptout2", cmd_ferme: "fèmen", cmd_ouvri: "ouvri", cmd_bienvenue: "byenveni",
     cmd_nolien: "nolyen", cmd_nolien2: "nolyen2", cmd_del: "del", cmd_del2: "del2", cmd_del3: "del3", cmd_vv: "vv", cmd_vv2: "vv2", cmd_sites: "sit", cmd_info: "info", cmd_ping: "ping", cmd_url: "url",
-    cmd_alive: "alive", alive_title: "Alive", connected_since: "Konekte depi", days: "jou", hours: "èdtan", minutes: "minit", seconds: "segonn",
+    cmd_alive: "alive", cmd_prive: "prive", cmd_public: "piblik", alive_title: "Alive", connected_since: "Konekte depi", days: "jou", hours: "èdtan", minutes: "minit", seconds: "segonn",
     enabled: "aktive", disabled: "dezaktive", welcome_on: "Byenveni aktive", welcome_off: "Byenveni dezaktive", nolien_on: "Nolyen aktive", nolien_off: "Nolyen dezaktive", nolien2_on: "Nolyen2 aktive", nolien2_off: "Nolyen2 dezaktive",
     mode_title: 'Mòd',
     welcome_title: "Byenveni", welcome_to: "Byenveni nan",
@@ -11833,6 +11873,9 @@ info_text: [
     group_invite_admin_required: "Se administratè gwoup la sèlman ki ka jwenn lyen envitasyon gwoup la.",
     admin_required: "Se administratè gwoup la oswa pwopriyetè kont ki konekte a sèlman ki ka fè aksyon sa a.",
     command_error: "Aksyon an pa t kapab fini. Verifye enfòmasyon yo ak otorizasyon ki nesesè yo, epi eseye ankò.",
+    add_completed: "WhatsApp trete demann pou ajoute a.",
+    add_already_member: "Moun ou chwazi a deja manm gwoup sa a. Pa gen okenn kopi ki ajoute.",
+    add_metadata_unavailable: "Li pa posib verifye manm gwoup la. Pa gen okenn demann ajoute ki voye.",
 info_text: [
         "*IA ak rechèch*",
         "Asistan <kesyon> — Asistan IA",
@@ -11843,6 +11886,7 @@ info_text: [
         "*Sesyon*",
         "meni — Kòmand yo",
         "info — Èd",
+        "prive / piblik — Mòd prive / piblik",
         "qrbot — Nouvo sesyon",
         "kòd <nimewo> — Kòd koneksyon",
         "qr <tèks> — QR code",
@@ -16306,11 +16350,17 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             return normalizeActionJid(raw);
         };
 
-        const groupUpdateFailures = result => Array.isArray(result) ? result.filter(item => {
-            const status = String(item?.status ?? '').toLowerCase();
-            const failureTag = String(item?.content?.tag || item?.content?.attrs?.type || item?.error || '').toLowerCase();
-            return (status && !['200', 'ok', 'success'].includes(status)) || ['error', 'not-authorized', 'forbidden', 'conflict', 'bad-request', '401', '403', '404', '406', '500'].includes(failureTag);
-        }) : [];
+        const groupUpdateFailures = (result, expectedCount = 0, strict = false) => {
+            if (!Array.isArray(result)) return strict ? [{ status: 'missing_result', error: 'missing_result' }] : [];
+            if (strict && (!result.length || expectedCount > 0 && result.length !== expectedCount)) return [{ status: 'incomplete_result', error: 'incomplete_result', received: result.length, expected: expectedCount }];
+            return result.filter(item => {
+                if (!item || typeof item !== 'object') return true;
+                const status = String(item?.status ?? '').trim().toLowerCase();
+                const failureTag = String(item?.content?.tag || item?.content?.attrs?.type || item?.error || '').toLowerCase();
+                if (status) return !['200', 'ok', 'success'].includes(status) || ['error', 'not-authorized', 'forbidden', 'conflict', 'bad-request', '401', '403', '404', '406', '500'].includes(failureTag);
+                return strict || ['error', 'not-authorized', 'forbidden', 'conflict', 'bad-request', '401', '403', '404', '406', '500'].includes(failureTag);
+            });
+        };
 
         const safeGroupUpdate = async (jid, participants, action, knownMetadata = null, preferPhoneNumbers = false, batchOnly = false) => {
             let metadataForAction = null;
@@ -16373,7 +16423,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     if (unresolved.length) console.error('[group-participants-update-rejected]', { group: jid, action, requested: planned.length, unresolved });
                     return unresolved.length === 0;
                 }
-                const failures = groupUpdateFailures(result);
+                const failures = groupUpdateFailures(result, primaryIds.length, action === 'add');
                 if (!failures.length) {
                     if (action === 'add') console.info('[group-add-request-confirmed]', { sessionId, group: jid, requested: primaryIds.length, queuePartition: groupQueuePartitionKey, automaticRetry: false });
                     return true;
@@ -16831,7 +16881,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const appendIsAuthenticatedSelfChat = ['private_pn', 'private_lid'].includes(appendChatType)
                     && appendChatCandidates.some(chat => appendOwnIdentityCandidates.some(identity => chat === identity || areEquivalentWhatsAppChatJids(sessionId, chat, identity)));
                 let freshOwnAppendCommand = null;
-                if (upsertType === 'append' && appendIsAuthenticatedOwnDeviceMessage && earlyMessageAgeMs <= TFBOT_MAX_COMMAND_AGE_MS) {
+                if (upsertType === 'append' && appendIsAuthenticatedOwnDeviceMessage && !earlyMessageTimestampInfo.usedFallback && earlyMessageTimestampInfo.futureSkewMs <= TFBOT_MAX_COMMAND_FUTURE_SKEW_MS && !messagePredatesCurrentSocket && earlyMessageAgeMs <= TFBOT_MAX_COMMAND_AGE_MS) {
                     const earlyAppendBody = String(extractBody(m) || '').trim();
                     if (earlyAppendBody) {
                         let earlyAppendContext = getCommandParsingContext(m?.message, sessionId, earlyReceivedChat);
@@ -16850,7 +16900,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     }
                 }
                 const ignoreHistoricalAppend = upsertType === 'append' && !freshOwnAppendCommand;
-                const ignoreHistoricalMessage = ignoreHistoricalAppend || (messagePredatesCurrentSocket && !freshOwnAppendCommand) || staleUndecryptableMessageStub || (upsertType === 'notify' && sessionWasSynchronizingAtReceipt && earlyMessageAgeMs > 30000);
+                const ignoreHistoricalMessage = ignoreHistoricalAppend || (messagePredatesCurrentSocket && !freshOwnAppendCommand) || staleUndecryptableMessageStub || (upsertType === 'notify' && sessionWasSynchronizingAtReceipt && (earlyMessageTimestampInfo.usedFallback || earlyMessageAgeMs > 30000 || earlyMessageTimestampInfo.futureSkewMs > TFBOT_MAX_COMMAND_FUTURE_SKEW_MS));
                 if (ignoreHistoricalMessage) {
                     const historyMessageId = String(m?.key?.id || '').trim();
                     const historyChat = String(m?.key?.remoteJid || m?.key?.remoteJidAlt || 'unknown-chat');
@@ -16930,7 +16980,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const receivedTimestampMs = receivedTimestampInfo.timestampMs;
                 const receivedTimestampSeconds = receivedTimestampMs / 1000;
                 const receivedMessageAgeMs = receivedTimestampInfo.differenceMs;
-                if (receivedParsedCommand && receivedMessageAgeMs > TFBOT_MAX_COMMAND_AGE_MS) {
+                if (receivedParsedCommand && (receivedMessageAgeMs > TFBOT_MAX_COMMAND_AGE_MS || receivedTimestampInfo.futureSkewMs > TFBOT_MAX_COMMAND_FUTURE_SKEW_MS)) {
                     cacheRecentMessage(sessionId, m);
                     cacheMessageIdentityAliases(sessionId, m);
                     const staleCommandCacheKey = `${sessionId}:id:${receivedId}`;
@@ -16946,7 +16996,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     } catch (staleClaimError) {
                         console.warn('[stale-command-dedupe-mark-failed]', { sessionId, messageId: receivedId, error: staleClaimError?.message || String(staleClaimError) });
                     }
-                    console.warn('[stale-command-replay-blocked]', { sessionId, messageId: receivedId, chatType: getWhatsAppDestinationType(receivedChat), upsertType, command: receivedParsedCommand.internalCommand || receivedParsedCommand.command, ageMs: receivedMessageAgeMs, clockOffsetMs: receivedTimestampInfo.clockOffsetMs, timestampSource: receivedTimestampInfo.source, usedTimestampFallback: receivedTimestampInfo.usedFallback, maximumAgeMs: TFBOT_MAX_COMMAND_AGE_MS, fromMe: m?.key?.fromMe === true, reason: 'message_clock_difference_exceeded_70_seconds_before_deduplication_or_execution' });
+                    console.warn('[stale-command-replay-blocked]', { sessionId, messageId: receivedId, chatType: getWhatsAppDestinationType(receivedChat), upsertType, command: receivedParsedCommand.internalCommand || receivedParsedCommand.command, ageMs: receivedMessageAgeMs, clockOffsetMs: receivedTimestampInfo.clockOffsetMs, timestampSource: receivedTimestampInfo.source, usedTimestampFallback: receivedTimestampInfo.usedFallback, maximumAgeMs: TFBOT_MAX_COMMAND_AGE_MS, fromMe: m?.key?.fromMe === true, reason: receivedTimestampInfo.futureSkewMs > TFBOT_MAX_COMMAND_FUTURE_SKEW_MS ? 'message_timestamp_too_far_in_the_future' : 'message_clock_difference_exceeded_70_seconds_before_deduplication_or_execution' });
                     continue;
                 }
                 const receivedUpsertProcessingMs = Date.now() - messageUpsertHandlerStartedAt;
@@ -17267,8 +17317,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     void enqueueInboundCommand(sessionId, receivedChat, async () => {
                     try {
                         const dispatchTimestampInfo = getTfbotMessageTimestampInfo(m, messageUpsertEventStartedAt);
-                        if (receivedParsedCommand && dispatchTimestampInfo.differenceMs > TFBOT_MAX_COMMAND_AGE_MS) {
-                            console.warn('[stale-command-replay-blocked-before-dispatch]', { sessionId, messageId: msgId, command: receivedParsedCommand.internalCommand || receivedParsedCommand.command, upsertType, ageMs: dispatchTimestampInfo.differenceMs, clockOffsetMs: dispatchTimestampInfo.clockOffsetMs, timestampSource: dispatchTimestampInfo.source, usedTimestampFallback: dispatchTimestampInfo.usedFallback, maximumAgeMs: TFBOT_MAX_COMMAND_AGE_MS, action: 'final_clock_check_after_inbound_queue_wait_before_command_handler' });
+                        if (receivedParsedCommand && (dispatchTimestampInfo.differenceMs > TFBOT_MAX_COMMAND_AGE_MS || dispatchTimestampInfo.futureSkewMs > TFBOT_MAX_COMMAND_FUTURE_SKEW_MS)) {
+                            console.warn('[stale-command-replay-blocked-before-dispatch]', { sessionId, messageId: msgId, command: receivedParsedCommand.internalCommand || receivedParsedCommand.command, upsertType, ageMs: dispatchTimestampInfo.differenceMs, clockOffsetMs: dispatchTimestampInfo.clockOffsetMs, timestampSource: dispatchTimestampInfo.source, usedTimestampFallback: dispatchTimestampInfo.usedFallback, maximumAgeMs: TFBOT_MAX_COMMAND_AGE_MS, futureSkewMs: dispatchTimestampInfo.futureSkewMs, maximumFutureSkewMs: TFBOT_MAX_COMMAND_FUTURE_SKEW_MS, action: 'final_clock_check_after_inbound_queue_wait_before_command_handler' });
                             return;
                         }
                         const dispatchRuntime = activeSessions.get(sessionId);
@@ -18313,7 +18363,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                                             break;
                                         case 'menu':
                                             if (args.length > 0) break;
-                                            let menuBodyText = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n*○ ${t.cmd_info}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*● ${t.cmd_kickall2}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_del2}*\n*● ${t.cmd_del3}*\n*● ${t.cmd_vv}*\n*● ${t.cmd_vv2}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_url}*\n*○ ${t.cmd_ping}*`;
+                                            let menuBodyText = `*● ${t.cmd_ai}*\n*○ ${t.cmd_lang}*\n*○ ${t.cmd_imaj}*\n*○ ${t.cmd_cheche}*\n\n*● ${t.cmd_menu}*\n*○ ${t.cmd_qrbot}*\n*● ${t.cmd_qr}*\n*○ ${t.cmd_code}*\n*○ ${t.cmd_lien}*\n*○ ${t.cmd_sites}*\n*○ ${t.cmd_info}*\n*● ${t.cmd_prive}*\n*○ ${t.cmd_public}*\n\n*● ${t.cmd_tagall}*\n*○ ${t.cmd_hidetag}*\n*● ${t.cmd_kick}*\n*○ ${t.cmd_add}*\n*● ${t.cmd_promote}*\n*○ ${t.cmd_demote}*\n*● ${t.cmd_kickall}*\n*● ${t.cmd_kickall2}*\n*○ ${t.cmd_ferme}*\n*● ${t.cmd_ouvert}*\n*○ ${t.cmd_bienvenue}*\n\n*○ ${t.cmd_nolien}*\n*● ${t.cmd_nolien2}*\n*○ ${t.cmd_del}*\n*● ${t.cmd_del2}*\n*● ${t.cmd_del3}*\n*● ${t.cmd_vv}*\n*● ${t.cmd_vv2}*\n*○ ${t.cmd_alive}*\n*● ${t.cmd_url}*\n*○ ${t.cmd_ping}*`;
                                             await safeSendFormatted(sock, from, t.menu_title, menuBodyText, pushName, false, activeHostName);
                                             break;
                                         case 'info':
@@ -18506,6 +18556,11 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 break;
                                             }
                                             const metadataAdd = await getMeta();
+                                            if (!metadataAdd || !Array.isArray(metadataAdd.participants)) {
+                                                await safeSendFormatted(sock, from, t.cmd_add, t.add_metadata_unavailable || t.command_error, pushName, true, activeHostName);
+                                                console.warn('[group-add-aborted-metadata-unavailable]', { sessionId, group: from, automaticRetry: false, reason: 'fresh_group_participants_list_required_before_add' });
+                                                break;
+                                            }
                                             const targetsAdd = await resolveTargets(args, m, metadataAdd, sOwnerTop, botId);
                                             if (targetsAdd.length === 0) {
                                                 if (isProtectedTargetRequestWithoutJid(args, sOwnerTop)) {
@@ -18515,28 +18570,52 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                                                 await safeSendFormatted(sock, from, t.cmd_add, t.target_usage.replace('{command}', t.cmd_add), pushName, true, activeHostName);
                                                 break;
                                             }
-                                            const filteredTargetsAdd = [...new Set(targetsAdd.filter(target => !isProtectedWhatsAppTarget(target, sOwnerTop, botId, findActionParticipant(target, metadataAdd)?.phoneNumber || findActionParticipant(target, metadataAdd)?.phone || '')).map(normalizeActionJid).filter(Boolean))];
+                                            const filteredTargetsAdd = [];
+                                            const alreadyMemberTargetsAdd = [];
+                                            const seenAddTargetKeys = new Set();
+                                            for (const rawTarget of targetsAdd) {
+                                                const target = normalizeActionJid(rawTarget);
+                                                if (!target) continue;
+                                                const matchedParticipant = findActionParticipant(target, metadataAdd);
+                                                const protectedPhone = matchedParticipant?.phoneNumber || matchedParticipant?.phone || '';
+                                                if (isProtectedWhatsAppTarget(target, sOwnerTop, botId, protectedPhone)) continue;
+                                                const targetNumber = /@(?:s\.whatsapp\.net|c\.us)$/i.test(target) ? normalizedJidNumber(target) : '';
+                                                const participantKey = matchedParticipant ? `participant:${normalizeActionJid(matchedParticipant.id || matchedParticipant.lid || target)}` : targetNumber ? `phone:${targetNumber}` : `jid:${target}`;
+                                                if (seenAddTargetKeys.has(participantKey)) continue;
+                                                seenAddTargetKeys.add(participantKey);
+                                                if (matchedParticipant) alreadyMemberTargetsAdd.push(target);
+                                                else filteredTargetsAdd.push(target);
+                                            }
                                             if (filteredTargetsAdd.length === 0) {
-                                                console.info('[protected-group-target-ignored]', { sessionId, group: from, command: 'add', action: 'ignore_owner_or_bot_target' });
+                                                if (alreadyMemberTargetsAdd.length) {
+                                                    await safeSendFormatted(sock, from, t.cmd_add, t.add_already_member || t.command_error, pushName, false, activeHostName);
+                                                    console.info('[group-add-skipped-existing-members]', { sessionId, group: from, alreadyMembers: alreadyMemberTargetsAdd.length, attemptedAdds: 0, automaticRetry: false });
+                                                } else {
+                                                    console.info('[protected-group-target-ignored]', { sessionId, group: from, command: 'add', action: 'ignore_owner_or_bot_target' });
+                                                }
                                                 break;
                                             }
-                                            try {
-                                                for (let targetIndex = 0; targetIndex < filteredTargetsAdd.length; targetIndex++) {
-                                                    const target = filteredTargetsAdd[targetIndex];
-                                                    try {
-                                                        markCommandSending('group_participants_update', 'add');
-                                                        const added = await safeGroupUpdate(from, [target], 'add', metadataAdd, false, true);
-                                                        if (!added) throw new Error('group_add_result_not_confirmed_no_automatic_retry');
-                                                        console.info('[group-add-target-confirmed]', { sessionId, group: from, targetHash: shortLogHash(target), action: 'single_target_add_confirmed', automaticRetry: false });
-                                                        if (targetIndex < filteredTargetsAdd.length - 1) await new Promise(resolve => setTimeout(resolve, 2500));
-                                                    } catch (addTargetError) {
-                                                        await safeSendActionError(sock, from, t.cmd_add, addTargetError, messageLang, pushName, m.messageTimestamp);
-                                                        console.error('[group-add-target-failed]', { sessionId, group: from, targetHash: shortLogHash(target), requestedTargets: filteredTargetsAdd.length, automaticRetry: false, error: addTargetError?.message || String(addTargetError) });
-                                                        break;
-                                                    }
+                                            let addedTargetCount = 0;
+                                            let addTargetFailed = false;
+                                            for (let targetIndex = 0; targetIndex < filteredTargetsAdd.length; targetIndex++) {
+                                                const target = filteredTargetsAdd[targetIndex];
+                                                try {
+                                                    markCommandSending('group_participants_update', 'add');
+                                                    const added = await safeGroupUpdate(from, [target], 'add', metadataAdd, false, true);
+                                                    if (!added) throw new Error('group_add_result_not_confirmed_no_automatic_retry');
+                                                    addedTargetCount++;
+                                                    console.info('[group-add-target-confirmed]', { sessionId, group: from, targetHash: shortLogHash(target), action: 'single_target_add_confirmed', automaticRetry: false });
+                                                    if (targetIndex < filteredTargetsAdd.length - 1) await new Promise(resolve => setTimeout(resolve, 1200));
+                                                } catch (addTargetError) {
+                                                    addTargetFailed = true;
+                                                    await safeSendActionError(sock, from, t.cmd_add, addTargetError, messageLang, pushName, m.messageTimestamp);
+                                                    console.error('[group-add-target-failed]', { sessionId, group: from, targetHash: shortLogHash(target), requestedTargets: filteredTargetsAdd.length, confirmedAdds: addedTargetCount, alreadyMembers: alreadyMemberTargetsAdd.length, automaticRetry: false, error: addTargetError?.message || String(addTargetError) });
+                                                    break;
                                                 }
-                                            } catch (e) {
-                                                await safeSendActionError(sock, from, t.cmd_add, e, messageLang, pushName, m.messageTimestamp);
+                                            }
+                                            if (addedTargetCount > 0 && !addTargetFailed) {
+                                                invalidateCachedGroupMetadata(sessionId, from);
+                                                await safeSendFormatted(sock, from, t.cmd_add, t.add_completed || t.command_error, pushName, false, activeHostName);
                                             }
                                             break;
                                         case 'kick':
