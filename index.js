@@ -10510,7 +10510,7 @@ async function proxyClusterRequest(req, res, instance, timeoutOverride = TFBOT_C
         console.info('[cluster-request-proxied]', { path: String(req.path || '/'), method: req.method, targetInstanceId: instance._id, responseStatus: response.status, responseBytes: upstreamBytes || null, streamed: true });
         return true;
     } catch (error) {
-        console.warn('[cluster-proxy-failed]', { targetInstanceId: instance?._id || null, error: error?.name === 'AbortError' ? 'timeout' : String(error?.message || error).slice(0, 160), action: 'try_next_healthy_instance' });
+        console.warn('[cluster-proxy-failed]', { targetInstanceId: instance?._id || null, requestPath: normalizeTfbotRequestPath(req.path || '/'), requestMethod: String(req.method || 'GET').toUpperCase(), requestHost: normalizeTfbotHost(req.get('host') || req.hostname || '') || null, targetHost: normalizeTfbotHost(baseUrl) || null, errorName: error?.name || 'Error', error: error?.name === 'AbortError' ? 'timeout' : String(error?.message || error).slice(0, 160), action: 'return_failure_to_request_router' });
         return false;
     } finally {
         clearTimeout(timer);
@@ -15439,6 +15439,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     sessionId,
                     receivedAt: Date.now(),
                     connectedAccountJid: sock.user?.id || null,
+                    workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null,
+                    selectedWorkerHost: normalizeTfbotHost(tfbotActiveDomainCache?.host || tfbotCoordinatorSelectionCache?.host || '') || null,
                     sessionStatus: activeSessions.get(sessionId)?.status || null,
                     socketReadyState: sock.ws?.readyState ?? sock.ws?._socket?.readyState ?? sock.socket?.readyState ?? null,
                     socketIsOpen: sock.ws?.isOpen === true || Number(sock.ws?.readyState ?? sock.ws?._socket?.readyState ?? sock.socket?.readyState) === 1,
@@ -16827,6 +16829,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 sessionId,
                 upsertType: initialUpsertType,
                 messageCount: initialBatchCount,
+                workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null,
+                selectedWorkerHost: normalizeTfbotHost(tfbotActiveDomainCache?.host || tfbotCoordinatorSelectionCache?.host || '') || null,
                 currentRuntimePresent: !!currentUpsertRuntime,
                 sameSocket: currentUpsertRuntime?.sock === sock,
                 socketAuthenticated: isAuthenticatedSocketOperational(currentUpsertRuntime, sock),
@@ -16847,7 +16851,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             }
             if (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) {
                 updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: 'ignored_worker_handoff', lastCommandWorkerState: tfbotWorkerState, lastCommandWorkerActive: !!tfbotWorkerActive, lastCommandWorkerStopping: !!tfbotWorkerStopping, lastCommandSessionDraining: workerDrainingSessionIds.has(sessionId), lastCommandError: null });
-                console.warn('[message-upsert-ignored-during-worker-handoff]', { sessionId, upsertType: String(up?.type || ''), messageCount: Array.isArray(up?.messages) ? up.messages.length : 0, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), runtimeSocketPresent: !!activeSessions.get(sessionId)?.sock, sameSocket: activeSessions.get(sessionId)?.sock === sock, socketReady: isWhatsAppSocketReady(activeSessions.get(sessionId), sock), inboundHandlersActive: Number(sessionInboundUpsertActivity.get(sessionId)?.active || 0), action: 'leave_whatsapp_offline_sync_for_selected_worker' });
+                console.warn('[message-upsert-ignored-during-worker-handoff]', { sessionId, workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null, selectedWorkerHost: normalizeTfbotHost(tfbotActiveDomainCache?.host || tfbotCoordinatorSelectionCache?.host || '') || null, upsertType: String(up?.type || ''), messageCount: Array.isArray(up?.messages) ? up.messages.length : 0, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), runtimeSocketPresent: !!activeSessions.get(sessionId)?.sock, sameSocket: activeSessions.get(sessionId)?.sock === sock, socketReady: isWhatsAppSocketReady(activeSessions.get(sessionId), sock), inboundHandlersActive: Number(sessionInboundUpsertActivity.get(sessionId)?.active || 0), action: 'leave_whatsapp_offline_sync_for_selected_worker' });
                 return;
             }
             if (isPendingPairingReplacementSession(sessionId)) {
@@ -16987,7 +16991,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
 
             for (const m of rawBatch) {
                 if (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) {
-                    console.info('[message-upsert-paused-before-message-dispatch-during-worker-handoff]', { sessionId, messageCountRemaining: Math.max(0, rawBatch.length - rawBatch.indexOf(m)), upsertType, action: 'leave_unprocessed_messages_for_selected_worker' });
+                    console.info('[message-upsert-paused-before-message-dispatch-during-worker-handoff]', { sessionId, workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null, selectedWorkerHost: normalizeTfbotHost(tfbotActiveDomainCache?.host || tfbotCoordinatorSelectionCache?.host || '') || null, messageCountRemaining: Math.max(0, rawBatch.length - rawBatch.indexOf(m)), upsertType, action: 'leave_unprocessed_messages_for_selected_worker' });
                     break;
                 }
                 inboundMessagePreDispatchCounts.set(sessionId, Number(inboundMessagePreDispatchCounts.get(sessionId) || 0) + 1);
@@ -20464,7 +20468,7 @@ async function loadExistingSessions() {
                 { $set: { nextRestoreRetryAt, lastRestoreError: 'waiting_for_previous_owner_lease_to_expire', statusUpdatedAt: new Date(), updatedAt: new Date() } }
             ).catch(error => console.warn('[session-restore-deferred-retry-state-save-failed]', { sessionId: deferred.candidate.sessionId, error: error?.message || String(error) }));
         }
-        console.info('[session-restore-deferred-live-owner]', { sessionId: deferred.candidate.sessionId, previousOwner: deferred.owner.ownerInstanceUrl || deferred.owner.ownerInstanceId || null, currentOwner: TFBOT_CLUSTER_INSTANCE_HOST, ownerLeaseUntil: deferred.owner.ownerLeaseUntil || null, retryInMs: retryDelay || null, nextRestoreRetryAt: nextRestoreRetryAt?.toISOString() || null, retryScheduledBeforeWorkerActivation: !!retryDelay, action: 'retry_after_previous_worker_releases_runtime_and_account_locks' });
+        console.info('[session-restore-deferred-live-owner]', { sessionId: deferred.candidate.sessionId, previousOwner: deferred.owner.ownerInstanceUrl || deferred.owner.ownerInstanceId || null, previousOwnerHost: normalizeTfbotHost(deferred.owner.ownerInstanceUrl || '') || null, currentOwner: TFBOT_CLUSTER_INSTANCE_HOST, ownerLeaseUntil: deferred.owner.ownerLeaseUntil || null, retryInMs: retryDelay || null, nextRestoreRetryAt: nextRestoreRetryAt?.toISOString() || null, retryScheduledBeforeWorkerActivation: !!retryDelay, action: 'retry_after_previous_worker_releases_runtime_and_account_locks' });
     }
     const parent = identityCandidates.map((_, index) => index);
     const findRoot = index => {
@@ -20576,6 +20580,8 @@ async function loadExistingSessions() {
         scannedCredentialDocuments: credsDocs.length,
         authenticatedCandidates: candidates.length,
         eligibleCandidates: restorableCandidates.length,
+        deferredLivePeerCount: deferredLivePeerCandidates.length,
+        deferredLivePeerHosts: [...new Set(deferredLivePeerCandidates.map(item => normalizeTfbotHost(item.owner.ownerInstanceUrl || '')).filter(Boolean))],
         restoreStartedCount,
         restoreSuccessCount,
         restorePendingCount,
