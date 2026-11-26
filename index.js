@@ -8,7 +8,7 @@ const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number
 const TFBOT_CODE_VERSION = 'Bot (tfbot) 234';
 const TFBOT_CLUSTER_PROTOCOL_VERSION = 'tfbot-cluster-v2';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
-const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
+const TFBOT_CLUSTER_CODE_REVISION = '234 (7)';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${TFBOT_CODE_VERSION}:${TFBOT_CLUSTER_PROTOCOL_VERSION}:${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 function formatTfbotHaitiTimestamp(value = Date.now()) {
@@ -2797,14 +2797,14 @@ async function waitForSessionInboundProcessingIdle(sessionId, timeoutMs = TFBOT_
     while (Date.now() < deadline) {
         const upsertState = sessionInboundUpsertActivity.get(id);
         const queue = inboundCommandQueues.get(id);
-        const activeUpserts = Number(upsertState?.active || 0);
-        const activeCommands = Number(queue?.active || 0);
+        const activeCommands = Number(queue?.inFlight ?? queue?.active ?? 0);
+        const activeCommandSlots = Number(queue?.active || 0);
         const pendingCommands = Number(queue?.pending || 0);
         const readyCommands = Number(queue?.ready?.length || 0);
         const dispatchPending = Number(inboundMessagePreDispatchCounts.get(id) || 0);
         const quotedPersistencePending = [...quotedMessagePersistenceQueues.keys()].reduce((count, key) => count + (key.startsWith(prefix) ? 1 : 0), 0);
         const idle = activeUpserts === 0 && activeCommands === 0 && pendingCommands === 0 && readyCommands === 0 && dispatchPending === 0 && quotedPersistencePending === 0;
-        lastState = { activeUpserts, activeCommands, pendingCommands, readyCommands, dispatchPending, quotedPersistencePending };
+        lastState = { activeUpserts, activeCommands, activeCommandSlots, pendingCommands, readyCommands, dispatchPending, quotedPersistencePending };
         if (idle) {
             if (!idleSince) idleSince = Date.now();
             if (Date.now() - idleSince >= SESSION_INBOUND_IDLE_QUIET_MS) return { drained: true, ...lastState, quietMs: Date.now() - idleSince, elapsedMs: Date.now() - startedAt };
@@ -2821,7 +2821,8 @@ async function waitForSessionInboundProcessingIdle(sessionId, timeoutMs = TFBOT_
     const queue = inboundCommandQueues.get(id);
     const finalState = {
         activeUpserts: Number(upsertState?.active || 0),
-        activeCommands: Number(queue?.active || 0),
+        activeCommands: Number(queue?.inFlight ?? queue?.active ?? 0),
+        activeCommandSlots: Number(queue?.active || 0),
         pendingCommands: Number(queue?.pending || 0),
         readyCommands: Number(queue?.ready?.length || 0),
         dispatchPending: Number(inboundMessagePreDispatchCounts.get(id) || 0),
@@ -2833,6 +2834,7 @@ const INBOUND_COMMAND_MAX_CONCURRENCY_PER_SESSION = Math.max(4, Math.min(48, Num
 const INBOUND_COMMAND_MAX_PENDING_PER_SESSION = Math.max(50, Math.min(500, Number(process.env.INBOUND_COMMAND_MAX_PENDING_PER_SESSION) || 250));
 const INBOUND_COMMAND_MAX_PENDING_PER_CHAT = Math.max(20, Math.min(200, Number(process.env.INBOUND_COMMAND_MAX_PENDING_PER_CHAT) || 80));
 const INBOUND_COMMAND_PRIORITY_RESERVE_PER_CHAT = Math.max(5, Math.min(40, Number(process.env.INBOUND_COMMAND_PRIORITY_RESERVE_PER_CHAT) || 20));
+const INBOUND_COMMAND_SLOT_RELEASE_MS = Math.max(15000, Math.min(120000, Number(process.env.INBOUND_COMMAND_SLOT_RELEASE_MS) || 30000));
 
 function pumpInboundCommandQueue(sessionId, queueState) {
     if (!queueState || queueState.closed) return;
@@ -2843,10 +2845,17 @@ function pumpInboundCommandQueue(sessionId, queueState) {
         const task = partition.tasks.shift();
         queueState.pending = Math.max(0, queueState.pending - 1);
         queueState.active++;
+        queueState.inFlight++;
+        partition.inFlight++;
         partition.running = true;
         const queueWaitMs = Math.max(0, Date.now() - Number(task.enqueuedAt || Date.now()));
         if (queueWaitMs >= 2000) console.warn('[inbound-chat-queue-delay]', { sessionId, chatJid: task.chatJid || null, queuePartition: partition.key, queueWaitMs, pendingInChat: partition.tasks.length, action: 'delay_is_confined_to_this_chat_partition' });
-        Promise.resolve().then(task.execute).then(task.resolve, task.reject).finally(() => {
+        let slotReleased = false;
+        let slotReleaseTimer = null;
+        const releaseSlot = reason => {
+            if (slotReleased) return false;
+            slotReleased = true;
+            if (slotReleaseTimer) clearTimeout(slotReleaseTimer);
             queueState.active = Math.max(0, queueState.active - 1);
             partition.running = false;
             if (!queueState.closed && partition.tasks.length) {
@@ -2854,22 +2863,39 @@ function pumpInboundCommandQueue(sessionId, queueState) {
                     partition.ready = true;
                     queueState.ready.push(partition);
                 }
-            } else if (!partition.tasks.length) {
+            } else if (!partition.inFlight && !partition.tasks.length && queueState.partitions.get(partition.key) === partition) {
                 queueState.partitions.delete(partition.key);
             }
-            if (queueState.closed && queueState.active === 0) inboundCommandQueues.delete(sessionId);
+            if (queueState.closed && queueState.active === 0 && queueState.inFlight === 0) inboundCommandQueues.delete(sessionId);
             else if (queueState.pending || queueState.ready.length) setImmediate(() => pumpInboundCommandQueue(sessionId, queueState));
-            else if (queueState.active === 0 && inboundCommandQueues.get(sessionId) === queueState) inboundCommandQueues.delete(sessionId);
+            else if (queueState.active === 0 && queueState.inFlight === 0 && inboundCommandQueues.get(sessionId) === queueState) inboundCommandQueues.delete(sessionId);
+            return true;
+        };
+        if (task.independentCommand) {
+            slotReleaseTimer = setTimeout(() => {
+                if (!releaseSlot('slot_timeout')) return;
+                console.warn('[inbound-command-slot-released]', { sessionId, messageId: task.messageId || null, command: task.command || null, chatJid: task.chatJid || null, runningForMs: Date.now() - Number(task.startedAt || task.enqueuedAt || Date.now()), slotReleaseMs: INBOUND_COMMAND_SLOT_RELEASE_MS, originalCommandContinues: true, action: 'free_one_dispatch_slot_without_cancelling_or_finalizing_the_original_command' });
+            }, INBOUND_COMMAND_SLOT_RELEASE_MS);
+            if (typeof slotReleaseTimer.unref === 'function') slotReleaseTimer.unref();
+        }
+        task.startedAt = Date.now();
+        Promise.resolve().then(task.execute).then(task.resolve, task.reject).finally(() => {
+            queueState.inFlight = Math.max(0, queueState.inFlight - 1);
+            partition.inFlight = Math.max(0, partition.inFlight - 1);
+            releaseSlot('settled');
+            if (!partition.inFlight && !partition.running && !partition.tasks.length && queueState.partitions.get(partition.key) === partition) queueState.partitions.delete(partition.key);
+            if (queueState.closed && queueState.active === 0 && queueState.inFlight === 0) inboundCommandQueues.delete(sessionId);
+            else if (queueState.active === 0 && queueState.inFlight === 0 && queueState.pending === 0 && queueState.ready.length === 0 && inboundCommandQueues.get(sessionId) === queueState) inboundCommandQueues.delete(sessionId);
         });
     }
 }
 
-function enqueueInboundCommand(sessionId, chatJid, execute, messageId = '', senderJid = '', independentCommand = false, priorityCommand = false) {
+function enqueueInboundCommand(sessionId, chatJid, execute, messageId = '', senderJid = '', independentCommand = false, priorityCommand = false, commandName = '') {
     const id = String(sessionId || '').trim();
     if (!id || typeof execute !== 'function') return Promise.reject(new Error('inbound_command_queue_invalid_task'));
     let queueState = inboundCommandQueues.get(id);
     if (!queueState) {
-        queueState = { active: 0, pending: 0, ready: [], partitions: new Map(), closed: false };
+        queueState = { active: 0, inFlight: 0, pending: 0, ready: [], partitions: new Map(), closed: false };
         inboundCommandQueues.set(id, queueState);
     }
     if (queueState.closed) return Promise.reject(new Error('inbound_command_queue_closed'));
@@ -2881,20 +2907,20 @@ function enqueueInboundCommand(sessionId, chatJid, execute, messageId = '', send
     let partition = queueState.partitions.get(partitionKey);
     let pendingForChat = 0;
     for (const currentPartition of queueState.partitions.values()) {
-        if (currentPartition.chatPartition === chatPartition) pendingForChat += currentPartition.tasks.length + (currentPartition.running ? 1 : 0);
+        if (currentPartition.chatPartition === chatPartition) pendingForChat += currentPartition.tasks.length + Number(currentPartition.inFlight || 0);
     }
     const perChatPendingLimit = INBOUND_COMMAND_MAX_PENDING_PER_CHAT + (priorityCommand ? INBOUND_COMMAND_PRIORITY_RESERVE_PER_CHAT : 0);
     if (pendingForChat >= perChatPendingLimit) {
-        console.warn('[inbound-chat-queue-overloaded]', { sessionId: id, chatJid: chatValue, queuePartition: chatPartition, pendingForChat, limit: perChatPendingLimit, priorityCommand: priorityCommand === true, action: 'reject_only_this_chat_without_blocking_other_chats' });
+        console.warn('[inbound-chat-queue-overloaded]', { sessionId: id, chatJid: chatValue, queuePartition: chatPartition, pendingForChat, limit: perChatPendingLimit, priorityCommand: priorityCommand === true, action: 'reject_only_this_chat_without_blocking_other_chat_partitions' });
         return Promise.reject(new Error('inbound_chat_queue_overloaded'));
     }
-    if (queueState.active + queueState.pending >= INBOUND_COMMAND_MAX_PENDING_PER_SESSION) return Promise.reject(new Error('inbound_command_queue_overloaded'));
+    if (queueState.inFlight + queueState.pending >= INBOUND_COMMAND_MAX_PENDING_PER_SESSION) return Promise.reject(new Error('inbound_command_queue_overloaded'));
     if (!partition) {
-        partition = { key: partitionKey, chatPartition, chatJid: chatValue, tasks: [], running: false, ready: false };
+        partition = { key: partitionKey, chatPartition, chatJid: chatValue, tasks: [], inFlight: 0, running: false, ready: false };
         queueState.partitions.set(partitionKey, partition);
     }
     return new Promise((resolve, reject) => {
-        const queuedTask = { execute, resolve, reject, messageId: String(messageId || ''), senderJid: senderValue || null, chatJid: chatValue, enqueuedAt: Date.now(), priorityCommand: priorityCommand === true };
+        const queuedTask = { execute, resolve, reject, messageId: String(messageId || ''), command: String(commandName || ''), senderJid: senderValue || null, chatJid: chatValue, enqueuedAt: Date.now(), priorityCommand: priorityCommand === true, independentCommand: independentCommand === true };
         if (queuedTask.priorityCommand) {
             const firstNormalTask = partition.tasks.findIndex(task => task.priorityCommand !== true);
             if (firstNormalTask < 0) partition.tasks.push(queuedTask);
@@ -2921,7 +2947,7 @@ function closeInboundCommandQueue(sessionId) {
     }
     queueState.pending = 0;
     queueState.ready.length = 0;
-    if (queueState.active === 0) inboundCommandQueues.delete(id);
+    if (queueState.active === 0 && queueState.inFlight === 0) inboundCommandQueues.delete(id);
     return true;
 }
 
@@ -2949,19 +2975,20 @@ async function waitForInboundCommandQueueIdle(sessionId, timeoutMs = TFBOT_WORKE
     let lastLogAt = 0;
     while (Date.now() < deadline) {
         const state = inboundCommandQueues.get(id);
-        const active = Number(state?.active || 0);
+        const active = Number(state?.inFlight ?? state?.active ?? 0);
+        const activeSlots = Number(state?.active || 0);
         const pending = Number(state?.pending || 0);
         const ready = Number(state?.ready?.length || 0);
         const dispatchPending = Number(inboundMessagePreDispatchCounts.get(id) || 0);
-        if ((!state && !dispatchPending) || (state && !active && !pending && !ready && !dispatchPending)) return { drained: true, active: 0, pending: 0, dispatchPending: 0, elapsedMs: Date.now() - startedAt };
+        if ((!state && !dispatchPending) || (state && !active && !pending && !ready && !dispatchPending)) return { drained: true, active: 0, activeSlots: 0, pending: 0, dispatchPending: 0, elapsedMs: Date.now() - startedAt };
         if (Date.now() - lastLogAt >= 5000) {
             lastLogAt = Date.now();
-            console.info('[worker-inbound-command-drain-waiting]', { sessionId: id, active, pending, ready, dispatchPending, elapsedMs: Date.now() - startedAt, timeoutMs });
+            console.info('[worker-inbound-command-drain-waiting]', { sessionId: id, active, activeSlots, pending, ready, dispatchPending, elapsedMs: Date.now() - startedAt, timeoutMs });
         }
         await new Promise(resolve => setTimeout(resolve, 150));
     }
     const finalState = inboundCommandQueues.get(id);
-    return { drained: false, active: Number(finalState?.active || 0), pending: Number(finalState?.pending || 0), ready: Number(finalState?.ready?.length || 0), dispatchPending: Number(inboundMessagePreDispatchCounts.get(id) || 0), elapsedMs: Date.now() - startedAt };
+    return { drained: false, active: Number(finalState?.inFlight ?? finalState?.active ?? 0), activeSlots: Number(finalState?.active || 0), pending: Number(finalState?.pending || 0), ready: Number(finalState?.ready?.length || 0), dispatchPending: Number(inboundMessagePreDispatchCounts.get(id) || 0), elapsedMs: Date.now() - startedAt };
 }
 
 function sanitizeSessionDisplayName(value) {
@@ -9414,6 +9441,7 @@ app.get('/logs.txt', async (req, res) => {
                 authenticatedSessionCount: [...activeSessions.values()].filter(runtime => isAuthenticatedSocketOperational(runtime, runtime?.sock)).length,
                 inboundHandlersInFlight: [...sessionInboundUpsertActivity.values()].reduce((total, value) => total + Number(value?.active || 0), 0),
                 inboundCommandQueuesActive: [...inboundCommandQueues.values()].reduce((total, value) => total + Number(value?.active || 0), 0),
+                inboundCommandExecutionsInFlight: [...inboundCommandQueues.values()].reduce((total, value) => total + Number(value?.inFlight ?? value?.active ?? 0), 0),
                 inboundCommandQueuesPending: [...inboundCommandQueues.values()].reduce((total, value) => total + Number(value?.pending || 0), 0),
                 reconnectTimers: reconnectTimers.size,
                 sessionLockRetryTimers: sessionLockRetryTimers.size,
@@ -14541,7 +14569,7 @@ const commandsWithoutArguments = new Set([
     'kickall', 'kickall2', 'ferme', 'ouvert', 'bienvenue', 'nolien', 'nolien2',
     'del', 'del3', 'vv', 'vv2', 'url', 'sites'
 ]);
-const independentInboundCommands = new Set(['ai', 'cheche', 'imaj']);
+const serializedInboundCommands = new Set(['prive', 'public', 'lang', 'qr', 'qrbot', 'code', 'add', 'kick', 'kickall', 'kickall2', 'promote', 'demote', 'ferme', 'ouvert', 'nolien', 'nolien2', 'bienvenue', 'del', 'del2', 'del3']);
 const targetArgumentCommands = new Set(['kick', 'add', 'promote', 'demote', 'del2']);
 
 function isValidTargetCommandArguments(args, context = {}, internalCommand = '') {
@@ -19807,7 +19835,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                         if (messageClaimHeartbeat) clearInterval(messageClaimHeartbeat);
                         if (messageClaimed) await finalizeMessageClaim(true);
                     }
-                    }, msgId, receivedSenderJid, independentInboundCommands.has(receivedParsedCommand?.internalCommand), receivedClassification === 'recognized_command').catch(async dispatchQueueError => {
+                    }, msgId, receivedSenderJid, receivedClassification === 'recognized_command' && !serializedInboundCommands.has(receivedParsedCommand?.internalCommand), receivedClassification === 'recognized_command', receivedParsedCommand?.internalCommand || receivedParsedCommand?.command || '').catch(async dispatchQueueError => {
                         messageProcessingCompleted = true;
                         messageProcessingSucceeded = false;
                         messageProcessingError = dispatchQueueError?.message || String(dispatchQueueError);
@@ -20943,6 +20971,8 @@ async function main() {
         routineGroupSenderKeyReset: GROUP_SENDER_KEY_RESET_ON_SEND,
         messageQueueLateGraceMs: MESSAGE_QUEUE_LATE_GRACE_MS,
         inboundCommandConcurrencyPerSession: INBOUND_COMMAND_MAX_CONCURRENCY_PER_SESSION,
+        inboundCommandSlotReleaseMs: INBOUND_COMMAND_SLOT_RELEASE_MS,
+        inboundCommandsRunInParallelByMessageUnlessStateful: true,
         pairCodeTransientRetryLimit: 5,
         ownerPrivilegeScope: 'session-owner-only',
         ordinaryTextDispatch: 'ignore-unless-explicit-ai-command',
