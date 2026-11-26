@@ -5,11 +5,12 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'Bot (tfbot) 233';
+const TFBOT_CODE_VERSION = 'Bot (tfbot) 234';
+const TFBOT_CLUSTER_PROTOCOL_VERSION = 'tfbot-cluster-v2';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
 const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
 let tfbotBaileysSocketVersionCache = null;
-const TFBOT_CODE_RELEASE_ID = `${TFBOT_CODE_VERSION}:${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+const TFBOT_CODE_RELEASE_ID = `${TFBOT_CODE_VERSION}:${TFBOT_CLUSTER_PROTOCOL_VERSION}:${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 function formatTfbotHaitiTimestamp(value = Date.now()) {
     const date = value instanceof Date ? value : new Date(value);
     if (!Number.isFinite(date.getTime())) return null;
@@ -28,7 +29,16 @@ function normalizeTfbotReleaseId(value) {
 }
 
 function getTfbotReleaseCompatibilityKey(value) {
-    return normalizeTfbotReleaseId(value).toLowerCase();
+    const normalized = normalizeTfbotReleaseId(value);
+    const separator = normalized.indexOf(':');
+    if (separator <= 0) return '';
+    const codeVersion = normalized.slice(0, separator).trim().toLowerCase();
+    const remainder = normalized.slice(separator + 1);
+    const protocolSeparator = remainder.indexOf(':');
+    if (!codeVersion || protocolSeparator <= 0) return '';
+    const protocolVersion = remainder.slice(0, protocolSeparator).trim().toLowerCase();
+    if (protocolVersion !== TFBOT_CLUSTER_PROTOCOL_VERSION) return '';
+    return `${codeVersion}:${protocolVersion}`;
 }
 
 function areTfbotReleasesCompatible(first, second) {
@@ -5711,7 +5721,32 @@ async function connectMongo(options = {}) {
         await db.collection('lid_phone_mappings').createIndex({ sessionId: 1, phone: 1 }, { name: 'lid_phone_mappings_session_phone_lookup' });
         await db.collection('user_preferences').createIndex({ sessionId: 1, sender: 1 }, { name: 'user_preferences_session_sender' });
         await db.collection('user_preferences').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'user_preferences_expire_at_ttl' });
-        await db.collection('session_preserved_data').createIndex({ accountPhone: 1, kind: 1, sourceId: 1 }, { unique: true, name: 'session_preserved_account_kind_source' });
+        const preservedDataIndexName = 'tf_session_preserved_account_kind_source';
+        const preservedDataPartialFilter = {
+            __tfbotBucket: 'session_preserved_data',
+            accountPhone: { $type: 'string' },
+            kind: { $type: 'string' },
+            sourceId: { $type: 'string' }
+        };
+        const existingPreservedIndexes = await targetDb.collection(TFBOT_APP_DATA_COLLECTION).listIndexes().toArray();
+        const existingPreservedIndex = existingPreservedIndexes.find(index => index.name === preservedDataIndexName);
+        const preservedIndexFilterMatches = existingPreservedIndex && JSON.stringify(existingPreservedIndex.partialFilterExpression || null) === JSON.stringify(preservedDataPartialFilter);
+        if (existingPreservedIndex && !preservedIndexFilterMatches) {
+            await targetDb.collection(TFBOT_APP_DATA_COLLECTION).dropIndex(preservedDataIndexName);
+            console.info('[tfbot-preserved-data-index-rebuilt]', { index: preservedDataIndexName, reason: 'previous_unique_index_was_not_scoped_to_valid_session_preserved_data_records' });
+        }
+        try {
+            await db.collection('session_preserved_data').createIndex(
+                { accountPhone: 1, kind: 1, sourceId: 1 },
+                { unique: true, name: 'session_preserved_account_kind_source', partialFilterExpression: preservedDataPartialFilter }
+            );
+        } catch (preservedIndexError) {
+            if (Number(preservedIndexError?.code) === 11000 || preservedIndexError?.codeName === 'DuplicateKey') {
+                console.error('[tfbot-preserved-data-unique-index-skipped]', { error: preservedIndexError?.message || String(preservedIndexError), action: 'keep_database_available_without_unique_constraint_until_duplicate_session_preserved_records_are_cleaned' });
+            } else {
+                throw preservedIndexError;
+            }
+        }
         await db.collection('group_del2').createIndex({ sessionId: 1, gjid: 1, targetJid: 1 });
         await db.collection('group_del3').createIndex({ sessionId: 1, gjid: 1, messageFormat: 1 }, { name: 'group_del3_format_lookup' });
         await db.collection('session_runtime_locks').createIndex({ leaseUntil: 1 }, { expireAfterSeconds: 0, name: 'session_runtime_locks_lease_ttl' });
