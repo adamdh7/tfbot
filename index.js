@@ -5,9 +5,9 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'Bot (tfbot) 227';
+const TFBOT_CODE_VERSION = 'Bot (tfbot) 229';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
-const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
+const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot) 229';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 function formatTfbotHaitiTimestamp(value = Date.now()) {
@@ -9941,6 +9941,64 @@ async function persistTfbotCoordinatorSelection(selection, state = 'ready') {
     }
 }
 
+async function inspectTfbotPreviousWorkerLeases(host, url) {
+    if (!db || !host || !url) return { verified: false, protected: true, reason: 'database_or_previous_worker_identity_unavailable' };
+    const now = new Date();
+    try {
+        const [instanceRecord, sessionOwnerLease] = await Promise.all([
+            db.collection('cluster_instances').findOne(
+                { host, role: { $ne: 'coordinator' } },
+                { projection: { _id: 1, leaseUntil: 1, status: 1, draining: 1 } }
+            ),
+            db.collection('session_owners').findOne(
+                { ownerInstanceUrl: url, ownerLeaseUntil: { $gt: now } },
+                { sort: { ownerLeaseUntil: -1 }, projection: { ownerLeaseUntil: 1, sessionId: 1, connectionStatus: 1 } }
+            )
+        ]);
+        const previousInstanceId = String(instanceRecord?._id || '');
+        if (!previousInstanceId) return { verified: false, protected: true, reason: 'previous_worker_instance_record_missing' };
+        const escapedInstanceId = previousInstanceId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const previousProcessOwner = new RegExp(`^${escapedInstanceId}-`);
+        const [sessionRuntimeLock, accountRuntimeLock] = await Promise.all([
+            db.collection('session_runtime_locks').findOne(
+                { owner: { $regex: previousProcessOwner }, leaseUntil: { $gt: now } },
+                { projection: { leaseUntil: 1, _id: 1 } }
+            ),
+            db.collection('session_account_runtime_locks').findOne(
+                { owner: { $regex: previousProcessOwner }, leaseUntil: { $gt: now } },
+                { projection: { leaseUntil: 1, _id: 1 } }
+            )
+        ]);
+        const instanceLeaseUntil = instanceRecord?.leaseUntil ? new Date(instanceRecord.leaseUntil) : null;
+        const sessionOwnerLeaseUntil = sessionOwnerLease?.ownerLeaseUntil ? new Date(sessionOwnerLease.ownerLeaseUntil) : null;
+        const sessionRuntimeLockUntil = sessionRuntimeLock?.leaseUntil ? new Date(sessionRuntimeLock.leaseUntil) : null;
+        const accountRuntimeLockUntil = accountRuntimeLock?.leaseUntil ? new Date(accountRuntimeLock.leaseUntil) : null;
+        const isFuture = value => !!(value && Number.isFinite(value.getTime()) && value > now);
+        const instanceLeaseActive = isFuture(instanceLeaseUntil);
+        const sessionOwnerLeaseActive = isFuture(sessionOwnerLeaseUntil);
+        const sessionRuntimeLockActive = isFuture(sessionRuntimeLockUntil);
+        const accountRuntimeLockActive = isFuture(accountRuntimeLockUntil);
+        const protectedUntil = [instanceLeaseActive ? instanceLeaseUntil.getTime() : 0, sessionOwnerLeaseActive ? sessionOwnerLeaseUntil.getTime() : 0, sessionRuntimeLockActive ? sessionRuntimeLockUntil.getTime() : 0, accountRuntimeLockActive ? accountRuntimeLockUntil.getTime() : 0].reduce((latest, value) => Math.max(latest, value), 0) || null;
+        return {
+            verified: true,
+            protected: !!protectedUntil,
+            previousInstanceId,
+            instanceLeaseActive,
+            sessionOwnerLeaseActive,
+            sessionRuntimeLockActive,
+            accountRuntimeLockActive,
+            instanceLeaseUntil: isFuture(instanceLeaseUntil) ? instanceLeaseUntil.toISOString() : null,
+            sessionOwnerLeaseUntil: isFuture(sessionOwnerLeaseUntil) ? sessionOwnerLeaseUntil.toISOString() : null,
+            sessionRuntimeLockUntil: isFuture(sessionRuntimeLockUntil) ? sessionRuntimeLockUntil.toISOString() : null,
+            accountRuntimeLockUntil: isFuture(accountRuntimeLockUntil) ? accountRuntimeLockUntil.toISOString() : null,
+            protectedUntil: protectedUntil ? new Date(protectedUntil).toISOString() : null
+        };
+    } catch (error) {
+        console.error('[tfbot-router-previous-worker-lease-inspection-failed]', { host, error: String(error?.message || error).slice(0, 180), action: 'block_failover_until_previous_worker_and_runtime_locks_can_be_verified' });
+        return { verified: false, protected: true, reason: String(error?.message || error).slice(0, 180) };
+    }
+}
+
 async function refreshTfbotActiveDomain(force = false) {
     if (!TFBOT_CLUSTER_COORDINATOR_ONLY || !TFBOT_CLUSTER_ENABLED || serverShuttingDown) return null;
     const nowMs = Date.now();
@@ -9986,6 +10044,34 @@ async function refreshTfbotActiveDomain(force = false) {
                     previousFailure.lastFailureAt = Date.now();
                     tfbotCoordinatorActiveProbeFailures.set(previousHost, previousFailure);
                     activeFailureCount = previousFailure.count;
+                }
+            }
+            if (!activeWorkerOperational && previousIndex >= 0 && previousSelection?.generation && activeFailureCount >= TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD) {
+                const previousDomain = TFBOT_ROUTER_SERVING_DOMAINS[previousIndex];
+                const previousLeaseState = await inspectTfbotPreviousWorkerLeases(previousHost, previousDomain?.url || '');
+                if (!previousLeaseState.verified || previousLeaseState.protected) {
+                    const heldSelection = {
+                        ...previousSelection,
+                        checkedAt: new Date(),
+                        healthy: true,
+                        workerActive: activeDomainHealth?.workerActive === true,
+                        workerState: 'previous_worker_lease_protected',
+                        source: 'tfbot7-handoff-held-until-previous-leases-expire',
+                        previousWorkerLeaseState: previousLeaseState
+                    };
+                    tfbotCoordinatorSelectionCache = heldSelection;
+                    tfbotActiveDomainCache = heldSelection;
+                    tfbotCoordinatorSelectionAt = Date.now();
+                    tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
+                    console.error('[tfbot-router-failover-held-by-previous-worker-lease]', {
+                        previousHost,
+                        consecutiveProbeFailures: activeFailureCount,
+                        requiredFailuresBeforeFallback: TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD,
+                        leaseState: previousLeaseState,
+                        checkedHosts: checked.map(item => item.domain.host),
+                        action: 'keep_existing_selection_until_previous_worker_and_session_owner_leases_expire_or_worker_recovers'
+                    });
+                    return heldSelection;
                 }
             }
             let selectedItem = activeWorkerOperational ? { domain: activeCheckedItem.domain, health: activeDomainHealth, alreadyOperational: true, retainedActiveHost: true } : null;
@@ -10096,7 +10182,39 @@ async function refreshTfbotActiveDomain(force = false) {
                 const drained = await sendTfbotWorkerControl(oldDomain, result, 'drain', TFBOT_ROUTER_DRAIN_TIMEOUT_MS);
                 handoffCompleted = !!(drained && drained.state === 'standby' && drained.drained === true);
                 if (!handoffCompleted) {
-                    console.warn('[tfbot-worker-handoff-drain-unconfirmed]', { previousHost, newHost: selected.host, previousWorkerState, action: 'continue_only_with_mongodb_runtime_lock_exclusivity_on_new_worker' });
+                    const previousLeaseState = await inspectTfbotPreviousWorkerLeases(previousHost, oldDomain.url);
+                    if (!previousLeaseState.verified || previousLeaseState.protected) {
+                        tfbotCoordinatorCandidateFailures.set(selected.host, { expiresAt: Date.now() + TFBOT_ROUTER_CANDIDATE_FAILURE_COOLDOWN_MS, failureKind: 'previous_worker_drain_unconfirmed' });
+                        let restoredPrevious = null;
+                        if (activeDomainHealth?.ok === true && oldSelection?.generation) {
+                            restoredPrevious = await sendTfbotWorkerControl(oldDomain, { ...oldSelection, host: previousHost, releaseId: TFBOT_CODE_RELEASE_ID }, 'activate', TFBOT_ROUTER_ACTIVATE_TIMEOUT_MS);
+                        }
+                        const heldSelection = {
+                            ...oldSelection,
+                            checkedAt: new Date(),
+                            healthy: true,
+                            workerActive: (restoredPrevious?.state === 'active' && restoredPrevious.databasePing === true) || activeDomainHealth?.workerActive === true,
+                            workerState: restoredPrevious?.state === 'active' ? 'active' : 'handoff_drain_unconfirmed',
+                            source: 'tfbot7-handoff-aborted-after-drain-failure',
+                            previousWorkerLeaseState: previousLeaseState
+                        };
+                        tfbotCoordinatorSelectionCache = heldSelection;
+                        tfbotActiveDomainCache = heldSelection;
+                        tfbotCoordinatorSelectionAt = Date.now();
+                        tfbotActiveDomainCacheAt = tfbotCoordinatorSelectionAt;
+                        await persistTfbotCoordinatorSelection(heldSelection, 'selected');
+                        console.error('[tfbot-worker-handoff-aborted]', {
+                            previousHost,
+                            newHost: selected.host,
+                            previousWorkerState,
+                            previousLeaseState,
+                            previousWorkerReactivationConfirmed: restoredPrevious?.state === 'active' && restoredPrevious.databasePing === true,
+                            candidateCooldownMs: TFBOT_ROUTER_CANDIDATE_FAILURE_COOLDOWN_MS,
+                            action: 'do_not_activate_or_commit_new_worker_while_previous_worker_or_session_owner_lease_may_still_be_live'
+                        });
+                        return heldSelection;
+                    }
+                    console.warn('[tfbot-worker-handoff-unconfirmed-after-owner-leases-expired]', { previousHost, newHost: selected.host, previousWorkerState, previousLeaseState, action: 'allow_failover_only_after_previous_worker_and_session_owner_leases_are_expired' });
                 } else {
                     console.info('[tfbot-worker-handoff-drained]', { previousHost, newHost: selected.host, previousGeneration: oldSelection?.generation || null, newGeneration: generation, activeSessionCount: Number(drained.activeSessionCount || 0), authStoreDrainConfirmed: true });
                 }
@@ -14707,8 +14825,18 @@ async function cleanupSocket(sessionId, options = {}) {
         } catch (error) {
             if (session) session.lastAuthStoreCleanupError = String(error?.message || error).slice(0, 220);
             const signalState = getSignalState();
-            console.error('[signal-auth-store-flush-before-reconnect-failed]', { sessionId, stage, error: error?.message || String(error), errorName: error?.name || 'Error', stack: String(error?.stack || '').slice(0, 2400), credentialQueuePending: credentialPersistenceQueues.has(sessionKey), authQueuePending: authWriteQueues.has(sessionKey), authWriteFailure: authWriteFailures.get(sessionKey)?.message || null, signalTransactionsPending: signalState.pendingCount || 0, signalTransactionOldestAgeMs: signalState.oldestAgeMs || 0, socketKeptOpen: socketIsLive && !isSocketDefinitelyClosed(oldSocket), action: 'retain_existing_auth_documents_and_retry_without_forcing_a_stale_credentials_snapshot' });
-            return false;
+            const cleanupErrorText = String(error?.message || error);
+            const fencedOwnershipFailure = /(?:session|account)_runtime_lock_(?:missing|lost|fenced|owned_elsewhere)|duplicate_account_runtime_lock_owned_elsewhere/i.test(cleanupErrorText);
+            const localAuthQueuesQuiescent = !credentialPersistenceQueues.has(sessionKey)
+                && !authWriteQueues.has(sessionKey)
+                && Number(signalState.pendingCount || 0) === 0;
+            console.error('[signal-auth-store-flush-before-reconnect-failed]', { sessionId, stage, error: cleanupErrorText, errorName: error?.name || 'Error', stack: String(error?.stack || '').slice(0, 2400), credentialQueuePending: credentialPersistenceQueues.has(sessionKey), authQueuePending: authWriteQueues.has(sessionKey), authWriteFailure: authWriteFailures.get(sessionKey)?.message || null, signalTransactionsPending: signalState.pendingCount || 0, signalTransactionOldestAgeMs: signalState.oldestAgeMs || 0, socketKeptOpen: socketIsLive && !isSocketDefinitelyClosed(oldSocket), fencedOwnershipFailure, localAuthQueuesQuiescent, action: fencedOwnershipFailure && localAuthQueuesQuiescent ? 'abandon_only_uncommitted_stale_owner_retry_and_close_fenced_socket_without_writing_auth_state' : 'retain_existing_auth_documents_and_retry_without_forcing_a_stale_credentials_snapshot' });
+            if (!fencedOwnershipFailure || !localAuthQueuesQuiescent) return false;
+            authWriteFailures.delete(sessionKey);
+            authWriteQueues.delete(sessionKey);
+            if (session) delete session.lastAuthStoreCleanupError;
+            options.skipAuthStoreFlush = true;
+            console.warn('[signal-auth-store-stale-owner-abandoned]', { sessionId, stage, sessionRuntimeOwnershipLost: true, accountRuntimeOwnershipLost: /account_runtime_lock_/i.test(cleanupErrorText), authDocumentsPreserved: true, staleWriteRetryDiscarded: true, socketCloseRequired: socketIsLive && !isSocketDefinitelyClosed(oldSocket), action: 'close_fenced_socket_without_persisting_credentials_or_signal_keys_from_a_non_owner_process' });
         }
     }
     clearSessionOpenReadinessRetry(sessionId);
