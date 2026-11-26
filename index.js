@@ -5,9 +5,9 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'Bot (tfbot) 229';
+const TFBOT_CODE_VERSION = 'Bot (tfbot) 230';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
-const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot) 229';
+const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot) 230';
 let tfbotBaileysSocketVersionCache = null;
 const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 function formatTfbotHaitiTimestamp(value = Date.now()) {
@@ -1797,7 +1797,7 @@ function getTfbotInstalledPackageVersion(packageName) {
     return null;
 }
 const TFBOT_BAILEYS_VERSION = getTfbotInstalledPackageVersion('@whiskeysockets/baileys');
-enqueueTfbotDiagnosticRecord({ name: 'Bot (tfbot)', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ codeVersion: TFBOT_CODE_VERSION, releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION, timeZone: TFBOT_LOG_TIME_ZONE, baileysVersion: TFBOT_BAILEYS_VERSION, signalPeerAutoHeal: { enabled: true, threshold: SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD, windowMs: SIGNAL_RECOVERY_WINDOW_MS, cooldownMs: SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS, failureKinds: [...SIGNAL_PEER_AUTO_HEAL_FAILURE_KINDS], scope: 'one_peer_signal_session_records_and_pn_lid_aliases_only', deleteMethod: 'signalRepository.deleteSession_or_authState.keys.set_session_category_fallback', baileysAuthCredentialsDeleted: false, accountLogout: false, groupSenderKeysDeleted: false, allPeersDeleted: false }, diagnosticLogStorage: 'bounded_file_and_memory_17mb_7h', persistedLocalDisk: tfbotDiagnosticDiskAvailable, logTimeZone: TFBOT_LOG_TIME_ZONE, activeWorkerRouting: 'retain_current_healthy_worker_until_repeated_health_failure', appendCommandPolicy: 'authenticated_from_me_explicit_command_with_trusted_timestamp_within_70_seconds_not_before_current_socket_and_not_known_outgoing_echo' }) });
+enqueueTfbotDiagnosticRecord({ name: 'Bot (tfbot)', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'tfbot-release-boot', content: tfbotDiagnosticSerialize({ codeVersion: TFBOT_CODE_VERSION, releaseId: TFBOT_CODE_RELEASE_ID, revision: TFBOT_CLUSTER_CODE_REVISION, timeZone: TFBOT_LOG_TIME_ZONE, baileysVersion: TFBOT_BAILEYS_VERSION, signalPeerAutoHeal: { enabled: true, threshold: SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD, windowMs: SIGNAL_RECOVERY_WINDOW_MS, cooldownMs: SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS, failureKinds: [...SIGNAL_PEER_AUTO_HEAL_FAILURE_KINDS], scope: 'one_peer_signal_session_records_and_pn_lid_aliases_only', deleteMethod: 'signalRepository.deleteSession_or_authState.keys.set_session_category_fallback', baileysAuthCredentialsDeleted: false, accountLogout: false, groupSenderKeysDeleted: false, allPeersDeleted: false }, diagnosticLogStorage: 'bounded_file_and_memory_17mb_7h', persistedLocalDisk: tfbotDiagnosticDiskAvailable, logTimeZone: TFBOT_LOG_TIME_ZONE, activeWorkerRouting: 'retain_current_healthy_worker_until_repeated_health_failure', appendCommandPolicy: 'authenticated_own_device_commands_with_70_second_normal_window_and_5_minute_fenced_worker_handoff_recovery_window_with_message_claim_deduplication', ownerCommandHandoffQueue: { enabled: true, ttlMs: TFBOT_OWNER_HANDOFF_QUEUE_TTL_MS, scope: 'authenticated_owner_commands_from_socket_or_configured_owner_identity', destination: 'selected_worker_after_socket_and_runtime_lock_readiness', privateModePolicyPreserved: true } }) });
 enqueueTfbotDiagnosticRecord({ name: 'TFBot', sessionId: null, date: new Date().toISOString(), level: 'INFO', event: 'baileys-retry-patch-status', content: tfbotDiagnosticSerialize({ revision: TFBOT_CLUSTER_CODE_REVISION, baileysVersion: TFBOT_BAILEYS_VERSION, perChatInboundProcessing: baileysPerChatInboundProcessingPatchStatus, outgoingRetryPreflight: baileysOutgoingRetryPreflightPatchStatus, retryResendDoubleEncryption: baileysRetryResendDoubleEncryptionPatchStatus, groupRetrySkdm: baileysGroupRetrySkdmPatchStatus, retryBaseKeyCollision: baileysRetryBaseKeyCollisionPatchStatus, groupLidOutboundAddressing: baileysLidAwareGroupOutboundAddressingPatchStatus, messageRetryManagerById: baileysMessageRetryManagerDeviceJidPatchStatus, selfChatPlaceholderResend: baileysSelfChatPlaceholderResendPatchStatus, ownLidRetryAddressing: baileysOwnLidRetryAddressingPatchStatus, signalTransactions: baileysSignalTransactionPatchStatus, lidPnDecrypt: baileysLidPnDecryptPatchStatus, groupLidPnDecrypt: baileysGroupLidPnDecryptPatchStatus, companionRefresh: baileysCompanionRegRefreshPatchStatus, pairingCodeProtocol: baileysPairingCodeProtocolPatchStatus }) });
 const { MongoClient } = require('mongodb');
 const { Readable, Writable } = require('stream');
@@ -2203,7 +2203,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-25-r222-signal-session-missing-classification';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-26-r230-owner-command-handoff-replay';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_REQUEST_TOKEN = 'Bot (tfbot)';
@@ -2319,6 +2319,7 @@ const SEARCH_QUERY_MAX_CHARS = Math.max(200, Number(process.env.SEARCH_QUERY_MAX
 const TFSERVER_AI_URL = 'https://tfserver-ai.onrender.com';
 const tfServerAiUserRequestQueues = new Map();
 const TFBOT_MAX_COMMAND_AGE_MS = Math.max(1000, Math.min(70000, Number(process.env.TFBOT_MAX_COMMAND_AGE_MS || 70000)));
+const TFBOT_OWNER_HANDOFF_QUEUE_TTL_MS = Math.max(60000, Math.min(600000, Number(process.env.TFBOT_OWNER_HANDOFF_QUEUE_TTL_MS || 300000)));
 const TFBOT_MAX_COMMAND_FUTURE_SKEW_MS = Math.max(5000, Math.min(120000, Number(process.env.TFBOT_MAX_COMMAND_FUTURE_SKEW_MS || 30000)));
 
 function getTfbotTimestampMilliseconds(value) {
@@ -5361,6 +5362,7 @@ const TFBOT_LOGICAL_COLLECTIONS = new Set([
     'group_settings',
     'lid_phone_mappings',
     'processed_messages',
+    'pending_owner_handoff_commands',
     'session_account_runtime_locks',
     'session_owners',
     'session_runtime_locks',
@@ -5708,6 +5710,7 @@ async function connectMongo(options = {}) {
         }
         await db.collection('cluster_router').createIndex({ updatedAt: -1 }, { name: 'cluster_router_updated_desc' });
         await db.collection('processed_messages').createIndex({ ts: 1 });
+        await db.collection('pending_owner_handoff_commands').createIndex({ sessionId: 1, status: 1, nextAttemptAt: 1, createdAt: 1 }, { name: 'pending_owner_handoff_dispatch_lookup' });
         await db.collection('processed_messages').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'processed_messages_expire_at_ttl' });
         await db.collection('baileys_outgoing_messages').createIndex({ createdAt: 1 }, { expireAfterSeconds: BAILEYS_RETRY_MESSAGE_TTL_SECONDS, name: 'baileys_retry_message_ttl' });
         await db.collection('lid_phone_mappings').createIndex({ expireAt: 1 }, { expireAfterSeconds: 0, name: 'lid_phone_mappings_expire_at_ttl' });
@@ -9945,44 +9948,47 @@ async function inspectTfbotPreviousWorkerLeases(host, url) {
     if (!db || !host || !url) return { verified: false, protected: true, reason: 'database_or_previous_worker_identity_unavailable' };
     const now = new Date();
     try {
-        const [instanceRecord, sessionOwnerLease] = await Promise.all([
-            db.collection('cluster_instances').findOne(
+        const [instanceRecords, sessionOwnerLease] = await Promise.all([
+            db.collection('cluster_instances').find(
                 { host, role: { $ne: 'coordinator' } },
                 { projection: { _id: 1, leaseUntil: 1, status: 1, draining: 1 } }
-            ),
+            ).sort({ leaseUntil: -1 }).limit(50).toArray(),
             db.collection('session_owners').findOne(
                 { ownerInstanceUrl: url, ownerLeaseUntil: { $gt: now } },
                 { sort: { ownerLeaseUntil: -1 }, projection: { ownerLeaseUntil: 1, sessionId: 1, connectionStatus: 1 } }
             )
         ]);
-        const previousInstanceId = String(instanceRecord?._id || '');
-        if (!previousInstanceId) return { verified: false, protected: true, reason: 'previous_worker_instance_record_missing' };
-        const escapedInstanceId = previousInstanceId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const previousProcessOwner = new RegExp(`^${escapedInstanceId}-`);
+        const previousInstanceIds = [...new Set((Array.isArray(instanceRecords) ? instanceRecords : []).map(record => String(record?._id || '').trim()).filter(Boolean))];
+        if (!previousInstanceIds.length) return { verified: false, protected: true, reason: 'previous_worker_instance_record_missing' };
+        const escapedInstanceIds = previousInstanceIds.map(instanceId => instanceId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+        const previousProcessOwner = new RegExp(`^(?:${escapedInstanceIds.join('|')})-`);
         const [sessionRuntimeLock, accountRuntimeLock] = await Promise.all([
             db.collection('session_runtime_locks').findOne(
                 { owner: { $regex: previousProcessOwner }, leaseUntil: { $gt: now } },
-                { projection: { leaseUntil: 1, _id: 1 } }
+                { projection: { leaseUntil: 1, _id: 1, owner: 1 } }
             ),
             db.collection('session_account_runtime_locks').findOne(
                 { owner: { $regex: previousProcessOwner }, leaseUntil: { $gt: now } },
-                { projection: { leaseUntil: 1, _id: 1 } }
+                { projection: { leaseUntil: 1, _id: 1, owner: 1 } }
             )
         ]);
-        const instanceLeaseUntil = instanceRecord?.leaseUntil ? new Date(instanceRecord.leaseUntil) : null;
+        const instanceLeaseDates = (Array.isArray(instanceRecords) ? instanceRecords : []).map(record => record?.leaseUntil ? new Date(record.leaseUntil) : null).filter(value => value && Number.isFinite(value.getTime()));
+        const instanceLeaseUntil = instanceLeaseDates.length ? new Date(Math.max(...instanceLeaseDates.map(value => value.getTime()))) : null;
         const sessionOwnerLeaseUntil = sessionOwnerLease?.ownerLeaseUntil ? new Date(sessionOwnerLease.ownerLeaseUntil) : null;
         const sessionRuntimeLockUntil = sessionRuntimeLock?.leaseUntil ? new Date(sessionRuntimeLock.leaseUntil) : null;
         const accountRuntimeLockUntil = accountRuntimeLock?.leaseUntil ? new Date(accountRuntimeLock.leaseUntil) : null;
         const isFuture = value => !!(value && Number.isFinite(value.getTime()) && value > now);
-        const instanceLeaseActive = isFuture(instanceLeaseUntil);
+        const instanceLeaseActive = instanceLeaseDates.some(value => value > now);
         const sessionOwnerLeaseActive = isFuture(sessionOwnerLeaseUntil);
         const sessionRuntimeLockActive = isFuture(sessionRuntimeLockUntil);
         const accountRuntimeLockActive = isFuture(accountRuntimeLockUntil);
-        const protectedUntil = [instanceLeaseActive ? instanceLeaseUntil.getTime() : 0, sessionOwnerLeaseActive ? sessionOwnerLeaseUntil.getTime() : 0, sessionRuntimeLockActive ? sessionRuntimeLockUntil.getTime() : 0, accountRuntimeLockActive ? accountRuntimeLockUntil.getTime() : 0].reduce((latest, value) => Math.max(latest, value), 0) || null;
+        const protectedUntil = [sessionRuntimeLockActive ? sessionRuntimeLockUntil.getTime() : 0, accountRuntimeLockActive ? accountRuntimeLockUntil.getTime() : 0].reduce((latest, value) => Math.max(latest, value), 0) || null;
         return {
             verified: true,
             protected: !!protectedUntil,
-            previousInstanceId,
+            protectionBasis: 'session_and_account_runtime_fencing_locks_across_all_known_instances_for_previous_host',
+            previousInstanceId: previousInstanceIds[0],
+            previousInstanceIds,
             instanceLeaseActive,
             sessionOwnerLeaseActive,
             sessionRuntimeLockActive,
@@ -9991,6 +9997,7 @@ async function inspectTfbotPreviousWorkerLeases(host, url) {
             sessionOwnerLeaseUntil: isFuture(sessionOwnerLeaseUntil) ? sessionOwnerLeaseUntil.toISOString() : null,
             sessionRuntimeLockUntil: isFuture(sessionRuntimeLockUntil) ? sessionRuntimeLockUntil.toISOString() : null,
             accountRuntimeLockUntil: isFuture(accountRuntimeLockUntil) ? accountRuntimeLockUntil.toISOString() : null,
+            metadataLeasesDoNotBlockFailoverAfterRuntimeFencingExpires: true,
             protectedUntil: protectedUntil ? new Date(protectedUntil).toISOString() : null
         };
     } catch (error) {
@@ -10056,7 +10063,7 @@ async function refreshTfbotActiveDomain(force = false) {
                         healthy: true,
                         workerActive: activeDomainHealth?.workerActive === true,
                         workerState: 'previous_worker_lease_protected',
-                        source: 'tfbot7-handoff-held-until-previous-leases-expire',
+                        source: 'tfbot7-handoff-held-until-runtime-fencing-leases-expire',
                         previousWorkerLeaseState: previousLeaseState
                     };
                     tfbotCoordinatorSelectionCache = heldSelection;
@@ -10069,7 +10076,7 @@ async function refreshTfbotActiveDomain(force = false) {
                         requiredFailuresBeforeFallback: TFBOT_ROUTER_ACTIVE_FAILURE_THRESHOLD,
                         leaseState: previousLeaseState,
                         checkedHosts: checked.map(item => item.domain.host),
-                        action: 'keep_existing_selection_until_previous_worker_and_session_owner_leases_expire_or_worker_recovers'
+                        action: 'keep_existing_selection_only_while_previous_session_or_account_runtime_fencing_lock_is_live_or_unverifiable'
                     });
                     return heldSelection;
                 }
@@ -10210,11 +10217,11 @@ async function refreshTfbotActiveDomain(force = false) {
                             previousLeaseState,
                             previousWorkerReactivationConfirmed: restoredPrevious?.state === 'active' && restoredPrevious.databasePing === true,
                             candidateCooldownMs: TFBOT_ROUTER_CANDIDATE_FAILURE_COOLDOWN_MS,
-                            action: 'do_not_activate_or_commit_new_worker_while_previous_worker_or_session_owner_lease_may_still_be_live'
+                            action: 'do_not_activate_new_worker_while_previous_session_or_account_runtime_fencing_lock_is_live_or_unverifiable'
                         });
                         return heldSelection;
                     }
-                    console.warn('[tfbot-worker-handoff-unconfirmed-after-owner-leases-expired]', { previousHost, newHost: selected.host, previousWorkerState, previousLeaseState, action: 'allow_failover_only_after_previous_worker_and_session_owner_leases_are_expired' });
+                    console.warn('[tfbot-worker-handoff-unconfirmed-after-owner-leases-expired]', { previousHost, newHost: selected.host, previousWorkerState, previousLeaseState, action: 'allow_failover_after_previous_session_and_account_runtime_fencing_locks_expire_even_if_metadata_leases_remain' });
                 } else {
                     console.info('[tfbot-worker-handoff-drained]', { previousHost, newHost: selected.host, previousGeneration: oldSelection?.generation || null, newGeneration: generation, activeSessionCount: Number(drained.activeSessionCount || 0), authStoreDrainConfirmed: true });
                 }
@@ -10511,14 +10518,28 @@ async function selectLeastLoadedClusterInstance(excludedIds = []) {
     return selected;
 }
 
-async function isSessionLockStillActive(sessionId) {
-    if (!db || !sessionId) return false;
+async function getSessionRuntimeLockLeaseState(sessionId) {
+    if (!db || !sessionId) return { protected: false, sessionRuntimeLockActive: false, accountRuntimeLockActive: false, protectedUntil: null };
     const now = new Date();
     const [sessionLock, accountLock] = await Promise.all([
-        db.collection('session_runtime_locks').findOne({ _id: sessionId, leaseUntil: { $gt: now } }, { projection: { _id: 1 } }).catch(() => null),
-        db.collection('session_account_runtime_locks').findOne({ sessionId, leaseUntil: { $gt: now } }, { projection: { _id: 1 } }).catch(() => null)
+        db.collection('session_runtime_locks').findOne({ _id: sessionId, leaseUntil: { $gt: now } }, { projection: { _id: 1, leaseUntil: 1, owner: 1 } }).catch(() => null),
+        db.collection('session_account_runtime_locks').findOne({ sessionId, leaseUntil: { $gt: now } }, { projection: { _id: 1, leaseUntil: 1, owner: 1 } }).catch(() => null)
     ]);
-    return !!(sessionLock || accountLock);
+    const sessionRuntimeLockUntil = sessionLock?.leaseUntil ? new Date(sessionLock.leaseUntil) : null;
+    const accountRuntimeLockUntil = accountLock?.leaseUntil ? new Date(accountLock.leaseUntil) : null;
+    const activeUntil = [sessionRuntimeLockUntil, accountRuntimeLockUntil].filter(value => value && Number.isFinite(value.getTime()) && value > now);
+    const protectedUntil = activeUntil.length ? new Date(Math.max(...activeUntil.map(value => value.getTime()))) : null;
+    return {
+        protected: !!protectedUntil,
+        sessionRuntimeLockActive: !!(sessionRuntimeLockUntil && sessionRuntimeLockUntil > now),
+        accountRuntimeLockActive: !!(accountRuntimeLockUntil && accountRuntimeLockUntil > now),
+        protectedUntil: protectedUntil ? protectedUntil.toISOString() : null,
+        sessionRuntimeLockUntil: sessionRuntimeLockUntil && sessionRuntimeLockUntil > now ? sessionRuntimeLockUntil.toISOString() : null,
+        accountRuntimeLockUntil: accountRuntimeLockUntil && accountRuntimeLockUntil > now ? accountRuntimeLockUntil.toISOString() : null
+    };
+}
+async function isSessionLockStillActive(sessionId) {
+    return (await getSessionRuntimeLockLeaseState(sessionId)).protected;
 }
 
 async function resolveClusterTargetForPairing(req) {
@@ -14700,6 +14721,190 @@ function resolveIncomingMessageCommand(body, language, context = {}) {
     return parseIncomingCommand(body, language, context);
 }
 
+function parseIncomingCommandWithDecorations(body, language, context = {}) {
+    const parsed = parseIncomingCommand(body, language, context);
+    if (parsed) return parsed;
+    const source = String(body || '').normalize('NFKC').replace(/[\p{Cf}\uFE0E\uFE0F]/gu, '').trim();
+    if (!source) return null;
+    const token = source.replace(/^[^\p{L}\p{N}_-]+/u, '').replace(/[^\p{L}\p{N}_-]+$/u, '').trim();
+    if (!token || /\s/u.test(token)) return null;
+    const internalCommand = resolveCommand(token, language);
+    if (!internalCommand || !commandsWithoutArguments.has(internalCommand)) return null;
+    return parseIncomingCommand(token, language, context);
+}
+
+function getVerifiedOwnerHandoffIdentity(sessionId, sock, message, ownerRecord = null) {
+    if (message?.key?.fromMe === true) return { matched: true, source: 'authenticated_from_me' };
+    const runtime = activeSessions.get(sessionId);
+    const credentials = runtime?.authState?.creds || null;
+    const ownPhone = getAuthenticatedPhoneNumber(sock?.user, credentials);
+    const ownLid = getAuthenticatedLid(sock?.user, credentials);
+    const chatJid = String(message?.key?.remoteJid || message?.key?.remoteJidAlt || '').trim();
+    if (!chatJid) return { matched: false, source: null };
+    const isGroup = chatJid.endsWith('@g.us');
+    const senderJids = [...new Set([message?.key?.participant, message?.key?.participantAlt, message?.key?.participantPn, message?.key?.senderPn, message?.key?.senderLid, message?.key?.participantLid, message?.key?.remoteJidAlt, ...(!isGroup ? [chatJid] : [])].map(value => String(value || '').trim()).filter(Boolean))];
+    const senderNumbers = [...new Set(senderJids.map(normalizedJidNumber).map(normalizePhoneNumber).filter(Boolean))];
+    if (ownPhone && senderNumbers.includes(normalizePhoneNumber(ownPhone))) return { matched: true, source: 'authenticated_account_phone_alias' };
+    const ownIdentityJids = new Set([sock?.user?.id, sock?.user?.lid, ownLid, ownPhone ? `${ownPhone}@s.whatsapp.net` : ''].map(normalizeOwnerIdentityJid).filter(Boolean));
+    if (senderJids.map(normalizeOwnerIdentityJid).filter(Boolean).some(value => ownIdentityJids.has(value))) return { matched: true, source: 'authenticated_account_lid_or_jid_alias' };
+    const configured = getConfiguredOwnerAccessIdentities(ownerRecord || {}, sessionId);
+    const configuredMatch = matchConfiguredOwnerAccess(configured, senderJids, senderNumbers, chatJid, isGroup, sessionId);
+    if (configuredMatch.matched) return { matched: true, source: 'configured_session_owner_identity' };
+    return { matched: false, source: null };
+}
+
+const tfbotOwnerHandoffReplayInFlight = new Set();
+const tfbotOwnerHandoffReplayLastPollAt = new Map();
+let tfbotOwnerHandoffQueueCleanupAt = 0;
+async function persistOwnerHandoffCommands(sessionId, sock, messages, upsertType = 'notify', source = 'worker_handoff') {
+    if (!db || !TFBOT_CLUSTER_ENABLED || !sessionId || !sock || !['notify', 'append'].includes(String(upsertType || ''))) return 0;
+    const runtime = activeSessions.get(sessionId);
+    if (!runtime || runtime.sock !== sock || !isAuthenticatedSocketOperational(runtime, sock)) return 0;
+    let ownerRecord = sessionOwnersCache.get(sessionId) || null;
+    if (!ownerRecord) {
+        ownerRecord = await db.collection('session_owners').findOne({ sessionId }).catch(() => null);
+        if (ownerRecord) sessionOwnersCache.set(sessionId, ownerRecord);
+    }
+    const batch = Array.isArray(messages) ? messages : [];
+    let queued = 0;
+    for (const message of batch) {
+        if (message?.__tfbotOwnerHandoffQueueId) continue;
+        const messageId = String(message?.key?.id || '').trim();
+        if (!messageId) continue;
+        const alreadyOutgoing = outgoingMessageCache.has(`${sessionId}:id:${messageId}`)
+            || outgoingMessageCache.has(`${sessionId}:${String(message?.key?.remoteJid || '')}:${messageId}`)
+            || isRecentOutgoingMessageId(sessionId, messageId);
+        if (alreadyOutgoing) continue;
+        const body = String(extractBody(message) || '').trim();
+        if (!body) continue;
+        const chatJid = String(message?.key?.remoteJid || message?.key?.remoteJidAlt || '').trim();
+        if (!chatJid || chatJid === 'status@broadcast' || chatJid.endsWith('@newsletter')) continue;
+        const ownerIdentity = getVerifiedOwnerHandoffIdentity(sessionId, sock, message, ownerRecord);
+        if (!ownerIdentity.matched) continue;
+        const context = getCommandParsingContext(message?.message, sessionId, chatJid);
+        const parsed = parseIncomingCommandWithDecorations(body, ownerRecord?.lang || 'en', context);
+        if (!parsed) continue;
+        const timestampInfo = getTfbotMessageTimestampInfo(message, Date.now());
+        if (timestampInfo.usedFallback || timestampInfo.futureSkewMs > TFBOT_MAX_COMMAND_FUTURE_SKEW_MS || timestampInfo.differenceMs < -TFBOT_MAX_COMMAND_FUTURE_SKEW_MS || timestampInfo.differenceMs > TFBOT_OWNER_HANDOFF_QUEUE_TTL_MS) continue;
+        if (upsertType === 'append') {
+            const socketOpenedAt = Number(runtime.socketOpenedAt || 0);
+            if (timestampInfo.differenceMs > TFBOT_MAX_COMMAND_AGE_MS || socketOpenedAt > 0 && timestampInfo.timestampMs < socketOpenedAt - 15000) continue;
+        }
+        let serialized;
+        try {
+            serialized = JSON.stringify(message);
+            if (!serialized || Buffer.byteLength(serialized, 'utf8') > 65536) continue;
+        } catch (error) {
+            continue;
+        }
+        let storedMessage;
+        try { storedMessage = JSON.parse(serialized); } catch (error) { continue; }
+        const now = new Date();
+        const queueId = `${String(sessionId)}:${messageId}`;
+        try {
+            const result = await db.collection('pending_owner_handoff_commands').updateOne(
+                { _id: queueId },
+                { $setOnInsert: { sessionId: String(sessionId), messageId, chatJid, message: storedMessage, command: String(parsed.internalCommand || parsed.command || ''), ownerVerified: true, ownerIdentitySource: ownerIdentity.source, sourceHost: TFBOT_CLUSTER_INSTANCE_HOST || null, source, upsertType, status: 'pending', attempts: 0, createdAt: now, nextAttemptAt: now, expiresAt: new Date(now.getTime() + TFBOT_OWNER_HANDOFF_QUEUE_TTL_MS) } },
+                { upsert: true }
+            );
+            if (Number(result?.upsertedCount || 0) > 0 || result?.upsertedId) queued++;
+            console.info('[owner-command-handoff-queued]', { sessionId, messageId, command: parsed.internalCommand || parsed.command, ownerIdentitySource: ownerIdentity.source, fromMe: message?.key?.fromMe === true, chatType: getWhatsAppDestinationType(chatJid), sourceHost: TFBOT_CLUSTER_INSTANCE_HOST || null, upsertType, ageMs: timestampInfo.differenceMs, inserted: Number(result?.upsertedCount || 0) > 0 || !!result?.upsertedId, ttlMs: TFBOT_OWNER_HANDOFF_QUEUE_TTL_MS });
+        } catch (error) {
+            console.error('[owner-command-handoff-persist-failed]', { sessionId, messageId, command: parsed.internalCommand || parsed.command, error: String(error?.message || error).slice(0, 220) });
+        }
+    }
+    return queued;
+}
+
+async function finalizeOwnerHandoffCommand(queueId, succeeded, reason = '') {
+    if (!db || !queueId) return false;
+    const now = new Date();
+    const update = succeeded
+        ? { $set: { status: 'completed', completedAt: now, completionReason: String(reason || 'message_handler_completed').slice(0, 120) }, $unset: { claimOwner: 1, claimUntil: 1, nextAttemptAt: 1 } }
+        : { $set: { status: 'pending', nextAttemptAt: new Date(now.getTime() + 3000), lastError: String(reason || 'message_handler_failed').slice(0, 220) }, $unset: { claimOwner: 1, claimUntil: 1 } };
+    try {
+        await db.collection('pending_owner_handoff_commands').updateOne({ _id: String(queueId), status: 'dispatching', claimOwner: processInstanceId }, update);
+        return true;
+    } catch (error) {
+        console.warn('[owner-command-handoff-finalize-failed]', { queueId: String(queueId).slice(0, 120), succeeded: !!succeeded, error: error?.message || String(error) });
+        return false;
+    }
+}
+
+async function replayPendingOwnerHandoffCommands(sessionId, sock) {
+    if (!db || !TFBOT_CLUSTER_ENABLED || !tfbotWorkerActive || tfbotWorkerStopping || TFBOT_CLUSTER_COORDINATOR_ONLY || serverShuttingDown || !sessionId || !sock) return 0;
+    const runtime = activeSessions.get(sessionId);
+    if (!runtime || runtime.sock !== sock || !isAuthenticatedSocketOperational(runtime, sock) || !isWhatsAppSocketReady(runtime, sock)) return 0;
+    const ownPhone = getAuthenticatedPhoneNumber(sock.user, runtime.authState?.creds);
+    const ownLid = getAuthenticatedLid(sock.user, runtime.authState?.creds);
+    if (!hasFreshLocalExclusiveRuntimeOwnership(sessionId, sock, [ownPhone, ownLid])) return 0;
+    const nowMs = Date.now();
+    const lastPollAt = Number(tfbotOwnerHandoffReplayLastPollAt.get(String(sessionId)) || 0);
+    if (nowMs - lastPollAt < 2000 || tfbotOwnerHandoffReplayInFlight.has(String(sessionId))) return 0;
+    tfbotOwnerHandoffReplayLastPollAt.set(String(sessionId), nowMs);
+    tfbotOwnerHandoffReplayInFlight.add(String(sessionId));
+    let dispatched = 0;
+    try {
+        if (nowMs - tfbotOwnerHandoffQueueCleanupAt > 60000) {
+            tfbotOwnerHandoffQueueCleanupAt = nowMs;
+            void db.collection('pending_owner_handoff_commands').deleteMany({ expiresAt: { $lte: new Date(nowMs) } }).catch(error => console.warn('[owner-command-handoff-expiry-cleanup-failed]', { error: error?.message || String(error) }));
+        }
+        const now = new Date(nowMs);
+        const pending = await db.collection('pending_owner_handoff_commands').find({
+            sessionId: String(sessionId),
+            expiresAt: { $gt: now },
+            $or: [
+                { status: 'pending', nextAttemptAt: { $lte: now } },
+                { status: 'dispatching', claimUntil: { $lte: now } }
+            ]
+        }).sort({ createdAt: 1 }).limit(10).toArray();
+        for (const record of pending) {
+            if (!tfbotWorkerActive || tfbotWorkerStopping || activeSessions.get(sessionId)?.sock !== sock || !isAuthenticatedSocketOperational(activeSessions.get(sessionId), sock)) break;
+            const queueId = String(record?._id || '');
+            const message = record?.message;
+            if (!queueId || record?.ownerVerified !== true || !message?.key?.id) {
+                if (queueId) await db.collection('pending_owner_handoff_commands').updateOne({ _id: queueId }, { $set: { status: 'failed', completionReason: 'invalid_or_unverified_owner_record', completedAt: new Date() } }).catch(() => {});
+                continue;
+            }
+            const chatJid = String(message?.key?.remoteJid || message?.key?.remoteJidAlt || '').trim();
+            const context = getCommandParsingContext(message?.message, sessionId, chatJid);
+            const parsed = parseIncomingCommandWithDecorations(extractBody(message), sessionOwnersCache.get(sessionId)?.lang || 'en', context);
+            if (!parsed) {
+                await db.collection('pending_owner_handoff_commands').updateOne({ _id: queueId, status: { $in: ['pending', 'dispatching'] } }, { $set: { status: 'failed', completionReason: 'owner_command_no_longer_parses', completedAt: new Date() }, $unset: { claimOwner: 1, claimUntil: 1 } }).catch(() => {});
+                continue;
+            }
+            const claimedAt = new Date();
+            const claim = await db.collection('pending_owner_handoff_commands').updateOne(
+                { _id: queueId, expiresAt: { $gt: claimedAt }, $or: [{ status: 'pending', nextAttemptAt: { $lte: claimedAt } }, { status: 'dispatching', claimUntil: { $lte: claimedAt } }] },
+                { $set: { status: 'dispatching', claimOwner: processInstanceId, claimUntil: new Date(claimedAt.getTime() + 45000), targetHost: TFBOT_CLUSTER_INSTANCE_HOST || null, claimedAt }, $inc: { attempts: 1 } }
+            );
+            if (!Number(claim?.matchedCount || 0)) continue;
+            const replayMessage = { ...message, __tfbotOwnerHandoffQueueId: queueId };
+            const emitted = sock.ev.emit('messages.upsert', { type: 'notify', messages: [replayMessage] });
+            if (!emitted) {
+                await db.collection('pending_owner_handoff_commands').updateOne({ _id: queueId, status: 'dispatching', claimOwner: processInstanceId }, { $set: { status: 'pending', nextAttemptAt: new Date(Date.now() + 3000), lastError: 'messages_upsert_listener_unavailable' }, $unset: { claimOwner: 1, claimUntil: 1 } }).catch(() => {});
+                continue;
+            }
+            dispatched++;
+            console.info('[owner-command-handoff-replayed]', { sessionId, messageId: String(message.key.id), command: parsed.internalCommand || parsed.command, sourceHost: record.sourceHost || null, targetHost: TFBOT_CLUSTER_INSTANCE_HOST || null, attempts: Number(record.attempts || 0) + 1, ageMs: Math.max(0, Date.now() - new Date(record.createdAt || Date.now()).getTime()) });
+        }
+    } catch (error) {
+        console.warn('[owner-command-handoff-replay-failed]', { sessionId, targetHost: TFBOT_CLUSTER_INSTANCE_HOST || null, error: error?.message || String(error) });
+    } finally {
+        tfbotOwnerHandoffReplayInFlight.delete(String(sessionId));
+    }
+    return dispatched;
+}
+
+const tfbotOwnerHandoffReplayPollTimer = setInterval(() => {
+    if (!db || !TFBOT_CLUSTER_ENABLED || !tfbotWorkerActive || tfbotWorkerStopping || serverShuttingDown || TFBOT_CLUSTER_COORDINATOR_ONLY) return;
+    for (const [sessionId, runtime] of activeSessions.entries()) {
+        const socket = runtime?.sock;
+        if (!socket || !isAuthenticatedSocketOperational(runtime, socket) || !isWhatsAppSocketReady(runtime, socket)) continue;
+        void replayPendingOwnerHandoffCommands(sessionId, socket).catch(error => console.warn('[owner-command-handoff-poll-failed]', { sessionId, error: error?.message || String(error) }));
+    }
+}, 2500);
+if (typeof tfbotOwnerHandoffReplayPollTimer.unref === 'function') tfbotOwnerHandoffReplayPollTimer.unref();
 
 async function sendFormatted(sock, from, type, text, pushName, isAI = false, hostName = "Bot (tfbot)", sendOptions = {}) {
     return sendImageCaptioned(sock, from, adamLogoBuffer, type, text, pushName || 'Inconnu', sendOptions);
@@ -16978,8 +17183,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 console.info('[message-upsert-historical-append-cache-only]', { sessionId, messageCount: initialBatchCount, receivedAt: messageUpsertEventStartedAt, action: 'validate_session_ownership_then_cache_outgoing_private_retry_copies_without_command_dispatch' });
             }
             if (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) {
-                updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: 'ignored_worker_handoff', lastCommandWorkerState: tfbotWorkerState, lastCommandWorkerActive: !!tfbotWorkerActive, lastCommandWorkerStopping: !!tfbotWorkerStopping, lastCommandSessionDraining: workerDrainingSessionIds.has(sessionId), lastCommandError: null });
-                console.warn('[message-upsert-ignored-during-worker-handoff]', { sessionId, workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null, selectedWorkerHost: normalizeTfbotHost(tfbotActiveDomainCache?.host || tfbotCoordinatorSelectionCache?.host || '') || null, upsertType: String(up?.type || ''), messageCount: Array.isArray(up?.messages) ? up.messages.length : 0, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), runtimeSocketPresent: !!activeSessions.get(sessionId)?.sock, sameSocket: activeSessions.get(sessionId)?.sock === sock, socketReady: isWhatsAppSocketReady(activeSessions.get(sessionId), sock), inboundHandlersActive: Number(sessionInboundUpsertActivity.get(sessionId)?.active || 0), action: 'leave_whatsapp_offline_sync_for_selected_worker' });
+                const queuedOwnerCommands = await persistOwnerHandoffCommands(sessionId, sock, up?.messages, initialUpsertType, 'early_worker_handoff_guard');
+                updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: queuedOwnerCommands ? 'owner_command_saved_for_next_worker' : 'ignored_worker_handoff_non_owner_or_non_command', lastCommandWorkerState: tfbotWorkerState, lastCommandWorkerActive: !!tfbotWorkerActive, lastCommandWorkerStopping: !!tfbotWorkerStopping, lastCommandSessionDraining: workerDrainingSessionIds.has(sessionId), lastCommandError: null });
+                console.warn('[message-upsert-during-worker-handoff]', { sessionId, workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null, selectedWorkerHost: normalizeTfbotHost(tfbotActiveDomainCache?.host || tfbotCoordinatorSelectionCache?.host || '') || null, upsertType: initialUpsertType, messageCount: initialBatchCount, queuedOwnerCommands, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), runtimeSocketPresent: !!activeSessions.get(sessionId)?.sock, sameSocket: activeSessions.get(sessionId)?.sock === sock, socketReady: isWhatsAppSocketReady(activeSessions.get(sessionId), sock), inboundHandlersActive: Number(sessionInboundUpsertActivity.get(sessionId)?.active || 0), action: queuedOwnerCommands ? 'persist_authenticated_owner_commands_for_selected_worker' : 'ignore_non_owner_or_non_command_event_without_running_on_draining_worker' });
                 return;
             }
             if (isPendingPairingReplacementSession(sessionId)) {
@@ -17033,8 +17239,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             } catch (finalOwnershipError) {
                 const reason = String(finalOwnershipError?.message || finalOwnershipError);
                 if (reason === 'tfbot_worker_not_active' || tfbotWorkerStopping || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive)) {
-                    updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: 'left_for_selected_worker', lastCommandWorkerState: tfbotWorkerState, lastCommandWorkerActive: !!tfbotWorkerActive, lastCommandWorkerStopping: !!tfbotWorkerStopping, lastCommandSessionDraining: workerDrainingSessionIds.has(sessionId), lastCommandError: reason.slice(0, 240) });
-                    console.warn('[message-upsert-left-for-selected-worker]', { sessionId, upsertType: String(up?.type || ''), messageCount: Array.isArray(up?.messages) ? up.messages.length : 0, reason, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), inboundHandlersActive: Number(sessionInboundUpsertActivity.get(sessionId)?.active || 0), action: 'do_not_close_or_process_on_standby_worker' });
+                    const queuedOwnerCommands = await persistOwnerHandoffCommands(sessionId, sock, up?.messages, initialUpsertType, 'ownership_preflight_handoff');
+                    updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: queuedOwnerCommands ? 'owner_command_saved_for_next_worker' : 'left_for_selected_worker', lastCommandWorkerState: tfbotWorkerState, lastCommandWorkerActive: !!tfbotWorkerActive, lastCommandWorkerStopping: !!tfbotWorkerStopping, lastCommandSessionDraining: workerDrainingSessionIds.has(sessionId), lastCommandError: reason.slice(0, 240) });
+                    console.warn('[message-upsert-left-for-selected-worker]', { sessionId, upsertType: String(up?.type || ''), messageCount: Array.isArray(up?.messages) ? up.messages.length : 0, queuedOwnerCommands, reason, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), inboundHandlersActive: Number(sessionInboundUpsertActivity.get(sessionId)?.active || 0), action: queuedOwnerCommands ? 'persist_authenticated_owner_commands_for_next_worker' : 'do_not_close_or_process_on_standby_worker' });
                     return;
                 }
                 console.error('[message-upsert-blocked-without-exclusive-session-lock]', { sessionId, error: reason, ownershipValidationMs: Date.now() - ownershipValidationStartedAt, ownershipAttemptCount, messageEventAgeMs: Date.now() - messageUpsertEventStartedAt, action: 'retry_lock_failure_then_close_only_when_exclusive_ownership_cannot_be_verified' });
@@ -17046,8 +17253,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             const upsertType = String(up?.type || '');
             const rawBatch = Array.isArray(up?.messages) ? up.messages : [];
             if (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) {
-                updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: 'ignored_worker_handoff_after_lock_check', lastCommandWorkerState: tfbotWorkerState, lastCommandWorkerActive: !!tfbotWorkerActive, lastCommandWorkerStopping: !!tfbotWorkerStopping, lastCommandSessionDraining: workerDrainingSessionIds.has(sessionId), lastCommandError: null });
-                console.warn('[message-upsert-ignored-during-worker-handoff]', { sessionId, upsertType, messageCount: rawBatch.length, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), ownershipValidationMs, ownershipAttemptCount, inboundHandlersActive: Number(sessionInboundUpsertActivity.get(sessionId)?.active || 0), action: 'leave_whatsapp_offline_sync_for_selected_worker' });
+                const queuedOwnerCommands = await persistOwnerHandoffCommands(sessionId, sock, rawBatch, upsertType, 'post_ownership_handoff_guard');
+                updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: queuedOwnerCommands ? 'owner_command_saved_for_next_worker' : 'ignored_worker_handoff_after_lock_check', lastCommandWorkerState: tfbotWorkerState, lastCommandWorkerActive: !!tfbotWorkerActive, lastCommandWorkerStopping: !!tfbotWorkerStopping, lastCommandSessionDraining: workerDrainingSessionIds.has(sessionId), lastCommandError: null });
+                console.warn('[message-upsert-during-worker-handoff-after-lock-check]', { sessionId, upsertType, messageCount: rawBatch.length, queuedOwnerCommands, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), ownershipValidationMs, ownershipAttemptCount, inboundHandlersActive: Number(sessionInboundUpsertActivity.get(sessionId)?.active || 0), action: queuedOwnerCommands ? 'persist_authenticated_owner_commands_for_next_worker' : 'ignore_non_owner_or_non_command_event_after_lock_check' });
                 return;
             }
             console.info('[messages-upsert-batch]', {
@@ -17089,7 +17297,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     const unsupportedChat = String(entry?.key?.remoteJid || entry?.key?.remoteJidAlt || 'unknown-chat');
                     const unsupportedGroup = unsupportedChat.endsWith('@g.us');
                     const unsupportedBody = String(unsupportedAudit.messageText || '');
-                    const unsupportedCommand = unsupportedBody.trim() ? parseIncomingCommand(unsupportedBody, globalLang, getCommandParsingContext(entry?.message, sessionId, entry?.key?.remoteJid || entry?.key?.remoteJidAlt || '')) : null;
+                    const unsupportedCommand = unsupportedBody.trim() ? parseIncomingCommandWithDecorations(unsupportedBody, globalLang, getCommandParsingContext(entry?.message, sessionId, entry?.key?.remoteJid || entry?.key?.remoteJidAlt || ''), entry?.key?.fromMe === true) : null;
                     console.info('[message-received-not-processed]', {
                         sessionId,
                         connectedAccountJid: sock.user?.id || null,
@@ -17118,8 +17326,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             }
 
             for (const m of rawBatch) {
+                const handoffReplayQueueId = String(m?.__tfbotOwnerHandoffQueueId || '');
+                const isDurableOwnerHandoffReplay = !!handoffReplayQueueId;
                 if (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) {
-                    console.info('[message-upsert-paused-before-message-dispatch-during-worker-handoff]', { sessionId, workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null, selectedWorkerHost: normalizeTfbotHost(tfbotActiveDomainCache?.host || tfbotCoordinatorSelectionCache?.host || '') || null, messageCountRemaining: Math.max(0, rawBatch.length - rawBatch.indexOf(m)), upsertType, action: 'leave_unprocessed_messages_for_selected_worker' });
+                    const remainingMessages = rawBatch.slice(rawBatch.indexOf(m));
+                    const queuedOwnerCommands = await persistOwnerHandoffCommands(sessionId, sock, remainingMessages, upsertType, 'mid_batch_worker_handoff');
+                    console.info('[message-upsert-paused-before-message-dispatch-during-worker-handoff]', { sessionId, workerHost: TFBOT_CLUSTER_INSTANCE_HOST || null, selectedWorkerHost: normalizeTfbotHost(tfbotActiveDomainCache?.host || tfbotCoordinatorSelectionCache?.host || '') || null, messageCountRemaining: remainingMessages.length, queuedOwnerCommands, upsertType, action: queuedOwnerCommands ? 'persist_owner_command_tail_for_selected_worker' : 'leave_non_owner_or_non_command_events_unprocessed' });
                     break;
                 }
                 inboundMessagePreDispatchCounts.set(sessionId, Number(inboundMessagePreDispatchCounts.get(sessionId) || 0) + 1);
@@ -17168,7 +17380,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const earlyMessageAgeMs = earlyMessageTimestampInfo.differenceMs;
                 const sessionWasSynchronizingAtReceipt = ['opening', 'synchronisation', 'synchronizing', 'reconnexion', 'connecting', 'initialisation', 'pairing', 'qr_disponible'].includes(activeMessageStatusAtReceipt);
                 const socketOpenedAt = Number(activeMessageSession?.socketOpenedAt || 0);
-                const messagePredatesCurrentSocket = socketOpenedAt > 0 && earlyMessageTimestampSeconds > 0 && earlyMessageTimestampSeconds * 1000 < socketOpenedAt - 15000;
+                const messagePredatesCurrentSocket = !isDurableOwnerHandoffReplay && socketOpenedAt > 0 && earlyMessageTimestampSeconds > 0 && earlyMessageTimestampSeconds * 1000 < socketOpenedAt - 15000;
                 const messageStubDiagnosticText = (Array.isArray(m?.messageStubParameters) ? m.messageStubParameters : []).map(value => String(value || '')).join(' ');
                 const isUndecryptableMessageStub = Number(m?.messageStubType) === 2 || /no matching sessions found for message|no session found to decrypt message|failed to decrypt message|waiting for this message/i.test(messageStubDiagnosticText);
                 const staleUndecryptableMessageStub = isUndecryptableMessageStub && earlyMessageAgeMs > TFBOT_MAX_COMMAND_AGE_MS;
@@ -17180,8 +17392,9 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     && !!(sock.user?.id || earlyReceivedOwnPhoneJid || earlyReceivedOwnLidJid || activeMessageSession?.ownPhoneJid || activeMessageSession?.ownLidJid);
                 const appendIsAuthenticatedSelfChat = ['private_pn', 'private_lid'].includes(appendChatType)
                     && appendChatCandidates.some(chat => appendOwnIdentityCandidates.some(identity => chat === identity || areEquivalentWhatsAppChatJids(sessionId, chat, identity)));
+                const recentOwnerAppendHandoffWindow = upsertType === 'append' && appendIsAuthenticatedOwnDeviceMessage && !earlyMessageTimestampInfo.usedFallback && earlyMessageAgeMs <= TFBOT_OWNER_HANDOFF_QUEUE_TTL_MS && socketOpenedAt > 0 && Date.now() - socketOpenedAt <= TFBOT_OWNER_HANDOFF_QUEUE_TTL_MS;
                 let freshOwnAppendCommand = null;
-                if (upsertType === 'append' && appendIsAuthenticatedOwnDeviceMessage && !earlyMessageTimestampInfo.usedFallback && earlyMessageTimestampInfo.futureSkewMs <= TFBOT_MAX_COMMAND_FUTURE_SKEW_MS && !messagePredatesCurrentSocket && earlyMessageAgeMs <= TFBOT_MAX_COMMAND_AGE_MS) {
+                if (upsertType === 'append' && appendIsAuthenticatedOwnDeviceMessage && !earlyMessageTimestampInfo.usedFallback && earlyMessageTimestampInfo.futureSkewMs <= TFBOT_MAX_COMMAND_FUTURE_SKEW_MS && (!messagePredatesCurrentSocket || recentOwnerAppendHandoffWindow) && earlyMessageAgeMs <= (recentOwnerAppendHandoffWindow ? TFBOT_OWNER_HANDOFF_QUEUE_TTL_MS : TFBOT_MAX_COMMAND_AGE_MS)) {
                     const earlyAppendBody = String(extractBody(m) || '').trim();
                     if (earlyAppendBody) {
                         let earlyAppendContext = getCommandParsingContext(m?.message, sessionId, earlyReceivedChat);
@@ -17189,18 +17402,18 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                         if (['vv', 'vv2'].includes(resolveCommand(earlyAppendToken, globalLang))) {
                             earlyAppendContext = await resolveCommandParsingContext(m?.message, sessionId, earlyReceivedChat, earlyAppendBody, globalLang);
                         }
-                        const earlyAppendParsed = parseIncomingCommand(earlyAppendBody, globalLang, earlyAppendContext);
+                        const earlyAppendParsed = parseIncomingCommandWithDecorations(earlyAppendBody, globalLang, earlyAppendContext, m?.key?.fromMe === true);
                         const outgoingEchoKnown = outgoingMessageCache.has(`${sessionId}:id:${earlyReceivedId}`)
                             || outgoingMessageCache.has(`${sessionId}:${earlyReceivedChat}:${earlyReceivedId}`)
                             || isRecentOutgoingMessageId(sessionId, earlyReceivedId);
                         if (earlyAppendParsed && !outgoingEchoKnown) {
                             freshOwnAppendCommand = earlyAppendParsed;
-                            console.info('[own-device-append-command-accepted]', { sessionId, messageId: earlyReceivedId, command: earlyAppendParsed.internalCommand || earlyAppendParsed.command, ageMs: earlyMessageAgeMs, maximumAgeMs: TFBOT_MAX_COMMAND_AGE_MS, chatType: appendChatType, fromMe: true, authenticatedOwnDeviceMessage: appendIsAuthenticatedOwnDeviceMessage, authenticatedSelfChatAliasMatched: appendIsAuthenticatedSelfChat, outgoingEchoKnown: false, action: 'dispatch_recent_explicit_authenticated_own_device_command_in_private_or_group_chat_without_replaying_history' });
+                            console.info('[own-device-append-command-accepted]', { sessionId, messageId: earlyReceivedId, command: earlyAppendParsed.internalCommand || earlyAppendParsed.command, ageMs: earlyMessageAgeMs, maximumAgeMs: recentOwnerAppendHandoffWindow ? TFBOT_OWNER_HANDOFF_QUEUE_TTL_MS : TFBOT_MAX_COMMAND_AGE_MS, handoffRecoveryWindow: recentOwnerAppendHandoffWindow, chatType: appendChatType, fromMe: true, authenticatedOwnDeviceMessage: appendIsAuthenticatedOwnDeviceMessage, authenticatedSelfChatAliasMatched: appendIsAuthenticatedSelfChat, outgoingEchoKnown: false, action: recentOwnerAppendHandoffWindow ? 'recover_recent_owner_command_from_new_worker_offline_sync_after_handoff' : 'dispatch_recent_explicit_authenticated_own_device_command_in_private_or_group_chat_without_replaying_history' });
                         }
                     }
                 }
                 const ignoreHistoricalAppend = upsertType === 'append' && !freshOwnAppendCommand;
-                const ignoreHistoricalMessage = ignoreHistoricalAppend || (messagePredatesCurrentSocket && !freshOwnAppendCommand) || staleUndecryptableMessageStub || (upsertType === 'notify' && sessionWasSynchronizingAtReceipt && (earlyMessageTimestampInfo.usedFallback || earlyMessageAgeMs > 30000 || earlyMessageTimestampInfo.futureSkewMs > TFBOT_MAX_COMMAND_FUTURE_SKEW_MS));
+                const ignoreHistoricalMessage = !isDurableOwnerHandoffReplay && (ignoreHistoricalAppend || (messagePredatesCurrentSocket && !freshOwnAppendCommand) || staleUndecryptableMessageStub || (upsertType === 'notify' && sessionWasSynchronizingAtReceipt && (earlyMessageTimestampInfo.usedFallback || earlyMessageAgeMs > 30000 || earlyMessageTimestampInfo.futureSkewMs > TFBOT_MAX_COMMAND_FUTURE_SKEW_MS)));
                 if (ignoreHistoricalMessage) {
                     const historyMessageId = String(m?.key?.id || '').trim();
                     const historyChat = String(m?.key?.remoteJid || m?.key?.remoteJidAlt || 'unknown-chat');
@@ -17259,7 +17472,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     ? await resolveCommandParsingContext(m?.message, sessionId, m?.key?.remoteJid || m?.key?.remoteJidAlt || '', receivedBody, globalLang)
                     : getCommandParsingContext(m?.message, sessionId, m?.key?.remoteJid || m?.key?.remoteJidAlt || '');
                 const receivedExplicitParsedCommand = String(receivedBody || '').trim()
-                    ? parseIncomingCommand(receivedBody, globalLang, receivedCommandContext)
+                    ? parseIncomingCommandWithDecorations(receivedBody, globalLang, receivedCommandContext, m?.key?.fromMe === true)
                     : null;
                 const receivedParsedCommand = receivedExplicitParsedCommand;
                 const receivedBodyForAudit = String(receivedBody || '');
@@ -17280,7 +17493,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const receivedTimestampMs = receivedTimestampInfo.timestampMs;
                 const receivedTimestampSeconds = receivedTimestampMs / 1000;
                 const receivedMessageAgeMs = receivedTimestampInfo.differenceMs;
-                if (receivedParsedCommand && (receivedMessageAgeMs > TFBOT_MAX_COMMAND_AGE_MS || receivedTimestampInfo.futureSkewMs > TFBOT_MAX_COMMAND_FUTURE_SKEW_MS)) {
+                if (receivedParsedCommand && !isDurableOwnerHandoffReplay && (receivedMessageAgeMs > TFBOT_MAX_COMMAND_AGE_MS || receivedTimestampInfo.futureSkewMs > TFBOT_MAX_COMMAND_FUTURE_SKEW_MS)) {
                     cacheRecentMessage(sessionId, m);
                     cacheMessageIdentityAliases(sessionId, m);
                     const staleCommandCacheKey = `${sessionId}:id:${receivedId}`;
@@ -17514,14 +17727,14 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 });
                 const messageTimestampForDedupe = Number(m.messageTimestamp && typeof m.messageTimestamp.toNumber === 'function' ? m.messageTimestamp.toNumber() : m.messageTimestamp);
                 const messageAgeForDedupe = Number.isFinite(messageTimestampForDedupe) && messageTimestampForDedupe > 0 ? Math.floor(Date.now() / 1000) - messageTimestampForDedupe : null;
-                if (upsertType === 'append' && messageAgeForDedupe !== null && messageAgeForDedupe > 120 && !receivedExplicitParsedCommand) {
+                if (upsertType === 'append' && messageAgeForDedupe !== null && messageAgeForDedupe > 120 && !receivedParsedCommand) {
                     cacheRecentMessage(sessionId, m);
                     console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, chatJid: receivedChat, messageAgeSeconds: messageAgeForDedupe, reason: 'stale_history_append_not_claimed' });
                     continue;
                 }
                 const msgCacheKey = `${sessionId}:id:${msgId}`;
                 const msgChatCacheKey = `${sessionId}:${receivedChat}:${msgId}`;
-                if (m.key.fromMe && !receivedExplicitParsedCommand && consumeOutgoingTextEcho(sessionId, m.key.remoteJid || '', extractBody(m))) {
+                if (m.key.fromMe && !receivedParsedCommand && consumeOutgoingTextEcho(sessionId, m.key.remoteJid || '', extractBody(m))) {
                     console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'outgoing_text_echo' });
                     continue;
                 }
@@ -17566,7 +17779,8 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 const messageClaimTimedOut = false;
                 const messageClaimed = distributedClaimValue === true;
                 if (!messageClaimed) {
-                    console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'distributed_message_claim_already_owned_or_database_unavailable', claimMode: 'atomic_mongodb_message_id_claim', durationMs: Date.now() - claimStartedAt });
+                    if (handoffReplayQueueId) await finalizeOwnerHandoffCommand(handoffReplayQueueId, true, 'message_claim_already_processed_or_owned');
+                    console.info('[message-ignored]', { ...receivedDiagnostic, reason: 'distributed_message_claim_already_owned_or_database_unavailable', claimMode: 'atomic_mongodb_message_id_claim', durationMs: Date.now() - claimStartedAt, handoffReplayQueueId: handoffReplayQueueId || null });
                     continue;
                 }
                 console.info('[message-processing-claim-result]', {
@@ -17617,7 +17831,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                     void enqueueInboundCommand(sessionId, receivedChat, async () => {
                     try {
                         const dispatchTimestampInfo = getTfbotMessageTimestampInfo(m, messageUpsertEventStartedAt);
-                        if (receivedParsedCommand && (dispatchTimestampInfo.differenceMs > TFBOT_MAX_COMMAND_AGE_MS || dispatchTimestampInfo.futureSkewMs > TFBOT_MAX_COMMAND_FUTURE_SKEW_MS)) {
+                        if (receivedParsedCommand && !isDurableOwnerHandoffReplay && (dispatchTimestampInfo.differenceMs > TFBOT_MAX_COMMAND_AGE_MS || dispatchTimestampInfo.futureSkewMs > TFBOT_MAX_COMMAND_FUTURE_SKEW_MS)) {
                             console.warn('[stale-command-replay-blocked-before-dispatch]', { sessionId, messageId: msgId, command: receivedParsedCommand.internalCommand || receivedParsedCommand.command, upsertType, ageMs: dispatchTimestampInfo.differenceMs, clockOffsetMs: dispatchTimestampInfo.clockOffsetMs, timestampSource: dispatchTimestampInfo.source, usedTimestampFallback: dispatchTimestampInfo.usedFallback, maximumAgeMs: TFBOT_MAX_COMMAND_AGE_MS, futureSkewMs: dispatchTimestampInfo.futureSkewMs, maximumFutureSkewMs: TFBOT_MAX_COMMAND_FUTURE_SKEW_MS, action: 'final_clock_check_after_inbound_queue_wait_before_command_handler' });
                             return;
                         }
@@ -18275,7 +18489,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                             }
                         }
 
-                        const parsedCommand = receivedParsedCommand || resolveIncomingMessageCommand(body, messageLang, getCommandParsingContext(m?.message, sessionId, m?.key?.remoteJid || m?.key?.remoteJidAlt || ''));
+                        const parsedCommand = receivedParsedCommand || parseIncomingCommandWithDecorations(body, messageLang, getCommandParsingContext(m?.message, sessionId, m?.key?.remoteJid || m?.key?.remoteJidAlt || ''), isFromMe);
                         if (!parsedCommand) {
                             console.info('[message-ignored]', { sessionId, upsertType, messageId: msgId, senderName: sName, senderJid: sender, senderAliases: senderJids, chatJid: from, chatType: isGroup ? 'group' : isChannel ? 'channel' : 'private', messageType, messageLang, messageClassification: String(body || '').trim() ? 'text_not_recognized_as_command' : 'no_text_or_caption', detectedCommand: null, isPublicMode, botMode, bodyLength: body.length, bodyPreview: body.slice(0, 240), aiDispatch: false, imageDispatch: false, action: 'display_and_ignore_without_response_or_ai_dispatch', reason: String(body || '').trim() ? 'not_a_command' : 'empty_message_body' });
                             return;
@@ -19903,6 +20117,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                         console.error('[message-handler]', { sessionId, upsertType, messageId: msgId, senderName: receivedDiagnostic?.senderName || String(m?.pushName || 'Inconnu').slice(0, 100), senderJid: receivedSenderJid || null, messageClassification: receivedClassification, detectedCommand: receivedParsedCommand?.internalCommand || receivedParsedCommand?.command || null, incomingChatJid: m?.key?.remoteJid || m?.key?.remoteJidAlt || null, replyTargetJid: receivedChat || m?.key?.remoteJid || null, action: 'message_handler_failed', error: messageProcessingError });
                     } finally {
                         messageProcessingCompleted = true;
+                        if (handoffReplayQueueId) await finalizeOwnerHandoffCommand(handoffReplayQueueId, messageProcessingSucceeded, messageProcessingError || 'message_handler_completed');
                         if (!messageProcessingSucceeded) processedLocalCache.delete(`${sessionId}:id:${msgId}`);
                         if (messageClaimHeartbeat) clearInterval(messageClaimHeartbeat);
                         if (messageClaimed) await finalizeMessageClaim(true);
@@ -19919,7 +20134,7 @@ const qrCaptionText = `*_${qrCaptionSource}_*${qrPublicUrl ? `\n${qrPublicUrl}` 
                 });
                 } catch (messageDispatchError) {
                     const failedBody = String(extractBody(m) || '');
-                    const failedCommand = failedBody.trim() ? parseIncomingCommand(failedBody, globalLang, getCommandParsingContext(m?.message, sessionId, m?.key?.remoteJid || m?.key?.remoteJidAlt || '')) : null;
+                    const failedCommand = failedBody.trim() ? parseIncomingCommandWithDecorations(failedBody, globalLang, getCommandParsingContext(m?.message, sessionId, m?.key?.remoteJid || m?.key?.remoteJidAlt || ''), m?.key?.fromMe === true) : null;
                     console.error('[message-pre-dispatch-failed]', {
                         sessionId,
                         connectedAccountJid: sock.user?.id || null,
@@ -20574,20 +20789,27 @@ async function loadExistingSessions() {
     }
     const identityCandidates = candidates.filter(candidate => candidate.credentialsValid && (candidate.number || candidate.lid));
     const deferredLivePeerCandidates = [];
-    const restorableCandidates = identityCandidates.filter(candidate => {
+    const restorableCandidates = [];
+    for (const candidate of identityCandidates) {
         const owner = owners.get(candidate.sessionId) || {};
         const ownerLeaseUntil = new Date(owner.ownerLeaseUntil || 0).getTime();
         const isOwnedByLivePeer = TFBOT_CLUSTER_ENABLED && owner.ownerInstanceId && owner.ownerInstanceId !== TFBOT_CLUSTER_INSTANCE_ID && ownerLeaseUntil > now && !isPreviousDeploymentOwnerOnCurrentHost(owner) && owner.connectionStatus !== 'duplicate_account' && !owner.duplicateAccountOf && owner.reauthRequired !== true;
         const status = String(owner.connectionStatus || '').toLowerCase();
-        if (isOwnedByLivePeer) {
-            deferredLivePeerCandidates.push({ candidate, owner });
-            return false;
+        const runtimeLockState = isOwnedByLivePeer ? await getSessionRuntimeLockLeaseState(candidate.sessionId) : { protected: false, protectedUntil: null };
+        if (isOwnedByLivePeer && runtimeLockState.protected) {
+            deferredLivePeerCandidates.push({ candidate, owner, runtimeLockState });
+            continue;
         }
-        return owner.whatsappForbidden !== true && Number(owner.lastDisconnectCode || 0) !== 403 && status !== 'forbidden_wait' && !owner.reauthRequired && !owner.duplicateAccountOf && status !== 'duplicate_account' && status !== 'reauth_required' && status !== 'pairing_expired';
-    });
+        const allowed = owner.whatsappForbidden !== true && Number(owner.lastDisconnectCode || 0) !== 403 && status !== 'forbidden_wait' && !owner.reauthRequired && !owner.duplicateAccountOf && status !== 'duplicate_account' && status !== 'reauth_required' && status !== 'pairing_expired';
+        if (allowed) {
+            if (isOwnedByLivePeer) console.warn('[session-restore-owner-metadata-lease-stale-but-runtime-fenced]', { sessionId: candidate.sessionId, previousOwner: owner.ownerInstanceUrl || owner.ownerInstanceId || null, ownerLeaseUntil: owner.ownerLeaseUntil || null, runtimeLockState, action: 'take_over_only_after_session_and_account_runtime_locks_are_expired' });
+            restorableCandidates.push(candidate);
+        }
+    }
     for (const deferred of deferredLivePeerCandidates) {
         const ownerLeaseUntilAt = new Date(deferred.owner.ownerLeaseUntil || 0).getTime();
-        const retryNotBeforeAt = Number.isFinite(ownerLeaseUntilAt) && ownerLeaseUntilAt > now ? ownerLeaseUntilAt : 0;
+        const runtimeLockUntilAt = new Date(deferred.runtimeLockState?.protectedUntil || 0).getTime();
+        const retryNotBeforeAt = Number.isFinite(runtimeLockUntilAt) && runtimeLockUntilAt > now ? runtimeLockUntilAt : Number.isFinite(ownerLeaseUntilAt) && ownerLeaseUntilAt > now ? ownerLeaseUntilAt : 0;
         const retryDelay = scheduleSessionLockRetry(deferred.candidate.sessionId, false, normalizeConnectionFormat(deferred.owner.format || deferred.owner.Format || 'pair'), retryNotBeforeAt);
         const nextRestoreRetryAt = retryDelay ? new Date(Date.now() + retryDelay) : null;
         if (retryDelay && db) {
@@ -21015,7 +21237,7 @@ async function main() {
         clusterDomainRouter: true,
         clusterDomainDetectionUsesRenderDefaults: true,
         clusterDomainSelectionPriority: 'tf-bot-then-tfbot3-through-tfbot6',
-        clusterDomainSelectionMode: 'strict-priority-tf-bot-then-tfbot3-only-when-previous-domain-does-not-respond',
+        clusterDomainSelectionMode: 'prepared-candidate-priority-selection-with-fencing-safe-failover-after-repeated-active-health-failure',
         clusterWorkerCoordinatorPollMs: TFBOT_WORKER_COORDINATOR_POLL_MS,
         clusterWorkerStartupIndependent: true,
         clusterWorkerRequiresSimultaneousStartup: false,
@@ -21051,7 +21273,7 @@ async function main() {
         aiDispatchPolicy: 'ai-ia-asistan-iu-tfasistan-prefix-required-at-parser-and-handler',
         actionErrorExplanation: 'localized-static-fallback-no-ai-request',
         signalKeyCacheIsolation: 'deep-copy-on-cache-read-and-write-no-shared-mutable-session-object',
-        routerProbePolicy: 'keep_current_active_host_and_fail_over_only_after_a_final_send_failure; order_primary_then_tfbot3_through_tfbot6',
+        routerProbePolicy: 'retain_current_healthy_host; fail_over_after_repeated_health_failure_and_expired_session_account_runtime_fencing_locks; prepare_candidate_before_handoff',
         companionDeviceMessages: 'dispatch-readable-own-device-commands-and-ignore-only-known-bot-echoes',
         pairingPendingSessionTtlMs: PAIRING_SESSION_TTL_MS,
         pairingConnectedSocketStates: [1, 'OPEN'],
