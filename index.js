@@ -5,11 +5,11 @@ const MEDIA_SEND_TASK_TIMEOUT_MS = Math.max(120000, Math.min(1800000, Number(pro
 const MEDIA_SEND_LATE_GRACE_MS = Math.max(5000, Math.min(60000, Number(process.env.MEDIA_SEND_LATE_GRACE_MS || 30000)));
 const BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS = Math.max(1000, Math.min(7000, Number(process.env.BAILEYS_RETRY_STORE_WRITE_TIMEOUT_MS || 3500)));
 const WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS = Math.max(1500, Math.min(6000, Number(process.env.WHATSAPP_PRESENCE_UPDATE_TIMEOUT_MS || 3500)));
-const TFBOT_CODE_VERSION = 'Bot (tfbot) 231';
+const TFBOT_CODE_VERSION = 'Bot (tfbot) 233';
 const TFBOT_LOG_TIME_ZONE = 'America/Port-au-Prince';
 const TFBOT_CLUSTER_CODE_REVISION = 'Bot (tfbot)';
 let tfbotBaileysSocketVersionCache = null;
-const TFBOT_CODE_RELEASE_ID = `${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
+const TFBOT_CODE_RELEASE_ID = `${TFBOT_CODE_VERSION}:${(String(process.env.TFBOT_CLUSTER_RELEASE_ID || '').trim() || 'Bot (tfbot)')}:${String(process.env.RENDER_GIT_COMMIT || '').trim() || 'tfbot'}:${TFBOT_CLUSTER_CODE_REVISION}`.slice(0, 240);
 function formatTfbotHaitiTimestamp(value = Date.now()) {
     const date = value instanceof Date ? value : new Date(value);
     if (!Number.isFinite(date.getTime())) return null;
@@ -28,10 +28,7 @@ function normalizeTfbotReleaseId(value) {
 }
 
 function getTfbotReleaseCompatibilityKey(value) {
-    const normalized = normalizeTfbotReleaseId(value);
-    if (!normalized) return '';
-    const family = normalized.split(':', 1)[0].replace(/-\d{4}-\d{2}-\d{2}$/i, '').trim();
-    return (family || normalized).toLowerCase();
+    return normalizeTfbotReleaseId(value).toLowerCase();
 }
 
 function areTfbotReleasesCompatible(first, second) {
@@ -66,7 +63,7 @@ const SIGNAL_RECOVERY_COOLDOWN_MS = Math.max(60000, Math.min(3600000, Number(pro
 const SIGNAL_GROUP_SENDER_KEY_RECOVERY_COOLDOWN_MS = Math.max(30000, Math.min(1800000, Number(process.env.SIGNAL_GROUP_SENDER_KEY_RECOVERY_COOLDOWN_MS || 120000)));
 const SIGNAL_PRIVATE_PEER_REPAIR_THRESHOLD = 2;
 const SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS = Math.max(15000, Math.min(600000, Number(process.env.SIGNAL_PRIVATE_PEER_REPAIR_COOLDOWN_MS || 45000)));
-const SIGNAL_PEER_AUTO_HEAL_FAILURE_KINDS = new Set(['message_counter_error', 'bad_mac', 'signal_session_missing', 'invalid_prekey_id']);
+const SIGNAL_PEER_AUTO_HEAL_FAILURE_KINDS = new Set(['message_counter_error', 'bad_mac', 'signal_session_missing']);
 const SIGNAL_PEER_AUTO_HEAL_MAX_ALIASES = 2;
 
 function isSignalDecryptionFailure(args) {
@@ -1929,7 +1926,7 @@ async function repairSignalPeerSessionAfterDecryptFailures(sessionId, details, f
     if (!runtime || !sock || isSocketDefinitelyClosed(sock)) throw new Error('signal_peer_auto_heal_socket_unavailable');
     const repository = sock.signalRepository;
     if (!repository || typeof repository.jidToSignalProtocolAddress !== 'function') throw new Error('signal_repository_address_resolver_unavailable');
-    await assertSessionRuntimeOwnership(sessionId, { allowWorkerDrain: workerDrainingSessionIds.has(sessionId) });
+    await assertSessionRuntimeOwnership(sessionId);
     if (activeSessions.get(sessionId)?.sock !== sock) throw new Error('signal_peer_auto_heal_socket_replaced');
     const resolved = await resolveSignalPeerSessionAliases(sessionId, sock, details, selfPeer);
     const jids = resolved.jids;
@@ -2042,8 +2039,7 @@ function scheduleSignalRecoveryFromLog(sessionId, parsed) {
         parsed
     ]);
     const explicitFailureKind = String(parsed?.failureClass || parsed?.failureKind || '').trim().toLowerCase();
-    const kind = ['message_counter_error', 'signal_session_missing', 'bad_mac', 'invalid_prekey_id'].includes(explicitFailureKind) ? explicitFailureKind
-        : /PreKeyError|Invalid PreKey ID/i.test(failureText) ? 'invalid_prekey_id'
+    const kind = ['message_counter_error', 'signal_session_missing', 'bad_mac'].includes(explicitFailureKind) ? explicitFailureKind
         : /MessageCounterError|Key used already or never filled/i.test(failureText) ? 'message_counter_error'
         : /SessionError:\s*No sessions|No matching sessions found for message|No sessions|No session found to decrypt message/i.test(failureText) ? 'signal_session_missing'
         : /Bad MAC|SignalErrorBadMac|SignalErrorInvalidMessage|retry.{0,20}(?:error|code).{0,8}(?:4|7)\b/i.test(failureText) ? 'bad_mac'
@@ -2204,7 +2200,7 @@ function createRenderPinoLogger(options = {}) {
     return pino({ ...options, level: 'trace' }, sink);
 }
 
-const RUNTIME_FIX_BUILD = 'tfbot-2026-11-26-r231-worker-drain-lock-recovery';
+const RUNTIME_FIX_BUILD = 'tfbot-2026-11-26-r224-exact-cluster-release-gate';
 const PORT = process.env.PORT || 7000;
 const TFBOT_CLUSTER_TOKEN = String(process.env.TFBOT_CLUSTER_TOKEN || process.env.TFBOT_CLUSTER_SHARED_TOKEN || '').trim() || 'tfbot';
 const TFBOT_REQUEST_TOKEN = 'Bot (tfbot)';
@@ -6411,7 +6407,7 @@ async function acquireSessionRuntimeLock(sessionId) {
         let heartbeatRunning = false;
         let timer;
         timer = setInterval(async () => {
-            if (heartbeatRunning || serverShuttingDown || (tfbotWorkerStopping && !workerDrainingSessionIds.has(sessionId))) return;
+            if (heartbeatRunning || serverShuttingDown || tfbotWorkerStopping && !workerDrainingSessionIds.has(sessionId)) return;
             heartbeatRunning = true;
             try {
                 const nextLease = new Date(Date.now() + SESSION_RUNTIME_LOCK_LEASE_MS);
@@ -6468,7 +6464,7 @@ function sessionHasAccountRuntimeLocks(sessionId, identities) {
 
 function hasFreshLocalExclusiveRuntimeOwnership(sessionId, sock, identities = []) {
     if (!sessionId || !sock || serverShuttingDown || sessionFenceClosureInFlight.has(sessionId)) return false;
-    if (TFBOT_CLUSTER_COORDINATOR_ONLY || TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) return false;
+    if (TFBOT_CLUSTER_COORDINATOR_ONLY || TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping) && !workerDrainingSessionIds.has(sessionId)) return false;
     const runtime = activeSessions.get(sessionId);
     if (!runtime || runtime.sock !== sock || isSocketDefinitelyClosed(sock)) return false;
     const now = Date.now();
@@ -6671,7 +6667,7 @@ function activateAccountRuntimeLockState(sessionId, acquiredEntries, requestedKe
     let heartbeatRunning = false;
     const heartbeatEntries = acquiredEntries.map(entry => ({ key: entry.key, token: entry.token }));
     const timer = setInterval(async () => {
-        if (heartbeatRunning || serverShuttingDown || (tfbotWorkerStopping && !workerDrainingSessionIds.has(sessionId)) || sessionFenceClosureInFlight.has(sessionId)) return;
+        if (heartbeatRunning || serverShuttingDown || tfbotWorkerStopping && !workerDrainingSessionIds.has(sessionId) || sessionFenceClosureInFlight.has(sessionId)) return;
         heartbeatRunning = true;
         try {
             const nextLease = new Date(Date.now() + SESSION_RUNTIME_LOCK_LEASE_MS);
@@ -10890,7 +10886,7 @@ async function deactivateTfbotWorker(reason = 'not_selected') {
         tfbotWorkerActive = false;
         tfbotWorkerStarting = false;
         tfbotWorkerState = 'stopping';
-        console.info('[tfbot-worker-handoff-barrier-engaged]', { host: TFBOT_CLUSTER_INSTANCE_HOST, reason, sessionCount: sessionsToDrain.length, action: 'stop_accepting_new_messages_only_after_all_command_and_quote_queues_are_idle' });
+        console.info('[tfbot-worker-handoff-barrier-engaged]', { host: TFBOT_CLUSTER_INSTANCE_HOST, reason, sessionCount: sessionsToDrain.length, sessionAndAccountLockRenewalContinues: true, lockRenewalEndsAfterAuthStoreDrainAndRelease: true, action: 'stop_accepting_new_messages_only_after_all_command_and_quote_queues_are_idle_while_renewing_owned_session_and_account_locks_until_safe_release' });
         if (clusterHeartbeatTimer) clearInterval(clusterHeartbeatTimer);
         clusterHeartbeatTimer = null;
         for (const timer of reconnectTimers.values()) clearTimeout(timer);
@@ -14712,14 +14708,6 @@ async function cleanupSocket(sessionId, options = {}) {
             return false;
         }
     }
-    if (workerDrainingSessionIds.has(sessionId)) {
-        const finalInboundDrain = await waitForSessionInboundProcessingIdle(sessionId, TFBOT_WORKER_COMMAND_DRAIN_TIMEOUT_MS);
-        if (!finalInboundDrain.drained) {
-            console.error('[worker-session-final-inbound-drain-incomplete]', { sessionId, ...finalInboundDrain, action: 'keep_socket_open_and_cancel_worker_handoff_until_inbound_commands_finish' });
-            return false;
-        }
-        console.info('[worker-session-final-inbound-drain-completed]', { sessionId, ...finalInboundDrain, action: 'close_socket_only_after_last_inbound_command_and_reply_have_finished' });
-    }
     clearSessionOpenReadinessRetry(sessionId);
     if (!oldSocket) {
         if (typeof authState?.setAuthSocket === 'function') authState.setAuthSocket(null);
@@ -16854,7 +16842,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             if (initialUpsertType === 'append') {
                 console.info('[message-upsert-historical-append-cache-only]', { sessionId, messageCount: initialBatchCount, receivedAt: messageUpsertEventStartedAt, action: 'validate_session_ownership_then_cache_outgoing_private_retry_copies_without_command_dispatch' });
             }
-            if (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping) && !workerDrainingSessionIds.has(sessionId)) {
+            if (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) {
                 updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: 'ignored_worker_handoff', lastCommandWorkerState: tfbotWorkerState, lastCommandWorkerActive: !!tfbotWorkerActive, lastCommandWorkerStopping: !!tfbotWorkerStopping, lastCommandSessionDraining: workerDrainingSessionIds.has(sessionId), lastCommandError: null });
                 console.warn('[message-upsert-ignored-during-worker-handoff]', { sessionId, upsertType: String(up?.type || ''), messageCount: Array.isArray(up?.messages) ? up.messages.length : 0, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), runtimeSocketPresent: !!activeSessions.get(sessionId)?.sock, sameSocket: activeSessions.get(sessionId)?.sock === sock, socketReady: isWhatsAppSocketReady(activeSessions.get(sessionId), sock), inboundHandlersActive: Number(sessionInboundUpsertActivity.get(sessionId)?.active || 0), action: 'leave_whatsapp_offline_sync_for_selected_worker' });
                 return;
@@ -16889,12 +16877,12 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 for (let ownershipAttempt = 0; !ownershipReady && ownershipAttempt < 5; ownershipAttempt++) {
                     ownershipAttemptCount = ownershipAttempt + 1;
                     try {
-                        if (!TFBOT_CLUSTER_ENABLED || (tfbotWorkerActive && !tfbotWorkerStopping) || workerDrainingSessionIds.has(sessionId)) {
+                        if (!TFBOT_CLUSTER_ENABLED || tfbotWorkerActive && !tfbotWorkerStopping) {
                             if (liveAccountLockKey && !sessionHasAccountRuntimeLocks(sessionId, [liveAccountPhone, liveAccountLid])) {
                                 const accountLock = await ensureAccountRuntimeLockForIdentity(sessionId, sock.user, state.creds);
                                 if (!accountLock.acquired) throw new Error('account_runtime_lock_not_owned');
                             }
-                            await assertSessionRuntimeOwnership(sessionId, { skipLiveAccountIdentityCheck: true, allowWorkerDrain: workerDrainingSessionIds.has(sessionId) });
+                            await assertSessionRuntimeOwnership(sessionId, { skipLiveAccountIdentityCheck: true });
                             ownershipReady = true;
                             break;
                         }
@@ -16909,7 +16897,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
                 if (!ownershipReady) throw ownershipError || new Error('session_runtime_ownership_not_confirmed');
             } catch (finalOwnershipError) {
                 const reason = String(finalOwnershipError?.message || finalOwnershipError);
-                if ((reason === 'tfbot_worker_not_active' || tfbotWorkerStopping || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive)) && !workerDrainingSessionIds.has(sessionId)) {
+                if (reason === 'tfbot_worker_not_active' || tfbotWorkerStopping || (TFBOT_CLUSTER_ENABLED && !tfbotWorkerActive)) {
                     updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: 'left_for_selected_worker', lastCommandWorkerState: tfbotWorkerState, lastCommandWorkerActive: !!tfbotWorkerActive, lastCommandWorkerStopping: !!tfbotWorkerStopping, lastCommandSessionDraining: workerDrainingSessionIds.has(sessionId), lastCommandError: reason.slice(0, 240) });
                     console.warn('[message-upsert-left-for-selected-worker]', { sessionId, upsertType: String(up?.type || ''), messageCount: Array.isArray(up?.messages) ? up.messages.length : 0, reason, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), inboundHandlersActive: Number(sessionInboundUpsertActivity.get(sessionId)?.active || 0), action: 'do_not_close_or_process_on_standby_worker' });
                     return;
@@ -16922,7 +16910,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             if (ownershipValidationMs >= 150) console.warn('[message-upsert-ownership-validation-latency]', { sessionId, upsertType: initialUpsertType, messageCount: initialBatchCount, durationMs: ownershipValidationMs, attempts: ownershipAttemptCount, action: 'measure_time_before_detection_without_bypassing_session_or_account_locks' });
             const upsertType = String(up?.type || '');
             const rawBatch = Array.isArray(up?.messages) ? up.messages : [];
-            if (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping) && !workerDrainingSessionIds.has(sessionId)) {
+            if (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) {
                 updateTfbotSessionInboundDiagnostics(sessionId, { lastCommandOutcome: 'ignored_worker_handoff_after_lock_check', lastCommandWorkerState: tfbotWorkerState, lastCommandWorkerActive: !!tfbotWorkerActive, lastCommandWorkerStopping: !!tfbotWorkerStopping, lastCommandSessionDraining: workerDrainingSessionIds.has(sessionId), lastCommandError: null });
                 console.warn('[message-upsert-ignored-during-worker-handoff]', { sessionId, upsertType, messageCount: rawBatch.length, workerState: tfbotWorkerState, workerActive: tfbotWorkerActive, workerStopping: tfbotWorkerStopping, sessionDraining: workerDrainingSessionIds.has(sessionId), ownershipValidationMs, ownershipAttemptCount, inboundHandlersActive: Number(sessionInboundUpsertActivity.get(sessionId)?.active || 0), action: 'leave_whatsapp_offline_sync_for_selected_worker' });
                 return;
@@ -16995,7 +16983,7 @@ async function startAdamBotInner(sessionId, autoExpire = false, format = 'pair',
             }
 
             for (const m of rawBatch) {
-                if (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping) && !workerDrainingSessionIds.has(sessionId)) {
+                if (TFBOT_CLUSTER_ENABLED && (!tfbotWorkerActive || tfbotWorkerStopping)) {
                     console.info('[message-upsert-paused-before-message-dispatch-during-worker-handoff]', { sessionId, messageCountRemaining: Math.max(0, rawBatch.length - rawBatch.indexOf(m)), upsertType, action: 'leave_unprocessed_messages_for_selected_worker' });
                     break;
                 }
